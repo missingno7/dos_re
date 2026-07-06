@@ -101,13 +101,18 @@ The full arc, stage by stage: [`docs/lifecycle.md`](docs/lifecycle.md).
 ```bash
 git clone <this repo>
 cd dos_re
-python examples/minimal_adapter/example.py   # the whole loop on a synthetic EXE, no assets needed
-python -m pytest tests -q                    # or: python tools/run_tests.py
+python examples/minimal_adapter/example.py       # the hook/verify/snapshot loop, 5 minutes
+python examples/tiny_frame_game/walkthrough.py   # the WHOLE lifecycle on a synthetic frame-loop game
+python -m pytest tests -q                        # or: python tools/run_tests.py
 ```
 
-The example builds a tiny MZ executable, runs it as the oracle, installs a
-wrong hook (and watches the verifier catch it), installs the correct hook
+`minimal_adapter` builds a tiny MZ executable, runs it as the oracle, installs
+a wrong hook (and watches the verifier catch it), installs the correct hook
 (verified on every call), and proves snapshot-replay determinism.
+`tiny_frame_game` goes further — a synthetic game with a real frame loop,
+keyboard ISR, and framebuffer, driven through cold-start input demos, both
+verification oracles, and a state mirror
+([its README](examples/tiny_frame_game/README.md) is the 10-minute tour).
 
 To start on a real game, read
 [`docs/porting_new_game.md`](docs/porting_new_game.md) and copy

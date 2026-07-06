@@ -28,3 +28,5 @@ jobs:
         run: python -m pytest tests -q
       - name: End-to-end example (oracle -> hook -> verify -> snapshot)
         run: python examples/minimal_adapter/example.py
+      - name: Full-lifecycle example (frames, demos, both oracles, state mirror)
+        run: python examples/tiny_frame_game/walkthrough.py

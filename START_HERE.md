@@ -29,8 +29,10 @@ equivalence. ([`docs/lifecycle.md`](docs/lifecycle.md) tells the whole arc.)
    (gitignored — original game files are never committed). Create your adapter
    package next to `dos_re/` by copying the shape of
    [`examples/adapter_skeleton/`](examples/adapter_skeleton/README.md), named
-   after the game. Run `python examples/minimal_adapter/example.py` once to
-   confirm the framework works on this machine.
+   after the game. Run `python examples/tiny_frame_game/walkthrough.py` once —
+   it exercises the full stack (boot, demos, snapshots, both oracles, state
+   mirror) and confirms the framework works on this machine; its README is
+   also the fastest way to *see* every mechanism you are about to use.
 3. **Start the ledgers** (empty is fine): `docs/<game>/run_status.md` (current
    phase, recent findings), `docs/<game>/symbol_ledger.md` (addresses →
    evidence), `docs/<game>/blockers.md` (see the loop protocol), and the

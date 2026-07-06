@@ -123,10 +123,10 @@ is modeled and reference the oracle evidence).
 6. ~~`docs/state_mirrors.md` describes adapter code that does not ship here~~
    **Resolved**: the generic machinery was promoted as `dos_re/state_view.py`
    (second extraction pass); only the game layout tables remain adapter code.
-7. **Input-demo cold-start replay is recorder/manifest-level tested**, but no
-   end-to-end cold-start demo has been replayed inside *this* repo (both source
-   repos did it against real games). Exercise it during your first port
-   bring-up.
+7. ~~Input-demo cold-start replay never exercised end-to-end in this repo~~
+   **Resolved**: `examples/tiny_frame_game/` records a cold-start demo (no
+   snapshot) and replays it from a fresh boot, byte-identical over 10 frames,
+   as part of the test suite (`tests/test_tiny_frame_game.py`).
 8. **`dos_re/bootstrap_lzexe.py` keeps private copies** of `code_matches` and
    `interpret_current_instruction_without_hook` that predate the canonical
    signature-guard versions in `dos_re/hooks.py` (which add variant tuples and

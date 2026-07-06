@@ -28,7 +28,11 @@ Related, outside `docs/`:
   (pre2_port vs overkill_port), what was deliberately excluded, and what still
   needs cleanup.
 - [`../examples/minimal_adapter/example.py`](../examples/minimal_adapter/example.py)
-  — runnable 5-minute demo of the whole loop on a synthetic EXE.
+  — runnable 5-minute demo of the hook/verify/snapshot loop on a synthetic EXE.
+- [`../examples/tiny_frame_game/`](../examples/tiny_frame_game/README.md) —
+  the whole lifecycle in ten minutes: a synthetic frame-loop game through
+  oracle boot, cold-start demos, snapshots, both verification oracles, and a
+  state mirror.
 - [`../examples/adapter_skeleton/`](../examples/adapter_skeleton/README.md) —
   the template for a new game adapter.
 - [`../AGENTS.md`](../AGENTS.md) — working rules for agents/humans contributing

@@ -8,12 +8,11 @@ session. Items graduate off this list into `MIGRATION.md` when they land.
 
 ## Short-term (framework-side, no game required)
 
-- **tiny_frame_game example** — a synthetic MZ program with a real frame loop
-  (timer wait, INT 09h input, A000h framebuffer writes) plus the full ritual:
-  record a demo, snapshot, one wrong hook caught, one verified hook, frame
-  verification, a tiny state mirror. The 10-minute onboarding artifact; the
-  current `minimal_adapter` example covers the hook/verify/snapshot loop but
-  not frames/input/demos.
+- ~~tiny_frame_game example~~ **Done** (`examples/tiny_frame_game/`): a
+  synthetic frame-loop game driven through oracle boot, cold-start demo
+  record/replay, snapshot restore, hook oracle (wrong + correct), frame
+  verifier lockstep, and a state mirror — also serving as the repo's only
+  full-stack integration test.
 - **Opt-in strict-ports mode** — today, reads from unmodeled ports return 0
   silently (proven behaviour for both source games; changing the default
   would invalidate their runs). Add an opt-in flag that logs or raises on
