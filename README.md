@@ -7,6 +7,14 @@ they shared: a deterministic 8086 VM, differential hook verification, frame
 comparison, deterministic input demos, snapshots, and the discipline that keeps
 recovery honest.
 
+**This is a framework built by AI, for AI.** The expected user is an autonomous
+AI agent handed this repo plus a game's files and told to port it. The docs are
+the agent's operating manual — start at [`START_HERE.md`](START_HERE.md) — and
+the framework itself is expected to *adapt*: every new game exercises hardware
+and DOS behaviour the last one didn't, and extending `dos_re` (under its rules)
+is part of the job, not a deviation from it. Humans are welcome; none are
+required.
+
 ## What it is
 
 - **A real-mode VM built for reverse engineering** — an 8086 interpreter, DOS/

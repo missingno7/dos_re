@@ -3,7 +3,9 @@
 This is the concrete path from "an original EXE + its data files" to "the
 oracle-driven recovery loop is running". The full method is in
 [`ai_porting_charter.md`](ai_porting_charter.md); this guide is the ordered
-to-do list with the framework touchpoints named.
+to-do list with the framework touchpoints named. If you are the porting agent,
+[`START_HERE.md`](../START_HERE.md) is your boot sequence (it routes here) and
+[`pitfalls.md`](pitfalls.md) is the list of mistakes already made for you.
 
 ## 0. Set up the adapter
 

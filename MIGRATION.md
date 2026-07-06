@@ -26,6 +26,10 @@ is modeled and reference the oracle evidence).
 | `dos_re/islands.py` | promoted from `pre2_port/pre2/islands.py` (an equivalent registry existed in overkill_port) | `@oracle_link` metadata + manifest generation; package list/manifest path parameterized; the six-level status ladder kept verbatim |
 | `tools/gen_island_manifest.py` | generalized from `pre2_port/scripts/gen_island_manifest.py` | packages + output path became CLI arguments |
 | `docs/lifecycle.md` late-stage content | synthesized from `pre2_port/docs/pre2/recovery_lifecycle.md`, `source_port_plan.md`, `renderer_goal.md` | per-subsystem equivalence contracts, the heartbeat rule, coastline shortening, one-leaf-many-adapters, boot constants, tick-equivalence harness, verification switch |
+| `dos_re/gaps.py` | generalized from `pre2_port/pre2/gaps.py` | `HybridGap` fail-loud exception + the transition-signal subclass pattern + `HookVerifyStats`/`HookTraceStats`/`report`; the six Pre2 signal subclasses stayed behind as the worked example |
+| `dos_re/state_view.py` | promoted from `pre2_port/pre2/bridge/dgroup_view.py` (the generic half: backends, descriptors, view bases) | `DGROUP_BASE` parameterized into `ByteBackend(source, base)` / `coerce_backend(source, base)`; descriptor names made public (`U8`/`U16`/...); the game layout views stayed behind |
+| `tools/display.py` | copied from `pre2_port/scripts/display.py` | GPU-accelerated pygame presenter; zero game knowledge — only the window title changed |
+| `docs/pitfalls.md` (P2 entries) | distilled from `pre2_port` docs: `camera_fidelity_bug.md`, `renderer_bug_table.md`, `live_view_timing_design.md`, `timing_hook_design.md`, `faithful_visual_layer.md`, `run_status.md` | each entry cites its consequence and the rule that fixed it |
 | `docs/architecture.md` | new text, synthesized from `pre2_port/ARCHITECTURE.md` + `docs/architecture/package_boundary.md` + `third_party.md` | |
 | `AGENTS.md`, `README.md` | new text, synthesized from both repos' `AGENTS.md`/`README.md`/`ARCHITECTURE.md` | |
 | `tools/clean.py`, `tools/run_tests.py` | `pre2_port/scripts/` | artifact globs generalized; lint path updated |
@@ -50,6 +54,10 @@ is modeled and reference the oracle evidence).
 | `tests/test_frame_verify.py` | `overkill_port/tests/` | `overkill.frame_verify` WIDTH/HEIGHT import → local 320×200 constants. |
 | `tests/test_nuked_opl3_vendor.py` | `overkill_port/tests/` | verbatim. |
 | Docs content | `overkill_port` docs (`source_port_methodology.md`, `game_recovery_lifecycle.md`, `hook_naming_audit.md`, AGENTS.md) | concepts folded into `docs/hooks_and_verification.md` and `docs/architecture.md` where they added something pre2's newer docs lacked. |
+| `dos_re/checkpoints.py` | generalized from `overkill/checkpoints.py` | checkpoint table parameterized instead of imported from the game package |
+| `dos_re/frontier.py` | generalized from `overkill/frontier_manifest.py` | category enum + entry dataclass + summary; Overkill's 25-entry manifest stayed behind as game knowledge |
+| signature guards in `dos_re/hooks.py` | generalized from `overkill/hook_wrappers/common.py` | `signature_matches`/`code_matches`/`self_disable_if_patched`/`interpret_current_instruction_without_hook`; the runtime-code staticization enforcement |
+| `docs/pitfalls.md` (OK entries) + the loop protocol in `START_HERE.md` | distilled from `overkill_port` docs: `rescue_refactor.md`, `hook_naming_audit.md`, `refactor_plan.md`, `performance_investigation.md`, `runtime_code_staticization.md`, `loop_plan.md`, `loop_blockers.md`, `overnight_loop.sh` | the autonomous-loop invariants (smallest slice, never commit red, revert+log blockers, never weaken oracles) come from Overkill's overnight-loop practice |
 
 ## New in this repo (not copied)
 
@@ -109,14 +117,32 @@ is modeled and reference the oracle evidence).
 5. **Comments referencing PRE2/OVERKILL remain in core modules** (e.g. dos.py's
    VGA notes). Kept deliberately as oracle-evidence citations; a purist sweep
    could rename them to neutral phrasing at the cost of losing the "why".
-6. **`docs/state_mirrors.md` describes adapter code that does not ship here**
-   (the view/backend classes live in `pre2_port/pre2/bridge/dgroup_view.py`).
-   Promoting a generic `StructView`/`ByteBackend` into `dos_re/` is a good
-   future step once a second adapter needs it verbatim.
+6. ~~`docs/state_mirrors.md` describes adapter code that does not ship here~~
+   **Resolved**: the generic machinery was promoted as `dos_re/state_view.py`
+   (second extraction pass); only the game layout tables remain adapter code.
 7. **Input-demo cold-start replay is recorder/manifest-level tested**, but no
    end-to-end cold-start demo has been replayed inside *this* repo (both source
    repos did it against real games). Exercise it during your first port
    bring-up.
+8. **`dos_re/bootstrap_lzexe.py` keeps private copies** of `code_matches` and
+   `interpret_current_instruction_without_hook` that predate the canonical
+   signature-guard versions in `dos_re/hooks.py` (which add variant tuples and
+   telemetry). Left untouched because the bootstrap versions are proven and
+   subtly different (they also restore `hook_names`); dedupe when either next
+   changes for a real reason.
+9. **Documented-as-pattern, deliberately not promoted** (game-entangled;
+   the source repos hold the worked examples): timing fast-forward
+   (`pre2/bridge/timing_fastforward.py`, `overkill/timing_fastforward.py` —
+   see pitfalls #12–14), the tick-demo equivalence harness
+   (`pre2/native/game_tick_demo.py`, `scripts/verify_finish_demo.py`), the
+   coverage-telemetry classifier (`overkill/coverage.py`), headless
+   verification (`overkill/headless_verification.py`), the probe harness +
+   walk-shadow cache (`overkill/probes/_harness.py`, `_shadow_cache.py`), the
+   runtime-code staticization registry (`overkill/runtime_code.py` +
+   `static_runtime_bundle.py`), the frame-interpolation rolling capture
+   (`pre2/bridge/frame_capture.py`), and the layer-audit / status dashboards
+   (`scripts/audit_recovered_layers.py`, `source_port_status.py`). Each is a
+   parameterize-and-promote candidate the moment a second game needs it.
 
 ## Missing / uncertain features (inherited state, not regressions)
 

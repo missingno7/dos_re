@@ -119,6 +119,80 @@ def call_installed_hook_like_near_call(
 registry = HookRegistry()
 
 
+# ---- live-code signature guards ------------------------------------------------------------------
+# Games patch parts of their live code segment at runtime (self-modifying code, loader decor,
+# variant dispatch). A Python replacement bypasses the live bytes at CS:IP, so a hook that assumed
+# a fixed routine shape would silently run WRONG code when the bytes changed. The proven rule
+# (Overkill's runtime-code staticization): every accepted live-byte body is named and guarded by
+# signature; an unknown variant fails loud, never silently falls back.
+
+
+def signature_matches(live: bytes, expected: bytes | tuple[bytes, ...]) -> bool:
+    """Whether ``live`` starts with any of the expected signature variants."""
+    variants = expected if isinstance(expected, tuple) else (expected,)
+    return any(live[: len(sig)] == sig for sig in variants)
+
+
+def code_matches(cpu: CPU8086, off: int, expected: bytes | tuple[bytes, ...]) -> bool:
+    """Return whether live CS:off bytes still match a lifted hook signature."""
+    cs = cpu.s.cs & 0xFFFF
+    variants = expected if isinstance(expected, tuple) else (expected,)
+    return any(
+        all(cpu.mem.rb(cs, (off + i) & 0xFFFF) == b for i, b in enumerate(sig))
+        for sig in variants
+    )
+
+
+def self_disable_if_patched(cpu: CPU8086, ip: int, expected: bytes | tuple[bytes, ...], name: str) -> bool:
+    """Fail fast when a hook entry no longer matches the lifted ASM bytes.
+
+    Wrappers that assume a fixed routine shape call this on entry and refuse to
+    run when the original bytes changed (an unknown runtime-patched variant).
+    Synthetic tests often leave code bytes all zero; that fixture case is treated
+    as "no live signature available" and remains enabled. Returns False when the
+    signature is fine; raises RuntimeError on an unknown variant.
+    """
+    cs = cpu.s.cs & 0xFFFF
+    start = ((cs << 4) + (ip & 0xFFFF)) & 0xFFFFF
+    variants = expected if isinstance(expected, tuple) else (expected,)
+    max_len = max(len(sig) for sig in variants)
+    live = bytes(cpu.mem.data[start:start + max_len])
+    all_zero = any(all(b == 0 for b in live[: len(sig)]) for sig in variants)
+    if signature_matches(live, expected) or all_zero:
+        return False
+
+    expected_text = " or ".join(sig.hex(" ") for sig in variants)
+    raise RuntimeError(
+        f"hook {name} at {cs:04X}:{ip:04X} saw runtime-patched code; "
+        f"live bytes {live.hex(' ')} != expected {expected_text}"
+    )
+
+
+def interpret_current_instruction_without_hook(cpu: CPU8086) -> None:
+    """Interpret live ASM once when an overlaid hook signature no longer matches.
+
+    Temporarily removes the replacement at the current address, steps the real
+    bytes, and reinstalls it — the bounded, *explicit* way to let an original
+    variant run (as opposed to a silent fallback)."""
+    key = cpu.addr()
+    fn = cpu.replacement_hooks.pop(key, None)
+    telemetry = getattr(cpu, "coverage_telemetry", None)
+    ctx = (
+        telemetry.bounded_original(key, "overlaid hook signature mismatch")
+        if telemetry is not None and hasattr(telemetry, "bounded_original")
+        else None
+    )
+    try:
+        if ctx is not None:
+            ctx.__enter__()
+        cpu.step()
+    finally:
+        if ctx is not None:
+            ctx.__exit__(None, None, None)
+        if fn is not None:
+            cpu.replacement_hooks[key] = fn
+
+
 def jump_installed_hook_boundary(
     cpu: CPU8086,
     key: tuple[int, int],

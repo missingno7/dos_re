@@ -2,9 +2,9 @@
 
 These instructions apply to the whole repository. They are written for AI
 agents and humans working on the **framework itself**. (If you are using the
-framework to port a game, your primary document is
-[`docs/ai_porting_charter.md`](docs/ai_porting_charter.md); your game work
-happens in your own adapter repo, not here.)
+framework to port a game, start at [`START_HERE.md`](START_HERE.md) — your
+game work happens in your adapter package, and you touch `dos_re/` only under
+the rules below.)
 
 ## What this repository is
 
@@ -49,7 +49,8 @@ docs/         the method; docs/README.md is the index
 examples/     minimal_adapter (runnable), adapter_skeleton (template)
 tests/        framework tests; game-free by construction
 tools/        lint.py, run_tests.py, clean.py, lindis.py, profile_hotspots.py,
-              audit_hook_oracle.py, check_undefined_names.py, gen_island_manifest.py
+              audit_hook_oracle.py, check_undefined_names.py, gen_island_manifest.py,
+              display.py (optional-deps viewer backend)
 ```
 
 ## Standard commands

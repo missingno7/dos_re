@@ -52,7 +52,11 @@ from the source projects). Grouped by concern:
 
 | Module | What it is |
 |---|---|
-| `hooks.py` | `HookRegistry` (`@registry.replace(cs, ip, name)`), duplicate-registration fail-fast, env-var hook disabling, and the verifier-visible composition helpers `call_installed_hook_like_near_call` / `jump_installed_hook_boundary`. |
+| `hooks.py` | `HookRegistry` (`@registry.replace(cs, ip, name)`), duplicate-registration fail-fast, env-var hook disabling, the verifier-visible composition helpers `call_installed_hook_like_near_call` / `jump_installed_hook_boundary`, and the live-code signature guards (`self_disable_if_patched`, `code_matches`) for runtime-patched routines. |
+| `gaps.py` | `HybridGap` — the fail-loud "not yet recovered" exception, plus the transition-signal subclass pattern for multi-frame sequences, and the `HookVerifyStats`/`HookTraceStats` bookkeeping. |
+| `state_view.py` | The state-mirror machinery: typed views (`StructView`, `StructArray`, `U8/U16/S8/S16`) over swappable backends (byte image / segment / overlay contract / width contract) — the generic half of `docs/state_mirrors.md`. |
+| `checkpoints.py` | VM-until-checkpoint stepping: run the oracle to the next adapter-declared phase boundary (frame/render/object-update/input), filterable by kind. |
+| `frontier.py` | Cold-start frontier triage: classify the last unhooked addresses (hook candidate / bootstrap / bounded rare branch / harmless tail) so coverage reports stay precise to the end. |
 | `verification.py` | The differential **hook oracle**: clone the runtime, run the original ASM to the hook's continuation, run the hook, diff registers + flags + full memory. Metadata mode (`GenericHookStop` per address) or strict auto-continuation mode (no metadata). `OK_TRACE_HOOK=CS:IP` prints the ASM oracle trace on divergence. |
 | `frame_verify.py` | The **semantic/frame oracle**: step a reference (pure ASM) and a candidate (hooked/native) runtime to adapter-defined frame boundaries, build `FrameSample`s, diff raw VRAM + rendered RGB, dump PNG/report artifacts on divergence. |
 | `snapshot.py` | Full machine freeze/thaw (`write_snapshot` / `load_snapshot`): memory image + CPU + DOS + program metadata. Snapshots pin reproducible starting points and skip slow bootstraps. |
@@ -72,7 +76,8 @@ docs/         methodology + guides (start at docs/README.md)
 examples/     minimal_adapter/ (runnable end-to-end demo), adapter_skeleton/ (template)
 tests/        framework test suite (no game assets needed)
 tools/        lint, test runner, cleaner, linear disassembler, hotspot profiler,
-              hook-composition audit, undefined-name guard, island-manifest generator
+              hook-composition audit, undefined-name guard, island-manifest generator,
+              GPU-accelerated frame presenter (display.py, optional numpy+pygame)
 ```
 
 ## Execution modes (no silent fallbacks)

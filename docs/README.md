@@ -1,11 +1,14 @@
 # dos_re documentation
 
-Start here. Reading order for a newcomer: the repo [README](../README.md) →
-`lifecycle.md` → `architecture.md` → `ai_porting_charter.md` →
+Start here — or, if you are the agent about to port a game, start at
+[`../START_HERE.md`](../START_HERE.md) (the operational boot sequence).
+Reading order for a newcomer: the repo [README](../README.md) →
+`lifecycle.md` → `architecture.md` → `ai_porting_charter.md` → `pitfalls.md` →
 `porting_new_game.md`.
 
 | Doc | What it covers |
 |---|---|
+| [`pitfalls.md`](pitfalls.md) | **The 20 real mistakes** the source ports made — naming, hook bloat, verification narrowing, state-capture timing, determinism traps, SMC, layering — each with the consequence and the rule that fixed it. |
 | [`lifecycle.md`](lifecycle.md) | **The story in order**: EXE-in-VM → hot-path islands → gameplay recovery → islands merge into subsystems → VM-less native port with the verification bridge → VM retires into the oracle seat. Defines the shared vocabulary (oracle, island, golden, hybrid, native). |
 | [`architecture.md`](architecture.md) | The package boundary, the framework module map, execution modes, adapter layering, dependencies. |
 | [`ai_porting_charter.md`](ai_porting_charter.md) | **The method, complete.** VM-as-oracle, the two invariants, the lifting loop, the proof spine, the determinism trap, the phased roadmap, the rules of engagement. Written for an AI agent (or human) given this framework and a DOS game. |
