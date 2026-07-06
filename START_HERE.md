@@ -61,9 +61,13 @@ Proven over months of autonomous recovery on the source ports:
    [`HybridGap`](dos_re/gaps.py); it never silently falls back to ASM or to a
    plausible guess.
 6. **Check for existing mechanisms before building.** The framework and your
-   own adapter likely already have the tool (see the module map in
-   [`docs/architecture.md`](docs/architecture.md), the `tools/` directory, and
-   the two source repos as worked examples).
+   own adapter likely already have the tool (the module map in
+   [`docs/architecture.md`](docs/architecture.md), the `tools/` directory) —
+   and for problems the framework does NOT solve in code, check
+   [`docs/cookbook.md`](docs/cookbook.md) FIRST: it maps symptoms (busy-wait
+   crawl, runtime-patched code, resident audio driver, slow probes, cold-start
+   endgame…) to proven worked examples in the source repos. Re-deriving one of
+   those from scratch wastes days the previous ports already paid for.
 7. **Update the ledgers as you go** — `run_status.md` for state, the island
    manifest for progress, the symbol ledger for evidence. The next agent (or
    the next session of you) resumes from git + these files alone.

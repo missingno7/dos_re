@@ -8,7 +8,8 @@ Reading order for a newcomer: the repo [README](../README.md) →
 
 | Doc | What it covers |
 |---|---|
-| [`pitfalls.md`](pitfalls.md) | **The 20 real mistakes** the source ports made — naming, hook bloat, verification narrowing, state-capture timing, determinism traps, SMC, layering — each with the consequence and the rule that fixed it. |
+| [`pitfalls.md`](pitfalls.md) | **The 23 real mistakes** the source ports made — naming, hook bloat, verification narrowing, state-capture timing, determinism traps, SMC, layering, AI hallucination — each with the consequence and the rule that fixed it. |
+| [`cookbook.md`](cookbook.md) | **Problem-indexed techniques** that could not be promoted as code but exist as worked examples in the source repos: timing fast-forward, shadow caches, boot-data extraction, staticizing patched code, layered audio recovery, tick-demo proofs, overnight loops, deployment. Consult it the moment your game hits a wall. |
 | [`lifecycle.md`](lifecycle.md) | **The story in order**: EXE-in-VM → hot-path islands → gameplay recovery → islands merge into subsystems → VM-less native port with the verification bridge → VM retires into the oracle seat. Defines the shared vocabulary (oracle, island, golden, hybrid, native). |
 | [`architecture.md`](architecture.md) | The package boundary, the framework module map, execution modes, adapter layering, dependencies. |
 | [`ai_porting_charter.md`](ai_porting_charter.md) | **The method, complete.** VM-as-oracle, the two invariants, the lifting loop, the proof spine, the determinism trap, the phased roadmap, the rules of engagement. Written for an AI agent (or human) given this framework and a DOS game. |

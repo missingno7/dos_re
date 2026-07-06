@@ -23,9 +23,11 @@ session. Items graduate off this list into `MIGRATION.md` when they land.
 
 ## When the next port needs it (parameterize-and-promote candidates)
 
-These exist as proven, game-entangled code in the source repos (see
-MIGRATION.md "documented-as-pattern" list) and should be promoted the moment a
-second game wants them — not before:
+These exist as proven, game-entangled code in the source repos and should be
+promoted the moment a second game wants them — not before. **The
+problem-indexed guide to all of them (symptom → technique → worked-example
+path) is [`cookbook.md`](cookbook.md)**; MIGRATION.md §"documented-as-pattern"
+is the provenance record. The shortlist:
 
 - **Timing fast-forward** engine (closed-form wait collapsing; needs a
   per-game loop classification + clock model).
