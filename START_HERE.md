@@ -84,8 +84,8 @@ it knows your game's addresses or formats, it stays in your adapter.
 ## Hard boundaries (violating these voids the work)
 
 - `dos_re/` never learns your game (enforced: `python tools/lint.py`).
-- Your `recovered/` layer never imports the VM (add the layer audit to your
-  adapter's tests on day one — pitfall #17).
+- Your `recovered/` layer never imports the VM (`tools/audit_layers.py
+  mygame/recovered` — run it with your tests from day one; pitfall #17).
 - One shared definition of "a boundary" and "a wait loop" across all drivers
   ([`docs/demos_and_snapshots.md`](docs/demos_and_snapshots.md) — the trap
   that silently voids demo proofs).

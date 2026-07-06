@@ -32,6 +32,8 @@ is modeled and reference the oracle evidence).
 | `dos_re/gaps.py` | generalized from `pre2_port/pre2/gaps.py` | `HybridGap` fail-loud exception + the transition-signal subclass pattern + `HookVerifyStats`/`HookTraceStats`/`report`; the six Pre2 signal subclasses stayed behind as the worked example |
 | `dos_re/state_view.py` | promoted from `pre2_port/pre2/bridge/dgroup_view.py` (the generic half: backends, descriptors, view bases) | `DGROUP_BASE` parameterized into `ByteBackend(source, base)` / `coerce_backend(source, base)`; descriptor names made public (`U8`/`U16`/...); the game layout views stayed behind |
 | `tools/display.py` | copied from `pre2_port/scripts/display.py` | GPU-accelerated pygame presenter; zero game knowledge — only the window title changed |
+| `tools/render_frame.py` | adapted from `pre2_port/scripts/render_frame.py` | snapshot → PNG (VGA mode 13h + EGA/VGA planar, DAC palette, display start); EGA constants retargeted to `dos_re.memory`, game runtime loader replaced by `--exe` |
+| `tools/audit_layers.py` | generalized from `overkill_port/scripts/audit_recovered_layers.py` | pure-layer VM-leak audit; roots/forbidden packages/layout constants became CLI arguments |
 | `docs/pitfalls.md` (P2 entries) | distilled from `pre2_port` docs: `camera_fidelity_bug.md`, `renderer_bug_table.md`, `live_view_timing_design.md`, `timing_hook_design.md`, `faithful_visual_layer.md`, `run_status.md` | each entry cites its consequence and the rule that fixed it |
 | `docs/architecture.md` | new text, synthesized from `pre2_port/ARCHITECTURE.md` + `docs/architecture/package_boundary.md` + `third_party.md` | |
 | `AGENTS.md`, `README.md` | new text, synthesized from both repos' `AGENTS.md`/`README.md`/`ARCHITECTURE.md` | |
@@ -91,10 +93,11 @@ is modeled and reference the oracle evidence).
   The generic OPL2/PIT/speaker *port models* they sit on are in the core `dos.py`.
 - **Game-specific tools**: `trace.py`, `find_demo_divergence.py`,
   `capture_demo_snapshot.py`, `diag_video.py` (overkill_port) and `play.py`/
-  `play_native.py`/`sdl_view.py`/`render_frame.py`/`deploy_native.py`
-  (pre2_port) — all depend on the game adapter's runtime/frame config. Their
-  *patterns* are described in the docs; write yours in your adapter (they are
-  small: the divergence bisector is ~40 lines over `dos_re.frame_verify`).
+  `play_native.py`/`sdl_view.py`/`deploy_native.py` (pre2_port) — all depend
+  on the game adapter's runtime/frame config. Their *patterns* are described
+  in the docs; write yours in your adapter (they are small: the divergence
+  bisector is ~40 lines over `dos_re.frame_verify`).
+  (`render_frame.py` was later found separable and promoted — see above.)
 - **Game-specific tests, fixtures, docs**: `symbols.json`, symbol ledgers,
   island docs, run-status logs, campaign docs, generated artifacts, `.pyc`
   caches, IDE folders.

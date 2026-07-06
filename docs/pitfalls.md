@@ -145,8 +145,8 @@ speed: a faster wrong replacement is a regression.*
 `mem` imports crept into the recovered-logic layers. → The "portable" game
 logic became unmigratable to the native runtime. → *Automated layer audits run
 with the test suite from day one: recovered/ never imports dos_re/cpu/mem/
-hooks/offsets. (Adapt the check in `tests/test_architecture_layers.py`-style
-from the source repos; `tools/lint.py` covers the framework side.)*
+hooks/offsets. `tools/audit_layers.py` is that audit, ready to point at your
+adapter's pure directories; `tools/lint.py` covers the framework side.*
 
 **18. Two parallel state models.** [P2] A semantic frame model was built as a
 *parallel* representation next to the machine-level render state, each

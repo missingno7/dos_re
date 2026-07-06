@@ -76,7 +76,8 @@ docs/         methodology + guides (start at docs/README.md)
 examples/     minimal_adapter/ (runnable end-to-end demo), adapter_skeleton/ (template)
 tests/        framework test suite (no game assets needed)
 tools/        lint, test runner, cleaner, linear disassembler, hotspot profiler,
-              hook-composition audit, undefined-name guard, island-manifest generator,
+              hook-composition audit, pure-layer VM-leak audit, undefined-name
+              guard, island-manifest generator, snapshot→PNG frame renderer,
               GPU-accelerated frame presenter (display.py, optional numpy+pygame)
 ```
 

@@ -53,9 +53,11 @@ print(rt.cpu.addr(), rt.cpu.instruction_count)
 
 ## 2. See output, wire input
 
-- Decode the active video memory into an image so you can visually confirm
-  state (VGA mode 13h is a linear read of A000h; planar modes go through the
-  EGA aperture in `dos_re.memory`; your rasterizer is adapter code).
+- See the screen: `python tools/render_frame.py <snapshot_dir>` renders a
+  snapshot's video memory to PNG (VGA mode 13h and EGA/VGA planar, using the
+  saved DAC palette and display start). If your game uses a mode it doesn't
+  cover (CGA, Tandy, text), your adapter grows a rasterizer — the tool is the
+  template.
 - Deliver keys via `dos_re.interrupts.deliver_scancode` and confirm the game's
   key-state table updates (most action games poll their own INT 09h ISR state,
   not BIOS).
