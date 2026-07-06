@@ -147,6 +147,12 @@ to "a standalone native game ships" (full rationale in
 5. **A verification switch.** ON: the oracle runs beside the native game and
    diffs at boundaries. OFF: no VM starts. The shipped build contains no VM,
    no EXE, no fallback.
+6. **Only now, the enhanced layer.** Widescreen, interpolation, scaling and
+   friends are lifecycle Stage 6 — built on top of the *complete* faithful
+   game, never during recovery ([`enhancements.md`](enhancements.md),
+   pitfall #24). The audio-style exception (small, separable, fixes something
+   that disrupts the recovery workflow itself) needs explicit justification in
+   your run_status ledger.
 
 **Audio deserves its own plan** (usually the longest pole, charter §8).
 Recover it in layers, with the emulated Sound Blaster/OPL + the original ASM

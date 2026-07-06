@@ -195,3 +195,16 @@ the verified game; demos recorded on one desync on the other. → *Enhancements
 read state and write none, enforced by a parity gate (enhanced-at-neutral ≡
 faithful, pixel- and state-exact). Anything that needs to write is not an
 enhancement. See [`enhancements.md`](enhancements.md).*
+
+**24. Building presentation backends during recovery ("cyborgization").** [P2]
+Early in the project, faithful/enhanced *viewer* backends were grown alongside
+hook-based recovery, before the native game was complete. → It required a
+whole policing apparatus: transitional "faithful-only, not yet grounded"
+states to track, one-implementation audits to stop parallel truths, and
+presentation effort spent while gameplay was still unrecovered. It worked, but
+the project's own retrospective verdict is: not recommended. → *The enhanced
+layer is the ENDGAME — lifecycle Stage 6, after the faithful VM-less game is
+complete and stable. The only sanctioned exception class is audio-style
+disruptions: small, separable fixes for something that actively impedes the
+recovery workflow itself (P2's noisy, crackling emulated playback). See
+[`enhancements.md`](enhancements.md).*

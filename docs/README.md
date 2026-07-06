@@ -8,9 +8,9 @@ Reading order for a newcomer: the repo [README](../README.md) →
 
 | Doc | What it covers |
 |---|---|
-| [`pitfalls.md`](pitfalls.md) | **The 23 real mistakes** the source ports made — naming, hook bloat, verification narrowing, state-capture timing, determinism traps, SMC, layering, AI hallucination — each with the consequence and the rule that fixed it. |
+| [`pitfalls.md`](pitfalls.md) | **The 24 real mistakes** the source ports made — naming, hook bloat, verification narrowing, state-capture timing, determinism traps, SMC, layering, AI hallucination, premature presentation work — each with the consequence and the rule that fixed it. |
 | [`cookbook.md`](cookbook.md) | **Problem-indexed techniques** that could not be promoted as code but exist as worked examples in the source repos: timing fast-forward, shadow caches, boot-data extraction, staticizing patched code, layered audio recovery, tick-demo proofs, overnight loops, deployment. Consult it the moment your game hits a wall. |
-| [`lifecycle.md`](lifecycle.md) | **The story in order**: EXE-in-VM → hot-path islands → gameplay recovery → islands merge into subsystems → VM-less native port with the verification bridge → VM retires into the oracle seat. Defines the shared vocabulary (oracle, island, golden, hybrid, native). |
+| [`lifecycle.md`](lifecycle.md) | **The story in order**: EXE-in-VM → hot-path islands → gameplay recovery → islands merge into subsystems → complete faithful VM-less game → VM retires into the oracle seat → enhanced presentation layer last. Defines the shared vocabulary (oracle, island, golden, hybrid, native). |
 | [`architecture.md`](architecture.md) | The package boundary, the framework module map, execution modes, adapter layering, dependencies. |
 | [`ai_porting_charter.md`](ai_porting_charter.md) | **The method, complete.** VM-as-oracle, the two invariants, the lifting loop, the proof spine, the determinism trap, the phased roadmap, the rules of engagement. Written for an AI agent (or human) given this framework and a DOS game. |
 | [`methodology.md`](methodology.md) | The naming/altitude discipline: evidence ladder, status ladder (GUESS → CANONICAL), crystallization pyramid, hook lifecycle, fail-fast over guessed fallback. |
@@ -19,7 +19,7 @@ Reading order for a newcomer: the repo [README](../README.md) →
 | [`state_mirrors.md`](state_mirrors.md) | The state-view seam: human-named views over the DOS memory image with swappable backends, without weakening byte-exact verification. |
 | [`porting_new_game.md`](porting_new_game.md) | The concrete bring-up checklist for a new game, step 0 → the lifting loop, plus the endgame steps and the code-heavy vs data-driven game styles. |
 | [`hardware_support.md`](hardware_support.md) | Honest, status-legend-based matrix of the video/audio/timing/DOS models, the unmodeled-I/O policy, and the rule for extending them. |
-| [`enhancements.md`](enhancements.md) | The faithful-core vs enhanced-presentation boundary, the parity gate, and the widescreen / pixel-aspect lessons. |
+| [`enhancements.md`](enhancements.md) | The enhanced layer as the ENDGAME (sequencing rule + the audio exception), the faithful/enhanced boundary, the parity gate, and the widescreen / pixel-aspect lessons. |
 | [`glossary.md`](glossary.md) | Every project term (oracle, island, coastline, golden, heartbeat, …) in one table. |
 | [`roadmap.md`](roadmap.md) | What's next, what waits for the next port, long-term shape, and decided non-goals. |
 

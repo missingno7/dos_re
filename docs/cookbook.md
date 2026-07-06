@@ -153,7 +153,7 @@ standalone folder, prove every import resolves *inside* that tree, smoke-run
 it, optionally wrap with PyInstaller. Worked example:
 `pre2_port/scripts/deploy_native.py`.
 
-## Presentation (after the game is faithful)
+## Presentation (Stage 6 — only after the faithful game is complete)
 
 **Making it look/feel modern without touching gameplay.**
 → [`enhancements.md`](enhancements.md) has the rules; the worked examples are

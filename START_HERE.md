@@ -94,6 +94,11 @@ it knows your game's addresses or formats, it stays in your adapter.
   ([`docs/demos_and_snapshots.md`](docs/demos_and_snapshots.md) — the trap
   that silently voids demo proofs).
 - Full-memory diffs by default; narrowing is a temporary, deliberate lever.
+- **No enhanced-presentation work until the faithful native game is complete
+  and stable** (widescreen, interpolation, enhanced renderers = lifecycle
+  Stage 6). The only exception class is an audio-style disruption fix —
+  small, separable, justified in the ledger
+  ([`docs/enhancements.md`](docs/enhancements.md), pitfall #24).
 
 ## Progress is measured, not vibed
 

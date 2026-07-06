@@ -133,6 +133,13 @@ or a guess from screenshots. Top-down pressure ("native needs X") is answered
 by recovering X at the source layer, bottom-up — never by inventing it in the
 backend.
 
+**This early convergence applies to the FAITHFUL native runtime only.** The
+enhanced presentation layer (widescreen, interpolation, modern scaling…) is
+*not* part of it — it waits for Stage 6, after the faithful game is complete.
+The Prehistorik 2 project's early experiment with growing enhanced/faithful
+*viewer* backends alongside recovery ("cyborgization") is explicitly not
+recommended; see [`enhancements.md`](enhancements.md) and pitfall #24.
+
 **Verification is not lost at this step — that is the point of the state
 mirror.** The native port keeps an address-shaped compatibility bridge: the
 game state remains byte-compatible with the original memory layout where
@@ -184,6 +191,22 @@ is still the source of truth on the last day — what changed is what *runs*.
 **Mantra:** the VM preserves the original machine; the source port preserves
 the original game. Hybrid prepares the code; native plugs it in; the oracle
 proves it did not drift.
+
+## Stage 6 — the enhanced layer: the real endgame
+
+Only now — with a complete, stable, faithful VM-less game that passes the demo
+corpus — does the enhanced presentation layer become the focus: widescreen,
+frame interpolation, smooth transitions, modern scaling, CRT/square-pixel
+aspect, stereo expansion. This ordering is deliberate and learned: building
+presentation backends *during* recovery (the early "cyborgization" experiment)
+is explicitly not recommended — the enhanced engine is the reward for a
+finished faithful game, not a recovery shortcut. The rules, the parity gate,
+the sanctioned audio-style exception, and the widescreen/pixel-aspect lessons:
+[`enhancements.md`](enhancements.md).
+
+The faithful core stays frozen underneath: enhancements read state and write
+none, every enhancement is proven state-equal to the faithful game at its
+neutral setting, and the oracle suite from Stage 5 keeps running unchanged.
 
 ## The two invariants that hold through every stage
 

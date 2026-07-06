@@ -112,7 +112,8 @@ thin adapter over it — never a second copy:
 1. the **live replacement** (the hybrid runtime skips the ASM body),
 2. the **verify checkpoint** (diff vs the oracle at the boundary),
 3. the **native runtime consumer** (the VM-less game composes the same leaf),
-4. later, an enhanced backend.
+4. the enhanced backend — but only in lifecycle Stage 6, after the faithful
+   game is complete (never during recovery; pitfall #24).
 
 Ground the live hook + verifier *first*; the native side absorbs the grounded
 leaf *last*. Duplicating logic between a hook and the native backend is how a

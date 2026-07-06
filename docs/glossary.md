@@ -30,7 +30,8 @@ The project's vocabulary in one place. Terms link to the doc that owns them.
 | **Fail loud / HybridGap** | The no-silent-fallback rule made executable: unrecovered behaviour raises with precise context; it is never faked and never silently handed back to ASM. |
 | **Transition signal** | A `HybridGap` subclass that is a control-flow signal, not an error: the per-frame step reached a multi-frame sequence (respawn, level end) the flow driver must drive. |
 | **Status ladder** | GUESS → OBSERVED → RECOVERED → ASM_MATCHED → VERIFIED → CANONICAL — the only way names earn confidence (`dos_re/islands.py`, [`methodology.md`](methodology.md)). |
-| **Faithful core / enhanced layer** | The verified game vs the presentation-only comfort layer that reads state and writes none. ([`enhancements.md`](enhancements.md)) |
+| **Faithful core / enhanced layer** | The verified game vs the presentation-only comfort layer that reads state and writes none. The enhanced layer is built LAST — lifecycle Stage 6, after the faithful game is complete. ([`enhancements.md`](enhancements.md)) |
+| **Cyborgization** | The deprecated early-P2 experiment of growing faithful/enhanced viewer backends alongside recovery, before the native game was complete. Retrospective verdict: not recommended (pitfall #24). |
 | **Crystallization** | Letting higher-level meaning *emerge* from verified lower-level facts instead of naming by guess. ([`methodology.md`](methodology.md)) |
 | **Staticization** | The discipline for runtime-patched code: observed live bytes → named variant → signature guard → explicit static Python. |
 | **Adapter** | The per-game package holding everything that knows the game: addresses, formats, hooks, views, recovered logic. The framework core never learns a game. |

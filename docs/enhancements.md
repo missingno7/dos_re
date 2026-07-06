@@ -1,11 +1,42 @@
-# The enhanced layer — faithful core vs presentation
+# The enhanced layer — faithful core first, presentation last
 
 The Prehistorik 2 port shipped modern comforts (widescreen, frame
 interpolation, smooth transitions, stereo SFX, scaling) *without ever
-diverging from the verified game*. That worked because of one architectural
-rule, which every port built on this framework should adopt.
+diverging from the verified game*. That worked because of two rules — one
+about the boundary, one about the **order** — and every port built on this
+framework should adopt both.
 
-## The rule
+## The sequencing rule: the enhanced layer is the endgame
+
+**Recover a complete, working, faithful native game first. Build enhanced
+rendering/presentation on top of it, last.** The lifecycle is:
+
+```text
+ASM game running in VM → deterministic replay / snapshots → hooks and routine
+replacement → verified recovered islands → faithful native subsystems →
+COMPLETE faithful VM-less game → enhanced presentation layer
+```
+
+Do not start widescreen, interpolation, smooth transitions, or an "enhanced
+renderer" while the faithful core still has unrecovered subsystems. Early in
+its history, the Prehistorik 2 project experimented with growing a
+faithful/enhanced visual backend *alongside* recovery (the "cyborgization"
+phase — see `pre2_port/docs/pre2/faithful_visual_layer.md` for the machinery
+it required). It ultimately worked, but the project's own verdict is **not
+recommended**: it created transitional not-yet-grounded states to police,
+parallel-truth risks to audit, and presentation effort spent while gameplay
+was still unrecovered. The enhanced engine is the *reward* for a finished
+faithful game, not a recovery shortcut.
+
+**The one sanctioned exception class: audio-style disruptions.** P2 improved
+audio playback earlier than the rule allows because it was (a) relatively
+simple and separable, and (b) the original emulated playback was noisy and
+crackling enough to disrupt all other work. That is the bar for an exception:
+small, cleanly separable, and fixing something that actively impedes the
+recovery workflow itself — and it still obeys the boundary rule below. "It
+would look nicer" never qualifies.
+
+## The boundary rule
 
 **Enhancements are pure presentation: they read game state and write none.**
 
@@ -22,7 +53,9 @@ equal to the faithful game at its neutral setting (the "alpha=1 parity gate"),
 so *enhanced never means diverged* — it is the same game, shown better. An
 enhancement that needs data the faithful core doesn't expose gets that data
 **recovered at the source layer first** — never faked in the renderer
-(pitfall #18, and the bottom-up rule in [`lifecycle.md`](lifecycle.md)).
+(pitfall #18). Note that with the sequencing rule above this situation should
+be rare: by the time the enhanced layer is being built, the faithful core is
+complete.
 
 The seam enhancements attach to is a **semantic render-intent model** emitted
 by the faithful renderer (sprites, camera, palette, transition state) —
