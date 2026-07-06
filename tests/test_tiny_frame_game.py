@@ -1,14 +1,23 @@
 """The tiny_frame_game walkthrough doubles as an end-to-end integration test:
 it is the only place the whole stack (boot -> checkpoints -> INT9 input ->
 cold-start demos -> snapshots -> hook oracle -> frame oracle -> state mirror)
-runs against a live runtime inside this repo."""
+runs against a live runtime inside this repo.
+
+The examples are optional material (see examples/README.md): if the examples/
+directory is removed, these tests skip and the framework suite stays green."""
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "examples" / "tiny_frame_game"))
+_EXAMPLE_DIR = ROOT / "examples" / "tiny_frame_game"
+if not _EXAMPLE_DIR.is_dir():
+    pytest.skip("examples/tiny_frame_game removed — example tests are optional",
+                allow_module_level=True)
+sys.path.insert(0, str(_EXAMPLE_DIR))
 
 import walkthrough  # noqa: E402
 from game import build_game_exe  # noqa: E402

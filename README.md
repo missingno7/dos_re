@@ -144,7 +144,8 @@ layout, recovered logic — lives in your adapter. The boundary is documented in
 dos_re/       the framework package (VM + proof engines) — stdlib-only
 nuked_opl3/   vendored Nuked-OPL3 FM synthesis backend (optional, cffi)
 docs/         the method + guides            → start at docs/README.md
-examples/     runnable demo + adapter template
+examples/     runnable demos + adapter template — optional and deletable as a
+              whole; nothing in the framework imports it (examples/README.md)
 tests/        framework tests (no game assets needed)
 tools/        lint / test runner / disassembler / profiler / audits
 ```
