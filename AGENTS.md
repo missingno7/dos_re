@@ -52,7 +52,7 @@ tests/        framework tests; game-free by construction
 tools/        lint.py, run_tests.py, clean.py, lindis.py, profile_hotspots.py,
               audit_hook_oracle.py, audit_layers.py, check_undefined_names.py,
               gen_island_manifest.py, render_frame.py,
-              display.py (optional-deps viewer backend)
+              view.py + display.py (live oracle viewer; optional numpy+pygame)
 ```
 
 ## Standard commands

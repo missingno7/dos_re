@@ -19,8 +19,13 @@ dist/
 # Original game files never belong in this repo (bring your own, per game)
 assets/
 
-# Regenerable artifact families (snapshots, demos, frame-verify dumps)
-artifacts/
+# Regenerable artifact families (snapshots, demos, frame-verify dumps) are
+# scratch and ignored. PROMOTED evidence is tracked: a demo/oracle that a test
+# or ledger references gets moved into artifacts/test_oracles/ or
+# artifacts/evidence/ (see docs/demos_and_snapshots.md "Where evidence lives").
+artifacts/*
+!artifacts/test_oracles/
+!artifacts/evidence/
 
 # Scratch traces, dumps, and rendered probes
 tmp_*.bin

@@ -26,7 +26,11 @@ code*, not original *data*.
 **"Provably equivalent"** does not mean a formal proof (infeasible for a whole
 ASM game). It means the strongest practical proof available to us:
 deterministic, **frame-and-state-exact** equivalence against the original,
-replayed over a demo corpus that exercises the whole game.
+replayed over a demo corpus that exercises the whole game. (Scope note:
+"byte-exact" applies to *gameplay state*; rendering is pixel-exact but
+mechanism-flexible, audio event-exact but mixer-flexible, timing
+heartbeat-exact but never the waiting machinery — the per-subsystem contracts
+are the table in `docs/lifecycle.md` Stage 4.)
 
 Our structural advantage over a normal source port: **we have the exact
 original behavior on tap** (the VM) to diff against. The entire method is about
@@ -84,8 +88,10 @@ video layout, or data formats. Key modules:
     instead of calling the handler directly (this is how verification wraps
     every hook). `hook_verifier_passthrough` exempts addresses (e.g. UI pacing
     wrappers) from being verified.
-  - `coverage_telemetry` — records interpreted vs hooked instruction counts and
-    per-hook ASM-equivalent cost (your headline progress metric, see §10).
+  - `coverage_telemetry` — hook points for interpreted-vs-hooked step counting
+    (your headline progress metric, see §10). NOTE: the CPU only *calls* an
+    adapter-supplied collector object; the framework ships no implementation —
+    you build it (porting guide step 8).
   - `trace_enabled` / `trace` — per-instruction disassembly+state capture.
   - `instruction_count`, `addr() -> (cs,ip)`.
 - **`memory.py` — `Memory`.** Flat image + segment helpers (`rb/rw/wb/ww`,

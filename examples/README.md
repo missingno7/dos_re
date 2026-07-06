@@ -22,5 +22,7 @@ What's here:
 | [`tiny_frame_game/`](tiny_frame_game/README.md) | The whole lifecycle on a synthetic frame-loop game (oracle boot, cold-start demos, both verification oracles, state mirror). Doubles as the repo's full-stack integration test. |
 | [`adapter_skeleton/`](adapter_skeleton/README.md) | The **template** you copy to start a real game adapter — the one directory here that exists to be copied out, not run. |
 
-When you start a real port, your adapter package lives in *your* workspace
-(next to `dos_re/`, named after the game) — not under `examples/`.
+When you start a real port, your adapter package lives **at this repository's
+root, next to `dos_re/`** (e.g. `mygame/`) — not under `examples/`. See
+`START_HERE.md` step 2 for the conventions that come with it (tests,
+lint roots, asset-skip).

@@ -9,8 +9,10 @@ false confidence poisons every plan built on it.
 2. **Collect the numbers**:
    - islands by status-ladder level (GUESS…CANONICAL) — counts and deltas
      since the last report;
-   - % of per-frame instructions native vs interpreted (coverage telemetry),
-     per island where classified;
+   - native % over a demo replay (hooked / total step counts from your
+     adapter's coverage collector — the framework only provides the hook
+     points; if you haven't built the collector yet, say "not yet measured",
+     never estimate), per island where classified;
    - demo corpus: count, total frames, pass rate, which
      levels/behaviours/transitions it exercises — and does NOT;
    - hook counts by taxonomy role (glue falling is progress);

@@ -22,6 +22,28 @@ Uses:
 Snapshots are evidence: name them descriptively, keep the ones that justify
 hooks/tests/findings, prune scratch ones freely.
 
+**Loading rebuilds the runtime fresh** — `load_snapshot` goes through
+`create_runtime`, which reinstalls every hook registered in the global
+`registry`. Snapshots persist no hook state; determinism holds because the
+same hooks register at the same addresses every load. If you need a pure-ASM
+oracle from a snapshot, clear/skip the registry installs explicitly (the
+`DOS_RE_DISABLE_HOOKS` env var disables individual addresses).
+
+## Where evidence lives (git convention)
+
+Everything under `artifacts/` is **regenerable scratch and gitignored** —
+record freely, prune freely. When a demo or snapshot becomes *evidence* (a
+test replays it, a ledger cites it, the proof corpus includes it), **promote
+it**: move it to `artifacts/test_oracles/` or `artifacts/evidence/` (both
+tracked) and give it an entry in your `docs/<game>/demo_manifest.md` (name,
+purpose, length, what it exercises, pass status). An unpromoted demo is a
+scratch run; an unlisted promoted demo is a corpus blind spot — the manifest
+is what makes corpus coverage a measured number (pitfall #22). Mind size:
+demos are small (events + one snapshot); prefer promoting demos over raw
+memory dumps, and never commit anything containing original game data beyond
+what a snapshot inherently embeds (snapshots contain the game's memory image —
+they stay local/private unless the rights situation allows otherwise).
+
 `dos_re/repro_artifacts.py` captures *divergence* snapshots automatically: a
 detached clone of the runtime taken before the failing hook ran, plus a
 manifest of when/why — a ready-to-load repro.

@@ -36,6 +36,29 @@ oracle stays central: without it you guess; with it you are forced to
 converge. Name things by evidence, verify before you trust, and treat your own
 narrative sense as a hypothesis generator, never a source.
 
+## How the rituals chain
+
+```text
+new game ──▶ start_new_game_adapter (to the first no-op frame verify)
+                 │
+                 ▼
+        ┌──▶ recover_one_routine ──────────────┐   the daily loop
+        │        │ divergence?                 │
+        │        ▼                             │
+        │    diagnose_hook_divergence ─────────┤   (fix, or revert + blocker)
+        │        │ offsets piling up?          │
+        │        ▼                             │
+        │    create_state_mirror               │
+        │        │ neighbourhood proven?       │
+        │        ▼                             │
+        │    promote_hook_to_subsystem         │
+        └────────┴──── end of session ─────────┘
+                         │
+                         ▼
+             write_recovery_status  (every session ends here)
+      audit_no_silent_fallbacks  (periodically, and before any milestone claim)
+```
+
 | Prompt | Task |
 |---|---|
 | [`start_new_game_adapter.md`](start_new_game_adapter.md) | Day 0: stand up a new game's adapter and reach the first verified frame boundary. |

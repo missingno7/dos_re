@@ -25,6 +25,18 @@ The two source projects span the spectrum, and the recovery emphasis differs:
 Most games mix both. Classify early (a few hours of tracing tells you), and
 let it steer where the first islands go.
 
+## How the numbering systems line up
+
+Three docs count differently; they describe one process:
+
+| This guide (steps) | [`lifecycle.md`](lifecycle.md) (stages) | [`ai_porting_charter.md`](ai_porting_charter.md) (phases) |
+|---|---|---|
+| 0–6 (bring-up: adapter, boot, output, boundaries, verifier, input waits, first demo) | Stage 0 | charter §9 (bootstrapping checklist) |
+| 7 (the lifting loop) | Stages 1–2 | Phase 1 |
+| 8 (coverage telemetry) | ongoing | §10 (metrics) |
+| Endgame steps 1–5 | Stages 3–5 | Phases 2–6 |
+| Endgame step 6 (enhanced layer) | Stage 6 | after Phase 6 |
+
 ## 0. Set up the adapter
 
 Copy the shape of [`examples/adapter_skeleton/`](../examples/adapter_skeleton/README.md)
@@ -58,6 +70,13 @@ print(rt.cpu.addr(), rt.cpu.instruction_count)
   saved DAC palette and display start). If your game uses a mode it doesn't
   cover (CGA, Tandy, text), your adapter grows a rasterizer — the tool is the
   template.
+- Watch it live: `python tools/view.py --exe assets/GAME.EXE` opens an
+  interactive window (same two video modes), forwards your keyboard to the
+  game, and paces with `--fps` / `--steps-per-frame` /
+  `--timer-irqs-per-frame`. This is also how the human owner watches the game
+  and gives feedback throughout the port. It is deliberately approximate (no
+  boundaries, no hooks) — the verifiers stay the truth; your adapter's real
+  runner grows from this template.
 - Deliver keys via `dos_re.interrupts.deliver_scancode` and confirm the game's
   key-state table updates (most action games poll their own INT 09h ISR state,
   not BIOS).
@@ -87,7 +106,10 @@ demos before this step produces proofs that freeze or lie.
 
 Drive menus into gameplay; confirm the demo replays identically under every
 driver (interactive, headless, frame verifier). This demo is your first
-regression asset.
+regression asset: record into `artifacts/` (scratch), then **promote** it to
+`artifacts/test_oracles/` with a `docs/<game>/demo_manifest.md` entry — the
+storage convention is in
+[`demos_and_snapshots.md`](demos_and_snapshots.md#where-evidence-lives-git-convention).
 
 ## 7. Start the lifting loop
 
@@ -111,9 +133,19 @@ what tells you how far the port is.
 
 ## 8. Stand up coverage telemetry
 
-`cpu.coverage_telemetry` records interpreted vs hooked instruction counts; map
-addresses to islands (subsystems) in the adapter so "% of per-frame
-instructions running native" becomes your headline progress metric.
+The CPU only provides the *hook points*: if `cpu.coverage_telemetry` is set,
+the interpreter calls `record_interpreted_instruction(...)` per interpreted
+step and the hook/verifier paths call `record_hook_verified/unverified/
+skipped(...)`. **The collector object itself is yours to build in the
+adapter** — the framework ships none. Implement those methods, classify
+addresses into islands there, and assign the object after creating the
+runtime. The proven worked example is `overkill/coverage.py` (see
+[`cookbook.md`](cookbook.md) "Progress and process machinery").
+
+The headline metric, defined precisely so reports are comparable: **native %
+= hooked-step count / (hooked + interpreted step counts), accumulated over a
+full demo replay** (`cpu.step()` invocations, not instruction_count); report
+it overall and per island.
 
 ## Then: the phased roadmap
 

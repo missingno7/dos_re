@@ -27,12 +27,17 @@ equivalence. ([`docs/lifecycle.md`](docs/lifecycle.md) tells the whole arc.)
    work as VERIFIED).
 2. **Set up the workspace.** The game's files (EXE + data) go in `assets/`
    (gitignored — original game files are never committed). Create your adapter
-   package next to `dos_re/` by copying the shape of
-   [`examples/adapter_skeleton/`](examples/adapter_skeleton/README.md), named
-   after the game. Run `python examples/tiny_frame_game/walkthrough.py` once —
-   it exercises the full stack (boot, demos, snapshots, both oracles, state
-   mirror) and confirms the framework works on this machine; its README is
-   also the fastest way to *see* every mechanism you are about to use.
+   package **in this repository, at the root, next to `dos_re/`** — e.g.
+   `mygame/` — by copying the shape of
+   [`examples/adapter_skeleton/`](examples/adapter_skeleton/README.md). (This
+   repo becoming the game-port repo is the expected workflow; porting in a
+   separate repo that vendors `dos_re/` also works, but is the exception.)
+   Then wire the conventions in: your tests go in `tests/` and **must skip
+   when `assets/` is missing** (CI has no game files — copy the pattern from
+   `tests/test_tiny_frame_game.py`), add `mygame` to `tools/lint.py`'s
+   `PACKAGE_ROOTS`, and run `tools/audit_layers.py mygame/recovered` with the
+   suite. Run `python examples/tiny_frame_game/walkthrough.py` once — it
+   exercises the full stack and confirms the framework works on this machine.
 3. **Start the ledgers** (empty is fine): `docs/<game>/run_status.md` (current
    phase, recent findings), `docs/<game>/symbol_ledger.md` (addresses →
    evidence), `docs/<game>/blockers.md` (see the loop protocol), and the
@@ -41,6 +46,11 @@ equivalence. ([`docs/lifecycle.md`](docs/lifecycle.md) tells the whole arc.)
    step: load & run → see output → find frame boundaries → stand up the frame
    verifier → build the input-wait registry → record the first demo → start
    the lifting loop.
+5. **Keep the owner in the loop.** `python tools/view.py --exe assets/<GAME>`
+   is the generic live window (plus `tools/render_frame.py` for PNG evidence)
+   — use it to show progress and gather the owner's feedback on how the game
+   *runs*; the oracle judges whether the code is *correct*. Those are
+   different jobs, and both matter.
 
 ## The loop protocol (how work proceeds, slice by slice)
 
@@ -102,8 +112,9 @@ it knows your game's addresses or formats, it stays in your adapter.
 
 ## Progress is measured, not vibed
 
-- % of per-frame instructions running native vs interpreted
-  (`coverage_telemetry`, adapter-classified into islands).
+- Native % over a demo replay (hooked / total `cpu.step()` counts) — the CPU
+  exposes `coverage_telemetry` hook points; **your adapter builds the
+  collector** (porting guide step 8; worked example in the cookbook).
 - The generated island manifest (count × confidence ladder).
 - Demo-corpus coverage and pass rate.
 - The glue-hook count (falling is good) and the frontier manifest

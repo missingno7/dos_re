@@ -11,7 +11,9 @@ The project's vocabulary in one place. Terms link to the doc that owns them.
 | **Golden** | A recorded oracle fixture turned into a test: captured inputs/outputs/memory effects the recovered island must reproduce forever. |
 | **Coastline** | The total surface where recovered code borders interpreted ASM. Progress = the coastline moving upward (fewer, larger contact points). |
 | **Coastline shortening** | Calling a verified recovered callee directly instead of returning to ASM between two recovered islands. |
-| **Continent** | The geography metaphor's end state: islands → archipelagos (subsystems) → continents (native systems) → the recovered mainland (VM-less port). |
+| **Archipelago / Continent** | The geography metaphor's middle and end states: islands → archipelagos (islands connected into a *subsystem*) → continents (complete native systems) → the recovered mainland (VM-less port). "Subsystem" and "archipelago" name the same thing at different altitudes. |
+| **Glue** | A hook-taxonomy role: accidental ASM-boundary plumbing (tails, helpers, per-row scan steps) that exists only because a hook landed there — the collapse target when islands merge. Not an architectural layer. |
+| **Parity gate** | The enhanced layer's standing proof: at its neutral settings the enhanced game must be pixel- and state-identical to the faithful game, so "enhanced" can never silently mean "diverged". ([`enhancements.md`](enhancements.md)) |
 | **Hybrid runtime** | The workbench: the VM running the original game with recovered islands hooked live over it. |
 | **Native runtime** | The product: recovered source only — no VM, no EXE, no interpreted instruction in the hot path. |
 | **Demo** | A deterministic **input recording** (never a video): VM-visible key events keyed to the emulated boundary clock, plus metadata. Replays identically under every driver. ([`demos_and_snapshots.md`](demos_and_snapshots.md)) |

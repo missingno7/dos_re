@@ -8,6 +8,9 @@ and the worked example is sitting on disk. This is the problem-indexed map.
 The worked examples live in the sibling repositories:
 `D:\Games\DOS\pre2_port` (P2 — also github.com/missingno7/pre2_port) and
 `D:\Games\DOS\overkill_port` (OK). Paths below are relative to those repos.
+If neither is available on your machine, the entries below still carry the
+essential shape of each technique — enough to re-derive it against your own
+oracle; treat the missing example as lost convenience, not lost method.
 When you re-implement one of these for a new game, read the original first —
 each encodes debugging that took days — and if your version comes out generic,
 promote it (see `roadmap.md`, "parameterize-and-promote").

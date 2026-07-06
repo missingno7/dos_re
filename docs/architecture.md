@@ -13,10 +13,12 @@ dos_re/       the reusable, game-agnostic core: VM + verification engines.
               Stdlib-only.  Knows NOTHING about any specific game's addresses,
               filenames, video layout, or data formats.  Enforced by tools/lint.py.
 
-<your game>/  the per-game adapter you create in your own repo (or vendored
-              alongside): hooks, continuation metadata, frame boundaries,
-              input-wait registry, asset codecs, recovered logic, state views.
-              See examples/adapter_skeleton/.
+<your game>/  the per-game adapter you create AT THIS REPO'S ROOT, next to
+              dos_re/ (the expected workflow — this repo becomes the port
+              repo; a separate repo vendoring dos_re/ is the exception):
+              hooks, continuation metadata, frame boundaries, input-wait
+              registry, asset codecs, recovered logic, state views.
+              See examples/adapter_skeleton/ and START_HERE.md step 2.
 
 nuked_opl3/   vendored optional OPL2/OPL3 FM-synthesis backend (cffi binding to
               Nuked-OPL3).  Independent of dos_re and of any game.
@@ -78,7 +80,8 @@ tests/        framework test suite (no game assets needed)
 tools/        lint, test runner, cleaner, linear disassembler, hotspot profiler,
               hook-composition audit, pure-layer VM-leak audit, undefined-name
               guard, island-manifest generator, snapshot→PNG frame renderer,
-              GPU-accelerated frame presenter (display.py, optional numpy+pygame)
+              live interactive oracle viewer (view.py) and its GPU frame
+              presenter (display.py) — the last two need numpy+pygame
 ```
 
 ## Execution modes (no silent fallbacks)
