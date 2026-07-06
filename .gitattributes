@@ -1,0 +1,14 @@
+# Normalize line endings: store LF in the repo, let editors do what they like.
+* text=auto
+
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+
+# Binary evidence artifacts (game snapshots, captures) if ever committed
+*.bin binary
+*.png binary
+*.wav binary

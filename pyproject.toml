@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dos-re"
+version = "0.1.0"
+description = "Reusable oracle-driven DOS game reverse-engineering / source-port framework: 8086 VM, hook verification, deterministic demos, snapshots"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "missingno7" }]
+requires-python = ">=3.11"
+# The framework core is deliberately stdlib-only.
+dependencies = []
+keywords = ["dos", "reverse-engineering", "emulator", "8086", "source-port", "oracle"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Disassemblers",
+    "Topic :: System :: Emulators",
+]
+
+[project.urls]
+Repository = "https://github.com/missingno7/dos_re"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[project.optional-dependencies]
+viewer = [
+    "numpy>=1.23",
+    "pygame>=2.5",
+]
+test = [
+    "pytest>=8",
+]
+adlib = [
+    "cffi>=1.15",
+]
+
+[tool.setuptools.packages.find]
+include = ["dos_re*", "nuked_opl3*"]
+
+[tool.setuptools.package-data]
+"nuked_opl3" = ["vendor/*.c", "vendor/*.h", "README.md", "LICENSE"]

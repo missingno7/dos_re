@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install test dependencies
+        run: pip install pytest
+      - name: Boundary + syntax lint
+        run: python tools/lint.py
+      - name: Undefined-name guard
+        run: python tools/check_undefined_names.py
+      - name: Test suite
+        run: python -m pytest tests -q
+      - name: End-to-end example (oracle -> hook -> verify -> snapshot)
+        run: python examples/minimal_adapter/example.py

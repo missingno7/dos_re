@@ -1,0 +1,40 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+.vscode/
+.claude/
+
+# Virtual environments
+venv/
+.venv/
+
+# Python package/build outputs
+build/
+dist/
+*.egg-info/
+
+# Original game files never belong in this repo (bring your own, per game)
+assets/
+
+# Regenerable artifact families (snapshots, demos, frame-verify dumps)
+artifacts/
+
+# Scratch traces, dumps, and rendered probes
+tmp_*.bin
+tmp_*.png
+frame.png
+*.stackdump
+
+# Local Nuked-OPL3 CFFI/build products
+nuked_opl3/_opl3_cffi*.pyd
+nuked_opl3/_opl3_cffi*.so
+nuked_opl3/_opl3_cffi*.dylib
+nuked_opl3/_opl3_cffi*.dll
+nuked_opl3/_opl3_cffi*.c
+nuked_opl3/*.obj
+nuked_opl3/*.o
+nuked_opl3/*.exp
+nuked_opl3/*.lib
