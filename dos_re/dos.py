@@ -23,6 +23,15 @@ class ConsoleInputWouldBlock(Exception):
     """Raised when an interactive front-end wants DOS console input to wait."""
 
 
+class UnmodeledPortRead(NotImplementedError):
+    """A program read a port the hardware model does not know (strict mode only).
+
+    By default such reads return 0 — the proven behaviour the source games ran
+    under (their detection probes rely on benign defaults) — and are recorded in
+    ``DOSMachine.unmodeled_port_reads``.  Setting ``dos.strict_ports = True``
+    turns them into this loud failure for recovery/audit sessions."""
+
+
 @dataclass
 class FileHandle:
     path: Path
@@ -130,6 +139,13 @@ class DOSMachine:
     # Latest raw keyboard scan code presented on port 60h.  A front-end sets this
     # and then invokes the installed INT 9 handler (see dos_re.interrupts).
     current_scancode: int = 0
+    # Unmodeled-I/O policy (docs/hardware_support.md): reads from ports the model
+    # does not know return 0 — the proven default both source games ran under.
+    # Every such read is recorded here (capped) so probes are auditable, and the
+    # opt-in ``strict_ports`` flag turns them into loud failures for recovery/
+    # audit sessions where a silently-wrong 0 could hide behind "working" runs.
+    strict_ports: bool = False
+    unmodeled_port_reads: list[tuple[int, int]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.vga_palette:
@@ -402,6 +418,17 @@ class DOSMachine:
             return self._crtc_regs.get(self._crtc_index & 0xFF, 0) & 0xFF
         if port == 0x03CC and bits == 8:  # Misc Output read-back
             return self._misc_output & 0xFF
+        # Unmodeled port: record it, and fail loud when a recovery/audit session
+        # opted in (a program whose LOGIC consumes this read would silently get a
+        # wrong 0 — the exact fake-confidence hazard the strict mode exists for).
+        if len(self.unmodeled_port_reads) < 512:
+            self.unmodeled_port_reads.append((port & 0xFFFF, bits))
+        if self.strict_ports:
+            raise UnmodeledPortRead(
+                f"read from unmodeled port {port:04X}h ({bits}-bit) at "
+                f"{cpu.s.cs:04X}:{cpu.s.ip:04X} — model the observed behaviour "
+                f"(see docs/hardware_support.md) or run without strict_ports"
+            )
         return 0
 
     def port_write(self, cpu: CPU8086, port: int, value: int, bits: int) -> None:

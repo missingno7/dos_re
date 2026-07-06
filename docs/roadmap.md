@@ -13,11 +13,11 @@ session. Items graduate off this list into `MIGRATION.md` when they land.
   record/replay, snapshot restore, hook oracle (wrong + correct), frame
   verifier lockstep, and a state mirror — also serving as the repo's only
   full-stack integration test.
-- **Opt-in strict-ports mode** — today, reads from unmodeled ports return 0
-  silently (proven behaviour for both source games; changing the default
-  would invalidate their runs). Add an opt-in flag that logs or raises on
-  unmodeled port I/O for recovery/audit sessions, plus a `tools/`
-  audit-fallbacks scan.
+- ~~Opt-in strict-ports mode~~ **Done**: unmodeled port reads are always
+  recorded (`dos.unmodeled_port_reads`) and `dos.strict_ports = True` makes
+  them fail loud (`UnmodeledPortRead`); the proven return-0 default is
+  unchanged. A broader `tools/` audit-fallbacks scan remains a nice-to-have
+  (the manual ritual is `prompts/audit_no_silent_fallbacks.md`).
 - **Diagram pass** — the oracle loop and recovery-geography diagrams exist in
   ASCII; consider rendered versions if the docs ever get a site.
 

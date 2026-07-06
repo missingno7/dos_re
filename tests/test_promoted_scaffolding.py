@@ -176,6 +176,26 @@ def test_signature_guard_accepts_matching_and_zero_bytes_and_rejects_patched():
 
 # ---- fail-loud hardware gaps ----------------------------------------------------------------------
 
+def test_unmodeled_port_reads_are_recorded_and_strict_mode_fails_loud():
+    from pathlib import Path
+
+    from dos_re.dos import DOSMachine, UnmodeledPortRead
+
+    mem = Memory()
+    cpu = CPU8086(mem, CPUState(cs=0x1000, ip=0x0042))
+    dos = DOSMachine(Path("."))
+
+    # Default: benign 0 (the proven behaviour game probes rely on), but recorded.
+    assert dos.port_read(cpu, 0x0201, 8) == 0          # joystick port: unmodeled
+    assert dos.unmodeled_port_reads == [(0x0201, 8)]
+    assert dos.port_read(cpu, 0x03DA, 8) in (0x00, 0x08)  # modeled: not recorded
+    assert len(dos.unmodeled_port_reads) == 1
+
+    dos.strict_ports = True
+    with pytest.raises(UnmodeledPortRead, match="0201"):
+        dos.port_read(cpu, 0x0201, 8)
+
+
 def test_unmodeled_ega_write_modes_fail_loud_instead_of_acting_like_mode_0():
     from dos_re.memory import UnsupportedEgaWriteMode
 

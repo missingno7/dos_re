@@ -10,7 +10,10 @@ Search for:
 2. **Default-instead-of-model**: unsupported video/write mode treated as
    another mode; unknown interrupt/service returning "success"; unknown port
    read used for logic. (The core's known cases are documented in
-   `docs/hardware_support.md`; anything new needs the same honesty.)
+   `docs/hardware_support.md`; anything new needs the same honesty.) For port
+   reads specifically: check `dos.unmodeled_port_reads`, and run a session
+   with `rt.dos.strict_ports = True` — every unmodeled read then fails loud
+   with the reading CS:IP.
 3. **Tolerated mismatches**: a verifier/checkpoint that logs a diff without
    failing; a comparison narrowed to "the bytes that matter"; a test relaxed
    to pass (grep for recently-changed tolerances, skips, and `except` blocks

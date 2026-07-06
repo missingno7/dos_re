@@ -22,10 +22,12 @@ what its oracle proves it needs.
 and writes are logged but otherwise ignored — this is the *proven* behaviour
 both source games ran under (their detection probes rely on benign defaults),
 so it is kept as the default. It is also a documented soft spot: a program
-whose *logic* consumes an unmodeled port read gets a silently wrong 0. An
-opt-in strict-ports audit mode is on the roadmap; until then, when a new
-game's behaviour looks impossible, check its port traffic (`dos.port_log`)
-early.
+whose *logic* consumes an unmodeled port read gets a silently wrong 0. Two
+mitigations ship: every unmodeled read is recorded in
+`dos.unmodeled_port_reads` (capped; audit it early whenever a new game's
+behaviour looks impossible, alongside `dos.port_log`), and setting
+`rt.dos.strict_ports = True` makes such reads **fail loud**
+(`UnmodeledPortRead`, with the reading CS:IP) for recovery/audit sessions.
 
 ## Video
 
