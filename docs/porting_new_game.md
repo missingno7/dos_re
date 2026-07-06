@@ -7,6 +7,24 @@ to-do list with the framework touchpoints named. If you are the porting agent,
 [`START_HERE.md`](../START_HERE.md) is your boot sequence (it routes here) and
 [`pitfalls.md`](pitfalls.md) is the list of mistakes already made for you.
 
+## Know your game's style first
+
+The two source projects span the spectrum, and the recovery emphasis differs:
+
+- **Code-heavy procedural games** (Overkill): behaviour lives in handler zoos,
+  dispatch tables, runtime-patched routines, hardcoded choreography. Expect to
+  invest in handler classification, shared-primitive detection, routine-family
+  grouping, and staticizing patched code — the goal is recovering the implicit
+  actor/choreography model hiding inside the spaghetti, not rewriting each
+  handler forever. The Overkill repo is the worked example of these tools.
+- **Data-driven games** (script/bytecode-interpreter engines): behaviour lives
+  in data the engine interprets. Expect to invest in loaders, format decoders,
+  and verifying the interpreter's opcodes one by one — round-trip decode tests
+  carry more of the proof there.
+
+Most games mix both. Classify early (a few hours of tracing tells you), and
+let it steer where the first islands go.
+
 ## 0. Set up the adapter
 
 Copy the shape of [`examples/adapter_skeleton/`](../examples/adapter_skeleton/README.md)

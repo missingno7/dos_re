@@ -1,11 +1,20 @@
 # dos_re — an oracle-driven DOS game recovery framework
 
 A reusable framework for turning an original 16-bit DOS game into a verified,
-native source port — one proven routine at a time. It grew out of two completed
-ports (Overkill, then Prehistorik 2) and packages the machinery and the method
-they shared: a deterministic 8086 VM, differential hook verification, frame
-comparison, deterministic input demos, snapshots, and the discipline that keeps
-recovery honest.
+native source port — one proven routine at a time. **It is a recovery
+laboratory, not an emulator**: the original executable runs as the *oracle*,
+individual routines are replaced with recovered source, and every replacement
+is verified against the original execution. The key idea is not "AI writes
+code" — it is *AI writes code inside a verification loop where the original
+game remains executable truth.*
+
+The framework grew out of two real recovery projects: **Prehistorik 2**, where
+the method reached a complete, playable, VM-less native source port, and
+**Overkill**, the earlier pilot that stress-tested the same ideas on a far
+more chaotic codebase (its endgame is still in progress). It packages the
+machinery and method they shared: a deterministic 8086 VM, differential hook
+verification, frame comparison, deterministic input demos, snapshots, and the
+discipline that keeps recovery honest.
 
 **This is a framework built by AI, for AI.** The expected user is an autonomous
 AI agent handed this repo plus a game's files and told to port it. The docs are
@@ -161,3 +170,9 @@ owned game to port.
 MIT ([LICENSE](LICENSE)), except the vendored [`nuked_opl3/`](nuked_opl3/)
 package (Nuked-OPL3 emulator core + binding), which is LGPL-2.1-or-later — see
 [`nuked_opl3/LICENSE`](nuked_opl3/LICENSE).
+
+The framework's openness never extends to game IP: no game assets or
+executables are ever included here or in adapter repos; ports require a
+legally owned original copy; and any official/commercial packaging of a
+recovered port requires the rights holder's agreement. Framework code and
+game IP stay strictly separate.

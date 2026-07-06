@@ -1,5 +1,9 @@
 # State mirrors — how recovered logic reaches game state
 
+> *The bridge keeps the old address-shaped world alive for verification, but
+> prevents raw offsets from becoming the language of the recovered game.*
+> This is the architectural center of the whole project.
+
 *(Generalized from the Prehistorik 2 port's proven `state_view_layer.md`. The
 generic machinery — backends, field descriptors, view bases — ships as
 [`dos_re/state_view.py`](../dos_re/state_view.py); your game's layout tables

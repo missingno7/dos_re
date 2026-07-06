@@ -5,6 +5,14 @@ story in order, so you can see where each mechanism belongs. The detailed
 phase-by-phase treatment with exit criteria is
 [`ai_porting_charter.md`](ai_porting_charter.md) §7; this is the narrative map.
 
+The geography of recovery, in one picture:
+
+```text
+  raw ASM ocean          →   first verified islands   →   archipelagos        →   continents           →   recovered mainland
+  (the original binary,      (hooked routines, each       (islands merged         (native subsystems:      (the VM-less source
+   interpreted, opaque)       byte-exact vs oracle)        into subsystems)        renderer, gameplay)      port; VM = oracle)
+```
+
 ## Vocabulary used throughout the docs
 
 - **Oracle** — the original DOS executable running interpreted in the `dos_re`

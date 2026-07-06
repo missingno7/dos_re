@@ -10,8 +10,9 @@ the rules below.)
 
 The reusable, game-agnostic core of an oracle-driven DOS recovery method:
 a real-mode VM, differential hook verification, frame comparison, deterministic
-demos/snapshots, and the documented methodology. It was extracted from two
-completed ports (Prehistorik 2 — primary source; Overkill — earlier sibling);
+demos/snapshots, and the documented methodology. It was extracted from two real
+recovery projects — Prehistorik 2 (primary source; the method's completed
+VM-less proof) and Overkill (the earlier pilot; endgame still in progress);
 [`MIGRATION.md`](MIGRATION.md) records the provenance of every part.
 
 ## Working principles

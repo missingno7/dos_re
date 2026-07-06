@@ -21,7 +21,10 @@ equivalence. ([`docs/lifecycle.md`](docs/lifecycle.md) tells the whole arc.)
    read all of it, twice for §6) → [`docs/pitfalls.md`](docs/pitfalls.md)
    (the mistakes already made for you) →
    [`docs/porting_new_game.md`](docs/porting_new_game.md) (the checklist you
-   will now follow).
+   will now follow). For each recurring task type, use the ritual in
+   [`prompts/`](prompts/README.md) — every task ends with its accountability
+   REPORT block, and status claims follow the ladder (never present OBSERVED
+   work as VERIFIED).
 2. **Set up the workspace.** The game's files (EXE + data) go in `assets/`
    (gitignored — original game files are never committed). Create your adapter
    package next to `dos_re/` by copying the shape of

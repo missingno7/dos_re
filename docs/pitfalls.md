@@ -168,3 +168,30 @@ blocker was attacked at the death logic repeatedly. → No progress until the
 actual cause — a missing contact predicate one layer *below* — was recovered.
 → *When a divergence resists two focused trace attempts, log it and move on;
 returning later with more of the lower layer recovered often dissolves it.*
+
+**21. Fluent semantic hallucination.** [P2] An AI agent watched bridge tiles
+bend under the player and confidently described the player *eating something*
+— a coherent, plausible, completely false story. → Any name or model built on
+that reading would have encoded fiction into the port. → *Narrative sense is a
+hypothesis generator, never a source. Semantics are earned per the status
+ladder (multiple independent evidence paths), and the oracle is the only
+judge. This is WHY the framework constrains AI rather than trusting it.*
+
+**22. A demo corpus that flatters the code.** [both] Early demo suites
+exercised the happy path (short runs, few transitions). → Divergences in
+death/respawn, level-end, game-over, and rare spawns survived long past the
+point they "should" have been caught; cold-start testing later exposed paths
+no bounded demo reached. → *Corpus coverage is a measured artifact: track
+which levels, transitions, behaviours, and RNG paths the demos exercise, and
+treat the blind spots as open risks in every status report. Record death,
+game-over, and full-playthrough demos early — they are the proof spine's
+spine.*
+
+**23. Presentation quietly mutating the simulation.** [P2] The tempting
+widescreen shortcut — advancing the object producer/spawner so entities exist
+in the margins — changes gameplay state; camera/render helpers "just poking"
+one state byte have the same shape. → The enhanced build silently forks from
+the verified game; demos recorded on one desync on the other. → *Enhancements
+read state and write none, enforced by a parity gate (enhanced-at-neutral ≡
+faithful, pixel- and state-exact). Anything that needs to write is not an
+enhancement. See [`enhancements.md`](enhancements.md).*

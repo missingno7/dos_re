@@ -27,6 +27,13 @@ EGA_VISIBLE_PLANE_SIZE = 0x2000  # 320x200x4bpp visible bytes per plane
 EGA_SHADOW_SIZE = EGA_PLANE_STRIDE * 4
 MEM_SIZE = CPU_MEM_SIZE + EGA_SHADOW_SIZE
 
+
+class UnsupportedEgaWriteMode(NotImplementedError):
+    """A program used an EGA/VGA write mode the model does not implement (2 or 3).
+
+    Raised loudly instead of silently behaving like write mode 0 — the
+    no-silent-fallback rule applied to the hardware model itself."""
+
 # The system BIOS ROM lives at F000:0000..F000:FFFF (linear F0000h..FFFFFh) and is
 # read-only on real hardware (and in DOSBox).  CPU stores there must be silently
 # discarded: PRE2 (and other protected titles) XOR a ROM byte and check it is
@@ -253,6 +260,18 @@ class Memory:
         m = self.ega_map_mask
         d = self.data
         base = EGA_APERTURE + plane_off
+
+        if (self.ega_write_mode & 0x03) >= 2:
+            # Write modes 2 (color expand) and 3 (masked set/reset) are not
+            # modeled — no oracle has exercised them yet.  Fail loud instead of
+            # silently behaving like mode 0 (which corrupts planes in a way that
+            # surfaces frames later as inexplicable divergence).  Implement the
+            # observed behaviour when a real program hits this, then add a
+            # tests/test_core.py case.  See docs/hardware_support.md.
+            raise UnsupportedEgaWriteMode(
+                f"EGA/VGA write mode {self.ega_write_mode & 0x03} at aperture offset "
+                f"{plane_off:04X}h is not modeled (map mask {m:02X}h)"
+            )
 
         if (self.ega_write_mode & 0x03) == 1:
             # EGA/VGA write mode 1: CPU data is ignored.  The bytes previously

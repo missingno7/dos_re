@@ -6,8 +6,9 @@ trying to achieve, the method, the tools `dos_re` already gives you, the
 invariants you must never break, and the traps that will silently invalidate
 your work if you ignore them.
 
-Read this whole file before writing code. This method was proven on two
-DOS-game ports (Overkill, then Prehistorik 2); **your game is different**.
+Read this whole file before writing code. This method was piloted on Overkill
+and proven end-to-end on Prehistorik 2 (a playable VM-less source port);
+**your game is different**.
 You create a per-game adapter package for it (see
 `examples/adapter_skeleton/`). Every concrete address, video mode, and data
 layout is an *example* that lives in the adapter, not in `dos_re`.
@@ -382,7 +383,7 @@ exact equivalence for every demo in the corpus.
 
 ---
 
-*End of charter. The method here was demonstrated on two DOS-game ports
-(Overkill, then Prehistorik 2); reuse the patterns, but re-derive every address
-and format for your game — and re-verify everything against your game's
+*End of charter. The method here was piloted on Overkill and carried to a
+complete VM-less port on Prehistorik 2; reuse the patterns, but re-derive every
+address and format for your game — and re-verify everything against your game's
 original executable, which is your only oracle.*

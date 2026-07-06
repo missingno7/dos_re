@@ -1,11 +1,31 @@
 # Hardware model support — honest status
 
 What the VM actually models today, where it came from, and what a new game may
-have to add. "Modeled" means: exercised end-to-end by at least one of the two
-source ports (Overkill on CGA/EGA/Tandy hardware paths, Prehistorik 2 on
-VGA/SB), with behaviour derived from what those games' oracles demanded — not
-from datasheet completeness. Expect to extend models for what *your* game
-exercises; add only what its oracle proves it needs.
+have to add. Expect to extend models for what *your* game exercises; add only
+what its oracle proves it needs.
+
+**Status legend** (a claim is only as strong as its oracle):
+
+- **modeled** — exercised end-to-end by at least one source port's oracle
+  (Overkill on CGA/EGA/Tandy paths, Prehistorik 2 on VGA/SB); behaviour derived
+  from what those games demanded, not from datasheet completeness.
+- **minimal** — enough for the observed uses; thin beyond them.
+- **detection-only** — the program detects the device and its commands are
+  captured, but no output is produced (e.g. the Sound Blaster stub mode).
+- **VM-level only** — programs run and write the memory/ports, but there is no
+  rasterizer/present model; that part is adapter work.
+- **fails loud** — explicitly unimplemented; raises with context when hit.
+- **not modeled** — absent entirely; the interpreter's behaviour when touched
+  is documented below under "unmodeled I/O policy".
+
+**Unmodeled I/O policy:** reads from ports the model does not know return 0
+and writes are logged but otherwise ignored — this is the *proven* behaviour
+both source games ran under (their detection probes rely on benign defaults),
+so it is kept as the default. It is also a documented soft spot: a program
+whose *logic* consumes an unmodeled port read gets a silently wrong 0. An
+opt-in strict-ports audit mode is on the roadmap; until then, when a new
+game's behaviour looks impossible, check its port traffic (`dos.port_log`)
+early.
 
 ## Video
 
@@ -13,7 +33,7 @@ exercises; add only what its oracle proves it needs.
 |---|---|---|
 | VGA mode 13h (linear 320×200×256) | modeled | `dos.py` INT 10h + A000h in `memory.py` |
 | VGA DAC (3C7/3C8/3C9, 6-bit→8-bit, pixel mask probe) | modeled | `dos.py` |
-| VGA/EGA planar modes (4 planes behind A000h, map mask, read plane, write modes 0–1, read modes 0–1 incl. color-compare, latches, data-rotate/logical-op) | modeled — caveat: write modes 2–3 silently behave as mode 0 (known gap, see MIGRATION.md) | `memory.py` (EGA aperture) + `dos.py` (sequencer/GC ports) |
+| VGA/EGA planar modes (4 planes behind A000h, map mask, read plane, write modes 0–1, read modes 0–1 incl. color-compare, latches, data-rotate/logical-op) | modeled — write modes 2–3 **fail loud** (`UnsupportedEgaWriteMode`); implement from your oracle when a game hits them | `memory.py` (EGA aperture) + `dos.py` (sequencer/GC ports) |
 | CRTC display start + attribute pel-panning (smooth scroll), horizontal display-end narrowing | modeled | `dos.py`, `memory.py` |
 | Vertical retrace status (3DA), deterministic or wall-clock-driven, tunable active fraction | modeled | `dos.py` |
 | BIOS text modes / teletype output | minimal but present | `dos.py` INT 10h |

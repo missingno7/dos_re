@@ -172,3 +172,21 @@ def test_signature_guard_accepts_matching_and_zero_bytes_and_rejects_patched():
     mem.load(0x1000, 0, bytes.fromhex("48 c3"))  # runtime-patched: DEC AX instead of INC AX
     with pytest.raises(RuntimeError, match="runtime-patched"):
         self_disable_if_patched(cpu, 0x0000, sig, "inc_ret")
+
+
+# ---- fail-loud hardware gaps ----------------------------------------------------------------------
+
+def test_unmodeled_ega_write_modes_fail_loud_instead_of_acting_like_mode_0():
+    from dos_re.memory import UnsupportedEgaWriteMode
+
+    mem = Memory()
+    mem.ega_planar = True
+    mem.ega_map_mask = 0x0F
+
+    mem.ega_write_mode = 1          # modeled: latch copy, must not raise
+    mem.wb(0xA000, 0x0000, 0x12)
+
+    for mode in (2, 3):
+        mem.ega_write_mode = mode
+        with pytest.raises(UnsupportedEgaWriteMode):
+            mem.wb(0xA000, 0x0000, 0x12)

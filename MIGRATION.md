@@ -4,9 +4,12 @@ This framework was extracted (2026-07) from two working game-port repositories:
 
 - **`pre2_port`** (Prehistorik 2) — *primary source of truth*: the newer,
   more evolved framework (`dos_re` core superset, PIC + Sound Blaster, richer
-  VGA model, DOSBox-savestate import, LZEXE accelerator).
-- **`overkill_port`** (Overkill) — *earlier sibling*: contributed features the
-  pre2 line never needed, plus the vendored OPL3 backend and several tools.
+  VGA model, DOSBox-savestate import, LZEXE accelerator). The method's
+  completed proof: a playable, VM-less native source port.
+- **`overkill_port`** (Overkill) — *the earlier pilot*: stress-tested the same
+  ideas on a far more chaotic, procedural codebase; its endgame (full VM-less
+  native game) is still in progress. Contributed features the pre2 line never
+  needed, plus the vendored OPL3 backend and several tools.
 
 Both repos already enforced the same hard boundary (`dos_re` must not know the
 game), which is why the extraction is mostly verbatim: the core was analyzed
@@ -152,9 +155,10 @@ is modeled and reference the oracle evidence).
   nothing in the core exercises dual-register-set banks.
 - Joystick (INT 15h / port 201h): not modeled; neither game used it.
 - EGA write modes: 0 and 1 are implemented (plus read modes 0 and 1, including
-  color-compare). Write modes 2–3 are **not** implemented and currently fall
-  through to mode-0 semantics *silently* — a genuine violation of the fail-loud
-  rule inherited from the source repos; worth a guard if your game sets them.
+  color-compare). Write modes 2–3 are not implemented; the silent mode-0
+  fallback inherited from the source repos was replaced with a fail-loud
+  `UnsupportedEgaWriteMode` guard (feedback-round fix; implement from your
+  oracle when a real game sets them).
 - Self-modifying code is handled by the interpreter naturally (it always reads
   live bytes), but *static* lifting of runtime-patched routines is methodology
   (see charter §8), not framework code.

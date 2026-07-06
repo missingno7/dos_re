@@ -16,8 +16,11 @@ Reading order for a newcomer: the repo [README](../README.md) →
 | [`hooks_and_verification.md`](hooks_and_verification.md) | Hook registration and return mechanics, the differential hook oracle (metadata + strict modes), the frame oracle, hook taxonomy. |
 | [`demos_and_snapshots.md`](demos_and_snapshots.md) | Snapshots, repro artifacts, deterministic input demos (snapshot-anchored + cold-start), and the boundary-clock invariant that keeps demo proofs valid. |
 | [`state_mirrors.md`](state_mirrors.md) | The state-view seam: human-named views over the DOS memory image with swappable backends, without weakening byte-exact verification. |
-| [`porting_new_game.md`](porting_new_game.md) | The concrete bring-up checklist for a new game, step 0 → the lifting loop. |
-| [`hardware_support.md`](hardware_support.md) | Honest status of the video/audio/timing/DOS models, and the rule for extending them. |
+| [`porting_new_game.md`](porting_new_game.md) | The concrete bring-up checklist for a new game, step 0 → the lifting loop, plus the endgame steps and the code-heavy vs data-driven game styles. |
+| [`hardware_support.md`](hardware_support.md) | Honest, status-legend-based matrix of the video/audio/timing/DOS models, the unmodeled-I/O policy, and the rule for extending them. |
+| [`enhancements.md`](enhancements.md) | The faithful-core vs enhanced-presentation boundary, the parity gate, and the widescreen / pixel-aspect lessons. |
+| [`glossary.md`](glossary.md) | Every project term (oracle, island, coastline, golden, heartbeat, …) in one table. |
+| [`roadmap.md`](roadmap.md) | What's next, what waits for the next port, long-term shape, and decided non-goals. |
 
 Related, outside `docs/`:
 
