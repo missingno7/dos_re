@@ -349,3 +349,62 @@ def test_wait_is_noop_without_fpu():
     # wait; mov ax,1234h; hlt
     cpu = run_bytes(bytes.fromhex("9b b8 34 12 f4"), 3)
     assert cpu.s.ax == 0x1234
+
+
+def test_x87_integer_multiply_chain():
+    # The MSC inline-8087 shape: fild [0x100]; fild [0x104]; fmulp; fistp [0x108]
+    # with the control word set to truncate (the __ftol pattern).
+    code = bytes.fromhex(
+        "9b db 06 00 01"        # fild dword [0x0100]   (6)
+        "9b db 06 04 01"        # fild dword [0x0104]   (7)
+        "9b de c9"              # fmulp st(1),st
+        "9b d9 3e 10 01"        # fstcw [0x0110]
+        "c7 06 12 01 ff 0f"     # mov word [0x0112], 0x0FFF  (RC=11 truncate)
+        "9b d9 2e 12 01"        # fldcw [0x0112]
+        "9b df 3e 08 01"        # fistp qword [0x0108]
+        "f4"                    # hlt
+    )
+    mem = Memory()
+    mem.load(0x1000, 0, code)
+    mem.ww(0x1000, 0x0100, 6); mem.ww(0x1000, 0x0102, 0)
+    mem.ww(0x1000, 0x0104, 7); mem.ww(0x1000, 0x0106, 0)
+    cpu = CPU8086(mem, CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
+    cpu.run(40)
+    result = int.from_bytes(bytes(mem.rb(0x1000, 0x0108 + i) for i in range(8)), "little")
+    assert result == 42
+    assert cpu.s.fst == []          # stack fully popped
+
+
+def test_x87_compare_and_status_word():
+    # fild [0x100]=3; fild [0x104]=5 ; fcomp st(1) -> ST0(5) > ST1(3): C0=0,C3=0
+    code = bytes.fromhex(
+        "9b db 06 00 01"
+        "9b db 06 04 01"
+        "9b d8 d9"              # fcomp st(1)
+        "9b dd 3e 20 01"        # fnstsw [0x0120]
+        "f4")
+    mem = Memory()
+    mem.load(0x1000, 0, code)
+    mem.ww(0x1000, 0x0100, 3); mem.ww(0x1000, 0x0102, 0)
+    mem.ww(0x1000, 0x0104, 5); mem.ww(0x1000, 0x0106, 0)
+    cpu = CPU8086(mem, CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
+    cpu.run(20)
+    sw = mem.rw(0x1000, 0x0120)
+    assert sw & 0x4500 == 0         # not equal, not less, not unordered
+
+
+def test_x87_f80_roundtrip():
+    # fild -> fstp tbyte -> fld tbyte -> fistp preserves small integers.
+    code = bytes.fromhex(
+        "9b db 06 00 01"        # fild dword [0x0100]
+        "9b db 3e 30 01"        # fstp tbyte [0x0130]
+        "9b db 2e 30 01"        # fld tbyte [0x0130]
+        "9b df 3e 40 01"        # fistp qword [0x0140]
+        "f4")
+    mem = Memory()
+    mem.load(0x1000, 0, code)
+    mem.ww(0x1000, 0x0100, 12345); mem.ww(0x1000, 0x0102, 0)
+    cpu = CPU8086(mem, CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
+    cpu.run(20)
+    result = int.from_bytes(bytes(mem.rb(0x1000, 0x0140 + i) for i in range(8)), "little")
+    assert result == 12345

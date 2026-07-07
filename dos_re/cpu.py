@@ -52,6 +52,11 @@ class CPUState:
     ss: int = 0
     ip: int = 0
     flags: int = 0x0202
+    # x87 state (added for Win16 inline-8087 code; doubles stand in for the
+    # 80-bit registers — the documented precision caveat lives in execute_fpu).
+    fst: list = field(default_factory=list)     # ST(0) is fst[-1]
+    fsw: int = 0
+    fcw: int = 0x037F
 
     def snapshot(self) -> str:
         return (
@@ -441,7 +446,196 @@ class CPU8086:
             steps += 1
         return steps
 
+    # ---- x87 floating point (ESC opcodes D8-DF) --------------------------
+    # Grown for Win16 inline-8087 code.  Registers are Python doubles: the
+    # real 8087 computes in 80-bit extended precision, so long dependent
+    # chains can diverge in the low mantissa bits.  Documented caveat; revisit
+    # with an extended-precision model only if a target proves it matters.
+
+    def _fpush(self, v: float) -> None:
+        if len(self.s.fst) >= 8:
+            raise UnsupportedInstruction("x87 stack overflow")
+        self.s.fst.append(v)
+
+    def _fpop(self) -> float:
+        if not self.s.fst:
+            raise UnsupportedInstruction("x87 stack underflow")
+        return self.s.fst.pop()
+
+    def _fst(self, i: int) -> float:
+        return self.s.fst[-1 - i]
+
+    def _fst_set(self, i: int, v: float) -> None:
+        self.s.fst[-1 - i] = v
+
+    def _fcompare(self, a: float, b: float) -> None:
+        # C3 (bit14) = equal, C2 (bit10) = unordered, C0 (bit8) = a < b.
+        self.s.fsw &= ~0x4700
+        if a != a or b != b:
+            self.s.fsw |= 0x4500
+        elif a == b:
+            self.s.fsw |= 0x4000
+        elif a < b:
+            self.s.fsw |= 0x0100
+
+    def _fround(self, v: float) -> int:
+        rc = (self.s.fcw >> 10) & 3
+        import math
+        if rc == 0:  # round to nearest even
+            f = math.floor(v)
+            d = v - f
+            if d > 0.5 or (d == 0.5 and int(f) & 1):
+                f += 1
+            return int(f)
+        if rc == 1:
+            return math.floor(v)
+        if rc == 2:
+            return math.ceil(v)
+        return math.trunc(v)
+
+    @staticmethod
+    def _f80_to_double(b: bytes) -> float:
+        import math
+        man = int.from_bytes(b[:8], "little")
+        se = int.from_bytes(b[8:10], "little")
+        sign = -1.0 if se & 0x8000 else 1.0
+        exp = se & 0x7FFF
+        if exp == 0:
+            return sign * math.ldexp(man, -16382 - 63) if man else sign * 0.0
+        if exp == 0x7FFF:
+            return sign * float("inf") if man in (0, 1 << 63) else float("nan")
+        return sign * math.ldexp(man / (1 << 63), exp - 16383)
+
+    @staticmethod
+    def _double_to_f80(v: float) -> bytes:
+        import math
+        sign = 0x8000 if math.copysign(1.0, v) < 0 else 0
+        if v != v:
+            return (0xC000000000000000).to_bytes(8, "little") + (0x7FFF | sign).to_bytes(2, "little")
+        if math.isinf(v):
+            return (1 << 63).to_bytes(8, "little") + (0x7FFF | sign).to_bytes(2, "little")
+        if v == 0.0:
+            return b"\x00" * 8 + sign.to_bytes(2, "little")
+        m, e = math.frexp(abs(v))               # v = m * 2**e, 0.5 <= m < 1
+        man = int(m * (1 << 64)) & ((1 << 64) - 1)
+        return man.to_bytes(8, "little") + ((e - 1 + 16383) | sign).to_bytes(2, "little")
+
+    def _fmem(self, mod: int, rm: int, seg_override: str | None):
+        ea = self.decode_ea(mod, rm, seg_override)
+        return getattr(self.s, ea.segment), ea.offset, f"{ea.segment}:{ea.text}"
+
+    def _fread(self, seg: int, off: int, nbytes: int) -> bytes:
+        return bytes(self.mem.rb(seg, (off + i) & 0xFFFF) for i in range(nbytes))
+
+    def _fwrite(self, seg: int, off: int, data: bytes) -> None:
+        for i, byte in enumerate(data):
+            self.mem.wb(seg, (off + i) & 0xFFFF, byte)
+
+    def execute_fpu(self, op: int, seg_override: str | None) -> str:
+        import struct
+        s = self.s
+        _, mod, reg, rm = self.peek_modrm()
+
+        if mod == 3:
+            if op == 0xD8 and reg == 3:                          # FCOMP ST(i)
+                self._fcompare(self._fst(0), self._fst(rm))
+                self._fpop()
+                return f"fcomp st({rm})"
+            if op == 0xD9 and reg == 0:                          # FLD ST(i)
+                self._fpush(self._fst(rm))
+                return f"fld st({rm})"
+            if op == 0xDB and reg == 4:
+                if rm == 2:                                      # FCLEX
+                    s.fsw &= 0x7F00
+                    return "fclex"
+                if rm == 3:                                      # FINIT
+                    s.fst = []
+                    s.fsw = 0
+                    s.fcw = 0x037F
+                    return "finit"
+                if rm in (0, 1):                                 # FENI/FDISI (8087)
+                    return "feni" if rm == 0 else "fdisi"
+            if op == 0xDD and reg == 3:                          # FSTP ST(i)
+                v = self._fst(0)
+                self._fst_set(rm, v)
+                self._fpop()
+                return f"fstp st({rm})"
+            if op == 0xDE:
+                if reg == 0:                                     # FADDP ST(i),ST
+                    self._fst_set(rm, self._fst(rm) + self._fst(0))
+                    self._fpop()
+                    return f"faddp st({rm})"
+                if reg == 1:                                     # FMULP ST(i),ST
+                    self._fst_set(rm, self._fst(rm) * self._fst(0))
+                    self._fpop()
+                    return f"fmulp st({rm})"
+                if reg == 4:                                     # FSUBRP ST(i),ST
+                    self._fst_set(rm, self._fst(0) - self._fst(rm))
+                    self._fpop()
+                    return f"fsubrp st({rm})"
+                if reg == 5:                                     # FSUBP ST(i),ST
+                    self._fst_set(rm, self._fst(rm) - self._fst(0))
+                    self._fpop()
+                    return f"fsubp st({rm})"
+                if reg == 6:                                     # FDIVRP ST(i),ST
+                    self._fst_set(rm, self._fst(0) / self._fst(rm))
+                    self._fpop()
+                    return f"fdivrp st({rm})"
+                if reg == 7:                                     # FDIVP ST(i),ST
+                    self._fst_set(rm, self._fst(rm) / self._fst(0))
+                    self._fpop()
+                    return f"fdivp st({rm})"
+            raise UnsupportedInstruction(
+                f"x87 opcode {op:02X} /{reg} rm={rm} (register form) at {s.cs:04X}:{s.ip:04X}")
+
+        seg, off, text = self._fmem(mod, rm, seg_override)
+        if op == 0xD9:
+            if reg == 5:                                         # FLDCW m16
+                s.fcw = self.mem.rw(seg, off)
+                return f"fldcw {text}"
+            if reg == 7:                                         # FSTCW m16
+                self.mem.ww(seg, off, s.fcw)
+                return f"fstcw {text}"
+        if op == 0xDB:
+            if reg == 0:                                         # FILD m32int
+                v = self.mem.rw(seg, off) | (self.mem.rw(seg, (off + 2) & 0xFFFF) << 16)
+                if v & 0x80000000:
+                    v -= 1 << 32
+                self._fpush(float(v))
+                return f"fild dword {text}"
+            if reg == 5:                                         # FLD m80
+                self._fpush(self._f80_to_double(self._fread(seg, off, 10)))
+                return f"fld tbyte {text}"
+            if reg == 7:                                         # FSTP m80
+                self._fwrite(seg, off, self._double_to_f80(self._fpop()))
+                return f"fstp tbyte {text}"
+        if op == 0xDC and reg == 2:                              # FCOM m64
+            (v,) = struct.unpack("<d", self._fread(seg, off, 8))
+            self._fcompare(self._fst(0), v)
+            return f"fcom qword {text}"
+        if op == 0xDD:
+            if reg == 0:                                         # FLD m64
+                (v,) = struct.unpack("<d", self._fread(seg, off, 8))
+                self._fpush(v)
+                return f"fld qword {text}"
+            if reg == 2 or reg == 3:                             # FST/FSTP m64
+                self._fwrite(seg, off, struct.pack("<d", self._fst(0)))
+                if reg == 3:
+                    self._fpop()
+                return f"fst{'p' if reg == 3 else ''} qword {text}"
+            if reg == 7:                                         # FNSTSW m16
+                self.mem.ww(seg, off, s.fsw)
+                return f"fnstsw {text}"
+        if op == 0xDF and reg == 7:                              # FISTP m64int
+            v = self._fround(self._fpop()) & ((1 << 64) - 1)
+            self._fwrite(seg, off, v.to_bytes(8, "little"))
+            return f"fistp qword {text}"
+        raise UnsupportedInstruction(
+            f"x87 opcode {op:02X} /{reg} mem at {s.cs:04X}:{s.ip:04X}")
+
     def execute_opcode(self, op: int, seg_override: str | None, rep: int | None) -> str:
+        if 0xD8 <= op <= 0xDF:
+            return self.execute_fpu(op, seg_override)
         s = self.s
         # MOV immediate to register
         if 0xB0 <= op <= 0xB7:
