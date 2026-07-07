@@ -54,6 +54,11 @@ class Memory:
         # loaded program's own low segments).  None => pure real mode (DOS);
         # the hot paths below take their existing branch unchanged.
         self.sel_base = sel_base
+        # Selectors are all >= this value; segments below it skip the dict
+        # lookup (the common case: code/stack/dgroup in low memory), keeping the
+        # selector path nearly as fast as real mode.  The adapter sets it to its
+        # first selector value.
+        self.sel_min = 0
         # EGA planar emulation.  Real EGA exposes four hardware bitplanes behind
         # the same CPU offsets in A000h; the sequencer map-mask register
         # (03C4h index 02h) selects which planes a write lands in.  Keep those
@@ -169,14 +174,22 @@ class Memory:
     # real-mode hardware instead of raising.
     def _xlat(self, seg: int, off: int) -> int:
         """Selector/real-mode -> linear.  Only reached when sel_base is set."""
-        base = self.sel_base.get(seg & 0xFFFF)
-        if base is None:
-            return ((seg & 0xFFFF) << 4) + (off & 0xFFFF)
-        return base + (off & 0xFFFF)
+        seg &= 0xFFFF
+        if seg >= self.sel_min:
+            base = self.sel_base.get(seg)
+            if base is not None:
+                return base + (off & 0xFFFF)
+        return (seg << 4) + (off & 0xFFFF)
 
     def rb(self, seg: int, off: int) -> int:
-        if self.sel_base is not None:
-            return self.data[self._xlat(seg, off)]
+        sb = self.sel_base
+        if sb is not None:
+            seg &= 0xFFFF
+            if seg >= self.sel_min:
+                base = sb.get(seg)
+                if base is not None:
+                    return self.data[base + (off & 0xFFFF)]
+            return self.data[(seg << 4) + (off & 0xFFFF)]
         a = ((((seg & 0xFFFF) << 4) + (off & 0xFFFF)) & 0xFFFFF)
         if self.ega_planar:
             po = a - EGA_CPU_APERTURE
@@ -204,8 +217,16 @@ class Memory:
         return self.data[a]
 
     def rw(self, seg: int, off: int) -> int:
-        if self.sel_base is not None:
-            a = self._xlat(seg, off)
+        sb = self.sel_base
+        if sb is not None:
+            seg &= 0xFFFF
+            a = None
+            if seg >= self.sel_min:
+                base = sb.get(seg)
+                if base is not None:
+                    a = base + (off & 0xFFFF)
+            if a is None:
+                a = (seg << 4) + (off & 0xFFFF)
             d = self.data
             return d[a] | (d[a + 1] << 8)
         a = (((seg & 0xFFFF) << 4) + (off & 0xFFFF)) & 0xFFFFF
@@ -223,8 +244,16 @@ class Memory:
         return d[a] | (d[a + 1] << 8)
 
     def wb(self, seg: int, off: int, value: int) -> None:
-        if self.sel_base is not None:
-            a = self._xlat(seg, off)
+        sb = self.sel_base
+        if sb is not None:
+            seg &= 0xFFFF
+            a = None
+            if seg >= self.sel_min:
+                base = sb.get(seg)
+                if base is not None:
+                    a = base + (off & 0xFFFF)
+            if a is None:
+                a = (seg << 4) + (off & 0xFFFF)
             if self.write_watchers:
                 old = bytes([self.data[a]])
                 self.data[a] = value & 0xFF
@@ -249,8 +278,16 @@ class Memory:
             self.data[a] = v
 
     def ww(self, seg: int, off: int, value: int) -> None:
-        if self.sel_base is not None:
-            a = self._xlat(seg, off)
+        sb = self.sel_base
+        if sb is not None:
+            seg &= 0xFFFF
+            a = None
+            if seg >= self.sel_min:
+                base = sb.get(seg)
+                if base is not None:
+                    a = base + (off & 0xFFFF)
+            if a is None:
+                a = (seg << 4) + (off & 0xFFFF)
             d = self.data
             lo, hi = value & 0xFF, (value >> 8) & 0xFF
             if self.write_watchers:
