@@ -467,6 +467,16 @@ class CPU8086:
             imm = imm8 | 0xFF00 if imm8 & 0x80 else imm8
             self.push(imm)
             return f"push {imm:04X}h"
+        if op in (0x69, 0x6B):  # IMUL r16, r/m16, imm (80186+; Win16 code)
+            _, mod, reg, rm = self.peek_modrm()
+            operand = self.decode_rm_operand(mod, rm, 16, seg_override)
+            src = self.sign16(operand.read())
+            imm = self.sign8(self.fetch8()) if op == 0x6B else self.sign16(self.fetch16())
+            result = src * imm
+            self.set_reg16(reg, result & 0xFFFF)
+            carry = not (-32768 <= result <= 32767)
+            self.set_flag(CF, carry); self.set_flag(OF, carry)
+            return f"imul {REG16[reg]},{operand.text},{imm}"
         if op == 0x9C:
             self.push(s.flags); return "pushf"
         if op == 0x9D:

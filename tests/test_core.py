@@ -332,3 +332,14 @@ def test_cwd_sign_extends_ax_into_dx():
     assert cpu.s.dx == 0xFFFF
     cpu = run_bytes(bytes.fromhex("b8 ff 7f 99 f4"), 2)
     assert cpu.s.dx == 0x0000
+
+
+def test_imul_three_operand_imm8_and_imm16():
+    # mov ax,0100h; imul bx,ax,3; imul cx,ax,-2; hlt   (0x6B imm8 forms)
+    cpu = run_bytes(bytes.fromhex("b8 00 01 6b d8 03 6b c8 fe f4"), 4)
+    assert cpu.s.bx == 0x0300
+    assert cpu.s.cx == 0xFE00          # -512
+    # imul dx,ax,0200h (0x69 imm16): 0x100*0x200 = 0x20000 overflows -> CF/OF
+    cpu = run_bytes(bytes.fromhex("b8 00 01 69 d0 00 02 f4"), 3)
+    assert cpu.s.dx == 0x0000
+    assert cpu.s.flags & 0x0001 and cpu.s.flags & 0x0800  # CF and OF set
