@@ -481,6 +481,9 @@ class CPU8086:
             self.push(s.flags); return "pushf"
         if op == 0x9D:
             s.flags = self.pop() | 0x0002; return "popf"
+        if op == 0x9B:  # WAIT/FWAIT: no coprocessor exceptions are modelled,
+            # so this is a no-op (first exercised by Win16 x87-emulator code).
+            return "wait"
         if op == 0x98:
             al = s.ax & 0x00FF
             s.ax = al | (0xFF00 if al & 0x80 else 0x0000)

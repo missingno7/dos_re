@@ -343,3 +343,9 @@ def test_imul_three_operand_imm8_and_imm16():
     cpu = run_bytes(bytes.fromhex("b8 00 01 69 d0 00 02 f4"), 3)
     assert cpu.s.dx == 0x0000
     assert cpu.s.flags & 0x0001 and cpu.s.flags & 0x0800  # CF and OF set
+
+
+def test_wait_is_noop_without_fpu():
+    # wait; mov ax,1234h; hlt
+    cpu = run_bytes(bytes.fromhex("9b b8 34 12 f4"), 3)
+    assert cpu.s.ax == 0x1234
