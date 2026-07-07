@@ -324,3 +324,11 @@ def test_leave_restores_frame():
     cpu = run_bytes(bytes.fromhex("55 89 e5 83 ec 08 c9 f4"), 5)
     assert cpu.s.sp == 0xFFFE
     assert cpu.s.bp == 0x0000
+
+
+def test_cwd_sign_extends_ax_into_dx():
+    # mov ax,8000h; cwd; mov ax,7FFFh; cwd; hlt
+    cpu = run_bytes(bytes.fromhex("b8 00 80 99 f4"), 2)
+    assert cpu.s.dx == 0xFFFF
+    cpu = run_bytes(bytes.fromhex("b8 ff 7f 99 f4"), 2)
+    assert cpu.s.dx == 0x0000

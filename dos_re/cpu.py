@@ -475,6 +475,9 @@ class CPU8086:
             al = s.ax & 0x00FF
             s.ax = al | (0xFF00 if al & 0x80 else 0x0000)
             return "cbw"
+        if op == 0x99:  # CWD: DX:AX = sign-extended AX (first hit by Win16 code)
+            s.dx = 0xFFFF if s.ax & 0x8000 else 0x0000
+            return "cwd"
 
         # MOV between r/m and reg / segment
         if op in (0x88, 0x89, 0x8A, 0x8B):
