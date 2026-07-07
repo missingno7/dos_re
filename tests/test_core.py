@@ -408,3 +408,10 @@ def test_x87_f80_roundtrip():
     cpu.run(20)
     result = int.from_bytes(bytes(mem.rb(0x1000, 0x0140 + i) for i in range(8)), "little")
     assert result == 12345
+
+
+def test_enter_leave_frame_nesting0():
+    # enter 8,0 ; leave ; hlt  — the 80186 frame prologue/epilogue pair.
+    cpu = run_bytes(bytes.fromhex("c8 08 00 00 c9 f4"), 3)
+    # enter: push bp(0), bp=sp, sp-=8 ; leave: sp=bp, pop bp -> both restored
+    assert cpu.s.sp == 0xFFFE and cpu.s.bp == 0x0000

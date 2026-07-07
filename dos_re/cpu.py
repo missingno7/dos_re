@@ -874,6 +874,19 @@ class CPU8086:
             target_ip = self.pop(); target_cs = self.pop(); s.ip = target_ip; s.cs = target_cs; self.call_depth = max(0, self.call_depth - 1); return f"ret far -> {target_cs:04X}:{target_ip:04X}"
         if op == 0xCA:
             n = self.fetch16(); target_ip = self.pop(); target_cs = self.pop(); s.ip = target_ip; s.cs = target_cs; s.sp = (s.sp + n) & 0xFFFF; self.call_depth = max(0, self.call_depth - 1); return f"ret far {n} -> {target_cs:04X}:{target_ip:04X}"
+        if op == 0xC8:  # ENTER alloc,nesting (80186+): make a stack frame.
+            alloc = self.fetch16()
+            nesting = self.fetch8() & 0x1F
+            self.push(s.bp & 0xFFFF)
+            frame = s.sp & 0xFFFF
+            for _ in range(1, nesting):         # copy enclosing frame pointers
+                s.bp = (s.bp - 2) & 0xFFFF
+                self.push(self.mem.rw(s.ss, s.bp))
+            if nesting > 0:
+                self.push(frame)
+            s.bp = frame
+            s.sp = (s.sp - alloc) & 0xFFFF
+            return f"enter {alloc:#06x},{nesting}"
         if op == 0xC9:  # LEAVE (80186+): SP=BP, pop BP.  Win16 (MSC) epilogues
             # use it; first exercised by an NE executable's WinMain path.
             s.sp = s.bp
