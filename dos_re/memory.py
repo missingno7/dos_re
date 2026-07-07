@@ -44,9 +44,16 @@ BIOS_ROM_BASE = 0xF0000
 
 
 class Memory:
-    def __init__(self, size: int = MEM_SIZE):
+    def __init__(self, size: int = MEM_SIZE, sel_base: dict | None = None):
         self.data = bytearray(size)
         self.size = size
+        # Optional selector translation (protected-mode-style).  When set, a
+        # segment value is a SELECTOR that indexes this dict to an arbitrary
+        # linear base — lifting the 1MB real-mode ceiling for Win16 global
+        # memory.  Unmapped selectors fall back to the real-mode seg<<4 (the
+        # loaded program's own low segments).  None => pure real mode (DOS);
+        # the hot paths below take their existing branch unchanged.
+        self.sel_base = sel_base
         # EGA planar emulation.  Real EGA exposes four hardware bitplanes behind
         # the same CPU offsets in A000h; the sequencer map-mask register
         # (03C4h index 02h) selects which planes a write lands in.  Keep those
@@ -160,7 +167,16 @@ class Memory:
     # check()/*_phys() call chain.  ``addr`` is always masked to 0..0xFFFFF, so a
     # byte access is always in range; word accesses wrap at the 1 MB boundary like
     # real-mode hardware instead of raising.
+    def _xlat(self, seg: int, off: int) -> int:
+        """Selector/real-mode -> linear.  Only reached when sel_base is set."""
+        base = self.sel_base.get(seg & 0xFFFF)
+        if base is None:
+            return ((seg & 0xFFFF) << 4) + (off & 0xFFFF)
+        return base + (off & 0xFFFF)
+
     def rb(self, seg: int, off: int) -> int:
+        if self.sel_base is not None:
+            return self.data[self._xlat(seg, off)]
         a = ((((seg & 0xFFFF) << 4) + (off & 0xFFFF)) & 0xFFFFF)
         if self.ega_planar:
             po = a - EGA_CPU_APERTURE
@@ -188,6 +204,10 @@ class Memory:
         return self.data[a]
 
     def rw(self, seg: int, off: int) -> int:
+        if self.sel_base is not None:
+            a = self._xlat(seg, off)
+            d = self.data
+            return d[a] | (d[a + 1] << 8)
         a = (((seg & 0xFFFF) << 4) + (off & 0xFFFF)) & 0xFFFFF
         d = self.data
         if self.ega_planar:
@@ -203,6 +223,15 @@ class Memory:
         return d[a] | (d[a + 1] << 8)
 
     def wb(self, seg: int, off: int, value: int) -> None:
+        if self.sel_base is not None:
+            a = self._xlat(seg, off)
+            if self.write_watchers:
+                old = bytes([self.data[a]])
+                self.data[a] = value & 0xFF
+                self._notify_write(a, old, bytes([value & 0xFF]))
+            else:
+                self.data[a] = value & 0xFF
+            return
         a = ((((seg & 0xFFFF) << 4) + (off & 0xFFFF)) & 0xFFFFF)
         if a >= BIOS_ROM_BASE:
             return  # BIOS ROM is read-only on real hardware; ignore the store.
@@ -220,6 +249,19 @@ class Memory:
             self.data[a] = v
 
     def ww(self, seg: int, off: int, value: int) -> None:
+        if self.sel_base is not None:
+            a = self._xlat(seg, off)
+            d = self.data
+            lo, hi = value & 0xFF, (value >> 8) & 0xFF
+            if self.write_watchers:
+                old = bytes(d[a:a + 2])
+                d[a] = lo
+                d[a + 1] = hi
+                self._notify_write(a, old, bytes([lo, hi]))
+            else:
+                d[a] = lo
+                d[a + 1] = hi
+            return
         a = (((seg & 0xFFFF) << 4) + (off & 0xFFFF)) & 0xFFFFF
         if a >= BIOS_ROM_BASE:
             return  # BIOS ROM is read-only on real hardware; ignore the store.
@@ -305,6 +347,10 @@ class Memory:
             d[addr] = out & 0xFF
 
     def load(self, seg: int, off: int, payload: bytes) -> None:
+        if self.sel_base is not None:
+            a = self._xlat(seg, off)
+            self.data[a:a + len(payload)] = payload
+            return
         addr = self.check(linear(seg, off), len(payload))
         if self.write_watchers:
             old = bytes(self.data[addr:addr + len(payload)])
@@ -315,6 +361,9 @@ class Memory:
             self.data[addr:addr + len(payload)] = payload
 
     def block(self, seg: int, off: int, n: int) -> bytes:
+        if self.sel_base is not None:
+            a = self._xlat(seg, off)
+            return bytes(self.data[a:a + n])
         addr = self.check(linear(seg, off), n)
         return bytes(self.data[addr:addr+n])
 

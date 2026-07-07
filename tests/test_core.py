@@ -415,3 +415,22 @@ def test_enter_leave_frame_nesting0():
     cpu = run_bytes(bytes.fromhex("c8 08 00 00 c9 f4"), 3)
     # enter: push bp(0), bp=sp, sp-=8 ; leave: sp=bp, pop bp -> both restored
     assert cpu.s.sp == 0xFFFE and cpu.s.bp == 0x0000
+
+
+def test_selector_translation_lifts_1mb_ceiling():
+    # A 2MB memory with a selector map: selector 0x1000 -> linear 0x150000
+    # (past the 1MB real-mode ceiling), 0x2000 -> 0x180000.  Unmapped
+    # selectors fall back to real-mode seg<<4.
+    mem = Memory(size=0x200000, sel_base={0x1000: 0x150000, 0x2000: 0x180000})
+    mem.ww(0x1000, 0x0010, 0xBEEF)
+    assert mem.data[0x150010] == 0xEF and mem.data[0x150011] == 0xBE
+    assert mem.rw(0x1000, 0x0010) == 0xBEEF
+    mem.wb(0x2000, 0x0000, 0x42)
+    assert mem.rb(0x2000, 0x0000) == 0x42
+    # unmapped selector -> real-mode seg<<4 (low memory)
+    mem.wb(0x0100, 0x0004, 0x99)
+    assert mem.data[0x1004] == 0x99 and mem.rb(0x0100, 0x0004) == 0x99
+    # load()/block() honour the selector map too
+    mem.load(0x1000, 0x0100, b"\x01\x02\x03")
+    assert mem.block(0x1000, 0x0100, 3) == b"\x01\x02\x03"
+    assert bytes(mem.data[0x150100:0x150103]) == b"\x01\x02\x03"
