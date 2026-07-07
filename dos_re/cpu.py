@@ -664,6 +664,11 @@ class CPU8086:
             target_ip = self.pop(); target_cs = self.pop(); s.ip = target_ip; s.cs = target_cs; self.call_depth = max(0, self.call_depth - 1); return f"ret far -> {target_cs:04X}:{target_ip:04X}"
         if op == 0xCA:
             n = self.fetch16(); target_ip = self.pop(); target_cs = self.pop(); s.ip = target_ip; s.cs = target_cs; s.sp = (s.sp + n) & 0xFFFF; self.call_depth = max(0, self.call_depth - 1); return f"ret far {n} -> {target_cs:04X}:{target_ip:04X}"
+        if op == 0xC9:  # LEAVE (80186+): SP=BP, pop BP.  Win16 (MSC) epilogues
+            # use it; first exercised by an NE executable's WinMain path.
+            s.sp = s.bp
+            s.bp = self.pop()
+            return "leave"
         if op == 0xCF:  # IRET: pop IP, CS, FLAGS
             target_ip = self.pop(); target_cs = self.pop(); s.flags = self.pop() | 0x0002
             s.ip = target_ip; s.cs = target_cs; self.call_depth = max(0, self.call_depth - 1)

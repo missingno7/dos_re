@@ -317,3 +317,10 @@ def test_mode_set_no_clear_bit_preserves_planar_planes():
     cpu.s.ax = 0x008D                 # AL=0Dh | 80h => no clear
     dos.int10(cpu)
     assert _planes_any_nonzero(mem) == [True, True, True, True]
+
+
+def test_leave_restores_frame():
+    # push bp; mov bp,sp; sub sp,8; leave; hlt  — the MSC Win16 epilogue shape.
+    cpu = run_bytes(bytes.fromhex("55 89 e5 83 ec 08 c9 f4"), 5)
+    assert cpu.s.sp == 0xFFFE
+    assert cpu.s.bp == 0x0000
