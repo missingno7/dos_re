@@ -128,6 +128,11 @@ class DOSMachine:
     _pit_channel0_latch: int = 0
     _pit_channel0_write_low: bool = True
     pit_channel0_reload: int = 0  # 0 => 0x10000, the BIOS default ~18.2 Hz
+    # Pending bytes for a channel-0 "latch count value" readback (OUT 43h with
+    # SC=00,RW=00), consumed low-byte-first by the next IN AL,40h reads. A
+    # program that reads channel 0 directly (never through IRQ0) as a short
+    # hardware delay loop needs this.
+    _pit_channel0_read_latch: list[int] = field(default_factory=list)
     # Optional emulated-time source in seconds.  When set, the VGA input-status
     # vertical-retrace bit (03DAh/03BAh) advances with time at the display refresh
     # rate instead of toggling per read.  An interactive front-end sets it to
@@ -170,6 +175,14 @@ class DOSMachine:
     # Latest raw keyboard scan code presented on port 60h.  A front-end sets this
     # and then invokes the installed INT 9 handler (see dos_re.interrupts).
     current_scancode: int = 0
+    # 8042 keyboard controller status register (port 64h) bit 0 (output buffer
+    # full): set when a scan code is presented, cleared when port 60h is read.
+    # Code that polls the controller directly instead of via an installed INT 9h
+    # handler (e.g. before a game installs its own ISR) needs this to see new
+    # input at all -- a game's intro proved this gap: with the OBF bit
+    # unmodeled (always reading 0, the prior default), a "wait for keyboard data
+    # ready" poll never progresses to read port 60h.
+    kbd_output_buffer_full: bool = False
     # BIOS keyboard shift/toggle state, maintained by the BIOS INT 9 handler
     # (bios_int9_keyboard).  A game that installs its own INT 9 ISR and *chains*
     # to the previous (BIOS) handler relies on that handler translating scan
@@ -385,9 +398,25 @@ class DOSMachine:
 
     # PIT channel 0 (IRQ0/INT 08h) frequency the program itself programmed.
     PIT_INPUT_HZ = 1193182.0
+    # Coarse period-accurate stand-in for real 8088 instruction timing (~4.77 MHz,
+    # a handful of clocks/instruction) used only to age the channel-0 down-counter
+    # deterministically when no wall-clock time_source is set -- see
+    # _pit_channel0_live_value. Not a cycle-exact CPU model; bounded, reproducible
+    # progress for direct-read delay loops is all that is required here.
+    PIT_TICKS_PER_INSTRUCTION_ESTIMATE = 3.0
 
     def pit_channel0_hz(self) -> float:
         return self.PIT_INPUT_HZ / (self.pit_channel0_reload or 0x10000)
+
+    def _pit_channel0_live_value(self, cpu: CPU8086) -> int:
+        """The channel-0 down-counter's current value (mode 3 free-running square wave)."""
+        reload = self.pit_channel0_reload or 0x10000
+        ts = self.time_source
+        if ts is not None:
+            elapsed_ticks = int(ts() * self.PIT_INPUT_HZ)
+        else:
+            elapsed_ticks = int(cpu.instruction_count * self.PIT_TICKS_PER_INSTRUCTION_ESTIMATE)
+        return (reload - (elapsed_ticks % reload)) % reload
 
     def display_refresh_hz(self) -> float:
         # VGA 320x200 graphics and text modes refresh at ~70 Hz; a property of the
@@ -422,8 +451,25 @@ class DOSMachine:
         if port == 0x03DA and bits == 8:
             return self._vga_status(0x08)
         if port == 0x60 and bits == 8:
-            # 8042 keyboard data port: the game's INT 9 handler reads the scan code here.
+            # 8042 keyboard data port: the game's INT 9 handler (or code polling
+            # the controller directly) reads the scan code here. Reading clears
+            # the output-buffer-full status bit (port 64h), matching real hardware.
+            self.kbd_output_buffer_full = False
             return self.current_scancode & 0xFF
+        if port == 0x64 and bits == 8:
+            # 8042 keyboard controller status register. Only bit 0 (output
+            # buffer full) is modeled; the other status bits (input buffer
+            # full, self-test, etc.) are not exercised by a program that only
+            # polls for "is a scan code waiting".
+            return 0x01 if self.kbd_output_buffer_full else 0x00
+        if port == 0x40 and bits == 8:
+            # PIT channel 0 data port. A prior "latch count" command (OUT 43h,
+            # SC=00 RW=00) queues [lo, hi] of the down-counter at latch time;
+            # consume it low-byte-first. With no pending latch (a bare,
+            # unlatched read), fall back to the live counter's low byte.
+            if self._pit_channel0_read_latch:
+                return self._pit_channel0_read_latch.pop(0)
+            return self._pit_channel0_live_value(cpu) & 0xFF
         if port == 0x61 and bits == 8:
             return self.speaker_control & 0xFF
         if port == 0x03C6 and bits == 8:
@@ -476,7 +522,7 @@ class DOSMachine:
         port &= 0xFFFF
         if self.sound_blaster is not None and bits == 8 and self._route_sound_write(port, value):
             return
-        self._track_pc_speaker(port, value, bits)
+        self._track_pc_speaker(cpu, port, value, bits)
         self._track_vga_dac_ports(port, value, bits)
         self._track_ega_ports(cpu, port, value, bits)
         self._track_adlib_ports(port, value, bits)
@@ -568,10 +614,10 @@ class DOSMachine:
             elif value & 0x01:
                 self.opl_status = 0xC0
 
-    def _track_pc_speaker(self, port: int, value: int, bits: int) -> None:
+    def _track_pc_speaker(self, cpu: CPU8086, port: int, value: int, bits: int) -> None:
         if bits == 16:
-            self._track_pc_speaker(port, value & 0xFF, 8)
-            self._track_pc_speaker((port + 1) & 0xFFFF, (value >> 8) & 0xFF, 8)
+            self._track_pc_speaker(cpu, port, value & 0xFF, 8)
+            self._track_pc_speaker(cpu, (port + 1) & 0xFFFF, (value >> 8) & 0xFF, 8)
             return
 
         value &= 0xFF
@@ -584,10 +630,17 @@ class DOSMachine:
                 if access in (1, 2):
                     self._pit_channel2_latch = 0
             elif channel == 0:
-                self._pit_channel0_access = access
-                self._pit_channel0_write_low = True
-                if access in (1, 2):
-                    self._pit_channel0_latch = 0
+                if access == 0:
+                    # Counter-latch command: snapshot the live down-counter for
+                    # the next IN AL,40h reads. Real 8253 latch commands do not
+                    # disturb the counter's programmed read/write access mode.
+                    counter = self._pit_channel0_live_value(cpu)
+                    self._pit_channel0_read_latch = [counter & 0xFF, (counter >> 8) & 0xFF]
+                else:
+                    self._pit_channel0_access = access
+                    self._pit_channel0_write_low = True
+                    if access in (1, 2):
+                        self._pit_channel0_latch = 0
             return
         if port == 0x40:
             access = self._pit_channel0_access
@@ -832,6 +885,9 @@ class DOSMachine:
             cpu.s.ax = (cpu.s.ax & 0xFF00) | ch
             if ah == 0x01:
                 self._console_output(cpu, chr(ch))
+            return
+        if ah == 0x0B:  # check stdin input status: AL=FFh if a char is ready, else 00h
+            cpu.s.ax = (cpu.s.ax & 0xFF00) | (0xFF if self.key_queue else 0x00)
             return
         if ah == 0x30:  # get DOS version
             cpu.s.ax = 0x0005

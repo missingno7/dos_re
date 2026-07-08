@@ -63,4 +63,5 @@ def deliver_scancode(rt: Runtime, scancode: int, *, max_steps: int = 200_000) ->
     key-state table, so no game-side key semantics are reimplemented here.
     """
     rt.dos.current_scancode = scancode & 0xFF
+    rt.dos.kbd_output_buffer_full = True
     return deliver_interrupt(rt, 0x09, max_steps=max_steps)

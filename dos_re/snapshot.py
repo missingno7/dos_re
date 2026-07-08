@@ -220,6 +220,6 @@ def _restore_speaker_from_port_log_tail(rt: Runtime, port_log_tail) -> None:
             port = int(port) & 0xFFFF
             if port not in (0x42, 0x43, 0x61):
                 continue
-            rt.dos._track_pc_speaker(port, int(value), int(bits))
+            rt.dos._track_pc_speaker(rt.cpu, port, int(value), int(bits))
     finally:
         rt.dos.speaker_callback = saved_callback

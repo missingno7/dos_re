@@ -59,10 +59,10 @@ behaviour looks impossible, alongside `dos.port_log`), and setting
 
 | Area | Status | Where |
 |---|---|---|
-| PIT channel 0 (reload tracking, programmed Hz property) | modeled | `dos.py` |
+| PIT channel 0 (reload tracking, programmed Hz property, direct reads via the latch command + port 40h) | modeled | `dos.py` |
 | PIT channel 2 (speaker) | modeled | `dos.py` |
 | INT 08h delivery (deterministic, front-end-paced, or PIC-driven inline via `cpu.pending_irq`) | modeled | `interrupts.py`, `cpu.py`, `pic.py` |
-| INT 09h keyboard (port 60h scancode + game ISR) | modeled | `interrupts.py`, `keyboard.py` |
+| INT 09h keyboard (port 60h scancode + game ISR) + 8042 controller status (port 64h output-buffer-full bit) | modeled | `interrupts.py`, `keyboard.py`, `dos.py` |
 | Wall-clock pacing (`timer_pacer`, retrace `time_source`) | modeled, opt-in — deterministic paths leave it off | `cpu.py`, `dos.py` |
 
 ## DOS / BIOS services
