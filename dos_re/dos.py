@@ -716,6 +716,9 @@ class DOSMachine:
         if num == 0x12:  # conventional memory size in KB
             cpu.s.ax = 640
             return
+        if num == 0x15:
+            self.int15(cpu)
+            return
         if num == 0x16:
             self.int16(cpu)
             return
@@ -858,6 +861,23 @@ class DOSMachine:
             h.pos = end
             cpu.s.ax = len(data)
             cpu.set_flag(CF, False)
+            return
+        if ah == 0x44 and al == 0x00:  # IOCTL: get device information
+            # Observed use (AEPROG.EXE): probing an opened .DAT handle to tell
+            # file from character device.  DX bit 7 = 0 marks a block-device
+            # file; low 6 bits are the drive (2 = C:, matching AH=19h above).
+            # Std handles 0-2 answer as character devices (bit 7 set; stdin/
+            # stdout/CON flag bits as a real DOS reports them).
+            if cpu.s.bx in (0, 1, 2):
+                cpu.s.dx = 0x80D3
+                cpu.set_flag(CF, False)
+                return
+            if cpu.s.bx in self.files:
+                cpu.s.dx = 0x0002
+                cpu.set_flag(CF, False)
+                return
+            cpu.s.ax = 6  # invalid handle
+            cpu.set_flag(CF, True)
             return
         if ah == 0x58:  # get/set allocation strategy
             # AL=00h get strategy, AL=01h set strategy.  current targets only need
@@ -1018,6 +1038,15 @@ class DOSMachine:
             cpu.s.bx = 0x0003
             cpu.s.cx = 0x0009
             return
+        if ah == 0x1A and al == 0x00:
+            # VGA read display combination code.  Games use this as the primary
+            # VGA-presence probe: a VGA BIOS answers AL=1Ah (function supported)
+            # with BL=active display (08h = colour analog VGA), BH=alternate
+            # (00h = none).  Pre-VGA BIOSes leave AL unchanged.  First exercised
+            # by AEPROG.EXE (Ancient Empires), which selects mode 13h on it.
+            cpu.s.ax = (cpu.s.ax & 0xFF00) | 0x1A
+            cpu.s.bx = 0x0008
+            return
         if ah == 0x1B and al == 0x00:
             # VGA get functionality/state information.  PRE2.EXE calls this
             # during startup detection and passes ES:DI as a caller-owned buffer.
@@ -1156,6 +1185,19 @@ class DOSMachine:
         # commonly treated as "service absent" rather than fatal during DOS-game
         # bring-up.  Leave registers unchanged for unknown multiplex IDs.
         return
+
+    def int15(self, cpu: CPU8086) -> None:
+        """BIOS system services.  On the PC/XT-class 8086 machine this VM
+        models, extended services are absent: the faithful response is CF set
+        with AH=86h ("function not supported"), which machine-type detection
+        code reads as "old PC".  Observed use: AH=C0h (get system
+        configuration) during AEPROG.EXE hardware detection."""
+        ah = (cpu.s.ax >> 8) & 0xFF
+        if ah == 0xC0:
+            cpu.s.ax = 0x8600 | (cpu.s.ax & 0x00FF)
+            cpu.set_flag(CF, True)
+            return
+        raise UnsupportedInstruction(f"Unhandled BIOS INT 15h AH={ah:02X}h")
 
     def int33(self, cpu: CPU8086) -> None:
         # Mouse API. Report absent but don't crash.

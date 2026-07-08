@@ -463,3 +463,48 @@ def test_cmc_toggles_carry():
     assert cpu.get_flag(CF) is True
     cpu = run_bytes(bytes.fromhex("f9 f5 f4"), 2)         # STC then CMC
     assert cpu.get_flag(CF) is False
+
+
+def test_int10_read_display_combination_reports_vga():
+    # AH=1Ah is the standard VGA-presence probe (AEPROG.EXE keys mode 13h on it):
+    # AL=1Ah function supported, BL=08h colour analog VGA, BH=00h no alternate.
+    from dos_re.cpu import CF
+    cpu = CPU8086(Memory(), CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
+    dos = DOSMachine(root=Path('.'))
+    cpu.s.ax = 0x1A00
+    dos.interrupt(cpu, 0x10)
+    assert cpu.s.ax & 0xFF == 0x1A
+    assert cpu.s.bx & 0xFF == 0x08
+    assert not cpu.get_flag(CF)
+
+
+def test_int15_system_config_unsupported_on_8086():
+    # AH=C0h (get system configuration) on a PC/XT-class machine: CF set,
+    # AH=86h "function not supported" -- detection code reads this as "old PC".
+    from dos_re.cpu import CF
+    cpu = CPU8086(Memory(), CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
+    dos = DOSMachine(root=Path('.'))
+    cpu.s.ax = 0xC000
+    dos.interrupt(cpu, 0x15)
+    assert (cpu.s.ax >> 8) & 0xFF == 0x86
+    assert cpu.get_flag(CF)
+
+
+def test_int21_ioctl_get_device_info_file_and_std_handles():
+    # AX=4400h: DX bit 7 clear = block-device file (drive bits 2 = C:),
+    # std handles answer as character devices, unknown handle = CF + error 6.
+    from dos_re.cpu import CF
+    from dos_re.dos import FileHandle
+    cpu = CPU8086(Memory(), CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
+    dos = DOSMachine(root=Path('.'))
+    dos.files[5] = FileHandle(Path('X.DAT'), bytearray(b'x'))
+    cpu.s.ax, cpu.s.bx = 0x4400, 5
+    dos.interrupt(cpu, 0x21)
+    assert cpu.s.dx & 0x80 == 0
+    assert not cpu.get_flag(CF)
+    cpu.s.ax, cpu.s.bx = 0x4400, 1
+    dos.interrupt(cpu, 0x21)
+    assert cpu.s.dx & 0x80
+    cpu.s.ax, cpu.s.bx = 0x4400, 42
+    dos.interrupt(cpu, 0x21)
+    assert cpu.get_flag(CF) and cpu.s.ax == 6
