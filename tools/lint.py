@@ -28,12 +28,13 @@ CORE_ALLOWED_PREFIXES = ("dos_re",)
 # Optional third-party backends the *non-core* layers may use.
 KNOWN_OPTIONAL = ("pynuked_opl3", "numpy", "pygame", "pytest", "cffi")
 
-# The FRONTEND RING: the two viewer-facing modules inside the package that may
-# use the optional viewer dependencies (numpy + pygame).  ``import dos_re``
-# itself must never pull them in — player.py keeps its imports lazy and
-# display.py is only imported by player.py when a window actually opens.
-FRONTEND_RING = {"player.py", "display.py"}
-FRONTEND_ALLOWED = ("numpy", "pygame")
+# The FRONTEND RING: the viewer-facing modules inside the package that may use
+# the optional viewer dependencies (numpy + pygame + the OPL backend).
+# ``import dos_re`` itself must never pull them in — player.py keeps its
+# imports lazy; display.py and audio_sink.py are only imported by player.py
+# when a window actually opens.
+FRONTEND_RING = {"player.py", "display.py", "audio_sink.py"}
+FRONTEND_ALLOWED = ("numpy", "pygame", "pynuked_opl3")
 
 
 def _stdlib_names() -> set[str]:

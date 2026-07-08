@@ -104,6 +104,8 @@ def scancode_table(pygame) -> dict[int, int]:
         k.K_DOWN: 0x50, k.K_COMMA: 0x33, k.K_PERIOD: 0x34, k.K_SLASH: 0x35,
         k.K_SEMICOLON: 0x27, k.K_QUOTE: 0x28, k.K_BACKQUOTE: 0x29,
         k.K_LEFTBRACKET: 0x1A, k.K_RIGHTBRACKET: 0x1B, k.K_BACKSLASH: 0x2B,
+        k.K_HOME: 0x47, k.K_PAGEUP: 0x49, k.K_END: 0x4F, k.K_PAGEDOWN: 0x51,
+        k.K_INSERT: 0x52, k.K_DELETE: 0x53,
     }
     for i, key in enumerate((k.K_1, k.K_2, k.K_3, k.K_4, k.K_5, k.K_6, k.K_7,
                              k.K_8, k.K_9, k.K_0)):
@@ -158,6 +160,8 @@ class GameFrontend:
     default_timer_irqs_per_frame = 0
     default_present_hz = 60
     default_scale = 3
+    #: "adlib" turns on the observer-only OPL3 + PC-speaker sink in the viewer
+    default_audio = "off"
 
     def __init__(self, root: Path | str) -> None:
         #: the PORT repo root; artifacts (snapshots/demos/screenshots) live under it
@@ -244,6 +248,19 @@ class GameFrontend:
         exe = Path(args.exe).name if args.exe else self.name
         return f"{exe} — dos_re VM ({mode})"
 
+    def create_audio_sink(self, pygame, rt, args: argparse.Namespace):
+        """Viewer audio, or None.  The default honours ``--audio adlib`` with the
+        observer-only OPL3 + PC-speaker sink (never affects game state; demos
+        replay identically with audio on or off).  Ports with another audio
+        architecture (e.g. digital SB-DMA) override this; the returned object
+        just needs a ``pump()`` method called once per presented frame."""
+        if args.audio != "adlib":
+            return None
+        from dos_re.audio_sink import AdlibSpeakerSink
+
+        sink = AdlibSpeakerSink(pygame, rt, args.present_hz)
+        return sink if sink.available else None
+
 
 # --- CLI ------------------------------------------------------------------------------------------
 
@@ -314,6 +331,10 @@ def build_arg_parser(frontend: GameFrontend,
                       help="initial viewer window scale")
     view.add_argument("--square-pixels", action="store_true",
                       help="par=1.0 instead of the DOS 4:3 look (par=1.2)")
+    view.add_argument("--audio", default=frontend.default_audio,
+                      choices=("adlib", "off"),
+                      help="viewer audio: 'adlib' = observer-only OPL3 + PC-speaker "
+                           "sink (never affects game state); 'off'")
 
     frontend.add_arguments(p)
     return p
@@ -469,6 +490,7 @@ def run_view(frontend: GameFrontend, rt, args,
         print(f"screenshot: {out}")
 
     dispatcher = KeyDispatcher(live_input)
+    audio = frontend.create_audio_sink(pygame, rt, args)
     running = True
     status = "replaying" if replaying else "running"
 
@@ -528,6 +550,8 @@ def run_view(frontend: GameFrontend, rt, args,
                 status = new_status
             running = running and keep_running
 
+            if audio is not None:
+                audio.pump()
             rgb = np.asarray(frontend.decode_frame(rt), np.uint8)
             last_rgb[0] = rgb
             display.draw_game(rgb)
