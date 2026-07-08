@@ -25,7 +25,10 @@ beats large intuitive rewrites.
 
 - **`dos_re/` must stay game-agnostic and stdlib-only.** No game addresses,
   filenames, formats, or third-party imports in the core. `tools/lint.py`
-  enforces this; run it before finishing any change.
+  enforces this; run it before finishing any change. The one declared
+  exception is the FRONTEND RING (`player.py` + `display.py`, the unified
+  play-runner): those two files may use the optional viewer deps
+  (numpy/pygame), and `import dos_re` itself must never pull them in.
 - **Do not make the emulator more general than a real target requires.** New
   CPU/DOS/hardware behaviour is added only when a concrete program exercises it,
   with the observed register/flag contract documented and a focused test added.
@@ -55,7 +58,8 @@ tests/        framework tests; game-free by construction
 tools/        lint.py, run_tests.py, clean.py, lindis.py, profile_hotspots.py,
               audit_hook_oracle.py, audit_layers.py, check_undefined_names.py,
               gen_island_manifest.py, render_frame.py,
-              view.py + display.py (live oracle viewer; optional numpy+pygame)
+              view.py + display.py (shims over dos_re/player.py + dos_re/display.py —
+              the unified play-runner core; optional numpy+pygame)
 ```
 
 ## Standard commands

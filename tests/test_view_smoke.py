@@ -30,8 +30,8 @@ def test_viewer_presents_frames_headless(tmp_path):
     env = dict(os.environ, SDL_VIDEODRIVER="dummy", SDL_AUDIODRIVER="dummy")
     result = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "view.py"), "--exe", str(exe),
-         "--frames", "5", "--steps-per-frame", "3000", "--fps", "250"],
+         "--frames", "5", "--steps-per-frame", "3000", "--present-hz", "250"],
         capture_output=True, text=True, cwd=ROOT, env=env, timeout=120,
     )
     assert result.returncode == 0, result.stderr[-2000:]
-    assert "presented 5 frames" in result.stdout
+    assert "frames: 5" in result.stdout

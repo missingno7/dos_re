@@ -71,6 +71,13 @@ from the source projects). Grouped by concern:
 | `dosbox_savestate.py` | Import a DOSBox-X save state (memory + registers) as an alternative evidence source. |
 | `testing.py` | Stdlib-only test discovery/runner (pytest fallback for constrained sandboxes). |
 
+### The human frontend (the optional viewer ring)
+
+| Module | What it is |
+|---|---|
+| `player.py` | The game-agnostic core of every port's `scripts/play.py`: the STANDARD unified CLI (viewer by default, `--headless` to disable; `--snapshot`/`--save-snapshot`; `--record-demo`/`--play-demo`/`--demo-continue`; the four hook-mode flags `--no-replacements`/`--safe-hooks`/`--verify-hooks`/`--trace-hooks`, failing loud where a port has no such tier; pacing + presentation knobs), the live pygame viewer loop with the standard hotkeys (F10 screenshot, F11 demo-record toggle, F12 snapshot), headless demo replay, gap-snapshot-on-crash, and the `GameFrontend` adapter class a port subclasses. numpy/pygame imports stay lazy — importing the module and headless replay need neither. Worked example: `template_dos_port/scripts/play.py`. |
+| `display.py` | GPU-accelerated (SDL2 streaming texture) window/present backend with a software fallback, aspect-correct letterboxing (DOS 4:3 `par`), overlays and fullscreen. Imported only when a window opens; together with `player.py` it forms the lint's declared FRONTEND_RING (the only package files allowed to use numpy/pygame). |
+
 ### Repo layout
 
 ```text
@@ -84,8 +91,8 @@ tests/        framework test suite (no game assets needed)
 tools/        lint, test runner, cleaner, linear disassembler, hotspot profiler,
               hook-composition audit, pure-layer VM-leak audit, undefined-name
               guard, island-manifest generator, snapshot→PNG frame renderer,
-              live interactive oracle viewer (view.py) and its GPU frame
-              presenter (display.py) — the last two need numpy+pygame
+              view.py (generic any-EXE runner over dos_re.player; display.py is
+              a back-compat shim — both now live in the package)
 ```
 
 ## Execution modes (no silent fallbacks)
