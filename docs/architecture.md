@@ -21,7 +21,7 @@ dos_re/       the reusable, game-agnostic core: VM + verification engines.
               See template_dos_port's examples/adapter_skeleton/ and
               START_HERE.md step 2.
 
-nuked_opl3/   submodule: optional OPL2/OPL3 FM-synthesis backend (cffi binding
+pynuked_opl3/   submodule: optional OPL2/OPL3 FM-synthesis backend (cffi binding
               to Nuked-OPL3).  Independent of dos_re and of any game.
 ```
 
@@ -74,7 +74,7 @@ from the source projects). Grouped by concern:
 
 ```text
 dos_re/       the framework package (above)
-nuked_opl3/   submodule: OPL2/OPL3 backend (optional, cffi)
+pynuked_opl3/   submodule: OPL2/OPL3 backend (optional, cffi)
 docs/         framework reference docs (start at docs/README.md)
 examples/     minimal_adapter/ (runnable end-to-end demo), tiny_frame_game/
               (full-stack demo) — the adapter_skeleton/ template now lives in
@@ -125,5 +125,5 @@ keeps each layer honest.
 
 The `dos_re` core is stdlib-only — this is enforced by `tools/lint.py`. Optional
 extras (`pyproject.toml`): `numpy`/`pygame` for interactive viewers,
-`cffi` to build the vendored `nuked_opl3` backend, `pytest` for the test suite.
-`nuked_opl3` must remain independent of `dos_re` and of any game.
+`cffi` to build the vendored `pynuked_opl3` backend, `pytest` for the test suite.
+`pynuked_opl3` must remain independent of `dos_re` and of any game.

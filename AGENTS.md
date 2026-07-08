@@ -16,7 +16,7 @@ projects — Prehistorik 2 (primary source; the method's completed VM-less
 proof) and Overkill (the earlier pilot; endgame still in progress); the
 documented methodology now lives in `template_dos_port`, whose `MIGRATION.md`
 records the provenance of every part (including this repo's own later split
-into `dos_re` + `template_dos_port` + `nuked_opl3`).
+into `dos_re` + `template_dos_port` + `pynuked_opl3`).
 
 ## Working principles
 
@@ -48,7 +48,7 @@ beats large intuitive rewrites.
 
 ```text
 dos_re/       the framework package — see docs/architecture.md for the module map
-nuked_opl3/   submodule: third-party OPL backend; must stay independent of dos_re
+pynuked_opl3/   submodule: third-party OPL backend; must stay independent of dos_re
 docs/         framework reference docs; docs/README.md is the index
 examples/     minimal_adapter (runnable), tiny_frame_game (full-stack demo)
 tests/        framework tests; game-free by construction

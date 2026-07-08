@@ -26,7 +26,7 @@ PACKAGE_ROOTS = (ROOT / "dos_re", ROOT / "tools", ROOT / "examples", ROOT / "tes
 CORE_ALLOWED_PREFIXES = ("dos_re",)
 
 # Optional third-party backends the *non-core* layers may use.
-KNOWN_OPTIONAL = ("nuked_opl3", "numpy", "pygame", "pytest", "cffi")
+KNOWN_OPTIONAL = ("pynuked_opl3", "numpy", "pygame", "pytest", "cffi")
 
 
 def _stdlib_names() -> set[str]:

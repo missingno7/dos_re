@@ -48,7 +48,7 @@ behaviour looks impossible, alongside `dos.port_log`), and setting
 | Area | Status | Where |
 |---|---|---|
 | AdLib/OPL2 register file + timer-status detection handshake (ports 388/389) | modeled | `dos.py` (`opl_registers`, `adlib_callback`) |
-| OPL2/OPL3 FM synthesis (actual sound) | vendored | `nuked_opl3/` (cffi binding to Nuked-OPL3; build with `pip install cffi` + `python -m nuked_opl3._ffi_build`) |
+| OPL2/OPL3 FM synthesis (actual sound) | vendored | `pynuked_opl3/` (cffi binding to Nuked-OPL3; build with `pip install cffi` + `python -m pynuked_opl3._ffi_build`) |
 | PC speaker (port 61h gate + PIT channel 2 frequency) | modeled | `dos.py` (`speaker_callback`) |
 | Sound Blaster DSP + DMA + block IRQs (+ detection-only stub mode) | modeled | `sblaster.py`, wired by `runtime.enable_sound_blaster` |
 | 8259 PIC (IRQ raise/acknowledge/EOI, priority, mask) | modeled | `pic.py` |

@@ -149,7 +149,7 @@ layout, recovered logic — lives in your adapter. The boundary is documented in
 
 ```text
 dos_re/       the framework package (VM + proof engines) — stdlib-only
-nuked_opl3/   submodule: Nuked-OPL3 FM synthesis backend (optional, cffi)
+pynuked_opl3/   submodule: Nuked-OPL3 FM synthesis backend (optional, cffi)
 docs/         framework reference docs        → start at docs/README.md
 examples/     runnable demos — optional and deletable as a whole; nothing in
               the framework imports it (examples/README.md)
@@ -176,7 +176,7 @@ backend). `template_dos_port`'s `MIGRATION.md` records exactly what came from
 where, what was deliberately left behind (game code, game-specific
 renderers/sound drivers), and what still needs cleanup — including this
 repo's later split into `dos_re` (framework) + `template_dos_port` (porting
-methodology) + `nuked_opl3` (standalone OPL3 submodule).
+methodology) + `pynuked_opl3` (standalone OPL3 submodule).
 [`docs/hardware_support.md`](docs/hardware_support.md) is the honest status of
 the hardware models — including what is *not* modeled (no generic CGA/Tandy
 rasterizer, no MPU-401/GUS).
@@ -186,9 +186,9 @@ owned game to port.
 
 ## License
 
-MIT ([LICENSE](LICENSE)), except the vendored [`nuked_opl3/`](nuked_opl3/)
+MIT ([LICENSE](LICENSE)), except the vendored [`pynuked_opl3/`](pynuked_opl3/)
 package (Nuked-OPL3 emulator core + binding), which is LGPL-2.1-or-later — see
-[`nuked_opl3/LICENSE`](nuked_opl3/LICENSE).
+[`pynuked_opl3/LICENSE`](pynuked_opl3/LICENSE).
 
 The framework's openness never extends to game IP: no game assets or
 executables are ever included here or in adapter repos; ports require a
