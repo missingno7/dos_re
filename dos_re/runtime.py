@@ -49,6 +49,12 @@ def create_runtime(
     cpu.interrupt_handler = dos.interrupt
     cpu.port_reader = dos.port_read
     cpu.port_writer = dos.port_write
+    # The power-on INT 09h (IRQ1) keyboard ISR.  Installed as a native handler at
+    # the BIOS entry the IVT points to, so a game that installs its own INT 9 and
+    # chains to the previous vector gets real BIOS scancode->buffer translation
+    # (the type-ahead buffer INT 16h reads).  See DOSMachine.bios_int9_keyboard.
+    cpu.replacement_hooks[BIOS_INT9_ENTRY] = dos.bios_int9_keyboard
+    cpu.hook_names[BIOS_INT9_ENTRY] = "bios_int9_keyboard"
     registry.install(cpu)
     return Runtime(program, cpu, dos)
 
@@ -59,15 +65,27 @@ def create_runtime(
 # vector, or reading the CRTC base port at 0040:0063).  None of this is
 # program-specific — it is the power-on environment any DOS binary expects.
 _BIOS_IRET_STUB = 0xFFF53  # F000:FF53, the conventional BIOS dummy IRET
+# Dedicated power-on INT 09h (IRQ1) entry.  IVT[9] points here so a game that
+# saves and chains to "the previous keyboard ISR" reaches the native BIOS
+# keyboard handler installed at this address (create_runtime).  F000:E987 is the
+# classic IBM BIOS INT 9 entry point.
+BIOS_INT9_ENTRY = (0xF000, 0xE987)
+_BIOS_INT9_LINEAR = 0xFE987
 
 
 def _init_bios_environment(memory) -> None:
     data = memory.data
     data[_BIOS_IRET_STUB] = 0xCF  # IRET (written directly; F000 is ROM-protected via wb/ww)
+    data[_BIOS_INT9_LINEAR] = 0xCF  # IRET fallback if executed without the native handler
     seg, off = 0xF000, 0xFF53
     for vec in (*range(0x08, 0x10), *range(0x70, 0x78)):  # IRQ0-7 (INT 08-0F), IRQ8-15 (INT 70-77)
         base = vec * 4
         if data[base:base + 4] == b"\x00\x00\x00\x00":
+            if vec == 0x09:  # keyboard IRQ1 -> the native BIOS keyboard handler
+                kb_seg, kb_off = BIOS_INT9_ENTRY
+                data[base], data[base + 1] = kb_off & 0xFF, (kb_off >> 8) & 0xFF
+                data[base + 2], data[base + 3] = kb_seg & 0xFF, (kb_seg >> 8) & 0xFF
+                continue
             data[base], data[base + 1] = off & 0xFF, (off >> 8) & 0xFF
             data[base + 2], data[base + 3] = seg & 0xFF, (seg >> 8) & 0xFF
     # BIOS data area: CRTC base port (color) — read by retrace-wait code via

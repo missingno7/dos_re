@@ -19,6 +19,37 @@ def _dac8(v6: int) -> int:
     return (v << 2) | (v >> 4)
 
 
+# US-layout PC/XT set-1 scancode -> (unshifted, shifted) ASCII, for the BIOS
+# INT 09h keyboard translation (DOSMachine.bios_int9_keyboard).  Only keys the
+# BIOS puts in its type-ahead buffer as ASCII appear here.
+_BIOS_SCANCODE_ASCII: dict[int, tuple[str, str]] = {
+    0x01: ("\x1b", "\x1b"),                                          # Esc
+    0x02: ("1", "!"), 0x03: ("2", "@"), 0x04: ("3", "#"), 0x05: ("4", "$"),
+    0x06: ("5", "%"), 0x07: ("6", "^"), 0x08: ("7", "&"), 0x09: ("8", "*"),
+    0x0A: ("9", "("), 0x0B: ("0", ")"), 0x0C: ("-", "_"), 0x0D: ("=", "+"),
+    0x0E: ("\b", "\b"), 0x0F: ("\t", "\t"),
+    0x10: ("q", "Q"), 0x11: ("w", "W"), 0x12: ("e", "E"), 0x13: ("r", "R"),
+    0x14: ("t", "T"), 0x15: ("y", "Y"), 0x16: ("u", "U"), 0x17: ("i", "I"),
+    0x18: ("o", "O"), 0x19: ("p", "P"), 0x1A: ("[", "{"), 0x1B: ("]", "}"),
+    0x1C: ("\r", "\r"),
+    0x1E: ("a", "A"), 0x1F: ("s", "S"), 0x20: ("d", "D"), 0x21: ("f", "F"),
+    0x22: ("g", "G"), 0x23: ("h", "H"), 0x24: ("j", "J"), 0x25: ("k", "K"),
+    0x26: ("l", "L"), 0x27: (";", ":"), 0x28: ("'", '"'), 0x29: ("`", "~"),
+    0x2B: ("\\", "|"),
+    0x2C: ("z", "Z"), 0x2D: ("x", "X"), 0x2E: ("c", "C"), 0x2F: ("v", "V"),
+    0x30: ("b", "B"), 0x31: ("n", "N"), 0x32: ("m", "M"), 0x33: (",", "<"),
+    0x34: (".", ">"), 0x35: ("/", "?"), 0x39: (" ", " "),
+}
+
+# Scancodes the BIOS buffers as *extended* keys (AL=0, AH=scancode): the F-key
+# row and the (NumLock-off) navigation cluster.  Menus read these via INT 16h.
+_BIOS_EXTENDED_KEYS: frozenset[int] = frozenset({
+    0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42, 0x43, 0x44,  # F1-F10
+    0x57, 0x58,                                                   # F11, F12
+    0x47, 0x48, 0x49, 0x4B, 0x4D, 0x4F, 0x50, 0x51, 0x52, 0x53,  # nav cluster
+})
+
+
 class ConsoleInputWouldBlock(Exception):
     """Raised when an interactive front-end wants DOS console input to wait."""
 
@@ -139,6 +170,14 @@ class DOSMachine:
     # Latest raw keyboard scan code presented on port 60h.  A front-end sets this
     # and then invokes the installed INT 9 handler (see dos_re.interrupts).
     current_scancode: int = 0
+    # BIOS keyboard shift/toggle state, maintained by the BIOS INT 9 handler
+    # (bios_int9_keyboard).  A game that installs its own INT 9 ISR and *chains*
+    # to the previous (BIOS) handler relies on that handler translating scan
+    # codes into the type-ahead buffer that INT 16h serves.
+    kbd_shift: bool = False
+    kbd_ctrl: bool = False
+    kbd_alt: bool = False
+    kbd_caps: bool = False
     # Unmodeled-I/O policy (docs/hardware_support.md): reads from ports the model
     # does not know return 0 — the proven default both source games ran under.
     # Every such read is recorded here (capped) so probes are auditable, and the
@@ -1156,6 +1195,62 @@ class DOSMachine:
             cpu.set_flag(ZF, True)
             return
         raise UnsupportedInstruction(f"Unhandled BIOS INT 16h AH={ah:02X}h")
+
+    def bios_int9_keyboard(self, cpu: CPU8086) -> None:
+        """The IBM-PC BIOS INT 09h keyboard ISR (IRQ1).
+
+        This is the power-on keyboard handler.  A DOS game commonly installs its
+        own INT 9 ISR to maintain a live key-state table and then *chains* to the
+        previous (this) handler so ordinary keystrokes still reach the BIOS
+        type-ahead buffer that INT 16h reads.  Ancient Empires does exactly that:
+        its menus poll INT 16h for navigation (arrows arrive as extended codes,
+        AL=0/AH=scancode) while gameplay reads its own table -- the game decides
+        per key whether to chain, so this handler needs no game knowledge.
+
+        It is installed at a dedicated BIOS entry (runtime.BIOS_INT9_ENTRY) that
+        the power-on IVT[9] points to, so the game saves and chains to it.  Entry
+        frame is a hardware-interrupt frame (flags, cs, ip on the stack); it acks
+        the PIC and returns with IRET.
+        """
+        scancode = self.current_scancode & 0xFF
+        make = scancode & 0x7F
+        released = bool(scancode & 0x80)
+
+        if make == 0x2A or make == 0x36:      # left / right shift
+            self.kbd_shift = not released
+        elif make == 0x1D:                    # ctrl
+            self.kbd_ctrl = not released
+        elif make == 0x38:                    # alt
+            self.kbd_alt = not released
+        elif make == 0x3A and not released:   # caps lock (toggle on make)
+            self.kbd_caps = not self.kbd_caps
+        elif not released:
+            value = self._bios_translate_scancode(make)
+            if value is not None and len(self.key_queue) < 16:
+                self.key_queue.append(value & 0xFFFF)
+
+        if cpu.port_writer:                   # EOI to the master PIC
+            cpu.port_writer(cpu, 0x20, 0x20, 8)
+        # IRET: pop ip, cs, flags (entered via hardware-interrupt frame).
+        cpu.s.ip = cpu.pop()
+        cpu.s.cs = cpu.pop()
+        cpu.s.flags = cpu.pop() | 0x0002
+
+    def _bios_translate_scancode(self, make: int) -> int | None:
+        """Return the 16-bit BIOS buffer word (AH=scancode, AL=ASCII) for a make
+        code, or None for keys the BIOS does not buffer (pure modifiers, etc.)."""
+        if make in _BIOS_EXTENDED_KEYS:       # arrows, F-keys, nav cluster: AL=0
+            return (make << 8)
+        entry = _BIOS_SCANCODE_ASCII.get(make)
+        if entry is None:
+            return None
+        base, shifted = entry
+        if base.isalpha():
+            upper = self.kbd_shift ^ self.kbd_caps
+            ch = shifted if upper else base
+        else:
+            ch = shifted if self.kbd_shift else base
+        return (make << 8) | (ord(ch) & 0xFF)
 
     @staticmethod
     def _bcd(value: int) -> int:
