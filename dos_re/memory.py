@@ -143,8 +143,13 @@ class Memory:
 
     def _notify_write(self, addr: int, old: bytes, new: bytes) -> None:
         if self.write_watchers:
+            # In the selector model (sel_base set) linear addresses legally
+            # exceed 1MB; masking to 20 bits here silently mangled watcher
+            # reports for global-heap writes (found while tracing SimAnt).
+            if self.sel_base is None:
+                addr &= 0xFFFFF
             for watcher in tuple(self.write_watchers):
-                watcher(addr & 0xFFFFF, old, new)
+                watcher(addr, old, new)
 
     def wb_phys(self, addr: int, value: int) -> None:
         addr = self.check(addr)
