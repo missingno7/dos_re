@@ -4,16 +4,16 @@ The project's vocabulary in one place. Terms link to the doc that owns them.
 
 | Term | Meaning |
 |---|---|
-| **Oracle** | The original DOS executable running interpreted in the VM — the single source of truth for all behaviour. Never guessed around, never retired until a piece is CANONICAL. (template_port's `docs/lifecycle.md`) |
+| **Oracle** | The original DOS executable running interpreted in the VM — the single source of truth for all behaviour. Never guessed around, never retired until a piece is CANONICAL. (template_dos_port's `docs/lifecycle.md`) |
 | **VM / the microscope** | The `dos_re` 8086 + DOS + hardware interpreter. A controlled execution environment for observing and proving — not necessarily the final runtime. |
 | **Hook** | A native handler installed at an original CS:IP. Scaffolding, never architecture; classified by role (checkpoint / env_wait / debug_probe / glue). ([`hooks_and_verification.md`](hooks_and_verification.md)) |
-| **Island** | One coherent recovered unit with its own verification contract: pure logic + thin adapter + verifier. Tagged with `@oracle_link`. (template_port's `docs/lifecycle.md`) |
+| **Island** | One coherent recovered unit with its own verification contract: pure logic + thin adapter + verifier. Tagged with `@oracle_link`. (template_dos_port's `docs/lifecycle.md`) |
 | **Golden** | A recorded oracle fixture turned into a test: captured inputs/outputs/memory effects the recovered island must reproduce forever. |
 | **Coastline** | The total surface where recovered code borders interpreted ASM. Progress = the coastline moving upward (fewer, larger contact points). |
 | **Coastline shortening** | Calling a verified recovered callee directly instead of returning to ASM between two recovered islands. |
 | **Archipelago / Continent** | The geography metaphor's middle and end states: islands → archipelagos (islands connected into a *subsystem*) → continents (complete native systems) → the recovered mainland (VM-less port). "Subsystem" and "archipelago" name the same thing at different altitudes. |
 | **Glue** | A hook-taxonomy role: accidental ASM-boundary plumbing (tails, helpers, per-row scan steps) that exists only because a hook landed there — the collapse target when islands merge. Not an architectural layer. |
-| **Parity gate** | The enhanced layer's standing proof: at its neutral settings the enhanced game must be pixel- and state-identical to the faithful game, so "enhanced" can never silently mean "diverged". (template_port's `docs/enhancements.md`) |
+| **Parity gate** | The enhanced layer's standing proof: at its neutral settings the enhanced game must be pixel- and state-identical to the faithful game, so "enhanced" can never silently mean "diverged". (template_dos_port's `docs/enhancements.md`) |
 | **Hybrid runtime** | The workbench: the VM running the original game with recovered islands hooked live over it. |
 | **Native runtime** | The product: recovered source only — no VM, no EXE, no interpreted instruction in the hot path. |
 | **Demo** | A deterministic **input recording** (never a video): VM-visible key events keyed to the emulated boundary clock, plus metadata. Replays identically under every driver. ([`demos_and_snapshots.md`](demos_and_snapshots.md)) |
@@ -31,9 +31,9 @@ The project's vocabulary in one place. Terms link to the doc that owns them.
 | **Frontier** | The residue of never-hooked addresses late in a port, each explicitly triaged (`dos_re/frontier.py`). |
 | **Fail loud / HybridGap** | The no-silent-fallback rule made executable: unrecovered behaviour raises with precise context; it is never faked and never silently handed back to ASM. |
 | **Transition signal** | A `HybridGap` subclass that is a control-flow signal, not an error: the per-frame step reached a multi-frame sequence (respawn, level end) the flow driver must drive. |
-| **Status ladder** | GUESS → OBSERVED → RECOVERED → ASM_MATCHED → VERIFIED → CANONICAL — the only way names earn confidence (`dos_re/islands.py`, template_port's `docs/methodology.md`). |
-| **Faithful core / enhanced layer** | The verified game vs the presentation-only comfort layer that reads state and writes none. The enhanced layer is built LAST — lifecycle Stage 6, after the faithful game is complete. (template_port's `docs/enhancements.md`) |
+| **Status ladder** | GUESS → OBSERVED → RECOVERED → ASM_MATCHED → VERIFIED → CANONICAL — the only way names earn confidence (`dos_re/islands.py`, template_dos_port's `docs/methodology.md`). |
+| **Faithful core / enhanced layer** | The verified game vs the presentation-only comfort layer that reads state and writes none. The enhanced layer is built LAST — lifecycle Stage 6, after the faithful game is complete. (template_dos_port's `docs/enhancements.md`) |
 | **Cyborgization** | The deprecated early-P2 experiment of growing faithful/enhanced viewer backends alongside recovery, before the native game was complete. Retrospective verdict: not recommended (pitfall #24). |
-| **Crystallization** | Letting higher-level meaning *emerge* from verified lower-level facts instead of naming by guess. (template_port's `docs/methodology.md`) |
+| **Crystallization** | Letting higher-level meaning *emerge* from verified lower-level facts instead of naming by guess. (template_dos_port's `docs/methodology.md`) |
 | **Staticization** | The discipline for runtime-patched code: observed live bytes → named variant → signature guard → explicit static Python. |
 | **Adapter** | The per-game package holding everything that knows the game: addresses, formats, hooks, views, recovered logic. The framework core never learns a game. |

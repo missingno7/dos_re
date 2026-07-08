@@ -2,7 +2,7 @@
 
 These instructions apply to the whole repository. They are written for AI
 agents and humans working on the **framework itself**. (If you are using the
-framework to port a game, start at `template_port`'s `START_HERE.md` —
+framework to port a game, start at `template_dos_port`'s `START_HERE.md` —
 this repo is consumed there as the `dos_re/` submodule; your game work
 happens in your adapter package, and you touch `dos_re/` only under the rules
 below.)
@@ -14,9 +14,9 @@ a real-mode VM, differential hook verification, frame comparison, and
 deterministic demos/snapshots. It was extracted from two real recovery
 projects — Prehistorik 2 (primary source; the method's completed VM-less
 proof) and Overkill (the earlier pilot; endgame still in progress); the
-documented methodology now lives in `template_port`, whose `MIGRATION.md`
+documented methodology now lives in `template_dos_port`, whose `MIGRATION.md`
 records the provenance of every part (including this repo's own later split
-into `dos_re` + `template_port` + `nuked_opl3`).
+into `dos_re` + `template_dos_port` + `nuked_opl3`).
 
 ## Working principles
 

@@ -9,7 +9,7 @@ generic machinery — backends, field descriptors, view bases — ships as
 [`dos_re/state_view.py`](../dos_re/state_view.py); your game's layout tables
 (the `StructView` subclasses with the actual offsets) live in your adapter's
 bridge module. For the terms "island" and "golden" used below, see
-[`glossary.md`](glossary.md) (or template_port's `docs/lifecycle.md`).)*
+[`glossary.md`](glossary.md) (or template_dos_port's `docs/lifecycle.md`).)*
 
 ## The problem
 

@@ -15,10 +15,10 @@ dos_re/       the reusable, game-agnostic core: VM + verification engines.
 
 <your game>/  the per-game adapter you create at your porting repo's root,
               next to its dos_re/ submodule (the expected workflow — see
-              template_port, which wires this framework in that way):
+              template_dos_port, which wires this framework in that way):
               hooks, continuation metadata, frame boundaries, input-wait
               registry, asset codecs, recovered logic, state views.
-              See template_port's examples/adapter_skeleton/ and
+              See template_dos_port's examples/adapter_skeleton/ and
               START_HERE.md step 2.
 
 nuked_opl3/   submodule: optional OPL2/OPL3 FM-synthesis backend (cffi binding
@@ -78,7 +78,7 @@ nuked_opl3/   submodule: OPL2/OPL3 backend (optional, cffi)
 docs/         framework reference docs (start at docs/README.md)
 examples/     minimal_adapter/ (runnable end-to-end demo), tiny_frame_game/
               (full-stack demo) — the adapter_skeleton/ template now lives in
-              template_port
+              template_dos_port
 tests/        framework test suite (no game assets needed)
 tools/        lint, test runner, cleaner, linear disassembler, hotspot profiler,
               hook-composition audit, pure-layer VM-leak audit, undefined-name
@@ -118,7 +118,7 @@ only; the pure layer never imports the VM.
 | **pure** | portable, VM-free game logic and data records | pure only |
 
 See [`state_mirrors.md`](state_mirrors.md) for the bridge/view seam and
-template_port's `docs/methodology.md` for the naming/altitude discipline that
+template_dos_port's `docs/methodology.md` for the naming/altitude discipline that
 keeps each layer honest.
 
 ## Third-party code and dependencies
