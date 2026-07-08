@@ -691,9 +691,13 @@ class CPU8086:
         # value and returns.  Verified byte-exact by the state-digest gate.
         if 0x70 <= op <= 0x7F:                          # Jcc rel8
             rel = self.sign8(self.fetch8()); take = self.condition(op & 0xF)
-            old = s.ip
-            if take: s.ip = (s.ip + rel) & 0xFFFF
-            return T and f"{JCC_NAMES[op & 0xF]} -> {s.cs:04X}:{s.ip if take else old:04X} {'taken' if take else 'not'}"
+            target = (s.ip + rel) & 0xFFFF
+            if take: s.ip = target
+            # Trace always shows the encoded branch target, taken or not --
+            # showing the fall-through IP instead reads as "the target is here",
+            # which is not what the not-taken case means (regression fix ported
+            # from overkill_port, reintroduced when this path was hoisted for perf).
+            return T and f"{JCC_NAMES[op & 0xF]} -> {s.cs:04X}:{target:04X} {'taken' if take else 'not'}"
         if op in (0x86, 0x87):                          # XCHG r/m, reg
             bits = 8 if op == 0x86 else 16
             _, mod, reg, rm = self.peek_modrm(); operand = self.decode_rm_operand(mod, rm, bits, seg_override)
@@ -969,12 +973,12 @@ class CPU8086:
             target = (s.ip + rel) & 0xFFFF
             if take: s.ip = target
             name = {0xE0: 'loopne', 0xE1: 'loope', 0xE2: 'loop'}[op]
-            return T and f"{name} -> {s.cs:04X}:{s.ip:04X} {'taken' if take else 'not'} cx={s.cx:04X}"
+            return T and f"{name} -> {s.cs:04X}:{target:04X} {'taken' if take else 'not'} cx={s.cx:04X}"
         if op == 0xE3:
             rel = self.sign8(self.fetch8()); take = s.cx == 0
             target = (s.ip + rel) & 0xFFFF
             if take: s.ip = target
-            return T and f"jcxz -> {s.cs:04X}:{s.ip:04X} {'taken' if take else 'not'}"
+            return T and f"jcxz -> {s.cs:04X}:{target:04X} {'taken' if take else 'not'}"
 
         # String operations
         if op in (0x6C, 0x6D, 0x6E, 0x6F, 0xA4, 0xA5, 0xA6, 0xA7, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF):
