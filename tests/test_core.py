@@ -508,3 +508,33 @@ def test_int21_ioctl_get_device_info_file_and_std_handles():
     cpu.s.ax, cpu.s.bx = 0x4400, 42
     dos.interrupt(cpu, 0x21)
     assert cpu.get_flag(CF) and cpu.s.ax == 6
+
+
+def test_file_handles_reuse_lowest_free_slot(tmp_path):
+    # Real DOS returns the lowest free handle (>=5) and reuses closed ones.  A
+    # monotonic counter instead lets handles climb without bound; a game that
+    # indexes a fixed per-handle table by the handle value then overruns it
+    # (Ancient Empires' DS:38CC handle table into its DS:3904 colour table).
+    from dos_re.cpu import CF
+    (tmp_path / "A.DAT").write_bytes(b"aaaa")
+    (tmp_path / "B.DAT").write_bytes(b"bbbb")
+    cpu = CPU8086(Memory(), CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
+    dos = DOSMachine(root=tmp_path)
+
+    def _open(name: str) -> int:
+        addr = 0x200
+        for i, ch in enumerate(name.encode() + b"\x00"):
+            cpu.mem.wb(cpu.s.ds, addr + i, ch)
+        cpu.s.ax, cpu.s.dx = 0x3D00, addr
+        dos.interrupt(cpu, 0x21)
+        assert not cpu.get_flag(CF)
+        return cpu.s.ax
+
+    h1 = _open("A.DAT")
+    h2 = _open("B.DAT")
+    assert (h1, h2) == (5, 6)          # first two files
+    cpu.s.bx = h1                       # close the first
+    cpu.s.ax = 0x3E00
+    dos.interrupt(cpu, 0x21)
+    h3 = _open("A.DAT")
+    assert h3 == 5                     # handle 5 reused, not 7

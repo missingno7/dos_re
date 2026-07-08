@@ -736,6 +736,20 @@ class DOSMachine:
             return
         raise UnsupportedInstruction(f"Unhandled interrupt INT {num:02X}h at {cpu.s.cs:04X}:{cpu.s.ip:04X}")
 
+    def _alloc_handle(self) -> int:
+        """Return the lowest free DOS file handle (>= 5, after the five standard
+        handles).  Real DOS reuses the lowest closed handle; a monotonically
+        increasing counter instead lets handles climb without bound, and a game
+        that indexes a fixed-size per-handle table by the handle value will then
+        write out of bounds (Ancient Empires' handle table at DS:38CC overruns
+        into its text-colour table at DS:3904 once a handle reaches 28 — every
+        menu drew red instead of black)."""
+        handle = 5
+        while handle in self.files:
+            handle += 1
+        self.next_handle = handle + 1  # kept for compatibility/inspection
+        return handle
+
     def int21(self, cpu: CPU8086) -> None:
         ah = (cpu.s.ax >> 8) & 0xFF
         al = cpu.s.ax & 0xFF
@@ -804,8 +818,7 @@ class DOSMachine:
         if ah == 0x3C:  # create/truncate file
             name = self.read_asciiz(cpu, cpu.s.ds, cpu.s.dx)
             path = self.resolve_game_path(name)
-            handle = self.next_handle
-            self.next_handle += 1
+            handle = self._alloc_handle()
             # Keep writes in-memory so RE runs are deterministic and do not
             # mutate the user's original game directory.
             self.files[handle] = FileHandle(path, bytearray(), pos=0, writable=True)
@@ -819,8 +832,7 @@ class DOSMachine:
                 cpu.s.ax = 2              # DOS "file not found" (CF=1) -> the game's open-fail path, not a crash
                 cpu.set_flag(CF, True)
                 return
-            handle = self.next_handle
-            self.next_handle += 1
+            handle = self._alloc_handle()
             self.files[handle] = FileHandle(path, bytearray(path.read_bytes()))
             cpu.s.ax = handle
             cpu.set_flag(CF, False)
