@@ -711,6 +711,16 @@ class CPU8086:
             reg = op - 0x50; self.push(self.get_reg16(reg)); return T and f"push {REG16[reg]}"
         if 0x58 <= op <= 0x5F:
             reg = op - 0x58; self.set_reg16(reg, self.pop()); return T and f"pop {REG16[reg]}"
+        if op == 0x60:              # PUSHA (80186+): AX,CX,DX,BX,orig SP,BP,SI,DI
+            sp0 = s.sp
+            for v in (s.ax, s.cx, s.dx, s.bx, sp0, s.bp, s.si, s.di):
+                self.push(v)
+            return T and "pusha"
+        if op == 0x61:              # POPA (80186+): DI,SI,BP,(skip SP),BX,DX,CX,AX
+            s.di = self.pop(); s.si = self.pop(); s.bp = self.pop()
+            self.pop()                                  # discard the saved SP
+            s.bx = self.pop(); s.dx = self.pop(); s.cx = self.pop(); s.ax = self.pop()
+            return T and "popa"
         if op in (0x06, 0x0E, 0x16, 0x1E):
             idx = {0x06: 0, 0x0E: 1, 0x16: 2, 0x1E: 3}[op]; self.push(self.get_sreg(idx)); return T and f"push {SREG[idx]}"
         if op in (0x07, 0x17, 0x1F):

@@ -18,6 +18,26 @@ def test_mov_add_ret():
     assert cpu.s.ax == 0x1235
 
 
+def test_pusha_popa_roundtrip():
+    # PUSHA (60) saves AX,CX,DX,BX,SP,BP,SI,DI; scribble the regs; POPA (61)
+    # restores them (SP's stack slot is discarded).  Seed via mov ax..di.
+    cpu = run_bytes(bytes.fromhex(
+        "b8 11 11"        # mov ax,1111
+        "b9 22 22"        # mov cx,2222
+        "ba 33 33"        # mov dx,3333
+        "bb 44 44"        # mov bx,4444
+        "bd 55 55"        # mov bp,5555
+        "be 66 66"        # mov si,6666
+        "bf 77 77"        # mov di,7777
+        "60"              # pusha
+        "b8 00 00 b9 00 00 ba 00 00 bb 00 00 bd 00 00 be 00 00 bf 00 00"  # zero regs
+        "61"              # popa
+        "f4"), 17)
+    assert (cpu.s.ax, cpu.s.cx, cpu.s.dx, cpu.s.bx) == (0x1111, 0x2222, 0x3333, 0x4444)
+    assert (cpu.s.bp, cpu.s.si, cpu.s.di) == (0x5555, 0x6666, 0x7777)
+    assert cpu.s.sp == 0xFFFE            # balanced
+
+
 def test_memory_operand_decoded_once():
     cpu = run_bytes(bytes.fromhex("c7 06 00 01 34 12 81 06 00 01 01 00 f4"), 3)
     assert cpu.mem.rw(0x1000, 0x0100) == 0x1235
