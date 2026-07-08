@@ -120,7 +120,7 @@ leaf *last*. Duplicating logic between a hook and the native backend is how a
 port silently forks from its own proof.
 
 Beyond the confidence ladder on each function
-([`methodology.md`](methodology.md)), track which **adapter state** each piece
+(template_port's `docs/methodology.md`), track which **adapter state** each piece
 is in — every rendering/audio piece is exactly one of:
 
 1. **recovered + live-grounded** — leaf + live replacement hook + verifier;
@@ -144,6 +144,5 @@ recovered" is answered by the code, not by a hand-edited list.
 observe -> classify -> choose boundary -> build ASM oracle -> implement hook -> verify -> document
 ```
 
-See [`methodology.md`](methodology.md) for each step in detail and
-[`ai_porting_charter.md`](ai_porting_charter.md) §4 for the per-slice lifting
-loop this fits into.
+See template_port's `docs/methodology.md` for each step in detail and its
+`docs/ai_porting_charter.md` §4 for the per-slice lifting loop this fits into.

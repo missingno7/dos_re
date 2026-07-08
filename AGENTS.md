@@ -2,18 +2,21 @@
 
 These instructions apply to the whole repository. They are written for AI
 agents and humans working on the **framework itself**. (If you are using the
-framework to port a game, start at [`START_HERE.md`](START_HERE.md) — your
-game work happens in your adapter package, and you touch `dos_re/` only under
-the rules below.)
+framework to port a game, start at `template_port`'s `START_HERE.md` —
+this repo is consumed there as the `dos_re/` submodule; your game work
+happens in your adapter package, and you touch `dos_re/` only under the rules
+below.)
 
 ## What this repository is
 
 The reusable, game-agnostic core of an oracle-driven DOS recovery method:
-a real-mode VM, differential hook verification, frame comparison, deterministic
-demos/snapshots, and the documented methodology. It was extracted from two real
-recovery projects — Prehistorik 2 (primary source; the method's completed
-VM-less proof) and Overkill (the earlier pilot; endgame still in progress);
-[`MIGRATION.md`](MIGRATION.md) records the provenance of every part.
+a real-mode VM, differential hook verification, frame comparison, and
+deterministic demos/snapshots. It was extracted from two real recovery
+projects — Prehistorik 2 (primary source; the method's completed VM-less
+proof) and Overkill (the earlier pilot; endgame still in progress); the
+documented methodology now lives in `template_port`, whose `MIGRATION.md`
+records the provenance of every part (including this repo's own later split
+into `dos_re` + `template_port` + `nuked_opl3`).
 
 ## Working principles
 
@@ -45,9 +48,9 @@ beats large intuitive rewrites.
 
 ```text
 dos_re/       the framework package — see docs/architecture.md for the module map
-nuked_opl3/   vendored third-party OPL backend; must stay independent of dos_re
-docs/         the method; docs/README.md is the index
-examples/     minimal_adapter (runnable), adapter_skeleton (template)
+nuked_opl3/   submodule: third-party OPL backend; must stay independent of dos_re
+docs/         framework reference docs; docs/README.md is the index
+examples/     minimal_adapter (runnable), tiny_frame_game (full-stack demo)
 tests/        framework tests; game-free by construction
 tools/        lint.py, run_tests.py, clean.py, lindis.py, profile_hotspots.py,
               audit_hook_oracle.py, audit_layers.py, check_undefined_names.py,

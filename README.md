@@ -17,12 +17,16 @@ verification, frame comparison, deterministic input demos, snapshots, and the
 discipline that keeps recovery honest.
 
 **This is a framework built by AI, for AI.** The expected user is an autonomous
-AI agent handed this repo plus a game's files and told to port it. The docs are
-the agent's operating manual — start at [`START_HERE.md`](START_HERE.md) — and
-the framework itself is expected to *adapt*: every new game exercises hardware
-and DOS behaviour the last one didn't, and extending `dos_re` (under its rules)
-is part of the job, not a deviation from it. Humans are welcome; none are
-required.
+AI agent handed a porting repo (this framework plugged in as a submodule) plus
+a game's files, and told to port it. The porting agent's operating manual —
+boot sequence, methodology, prompts, adapter template — lives in
+[`template_port`](https://github.com/missingno7/template_port), which consumes
+this repo at `dos_re/`; this repo itself is the framework's reference manual
+(see [`docs/README.md`](docs/README.md)) plus its own contribution rules
+([`AGENTS.md`](AGENTS.md)). The framework itself is expected to *adapt*: every
+new game exercises hardware and DOS behaviour the last one didn't, and
+extending `dos_re` (under its rules) is part of the job, not a deviation from
+it. Humans are welcome; none are required.
 
 ## What it is
 
@@ -37,9 +41,9 @@ required.
 - **A determinism substrate** — full machine snapshots and input demos keyed to
   an emulated boundary clock, so every finding is replayable and every claim of
   equivalence is checkable.
-- **A method** — the [AI Porting Charter](docs/ai_porting_charter.md): the
-  lifting loop, the proof spine, the phased roadmap from "hook one routine" to
-  "flip the engine and keep the VM as an offline oracle".
+- **A method** — the AI Porting Charter (`template_port/docs/ai_porting_charter.md`):
+  the lifting loop, the proof spine, the phased roadmap from "hook one routine"
+  to "flip the engine and keep the VM as an offline oracle".
 
 ## What it is not
 
@@ -94,7 +98,7 @@ original EXE ──▶ dos_re VM (the oracle) ──▶ traces / snapshots / dem
    layout (readable code above, exact verification below), and the VM retires
    into the oracle seat: testing, replay, debugging, and proof.
 
-The full arc, stage by stage: [`docs/lifecycle.md`](docs/lifecycle.md).
+The full arc, stage by stage: `template_port/docs/lifecycle.md`.
 
 ## Quick start
 
@@ -114,13 +118,16 @@ keyboard ISR, and framebuffer, driven through cold-start input demos, both
 verification oracles, and a state mirror
 ([its README](examples/tiny_frame_game/README.md) is the 10-minute tour).
 
-To start on a real game, read
-[`docs/porting_new_game.md`](docs/porting_new_game.md) and copy
-[`examples/adapter_skeleton/`](examples/adapter_skeleton/README.md).
+To start on a real game, clone [`template_port`](https://github.com/missingno7/template_port)
+(this repo comes along as its `dos_re/` submodule) and read its
+`START_HERE.md` and `docs/porting_new_game.md`.
 
 ## Adapting it to a new game (the short version)
 
-1. Create a game adapter package (the skeleton shows the shape).
+This lives in full in `template_port`; in outline:
+
+1. Create a game adapter package (`template_port/examples/adapter_skeleton/`
+   shows the shape).
 2. Configure EXE loading (packer bootstrap → snapshot past it) and data paths.
 3. Wire input delivery and see video output.
 4. Find the frame boundaries (timer wait, retrace wait, present) and stand up
@@ -142,13 +149,17 @@ layout, recovered logic — lives in your adapter. The boundary is documented in
 
 ```text
 dos_re/       the framework package (VM + proof engines) — stdlib-only
-nuked_opl3/   vendored Nuked-OPL3 FM synthesis backend (optional, cffi)
-docs/         the method + guides            → start at docs/README.md
-examples/     runnable demos + adapter template — optional and deletable as a
-              whole; nothing in the framework imports it (examples/README.md)
+nuked_opl3/   submodule: Nuked-OPL3 FM synthesis backend (optional, cffi)
+docs/         framework reference docs        → start at docs/README.md
+examples/     runnable demos — optional and deletable as a whole; nothing in
+              the framework imports it (examples/README.md)
 tests/        framework tests (no game assets needed)
 tools/        lint / test runner / disassembler / profiler / audits
 ```
+
+The porting methodology, prompts, and adapter template live in
+[`template_port`](https://github.com/missingno7/template_port), which consumes
+this repo as its `dos_re/` submodule.
 
 ## Requirements
 
@@ -161,9 +172,11 @@ interactive viewer).
 This repo was extracted from `pre2_port` (primary, the newer framework) and
 `overkill_port` (older sibling; contributed the cold-start demos, the asm
 helper library, the hook taxonomy, several tools, and the vendored OPL3
-backend). [`MIGRATION.md`](MIGRATION.md) records exactly what came from where,
-what was deliberately left behind (game code, game-specific renderers/sound
-drivers), and what still needs cleanup.
+backend). `template_port`'s `MIGRATION.md` records exactly what came from
+where, what was deliberately left behind (game code, game-specific
+renderers/sound drivers), and what still needs cleanup — including this
+repo's later split into `dos_re` (framework) + `template_port` (porting
+methodology) + `nuked_opl3` (standalone OPL3 submodule).
 [`docs/hardware_support.md`](docs/hardware_support.md) is the honest status of
 the hardware models — including what is *not* modeled (no generic CGA/Tandy
 rasterizer, no MPU-401/GUS).

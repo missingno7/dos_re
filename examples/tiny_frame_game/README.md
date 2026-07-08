@@ -21,9 +21,8 @@ python examples/tiny_frame_game/walkthrough.py
 The point is onboarding, not realism: [`game.py`](game.py) is the "original
 binary" (its docstring is the disassembly), [`walkthrough.py`](walkthrough.py)
 is the whole lifecycle. When you understand why each stage exists, read
-[`docs/lifecycle.md`](../../docs/lifecycle.md) for how the same stages play
-out on a real game, and [`docs/porting_new_game.md`](../../docs/porting_new_game.md)
-to start one.
+template_port's `docs/lifecycle.md` for how the same stages play out on a
+real game, and its `docs/porting_new_game.md` to start one.
 
 Two details worth noticing:
 
