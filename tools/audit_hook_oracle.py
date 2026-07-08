@@ -71,6 +71,12 @@ def _parse_registered_hooks(paths: list[Path]) -> dict[str, Addr]:
     return out
 
 
+# The continuation-metadata class as adapters actually name it: the framework
+# exports GenericHookStop (dos_re.verification); "HookStop" is kept for
+# adapters that alias/subclass it under the shorter historical name.
+_HOOK_STOP_CLASS_NAMES = ("HookStop", "GenericHookStop")
+
+
 def _parse_hookstop_metadata(verification_py: Path) -> set[Addr]:
     tree = ast.parse(verification_py.read_text(encoding="utf-8"), filename=str(verification_py))
     out: set[Addr] = set()
@@ -81,12 +87,12 @@ def _parse_hookstop_metadata(verification_py: Path) -> set[Addr]:
             is_hook_stop = (
                 isinstance(value, ast.Call)
                 and (
-                    (isinstance(value.func, ast.Name) and value.func.id == "HookStop")
+                    (isinstance(value.func, ast.Name) and value.func.id in _HOOK_STOP_CLASS_NAMES)
                     or (
                         isinstance(value.func, ast.Attribute)
                         and value.func.attr == "after_step"
                         and isinstance(value.func.value, ast.Name)
-                        and value.func.value.id == "HookStop"
+                        and value.func.value.id in _HOOK_STOP_CLASS_NAMES
                     )
                 )
             )
