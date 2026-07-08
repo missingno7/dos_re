@@ -961,6 +961,7 @@ class CPU8086:
             return f"shift/{reg} {operand.text},{count}"
 
         # Flag and misc
+        if op == 0xF5: self.set_flag(CF, not self.get_flag(CF)); return "cmc"
         if op == 0xF8: self.set_flag(CF, False); return "clc"
         if op == 0xF9: self.set_flag(CF, True); return "stc"
         if op == 0xFC: self.set_flag(DF, False); return "cld"

@@ -434,3 +434,12 @@ def test_selector_translation_lifts_1mb_ceiling():
     mem.load(0x1000, 0x0100, b"\x01\x02\x03")
     assert mem.block(0x1000, 0x0100, 3) == b"\x01\x02\x03"
     assert bytes(mem.data[0x150100:0x150103]) == b"\x01\x02\x03"
+
+
+def test_cmc_toggles_carry():
+    from dos_re.cpu import CF
+    # STC; CMC -> CF cleared; CMC -> CF set again.
+    cpu = run_bytes(bytes.fromhex("f9 f5 f5 f4"), 3)
+    assert cpu.get_flag(CF) is True
+    cpu = run_bytes(bytes.fromhex("f9 f5 f4"), 2)         # STC then CMC
+    assert cpu.get_flag(CF) is False
