@@ -8,6 +8,9 @@ from .memory import Memory, linear
 
 REG16 = ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di"]
 REG8 = ["al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"]
+# Backing 16-bit register per REG8 index (idx >= 4 = the high byte).  Module
+# level so get_reg8/set_reg8 don't rebuild the name by string concat per call.
+_REG8_BASE = ("ax", "cx", "dx", "bx", "ax", "cx", "dx", "bx")
 SREG = ["es", "cs", "ss", "ds"]
 # Segment-override prefix byte -> register name.  Module-level so the hot
 # prefix-decode loop in step() does not rebuild the dict on every instruction.
@@ -67,11 +70,32 @@ class CPUState:
         )
 
 
-@dataclass
 class EffectiveAddress:
-    segment: str
-    offset: int
-    text: str
+    """Decoded r/m effective address.
+
+    ``text`` (the disassembly rendering) is built ON DEMAND: it only feeds
+    trace lines and error messages, and every trace consumer is gated on
+    ``trace_enabled`` — so the hot trace-off path never pays the disp string
+    formatting this used to do eagerly on every memory operand.
+    ``base_text`` is None for the direct-address form ([1234]), else the
+    static "[bx+si]"-style literal; ``disp`` is the signed displacement to
+    render (None when the form has none).
+    """
+    __slots__ = ("segment", "offset", "base_text", "disp")
+
+    def __init__(self, segment: str, offset: int, base_text: str | None, disp: int | None = None) -> None:
+        self.segment = segment
+        self.offset = offset
+        self.base_text = base_text
+        self.disp = disp
+
+    @property
+    def text(self) -> str:
+        if self.base_text is None:
+            return f"[{self.disp:04X}]"
+        if self.disp is None:
+            return self.base_text
+        return self.base_text[:-1] + f"{self.disp:+d}]"
 
 
 class _RegOperand:
@@ -95,30 +119,38 @@ class _RegOperand:
 
 
 class _MemOperand:
-    """Memory r/m operand bound to a decoded effective address."""
-    __slots__ = ("cpu", "segment_name", "offset", "bits", "text")
+    """Memory r/m operand bound to a decoded effective address.
+
+    The segment register VALUE is captured at decode time (one getattr here
+    instead of one per read/write): no 8086 instruction modifies a segment
+    register before accessing its own r/m operand — the only segment writers
+    (MOV sreg / POP sreg / LES / LDS) read the operand first.  ``text`` is a
+    lazy property for the same trace-off reason as EffectiveAddress.
+    """
+    __slots__ = ("cpu", "ea", "segv", "offset", "bits")
 
     def __init__(self, cpu: "CPU8086", ea: EffectiveAddress, bits: int) -> None:
         self.cpu = cpu
-        self.segment_name = ea.segment
+        self.ea = ea
+        self.segv = getattr(cpu.s, ea.segment)
         self.offset = ea.offset
         self.bits = bits
-        self.text = f"{ea.segment}:{ea.text}"
+
+    @property
+    def text(self) -> str:
+        return f"{self.ea.segment}:{self.ea.text}"
 
     def read(self) -> int:
-        segv = getattr(self.cpu.s, self.segment_name)
-        return self.cpu.mem.rb(segv, self.offset) if self.bits == 8 else self.cpu.mem.rw(segv, self.offset)
+        return self.cpu.mem.rb(self.segv, self.offset) if self.bits == 8 else self.cpu.mem.rw(self.segv, self.offset)
 
     def write(self, value: int) -> None:
-        segv = getattr(self.cpu.s, self.segment_name)
         if self.bits == 8:
-            self.cpu.mem.wb(segv, self.offset, value)
+            self.cpu.mem.wb(self.segv, self.offset, value)
         else:
-            self.cpu.mem.ww(segv, self.offset, value)
+            self.cpu.mem.ww(self.segv, self.offset, value)
 
     def read_far(self) -> tuple[int, int]:
-        segv = getattr(self.cpu.s, self.segment_name)
-        return self.cpu.mem.rw(segv, self.offset), self.cpu.mem.rw(segv, (self.offset + 2) & 0xFFFF)
+        return self.cpu.mem.rw(self.segv, self.offset), self.cpu.mem.rw(self.segv, (self.offset + 2) & 0xFFFF)
 
 
 @dataclass
@@ -251,6 +283,34 @@ class CPU8086:
             f |= OF
         self.s.flags = (f | 0x0002) & 0x0FFF
 
+    def set_incdec_flags(self, old: int, res: int, bits: int, *, dec: bool) -> None:
+        """Flags for INC/DEC: ZF/SF/PF/AF/OF from old±1, CF PRESERVED.
+
+        Replaces the get_flag(CF) / set_add_flags / set_flag(CF) dance the
+        INC/DEC forms used (three calls per instruction).  Equivalences to
+        set_add_flags/set_sub_flags with b=1: AF = low nibble 0xF (inc) or 0
+        (dec); OF = result exactly the sign bit (inc 0x7FFF) or old exactly
+        the sign bit (dec 0x8000)."""
+        sign = 1 << (bits - 1)
+        f = self.s.flags & ~0x08D4  # clear PF, AF, ZF, SF, OF — keep CF
+        if res == 0:
+            f |= ZF
+        if res & sign:
+            f |= SF
+        if _PARITY[res & 0xFF]:
+            f |= PF
+        if dec:
+            if (old & 0xF) == 0:
+                f |= AF
+            if old == sign:
+                f |= OF
+        else:
+            if (old & 0xF) == 0xF:
+                f |= AF
+            if res == sign:
+                f |= OF
+        self.s.flags = (f | 0x0002) & 0x0FFF
+
     def get_reg16(self, idx: int) -> int:
         return getattr(self.s, REG16[idx]) & 0xFFFF
 
@@ -258,16 +318,13 @@ class CPU8086:
         setattr(self.s, REG16[idx], value & 0xFFFF)
 
     def get_reg8(self, idx: int) -> int:
-        r = REG8[idx]
-        base = r[0] + "x"
-        v = getattr(self.s, base)
-        return (v >> 8) & 0xFF if r[1] == "h" else v & 0xFF
+        v = getattr(self.s, _REG8_BASE[idx])
+        return (v >> 8) & 0xFF if idx >= 4 else v & 0xFF
 
     def set_reg8(self, idx: int, value: int) -> None:
-        r = REG8[idx]
-        base = r[0] + "x"
+        base = _REG8_BASE[idx]
         cur = getattr(self.s, base)
-        if r[1] == "h":
+        if idx >= 4:
             cur = (cur & 0x00FF) | ((value & 0xFF) << 8)
         else:
             cur = (cur & 0xFF00) | (value & 0xFF)
@@ -338,38 +395,34 @@ class CPU8086:
         return v - 0x10000 if v & 0x8000 else v
 
     def decode_ea(self, mod: int, rm: int, seg_override: str | None = None) -> EffectiveAddress:
-        disp = 0
         if mod == 0 and rm == 6:
             disp = self.fetch16()
-            base = 0
-            text = f"[{disp:04X}]"
-            default_seg = "ds"
+            # base_text=None marks the direct-address form; EffectiveAddress
+            # renders "[%04X]" from disp on demand.
+            return EffectiveAddress(seg_override or "ds", disp & 0xFFFF, None, disp)
+        if rm == 0:
+            base = self.s.bx + self.s.si; text = "[bx+si]"; default_seg = "ds"
+        elif rm == 1:
+            base = self.s.bx + self.s.di; text = "[bx+di]"; default_seg = "ds"
+        elif rm == 2:
+            base = self.s.bp + self.s.si; text = "[bp+si]"; default_seg = "ss"
+        elif rm == 3:
+            base = self.s.bp + self.s.di; text = "[bp+di]"; default_seg = "ss"
+        elif rm == 4:
+            base = self.s.si; text = "[si]"; default_seg = "ds"
+        elif rm == 5:
+            base = self.s.di; text = "[di]"; default_seg = "ds"
+        elif rm == 6:
+            base = self.s.bp; text = "[bp]"; default_seg = "ss"
         else:
-            if rm == 0:
-                base = self.s.bx + self.s.si; text = "[bx+si]"; default_seg = "ds"
-            elif rm == 1:
-                base = self.s.bx + self.s.di; text = "[bx+di]"; default_seg = "ds"
-            elif rm == 2:
-                base = self.s.bp + self.s.si; text = "[bp+si]"; default_seg = "ss"
-            elif rm == 3:
-                base = self.s.bp + self.s.di; text = "[bp+di]"; default_seg = "ss"
-            elif rm == 4:
-                base = self.s.si; text = "[si]"; default_seg = "ds"
-            elif rm == 5:
-                base = self.s.di; text = "[di]"; default_seg = "ds"
-            elif rm == 6:
-                base = self.s.bp; text = "[bp]"; default_seg = "ss"
-            else:
-                base = self.s.bx; text = "[bx]"; default_seg = "ds"
-            if mod == 1:
-                d = self.sign8(self.fetch8())
-                disp = d
-                text = text[:-1] + (f"{d:+d}]")
-            elif mod == 2:
-                d = self.fetch16()
-                disp = self.sign16(d)
-                text = text[:-1] + (f"{disp:+d}]")
-        return EffectiveAddress(seg_override or default_seg, (base + disp) & 0xFFFF, text)
+            base = self.s.bx; text = "[bx]"; default_seg = "ds"
+        if mod == 1:
+            disp = self.sign8(self.fetch8())
+        elif mod == 2:
+            disp = self.sign16(self.fetch16())
+        else:
+            return EffectiveAddress(seg_override or default_seg, base & 0xFFFF, text)
+        return EffectiveAddress(seg_override or default_seg, (base + disp) & 0xFFFF, text, disp)
 
 
     def decode_rm_operand(self, mod: int, rm: int, bits: int, seg_override: str | None = None):
@@ -383,7 +436,8 @@ class CPU8086:
         ea = self.decode_ea(mod, rm, seg_override)
         seg = getattr(self.s, ea.segment)
         v = self.mem.rb(seg, ea.offset) if bits == 8 else self.mem.rw(seg, ea.offset)
-        return v, f"{ea.segment}:{ea.text}"
+        # The text return only feeds trace lines (all gated on trace_enabled).
+        return v, (f"{ea.segment}:{ea.text}" if self.trace_enabled else "")
 
     def write_rm(self, mod: int, rm: int, bits: int, value: int, seg_override: str | None = None) -> str:
         if mod == 3:
@@ -398,7 +452,7 @@ class CPU8086:
             self.mem.wb(seg, ea.offset, value)
         else:
             self.mem.ww(seg, ea.offset, value)
-        return f"{ea.segment}:{ea.text}"
+        return f"{ea.segment}:{ea.text}" if self.trace_enabled else ""
 
     def peek_modrm(self) -> tuple[int, int, int, int]:
         m = self.fetch8()
@@ -451,8 +505,25 @@ class CPU8086:
 
         seg_override: str | None = None
         rep: int | None = None
+        mem = self.mem
         while True:
-            op = self.fetch8()
+            # Inline of fetch8()'s fast path (same branches, same semantics):
+            # saves one method-call frame on every instruction executed.
+            off = s.ip & 0xFFFF
+            sb = mem.sel_base
+            if sb is not None:
+                seg = s.cs & 0xFFFF
+                if seg >= mem.sel_min:
+                    base = sb.get(seg)
+                    op = mem.data[base + off] if base is not None \
+                        else mem.data[(seg << 4) + off]
+                else:
+                    op = mem.data[(seg << 4) + off]
+            elif not mem.ega_planar:
+                op = mem.data[(((s.cs & 0xFFFF) << 4) + off) & 0xFFFFF]
+            else:
+                op = mem.rb(s.cs, off)
+            s.ip = (off + 1) & 0xFFFF
             if op == 0x26 or op == 0x2E or op == 0x36 or op == 0x3E:
                 seg_override = _SEG_OVERRIDE[op]
                 continue
@@ -824,6 +895,95 @@ class CPU8086:
             # which is not what the not-taken case means (regression fix ported
             # from overkill_port, reintroduced when this path was hoisted for perf).
             return T and f"{JCC_NAMES[op & 0xF]} -> {s.cs:04X}:{target:04X} {'taken' if take else 'not'}"
+        # Shift/rotate group 2 (hoisted: ~20%+ of real workloads — codec loops)
+        if op in (0xC0,0xC1,0xD0,0xD1,0xD2,0xD3):
+            bits = 8 if op in (0xC0,0xD0,0xD2) else 16
+            _, mod, reg, rm = self.peek_modrm()
+            operand = self.decode_rm_operand(mod, rm, bits, seg_override)
+            if op in (0xD0,0xD1):
+                count = 1
+            elif op in (0xD2,0xD3):
+                count = s.cx & 0xFF
+            else:
+                count = self.fetch8()
+            val = operand.read()
+            res = self.shift(reg, val, count, bits)
+            operand.write(res)
+            return T and f"shift/{reg} {operand.text},{count}"
+        # Arithmetic r/m with reg, directions 00-03,08-0B,10-13,18-1B,20-23,28-2B,30-33,38-3B (hoisted)
+        if op < 0x40 and (op & 0x04) == 0 and (op & 0x07) in (0,1,2,3):
+            group = (op >> 3) & 7
+            bits = 8 if (op & 1) == 0 else 16
+            direction_to_reg = bool(op & 2)
+            _, mod, reg, rm = self.peek_modrm()
+            operand = self.decode_rm_operand(mod, rm, bits, seg_override)
+            rmv = operand.read()
+            regv = self.get_reg8(reg) if bits == 8 else self.get_reg16(reg)
+            if direction_to_reg:
+                res, name = self.alu(group, regv, rmv, bits, write=False)
+                if group != 7:
+                    if bits == 8: self.set_reg8(reg, res)
+                    else: self.set_reg16(reg, res)
+                return T and f"{name} {REG8[reg] if bits==8 else REG16[reg]},{operand.text}"
+            res, name = self.alu(group, rmv, regv, bits, write=False)
+            if group != 7:
+                operand.write(res)
+            return T and f"{name} {operand.text},{REG8[reg] if bits==8 else REG16[reg]}"
+        # Group FE/FF: INC/DEC r/m + indirect call/jmp/push (hoisted)
+        if op in (0xFE, 0xFF):
+            bits = 8 if op == 0xFE else 16
+            _, mod, reg, rm = self.peek_modrm()
+            if reg in (0,1):
+                operand = self.decode_rm_operand(mod, rm, bits, seg_override)
+                old = operand.read()
+                if reg == 0:
+                    res = (old + 1) & ((1 << bits)-1); self.set_incdec_flags(old, res, bits, dec=False); opn = "inc"
+                else:
+                    res = (old - 1) & ((1 << bits)-1); self.set_incdec_flags(old, res, bits, dec=True); opn = "dec"
+                operand.write(res); return T and f"{opn} {operand.text}"
+            if op == 0xFF and reg == 2:
+                operand = self.decode_rm_operand(mod, rm, 16, seg_override); target = operand.read(); self.push(s.ip); s.ip = target; return T and f"call {operand.text}"
+            if op == 0xFF and reg == 3:
+                if mod == 3:
+                    raise UnsupportedInstruction("far indirect call requires memory operand")
+                operand = self.decode_rm_operand(mod, rm, 16, seg_override)
+                off, farseg = operand.read_far()
+                self.push(s.cs); self.push(s.ip); s.cs = farseg; s.ip = off
+                return T and f"call far {operand.text}"
+            if op == 0xFF and reg == 4:
+                operand = self.decode_rm_operand(mod, rm, 16, seg_override); target = operand.read(); s.ip = target; return T and f"jmp {operand.text}"
+            if op == 0xFF and reg == 5:
+                if mod == 3:
+                    raise UnsupportedInstruction("far indirect jmp requires memory operand")
+                operand = self.decode_rm_operand(mod, rm, 16, seg_override)
+                off, farseg = operand.read_far()
+                s.cs = farseg; s.ip = off
+                return T and f"jmp far {operand.text} -> {farseg:04X}:{off:04X}"
+            if op == 0xFF and reg == 6:
+                operand = self.decode_rm_operand(mod, rm, 16, seg_override); val = operand.read(); self.push(val); return T and f"push {operand.text}"
+            raise UnsupportedInstruction(f"group FE/FF /{reg}")
+        # CALL/RET/LOOP/JMP short + string ops (hoisted control-flow tail)
+        if op == 0xE8:
+            rel = self.sign16(self.fetch16())
+            ret = s.ip
+            target = (s.ip + rel) & 0xFFFF
+            self.push(ret)
+            s.ip = target
+            self.call_depth += 1
+            return T and f"call near -> {s.cs:04X}:{target:04X} ret={ret:04X}"
+        if op == 0xC3:
+            target = self.pop(); s.ip = target; self.call_depth = max(0, self.call_depth - 1); return T and f"ret near -> {s.cs:04X}:{target:04X}"
+        if op in (0xE0, 0xE1, 0xE2):
+            rel = self.sign8(self.fetch8()); s.cx = (s.cx - 1) & 0xFFFF
+            take = s.cx != 0 and (op == 0xE2 or (op == 0xE1 and self.get_flag(ZF)) or (op == 0xE0 and not self.get_flag(ZF)))
+            target = (s.ip + rel) & 0xFFFF
+            if take: s.ip = target
+            name = {0xE0: 'loopne', 0xE1: 'loope', 0xE2: 'loop'}[op]
+            return T and f"{name} -> {s.cs:04X}:{target:04X} {'taken' if take else 'not'} cx={s.cx:04X}"
+        if op == 0xEB:
+            rel = self.sign8(self.fetch8()); target = (s.ip + rel) & 0xFFFF; s.ip = target; return T and f"jmp short -> {s.cs:04X}:{target:04X}"
+        if op in (0x6C, 0x6D, 0x6E, 0x6F, 0xA4, 0xA5, 0xA6, 0xA7, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF):
+            return self.string_op(op, rep, seg_override)
         if op in (0x86, 0x87):                          # XCHG r/m, reg
             bits = 8 if op == 0x86 else 16
             _, mod, reg, rm = self.peek_modrm(); operand = self.decode_rm_operand(mod, rm, bits, seg_override)
@@ -843,9 +1003,9 @@ class CPU8086:
             else: self.set_reg16(reg, val)
             return T and f"mov {REG8[reg] if bits == 8 else REG16[reg]},{operand.text}"
         if 0x40 <= op <= 0x47:                          # INC r16
-            reg = op - 0x40; old = self.get_reg16(reg); res = (old + 1) & 0xFFFF; old_cf = self.get_flag(CF); self.set_add_flags(old,1,old+1,16); self.set_flag(CF, old_cf); self.set_reg16(reg,res); return T and f"inc {REG16[reg]}"
+            reg = op - 0x40; old = self.get_reg16(reg); res = (old + 1) & 0xFFFF; self.set_incdec_flags(old, res, 16, dec=False); self.set_reg16(reg,res); return T and f"inc {REG16[reg]}"
         if 0x48 <= op <= 0x4F:                          # DEC r16
-            reg = op - 0x48; old = self.get_reg16(reg); res = (old - 1) & 0xFFFF; old_cf = self.get_flag(CF); self.set_sub_flags(old,1,old-1,16); self.set_flag(CF, old_cf); self.set_reg16(reg,res); return T and f"dec {REG16[reg]}"
+            reg = op - 0x48; old = self.get_reg16(reg); res = (old - 1) & 0xFFFF; self.set_incdec_flags(old, res, 16, dec=True); self.set_reg16(reg,res); return T and f"dec {REG16[reg]}"
         # MOV immediate to register
         if 0xB0 <= op <= 0xB7:
             reg = op - 0xB0; imm = self.fetch8(); self.set_reg8(reg, imm); return T and f"mov {REG8[reg]},{imm:02X}h"
@@ -940,25 +1100,7 @@ class CPU8086:
                 else: s.ax = res & 0xFFFF
             return T and f"{name} {'al' if bits == 8 else 'ax'},{imm:0{bits//4}X}h"
 
-        # Arithmetic r/m with reg, directions 00-03,08-0B,10-13,18-1B,20-23,28-2B,30-33,38-3B
-        if op < 0x40 and (op & 0x04) == 0 and (op & 0x07) in (0,1,2,3):
-            group = (op >> 3) & 7
-            bits = 8 if (op & 1) == 0 else 16
-            direction_to_reg = bool(op & 2)
-            _, mod, reg, rm = self.peek_modrm()
-            operand = self.decode_rm_operand(mod, rm, bits, seg_override)
-            rmv = operand.read()
-            regv = self.get_reg8(reg) if bits == 8 else self.get_reg16(reg)
-            if direction_to_reg:
-                res, name = self.alu(group, regv, rmv, bits, write=False)
-                if group != 7:
-                    if bits == 8: self.set_reg8(reg, res)
-                    else: self.set_reg16(reg, res)
-                return T and f"{name} {REG8[reg] if bits==8 else REG16[reg]},{operand.text}"
-            res, name = self.alu(group, rmv, regv, bits, write=False)
-            if group != 7:
-                operand.write(res)
-            return T and f"{name} {operand.text},{REG8[reg] if bits==8 else REG16[reg]}"
+        # (Arithmetic r/m-with-reg is hoisted into the fast path above.)
 
         # Group 1 immediate to r/m
         if op in (0x80, 0x81, 0x82, 0x83):
@@ -975,39 +1117,7 @@ class CPU8086:
                 operand.write(res)
             return T and f"{name} {operand.text},{imm:0{bits//4}X}h"
 
-        # INC/DEC r16 (0x40-0x4F) are hoisted into the fast path above.
-        if op in (0xFE, 0xFF):
-            bits = 8 if op == 0xFE else 16
-            _, mod, reg, rm = self.peek_modrm()
-            if reg in (0,1):
-                operand = self.decode_rm_operand(mod, rm, bits, seg_override)
-                old = operand.read()
-                if reg == 0:
-                    res = (old + 1) & ((1 << bits)-1); old_cf = self.get_flag(CF); self.set_add_flags(old,1,old+1,bits); self.set_flag(CF, old_cf); opn = "inc"
-                else:
-                    res = (old - 1) & ((1 << bits)-1); old_cf = self.get_flag(CF); self.set_sub_flags(old,1,old-1,bits); self.set_flag(CF, old_cf); opn = "dec"
-                operand.write(res); return T and f"{opn} {operand.text}"
-            if op == 0xFF and reg == 2:
-                operand = self.decode_rm_operand(mod, rm, 16, seg_override); target = operand.read(); self.push(s.ip); s.ip = target; return T and f"call {operand.text}"
-            if op == 0xFF and reg == 3:
-                if mod == 3:
-                    raise UnsupportedInstruction("far indirect call requires memory operand")
-                operand = self.decode_rm_operand(mod, rm, 16, seg_override)
-                off, farseg = operand.read_far()
-                self.push(s.cs); self.push(s.ip); s.cs = farseg; s.ip = off
-                return T and f"call far {operand.text}"
-            if op == 0xFF and reg == 4:
-                operand = self.decode_rm_operand(mod, rm, 16, seg_override); target = operand.read(); s.ip = target; return T and f"jmp {operand.text}"
-            if op == 0xFF and reg == 5:
-                if mod == 3:
-                    raise UnsupportedInstruction("far indirect jmp requires memory operand")
-                operand = self.decode_rm_operand(mod, rm, 16, seg_override)
-                off, farseg = operand.read_far()
-                s.cs = farseg; s.ip = off
-                return T and f"jmp far {operand.text} -> {farseg:04X}:{off:04X}"
-            if op == 0xFF and reg == 6:
-                operand = self.decode_rm_operand(mod, rm, 16, seg_override); val = operand.read(); self.push(val); return T and f"push {operand.text}"
-            raise UnsupportedInstruction(f"group FE/FF /{reg}")
+        # (INC/DEC r16 and the FE/FF group are hoisted into the fast path above.)
 
         # TEST/XCHG/LEA
         if op in (0x84, 0x85):
@@ -1043,15 +1153,7 @@ class CPU8086:
                 return T and f"xchg ax,{REG16[reg]}"
             return T and "nop"
 
-        # Control flow
-        if op == 0xE8:
-            rel = self.sign16(self.fetch16())
-            ret = s.ip
-            target = (s.ip + rel) & 0xFFFF
-            self.push(ret)
-            s.ip = target
-            self.call_depth += 1
-            return T and f"call near -> {s.cs:04X}:{target:04X} ret={ret:04X}"
+        # Control flow (CALL near / RET near / LOOPcc / JMP short are hoisted above)
         if op == 0x9A:
             off = self.fetch16(); seg = self.fetch16(); ret_cs, ret_ip = s.cs, s.ip
             self.push(ret_cs); self.push(ret_ip); s.cs = seg; s.ip = off
@@ -1059,12 +1161,8 @@ class CPU8086:
             return T and f"call far -> {seg:04X}:{off:04X} ret={ret_cs:04X}:{ret_ip:04X}"
         if op == 0xE9:
             rel = self.sign16(self.fetch16()); target = (s.ip + rel) & 0xFFFF; s.ip = target; return T and f"jmp near -> {s.cs:04X}:{target:04X}"
-        if op == 0xEB:
-            rel = self.sign8(self.fetch8()); target = (s.ip + rel) & 0xFFFF; s.ip = target; return T and f"jmp short -> {s.cs:04X}:{target:04X}"
         if op == 0xEA:
             off = self.fetch16(); seg = self.fetch16(); s.cs = seg; s.ip = off; return T and f"jmp far -> {seg:04X}:{off:04X}"
-        if op == 0xC3:
-            target = self.pop(); s.ip = target; self.call_depth = max(0, self.call_depth - 1); return T and f"ret near -> {s.cs:04X}:{target:04X}"
         if op == 0xC2:
             n = self.fetch16(); target = self.pop(); s.ip = target; s.sp = (s.sp + n) & 0xFFFF; self.call_depth = max(0, self.call_depth - 1); return T and f"ret near {n} -> {s.cs:04X}:{target:04X}"
         if op == 0xCB:
@@ -1093,22 +1191,13 @@ class CPU8086:
             target_ip = self.pop(); target_cs = self.pop(); s.flags = self.pop() | 0x0002
             s.ip = target_ip; s.cs = target_cs; self.call_depth = max(0, self.call_depth - 1)
             return T and f"iret -> {target_cs:04X}:{target_ip:04X}"
-        if op in (0xE0, 0xE1, 0xE2):
-            rel = self.sign8(self.fetch8()); s.cx = (s.cx - 1) & 0xFFFF
-            take = s.cx != 0 and (op == 0xE2 or (op == 0xE1 and self.get_flag(ZF)) or (op == 0xE0 and not self.get_flag(ZF)))
-            target = (s.ip + rel) & 0xFFFF
-            if take: s.ip = target
-            name = {0xE0: 'loopne', 0xE1: 'loope', 0xE2: 'loop'}[op]
-            return T and f"{name} -> {s.cs:04X}:{target:04X} {'taken' if take else 'not'} cx={s.cx:04X}"
         if op == 0xE3:
             rel = self.sign8(self.fetch8()); take = s.cx == 0
             target = (s.ip + rel) & 0xFFFF
             if take: s.ip = target
             return T and f"jcxz -> {s.cs:04X}:{target:04X} {'taken' if take else 'not'}"
 
-        # String operations
-        if op in (0x6C, 0x6D, 0x6E, 0x6F, 0xA4, 0xA5, 0xA6, 0xA7, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF):
-            return self.string_op(op, rep, seg_override)
+        # (String operations are hoisted into the fast path above.)
 
         if op == 0xD7:  # XLAT
             seg = getattr(s, seg_override or "ds")
@@ -1136,21 +1225,7 @@ class CPU8086:
             self.set_flag(PF, self.parity(al))
             return T and "daa"
 
-        # Shift/rotate group 2
-        if op in (0xC0,0xC1,0xD0,0xD1,0xD2,0xD3):
-            bits = 8 if op in (0xC0,0xD0,0xD2) else 16
-            _, mod, reg, rm = self.peek_modrm()
-            operand = self.decode_rm_operand(mod, rm, bits, seg_override)
-            if op in (0xD0,0xD1):
-                count = 1
-            elif op in (0xD2,0xD3):
-                count = s.cx & 0xFF
-            else:
-                count = self.fetch8()
-            val = operand.read()
-            res = self.shift(reg, val, count, bits)
-            operand.write(res)
-            return T and f"shift/{reg} {operand.text},{count}"
+        # (Shift/rotate group 2 is hoisted into the fast path above.)
 
         # Flag and misc
         if op == 0xF5: self.set_flag(CF, not self.get_flag(CF)); return T and "cmc"
@@ -1388,44 +1463,83 @@ class CPU8086:
         return ("rep " if rep else "") + names[op] + (f" ; {done}" if rep else "")
 
     def shift(self, group: int, val: int, count: int, bits: int) -> int:
+        # Closed-form shifts/rotates (this used to be a per-bit loop with a
+        # set_flag call per iteration — SHL AX,8 cost 8 iterations; codec-heavy
+        # code like the SQZ/LZS decoders spends a large share of its time here).
+        # Each formula reproduces exactly what the bit-loop left in the result
+        # and in CF; the regression gate is a byte-exact digest of multi-million
+        # instruction runs of real games plus the loop-vs-closed-form fuzz test.
         mask = (1 << bits) - 1
         count &= 0x1F
         res = val & mask
         if count == 0:
             return res
         orig = res
-        is_rotate = group in (0, 1, 2, 3)
-        for _ in range(count):
-            if group == 4:  # shl/sal
-                self.set_flag(CF, bool(res & (1 << (bits-1))))
-                res = (res << 1) & mask
-            elif group == 5:  # shr
-                self.set_flag(CF, bool(res & 1))
-                res >>= 1
-            elif group == 7:  # sar
-                self.set_flag(CF, bool(res & 1))
-                res = (res >> 1) | (res & (1 << (bits-1)))
-            elif group == 0:  # rol
-                c = bool(res & (1 << (bits-1))); res = ((res << 1) & mask) | (1 if c else 0); self.set_flag(CF,c)
-            elif group == 1:  # ror
-                c = bool(res & 1); res = (res >> 1) | ((1 << (bits-1)) if c else 0); self.set_flag(CF,c)
-            elif group == 2:  # rcl
-                old_cf = 1 if self.get_flag(CF) else 0
-                new_cf = bool(res & (1 << (bits-1)))
-                res = ((res << 1) & mask) | old_cf
-                self.set_flag(CF, new_cf)
-            elif group == 3:  # rcr
-                old_cf = 1 if self.get_flag(CF) else 0
-                new_cf = bool(res & 1)
-                res = (res >> 1) | (old_cf << (bits-1))
-                self.set_flag(CF, new_cf)
+        f = self.s.flags
+        if group == 4:      # shl/sal — CF = last bit shifted out = bit(bits-count)
+            if count <= bits:
+                cf = (orig >> (bits - count)) & 1
+                res = (orig << count) & mask
             else:
-                raise UnsupportedInstruction(f"unsupported shift group /{group}")
+                cf = 0
+                res = 0
+        elif group == 5:    # shr — CF = last bit shifted out = bit(count-1)
+            if count <= bits:
+                cf = (orig >> (count - 1)) & 1
+                res = orig >> count
+            else:
+                cf = 0
+                res = 0
+        elif group == 7:    # sar — shifts in copies of the sign bit
+            sign = (orig >> (bits - 1)) & 1
+            if count >= bits:
+                res = mask if sign else 0
+                cf = sign
+            else:
+                cf = (orig >> (count - 1)) & 1
+                sval = orig - (1 << bits) if sign else orig
+                res = (sval >> count) & mask
+        elif group == 0:    # rol — CF = bit rotated into the lsb on the last step
+            n = count % bits
+            if n:
+                res = ((orig << n) | (orig >> (bits - n))) & mask
+            cf = res & 1
+        elif group == 1:    # ror — CF = bit rotated into the msb on the last step
+            n = count % bits
+            if n:
+                res = ((orig >> n) | (orig << (bits - n))) & mask
+            cf = (res >> (bits - 1)) & 1
+        elif group == 2:    # rcl — rotate through CF: a (bits+1)-wide rotation
+            width = bits + 1
+            n = count % width
+            combined = ((f & CF) << bits) | orig
+            if n:
+                combined = ((combined << n) | (combined >> (width - n))) & ((1 << width) - 1)
+            res = combined & mask
+            cf = (combined >> bits) & 1
+        elif group == 3:    # rcr — the right rotation of the same (bits+1) value
+            width = bits + 1
+            n = count % width
+            combined = ((f & CF) << bits) | orig
+            if n:
+                combined = ((combined >> n) | (combined << (width - n))) & ((1 << width) - 1)
+            res = combined & mask
+            cf = (combined >> bits) & 1
+        else:
+            raise UnsupportedInstruction(f"unsupported shift group /{group}")
+
+        f = (f & ~CF) | cf
         # Rotates only define CF and, for count=1, OF. They do not update ZF/SF/PF.
         # The PRE2 SQZ decoder relies on CF flowing through SHR/RCL chains, so
         # touching the normal arithmetic flags here corrupts compressed streams.
-        if not is_rotate:
-            self.set_flag(ZF, res == 0); self.set_flag(SF, bool(res & (1 << (bits-1)))); self.set_flag(PF, self.parity(res))
+        if group in (4, 5, 7):
+            f &= ~(ZF | SF | PF)
+            if res == 0:
+                f |= ZF
+            if res & (1 << (bits - 1)):
+                f |= SF
+            if _PARITY[res & 0xFF]:
+                f |= PF
         # OF is only architecturally defined for a 1-bit shift/rotate (undefined for
         # other counts, so we leave it untouched there).  Drives JO/JG/JL/JGE/JLE.
         if count == 1:
@@ -1439,10 +1553,14 @@ class CPU8086:
             elif group == 0:    # rol: OF = msb ^ new lsb (= new CF)
                 of = msb ^ (res & 1)
             elif group == 2:    # rcl: OF = msb ^ new CF
-                of = msb ^ (1 if self.get_flag(CF) else 0)
+                of = msb ^ cf
             else:               # ror / rcr: OF = top two bits of result differ
                 of = msb ^ ((res >> (bits - 2)) & 1)
-            self.set_flag(OF, bool(of))
+            if of:
+                f |= OF
+            else:
+                f &= ~OF
+        self.s.flags = (f | 0x0002) & 0x0FFF
         return res & mask
 
     def last_ea_offset(self, mod: int, rm: int) -> int:
