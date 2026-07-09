@@ -506,6 +506,13 @@ def test_selector_translation_lifts_1mb_ceiling():
     mem.load(0x1000, 0x0100, b"\x01\x02\x03")
     assert mem.block(0x1000, 0x0100, 3) == b"\x01\x02\x03"
     assert bytes(mem.data[0x150100:0x150103]) == b"\x01\x02\x03"
+    # RPL bits are ignored for descriptor resolution: an alias selector (same
+    # index + TI, different RPL) hits the same mapping.  Win16 huge-pointer
+    # arithmetic flips RPL bits, so 0x1002 (0x1000 with RPL 2) must resolve to
+    # the same linear block as 0x1000 — not fall through to real-mode.
+    mem.ww(0x1002, 0x0020, 0x1234)
+    assert mem.rw(0x1000, 0x0020) == 0x1234 and mem.data[0x150020] == 0x34
+    assert mem._xlat(0x1003, 0x0020) == mem._xlat(0x1000, 0x0020)
 
 
 def test_cmc_toggles_carry():

@@ -178,10 +178,17 @@ class Memory:
     # byte access is always in range; word accesses wrap at the 1 MB boundary like
     # real-mode hardware instead of raising.
     def _xlat(self, seg: int, off: int) -> int:
-        """Selector/real-mode -> linear.  Only reached when sel_base is set."""
+        """Selector/real-mode -> linear.  Only reached when sel_base is set.
+
+        The low 2 bits of a selector are its RPL, which the hardware IGNORES
+        when resolving the descriptor (index + TI select the segment; RPL only
+        gates privilege).  So sel_base is keyed by descriptor (`sel & 0xFFFC`)
+        and every lookup masks the RPL off — Win16 huge-pointer arithmetic
+        routinely flips RPL bits (a sign-extended offset can decrement the
+        selector), and all such aliases must resolve to the same block."""
         seg &= 0xFFFF
         if seg >= self.sel_min:
-            base = self.sel_base.get(seg)
+            base = self.sel_base.get(seg & 0xFFFC)
             if base is not None:
                 return base + (off & 0xFFFF)
         return (seg << 4) + (off & 0xFFFF)
@@ -191,7 +198,7 @@ class Memory:
         if sb is not None:
             seg &= 0xFFFF
             if seg >= self.sel_min:
-                base = sb.get(seg)
+                base = sb.get(seg & 0xFFFC)     # RPL-agnostic (see _xlat)
                 if base is not None:
                     return self.data[base + (off & 0xFFFF)]
             return self.data[(seg << 4) + (off & 0xFFFF)]
@@ -227,7 +234,7 @@ class Memory:
             seg &= 0xFFFF
             a = None
             if seg >= self.sel_min:
-                base = sb.get(seg)
+                base = sb.get(seg & 0xFFFC)     # RPL-agnostic (see _xlat)
                 if base is not None:
                     a = base + (off & 0xFFFF)
             if a is None:
@@ -254,7 +261,7 @@ class Memory:
             seg &= 0xFFFF
             a = None
             if seg >= self.sel_min:
-                base = sb.get(seg)
+                base = sb.get(seg & 0xFFFC)     # RPL-agnostic (see _xlat)
                 if base is not None:
                     a = base + (off & 0xFFFF)
             if a is None:
@@ -288,7 +295,7 @@ class Memory:
             seg &= 0xFFFF
             a = None
             if seg >= self.sel_min:
-                base = sb.get(seg)
+                base = sb.get(seg & 0xFFFC)     # RPL-agnostic (see _xlat)
                 if base is not None:
                     a = base + (off & 0xFFFF)
             if a is None:
