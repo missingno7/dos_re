@@ -26,6 +26,7 @@ SREG = ["es", "cs", "ss", "ds"]
 # prefix-decode loop in step() does not rebuild the dict on every instruction.
 _SEG_OVERRIDE = {0x26: "es", 0x2E: "cs", 0x36: "ss", 0x3E: "ds"}
 JCC_NAMES = ["jo", "jno", "jb", "jnb", "jz", "jnz", "jbe", "ja", "js", "jns", "jp", "jnp", "jl", "jge", "jle", "jg"]
+_ALU_NAMES = ("add", "or", "adc", "sbb", "and", "sub", "xor", "cmp")
 
 CF = 0x0001
 PF = 0x0004
@@ -438,12 +439,33 @@ class CPU8086:
             base = self.s.bp; text = "[bp]"; default_seg = "ss"
         else:
             base = self.s.bx; text = "[bx]"; default_seg = "ds"
+        if mod == 0:
+            return EffectiveAddress(seg_override or default_seg, base & 0xFFFF, text)
+        # Inline the displacement fetch (fetch8/fetch16 fast path): one call
+        # frame per displacement-carrying memory operand.
+        s = self.s
+        mem = self.mem
+        if mem.sel_base is None:
+            ip = s.ip & 0xFFFF
+            cs_base = ((s.cs & 0xFFFF) << 4) & 0xFFFFF
+            a0 = (cs_base + ip) & 0xFFFFF
+            direct = not mem.ega_planar or a0 < EGA_CPU_APERTURE or a0 >= _EGA_WINDOW_END
+            if direct and mod == 1:
+                d = mem.data[a0]
+                s.ip = (ip + 1) & 0xFFFF
+                disp = d - 0x100 if d & 0x80 else d
+                return EffectiveAddress(seg_override or default_seg, (base + disp) & 0xFFFF, text, disp)
+            a1 = (cs_base + ((ip + 1) & 0xFFFF)) & 0xFFFFF
+            if direct and mod == 2 and (
+                    not mem.ega_planar or a1 < EGA_CPU_APERTURE or a1 >= _EGA_WINDOW_END):
+                d = mem.data[a0] | (mem.data[a1] << 8)
+                s.ip = (ip + 2) & 0xFFFF
+                disp = d - 0x10000 if d & 0x8000 else d
+                return EffectiveAddress(seg_override or default_seg, (base + disp) & 0xFFFF, text, disp)
         if mod == 1:
             disp = self.sign8(self.fetch8())
-        elif mod == 2:
-            disp = self.sign16(self.fetch16())
         else:
-            return EffectiveAddress(seg_override or default_seg, base & 0xFFFF, text)
+            disp = self.sign16(self.fetch16())
         return EffectiveAddress(seg_override or default_seg, (base + disp) & 0xFFFF, text, disp)
 
 
@@ -477,7 +499,21 @@ class CPU8086:
         return f"{ea.segment}:{ea.text}" if self.trace_enabled else ""
 
     def peek_modrm(self) -> tuple[int, int, int, int]:
-        m = self.fetch8()
+        # Inline of fetch8()'s fast path: this runs once per r/m instruction
+        # (~half of all instructions), so the extra call frame was measurable.
+        s = self.s
+        off = s.ip & 0xFFFF
+        mem = self.mem
+        sb = mem.sel_base
+        if sb is not None:
+            m = self.fetch8()
+            return m, (m >> 6) & 3, (m >> 3) & 7, m & 7
+        a = (((s.cs & 0xFFFF) << 4) + off) & 0xFFFFF
+        if not mem.ega_planar or a < EGA_CPU_APERTURE or a >= _EGA_WINDOW_END:
+            m = mem.data[a]
+        else:
+            m = mem.rb(s.cs, off)
+        s.ip = (off + 1) & 0xFFFF
         return m, (m >> 6) & 3, (m >> 3) & 7, m & 7
 
     def _enter_hardware_interrupt(self, irq: int) -> None:
@@ -1366,7 +1402,7 @@ class CPU8086:
 
     def alu(self, group: int, a: int, b: int, bits: int, write: bool) -> tuple[int, str]:
         mask = (1 << bits) - 1
-        names = ["add", "or", "adc", "sbb", "and", "sub", "xor", "cmp"]
+        names = _ALU_NAMES
         if group == 0:
             res = a + b; self.set_add_flags(a,b,res,bits)
         elif group == 1:
