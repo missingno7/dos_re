@@ -4,12 +4,12 @@ The interpreter is pure Python by design (stdlib-only core, hookable at any
 CS:IP, byte-exact verifiable). That means the two biggest speedups are *free*
 — they come from how you run it, not from changing it.
 
-## 1. Run headless workloads under PyPy (~13–17x interpretation)
+## 1. Run under PyPy (~13–17x interpretation; ~2x the live viewer)
 
-The core never imports anything outside the stdlib, so any headless path —
-oracle runs, hook verification, demo replay, the test suites — runs unchanged
-under [PyPy](https://pypy.org). Measured (PyPy 3.11 v7.3.20 vs CPython 3.11,
-Windows, 20M-instruction steady state):
+The core never imports anything outside the stdlib, so every path — oracle
+runs, hook verification, demo replay, the test suites, **and the live
+viewer** — runs unchanged under [PyPy](https://pypy.org). Measured (PyPy 3.11
+v7.3.20 vs CPython 3.11, Windows, 20M-instruction steady state):
 
 | Workload | CPython | PyPy | speedup |
 |---|---|---|---|
@@ -18,22 +18,57 @@ Windows, 20M-instruction steady state):
 | dos_re test suite | ~11s | 2.75s | 4x |
 | overkill_port test suite (verify-heavy) | 4m17s | 1m35s | 2.7x |
 | pre2_port test suite | 24s | 15s | 1.6x |
+| SkyRoads live viewer, 1200 frames | 2m35s | 1m14s | **2.1x** |
 
 (Suites gain less than raw interpretation because fixture/boot overhead and
 numpy-bound tests don't JIT; long verify sweeps and oracle runs gain the most.
 The JIT needs ~1–2M instructions of warmup before reaching steady state.)
 
 Setup (Windows): `winget install PyPy.PyPy.3.11`, then
-`pypy -m ensurepip && pypy -m pip install pytest pytest-xdist numpy`.
-numpy ships PyPy 3.11 wheels; **pygame does not** — the live viewer
-(`scripts/play.py` without `--headless`) stays on CPython. `--headless` runs,
-demo replay/record, and every verifier work under PyPy.
+`pypy -m ensurepip && pypy -m pip install pytest pytest-xdist numpy pygame-ce`.
 
-Two interpreters means two installs resolve `dos_re`: CPython uses the pip
-editable install; PyPy resolves through the port's own `sys.path` header
-(`ROOT/dos_re` — the submodule repo root). Port entry-point scripts must keep
-that header (see template_dos_port/scripts/play.py); relying on the editable
-install alone breaks any interpreter that lacks it.
+**Use `pygame-ce`, not `pygame`** — the community fork ships PyPy 3.11 wheels
+(upstream pygame has none and fails to build from source). It is a drop-in
+replacement: same `import pygame`, and `pygame._sdl2` works, so
+`dos_re.display`'s GPU present path is available. numpy also has PyPy wheels.
+
+### Why the viewer only gains ~2x when raw interpretation gains ~17x
+
+Neither pygame nor numpy is the bottleneck — measured per presented frame:
+`Display.draw_game()` + `flip()` is **0.42 ms** and `decode_frame_default()`
+is **0.78 ms**, essentially identical on both interpreters. The VM is the
+cost, and the viewer calls `cpu.run()` in small per-frame slices
+(`--steps-per-frame`, e.g. 30k) with a Python/pygame boundary crossing
+between each. That chunking gives the tracing JIT far less to work with than
+one long uninterrupted `cpu.run()`, so the viewer lands at ~2x rather than
+~17x. Per-frame VM cost still drops sharply (SkyRoads steady-state idle loop:
+**57.4 ms → 12.7 ms**), which is the difference between missing and making a
+16.7 ms 60 Hz frame budget.
+
+### The `sys.path` requirement (bites every entry-point script)
+
+Two interpreters means two ways `dos_re` resolves: CPython finds it via the
+pip editable install; PyPy has none, so it resolves through the script's own
+`sys.path` header. **Every entry-point script that imports `dos_re` must
+insert the submodule repo root**, one level above the package:
+
+```python
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "dos_re"))   # submodule repo root; the package is dos_re/dos_re/
+```
+
+Without it the script works on CPython and dies on PyPy with a confusing
+`ModuleNotFoundError: No module named 'dos_re.cpu'` (the bare submodule dir
+is picked up as an empty namespace package). This silently affected 26
+scripts across the ports until the 2026-07-09 PyPy trial surfaced it. To
+audit a port:
+
+```bash
+for f in scripts/*.py tools/*.py; do
+  grep -qE '^\s*(from|import) dos_re' "$f" && ! grep -q 'dos_re"' "$f" && echo "MISSING: $f"
+done
+```
 
 ## 2. Parallelize suites with pytest-xdist (`-n auto`)
 
@@ -51,8 +86,9 @@ test dominates the critical path. Measured locally (CPython, 24 threads):
 **xdist and PyPy do NOT compose well for suites**: every PyPy worker re-pays
 JIT warmup, so overkill under `pypy -n auto` is 1m27s — slower than
 CPython+xdist (56s). Rule of thumb: **CPython + `-n auto` for suites; PyPy
-serial for long single-process runs** (verify sweeps, oracle runs, probes,
-headless replay), where the 13-17x interpretation speedup dwarfs everything.
+serial for everything else** — long single-process runs (verify sweeps,
+oracle runs, probes, headless replay), where the 13-17x dwarfs everything,
+and the live viewer, where it is worth a steady ~2x.
 
 ## 3. If you change the interpreter itself: the equivalence gate
 

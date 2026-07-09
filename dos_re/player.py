@@ -42,6 +42,7 @@ The worked example a new port starts from: ``template_dos_port/scripts/play.py``
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -482,8 +483,20 @@ def run_headless(frontend: GameFrontend, rt, args) -> int:
 def run_view(frontend: GameFrontend, rt, args,
              playback: InputDemoPlayback | None = None) -> int:
     """The live pygame viewer: hybrid play, demo record/replay, F10/F11/F12."""
-    import numpy as np
-    import pygame
+    try:
+        import numpy as np
+        import pygame
+    except ImportError as exc:  # the viewer extras; the headless paths need neither
+        missing = exc.name or "numpy/pygame"
+        hint = ("pip install numpy pygame" if "pypy" not in sys.version.lower()
+                else "pypy -m pip install numpy pygame-ce  "
+                     "(the community fork; upstream pygame has no PyPy wheel)")
+        raise SystemExit(
+            f"the live viewer needs {missing!r}, which is not installed.\n"
+            f"  install it:  {hint}\n"
+            f"  or run without a window:  add --headless "
+            f"(snapshots, demo replay and every verifier work headless)"
+        ) from exc
 
     from dos_re.display import Display
 
