@@ -13,7 +13,7 @@ state (e.g. the keyboard scan-code table) -- instead of guessing that state.
 from __future__ import annotations
 
 from .cpu import IF, TF
-from .runtime import Runtime
+from .runtime import BIOS_INT9_ENTRY, Runtime
 
 
 def read_vector(rt: Runtime, num: int) -> tuple[int, int]:
@@ -61,7 +61,30 @@ def deliver_scancode(rt: Runtime, scancode: int, *, max_steps: int = 200_000) ->
     ``scancode`` is an XT make code (e.g. 0x1C Enter, 0x48 Up) for a press, or the
     make code OR 0x80 for a release.  The game's own ISR translates it into its
     key-state table, so no game-side key semantics are reimplemented here.
+
+    Also updates the BIOS-visible type-ahead buffer directly (``DOSMachine
+    .note_bios_keystroke``) when needed -- on real hardware a single physical
+    keypress is seen by both the game's own INT 9 handler AND (if it chains,
+    which is the common pattern) the BIOS ISR that fills the type-ahead
+    buffer INT 16h/INT 21h AH=0Bh read from. Emulating only the game's own
+    key-state table left "press any key" prompts that poll the BIOS buffer
+    directly unable to ever see input, even after the game's own menus
+    clearly responded to the same key delivered this way (found in SkyRoads:
+    level-select navigation worked, but its post-selection "press any key"
+    screen never advanced).
+
+    If IVT[9] still points at the stock BIOS handler (``BIOS_INT9_ENTRY`` --
+    the game never installed its own, e.g. SkyRoads), ``deliver_interrupt``
+    below invokes ``note_bios_keystroke`` itself as part of running that
+    handler, so calling it again here first would double-queue every
+    keystroke (found the hard way: a handful of keypresses left FOUR-plus
+    duplicate entries in the type-ahead buffer, confusing menu code that
+    reads one entry per logical press). Only call it directly when some
+    *other*, presumably-custom handler is installed, matching the "may or
+    may not chain" case the docstring above describes.
     """
     rt.dos.current_scancode = scancode & 0xFF
     rt.dos.kbd_output_buffer_full = True
+    if read_vector(rt, 0x09) != BIOS_INT9_ENTRY:
+        rt.dos.note_bios_keystroke(scancode)
     return deliver_interrupt(rt, 0x09, max_steps=max_steps)

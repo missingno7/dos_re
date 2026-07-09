@@ -83,6 +83,7 @@ def clone_runtime_state(src: Runtime) -> Runtime:
     dos._crtc_index = getattr(src.dos, "_crtc_index", 0)
     dos.current_scancode = src.dos.current_scancode
     dos.console_input_fallback = src.dos.console_input_fallback
+    dos.pending_console_scancode = getattr(src.dos, "pending_console_scancode", None)
     dos.key_queue = list(src.dos.key_queue)
     dos.port_log = list(src.dos.port_log)
 

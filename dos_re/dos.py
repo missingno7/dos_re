@@ -168,6 +168,15 @@ class DOSMachine:
     # ASCII).  An interactive front-end pushes keys here; when empty the runtime
     # keeps its previous deterministic headless behaviour.
     key_queue: list[int] = field(default_factory=list)
+    # Extended keys (arrows, F-keys, etc.) reach the byte-oriented DOS console
+    # reads (INT 21h AH=01h/07h/08h, which return one byte in AL) as a TWO-call
+    # sequence: the first read returns AL=00h, the second returns the scan code.
+    # When AH=07h pops an extended key_queue entry (low byte 0, high byte = scan
+    # code) it stashes that scan code here so the game's next read gets it, per
+    # real DOS.  Modeling only the leading 00h and discarding the scan code left
+    # menus that navigate via AH=07h (SkyRoads) unable to see arrows at all --
+    # they read 00h, call again for the scan code, and block forever.
+    pending_console_scancode: int | None = None
     # Deterministic headless fallback for blocking console reads.  Interactive
     # front-ends can set this to None so AH=01h/07h/08h waits for a real key
     # instead of synthesizing Esc.
@@ -864,30 +873,32 @@ class DOSMachine:
             # AH=08h: character input, no echo, Ctrl-C checked by DOS.
             #
             # This emulator does not have a real DOS stdin stream.  Use the same
-            # deterministic keyboard queue as INT 16h when available, returning
-            # the ASCII byte in AL.  When no queued key exists, return Esc, matching
-            # the existing headless INT 16h fallback and preventing blocking DOS
-            # read paths from crashing automated play runs.
-            if self.key_queue:
+            # deterministic keyboard queue as INT 16h.  These calls return ONE
+            # byte in AL; an extended key (arrow/F-key) is delivered as AL=00h
+            # then, on the next call, the scan code -- so a pending scan code
+            # from a prior call is returned first, before touching the queue.
+            if self.pending_console_scancode is not None:
+                ch = self.pending_console_scancode & 0xFF
+                self.pending_console_scancode = None
+            elif self.key_queue:
                 key = self.key_queue.pop(0)
+                ch = key & 0xFF
+                if ch == 0 and (key >> 8):
+                    # Extended key: return 00h now, stash the scan code for the
+                    # game's follow-up read (real DOS two-call behaviour).
+                    self.pending_console_scancode = (key >> 8) & 0xFF
             elif self.console_input_fallback is not None:
-                key = self.console_input_fallback & 0xFFFF
+                ch = self.console_input_fallback & 0xFF
             else:
                 cpu.s.ip = (cpu.s.ip - 2) & 0xFFFF
                 raise ConsoleInputWouldBlock()
-            ch = key & 0xFF
-            if ch == 0 and (key >> 8):
-                # DOS extended keys are reported as 00h first; a second read
-                # would return the scan code on real DOS.  Keeping the leading
-                # zero is the safest narrow emulation for code that distinguishes
-                # extended keys.
-                ch = 0
             cpu.s.ax = (cpu.s.ax & 0xFF00) | ch
             if ah == 0x01:
                 self._console_output(cpu, chr(ch))
             return
         if ah == 0x0B:  # check stdin input status: AL=FFh if a char is ready, else 00h
-            cpu.s.ax = (cpu.s.ax & 0xFF00) | (0xFF if self.key_queue else 0x00)
+            ready = self.pending_console_scancode is not None or bool(self.key_queue)
+            cpu.s.ax = (cpu.s.ax & 0xFF00) | (0xFF if ready else 0x00)
             return
         if ah == 0x30:  # get DOS version
             cpu.s.ax = 0x0005
@@ -1289,6 +1300,35 @@ class DOSMachine:
             return
         raise UnsupportedInstruction(f"Unhandled BIOS INT 16h AH={ah:02X}h")
 
+    def note_bios_keystroke(self, scancode: int) -> None:
+        """Update BIOS-visible keyboard state (modifiers + type-ahead buffer)
+        for one raw scan code, as ``bios_int9_keyboard`` does -- factored out
+        so a front-end injecting a key via ``deliver_scancode`` can update
+        this state directly without faking a hardware-interrupt stack frame
+        (see ``dos_re.interrupts.deliver_scancode``: on real hardware, one
+        physical keypress updates BOTH a game's own key-state table AND the
+        BIOS type-ahead buffer, since they observe the same INT 09h event;
+        emulating only the former left the latter permanently empty, which
+        breaks games that check it directly via INT 16h/INT 21h AH=0Bh --
+        common at "press any key" prompts even in games whose main input
+        loop uses a private key-state table for speed. Found via SkyRoads'
+        post-level-select "press any key" screen never seeing input.
+        """
+        make = scancode & 0x7F
+        released = bool(scancode & 0x80)
+        if make == 0x2A or make == 0x36:      # left / right shift
+            self.kbd_shift = not released
+        elif make == 0x1D:                    # ctrl
+            self.kbd_ctrl = not released
+        elif make == 0x38:                    # alt
+            self.kbd_alt = not released
+        elif make == 0x3A and not released:   # caps lock (toggle on make)
+            self.kbd_caps = not self.kbd_caps
+        elif not released:
+            value = self._bios_translate_scancode(make)
+            if value is not None and len(self.key_queue) < 16:
+                self.key_queue.append(value & 0xFFFF)
+
     def bios_int9_keyboard(self, cpu: CPU8086) -> None:
         """The IBM-PC BIOS INT 09h keyboard ISR (IRQ1).
 
@@ -1305,22 +1345,7 @@ class DOSMachine:
         frame is a hardware-interrupt frame (flags, cs, ip on the stack); it acks
         the PIC and returns with IRET.
         """
-        scancode = self.current_scancode & 0xFF
-        make = scancode & 0x7F
-        released = bool(scancode & 0x80)
-
-        if make == 0x2A or make == 0x36:      # left / right shift
-            self.kbd_shift = not released
-        elif make == 0x1D:                    # ctrl
-            self.kbd_ctrl = not released
-        elif make == 0x38:                    # alt
-            self.kbd_alt = not released
-        elif make == 0x3A and not released:   # caps lock (toggle on make)
-            self.kbd_caps = not self.kbd_caps
-        elif not released:
-            value = self._bios_translate_scancode(make)
-            if value is not None and len(self.key_queue) < 16:
-                self.key_queue.append(value & 0xFFFF)
+        self.note_bios_keystroke(self.current_scancode & 0xFF)
 
         if cpu.port_writer:                   # EOI to the master PIC
             cpu.port_writer(cpu, 0x20, 0x20, 8)

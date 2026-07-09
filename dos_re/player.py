@@ -618,6 +618,25 @@ def run_view(frontend: GameFrontend, rt, args,
 
 # --- entry point -----------------------------------------------------------------------------------
 
+def _use_real_console_input(rt) -> None:
+    """Make blocking DOS console reads (INT 21h AH=01h/07h/08h) wait for a real
+    key instead of synthesizing Esc.
+
+    DOSMachine defaults ``console_input_fallback`` to 0x011B (Esc) so a bare
+    headless ``cpu.run()`` with no driver loop can't hang on a blocking read.
+    But every player driver path (view, headless, replay) routes blocking reads
+    through ``_step_frame``, which already catches ``ConsoleInputWouldBlock``
+    and reports "waiting for DOS key" without hanging -- so the Esc synthesis
+    is not needed here and is actively harmful: a game that reads menu keys via
+    INT 21h AH=07h (SkyRoads does) receives a phantom Esc, interprets it as
+    "quit", and calls exit(0). That presented as a spurious "program halted" at
+    the main menu -- the game appearing to quit itself a few seconds in, with no
+    real keypress. Clearing the fallback makes the read block for a real key,
+    which the front-end (interactive) or demo/queue (headless/replay) supplies.
+    """
+    rt.dos.console_input_fallback = None
+
+
 def main(frontend: GameFrontend, argv: list[str] | None = None,
          description: str | None = None) -> int:
     """The standard play.py main: parse the unified CLI and dispatch.
@@ -637,6 +656,7 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
         else:
             rt = frontend.load_snapshot_runtime(args, playback.snapshot_path())
         frontend.apply_hook_mode(rt, args)
+        _use_real_console_input(rt)
         if args.headless:
             return run_replay_headless(frontend, rt, args, playback)
         return run_view(frontend, rt, args, playback=playback)
@@ -646,6 +666,7 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
     else:
         rt = frontend.create_runtime(args)
     frontend.apply_hook_mode(rt, args)
+    _use_real_console_input(rt)
     if args.headless:
         return run_headless(frontend, rt, args)
     return run_view(frontend, rt, args)
