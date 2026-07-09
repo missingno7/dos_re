@@ -21,13 +21,13 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install test dependencies
-        run: pip install pytest
+        run: pip install pytest pytest-xdist
       - name: Boundary + syntax lint
         run: python tools/lint.py
       - name: Undefined-name guard
         run: python tools/check_undefined_names.py
       - name: Test suite
-        run: python -m pytest tests -q
+        run: python -m pytest tests -q -n auto
       - name: End-to-end example (oracle -> hook -> verify -> snapshot)
         run: python examples/minimal_adapter/example.py
       - name: Full-lifecycle example (frames, demos, both oracles, state mirror)

@@ -67,6 +67,10 @@ tools/        lint.py, run_tests.py, clean.py, lindis.py, profile_hotspots.py,
 ```bash
 python tools/lint.py                          # boundary + syntax lint
 python -m pytest tests -q                     # test suite (or tools/run_tests.py)
+pypy -m pytest tests -q                       # same suite ~4x faster; headless paths run
+                                              # unchanged under PyPy (docs/performance.md —
+                                              # ~13-17x on raw interpretation; add -n auto
+                                              # via pytest-xdist for big suites)
 python tools/check_undefined_names.py         # latent-NameError guard
 python examples/minimal_adapter/example.py    # end-to-end smoke of the whole loop
 python tools/clean.py [--artifacts]           # remove generated junk
