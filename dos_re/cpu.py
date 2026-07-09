@@ -3,7 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .memory import Memory, linear
+from .memory import (
+    BIOS_ROM_BASE,
+    EGA_CPU_APERTURE,
+    EGA_PLANE_WINDOW,
+    Memory,
+    linear,
+)
+
+# One-past-the-end of the EGA CPU aperture: fetches/accesses below or above
+# this window are plain RAM even while the planar shadow is active.
+_EGA_WINDOW_END = EGA_CPU_APERTURE + EGA_PLANE_WINDOW
 
 
 REG16 = ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di"]
@@ -39,8 +49,13 @@ class HaltExecution(Exception):
     pass
 
 
-@dataclass
+@dataclass(slots=True)
 class CPUState:
+    # slots=True: register fields are read/written on virtually every emulated
+    # instruction, and slotted attribute access is measurably faster than
+    # __dict__ lookup.  Consequence: no ad-hoc attributes, and clones use
+    # dataclasses.replace() instead of CPUState(**s.__dict__) (verification.py
+    # and repro_artifacts.py were the only such sites in the ecosystem).
     ax: int = 0
     bx: int = 0
     cx: int = 0
@@ -339,10 +354,11 @@ class CPU8086:
     def fetch8(self) -> int:
         # Hot path: an opcode/operand byte from CS:IP.  Inline the memory
         # selector fast-path to save ~2.5M rb() method calls per profiled run,
-        # and the real-mode non-planar fast path (a code fetch is then a plain
-        # array read; rb() would take the same self.data[a] path after the
-        # aperture check).  Real-mode with EGA planar routing active still
-        # goes through rb() so aperture semantics stay in one place.
+        # and the real-mode fast path (a code fetch is then a plain array
+        # read).  With the EGA planar shadow active, only a fetch whose linear
+        # address lands INSIDE the A000h aperture goes through rb() (aperture
+        # reads have latch side effects); code executes from plain RAM, so in
+        # practice this keeps every fetch on the direct path.
         s = self.s
         off = s.ip & 0xFFFF
         mem = self.mem
@@ -355,26 +371,32 @@ class CPU8086:
                     else mem.data[(seg << 4) + off]
             else:
                 v = mem.data[(seg << 4) + off]
-        elif not mem.ega_planar:
-            v = mem.data[(((s.cs & 0xFFFF) << 4) + off) & 0xFFFFF]
         else:
-            v = mem.rb(s.cs, off)
+            a = (((s.cs & 0xFFFF) << 4) + off) & 0xFFFFF
+            if not mem.ega_planar or a < EGA_CPU_APERTURE or a >= _EGA_WINDOW_END:
+                v = mem.data[a]
+            else:
+                v = mem.rb(s.cs, off)
         s.ip = (off + 1) & 0xFFFF
         return v
 
     def fetch16(self) -> int:
-        # Real-mode non-planar fast path mirrors fetch8 (one call frame instead
-        # of two per operand word); selector/planar modes keep the fetch8 pair.
+        # Real-mode fast path mirrors fetch8 (one call frame instead of two
+        # per operand word); selector mode and aperture-crossing fetches keep
+        # the fetch8 pair.
         s = self.s
         mem = self.mem
-        if mem.sel_base is None and not mem.ega_planar:
+        if mem.sel_base is None:
             data = mem.data
             base = ((s.cs & 0xFFFF) << 4) & 0xFFFFF
             ip = s.ip & 0xFFFF
-            lo = data[(base + ip) & 0xFFFFF]
-            hi = data[(base + ((ip + 1) & 0xFFFF)) & 0xFFFFF]
-            s.ip = (ip + 2) & 0xFFFF
-            return lo | (hi << 8)
+            a0 = (base + ip) & 0xFFFFF
+            a1 = (base + ((ip + 1) & 0xFFFF)) & 0xFFFFF
+            if not mem.ega_planar or (
+                    (a0 < EGA_CPU_APERTURE or a0 >= _EGA_WINDOW_END)
+                    and (a1 < EGA_CPU_APERTURE or a1 >= _EGA_WINDOW_END)):
+                s.ip = (ip + 2) & 0xFFFF
+                return data[a0] | (data[a1] << 8)
         lo = self.fetch8()
         hi = self.fetch8()
         return lo | (hi << 8)
@@ -519,10 +541,12 @@ class CPU8086:
                         else mem.data[(seg << 4) + off]
                 else:
                     op = mem.data[(seg << 4) + off]
-            elif not mem.ega_planar:
-                op = mem.data[(((s.cs & 0xFFFF) << 4) + off) & 0xFFFFF]
             else:
-                op = mem.rb(s.cs, off)
+                a = (((s.cs & 0xFFFF) << 4) + off) & 0xFFFFF
+                if not mem.ega_planar or a < EGA_CPU_APERTURE or a >= _EGA_WINDOW_END:
+                    op = mem.data[a]
+                else:
+                    op = mem.rb(s.cs, off)
             s.ip = (off + 1) & 0xFFFF
             if op == 0x26 or op == 0x2E or op == 0x36 or op == 0x3E:
                 seg_override = _SEG_OVERRIDE[op]
@@ -1393,6 +1417,52 @@ class CPU8086:
         count = s.cx if rep is not None else 1
         if count > self.max_rep_count:
             raise RuntimeError(f"REP count too large: {count}")
+
+        # --- bulk fast path for REP MOVS / REP STOS -------------------------
+        # A 32KB frame blit is one Python slice operation instead of 16k
+        # element iterations.  Guarded so it is BYTE-EXACT equal to the loop:
+        # real mode only, DF=0, no write watchers, no 16-bit offset wrap, no
+        # 1MB linear wrap, neither range touching the EGA aperture (latch /
+        # plane-mask semantics) or ROM (stores there are ignored), and for
+        # MOVS no src<dst overlap (the 8086's element-order copy then reads
+        # bytes it already wrote — the classic repeating-fill pattern — which
+        # a snapshot slice copy would get wrong).  MOVS/STOS never touch
+        # flags, so the end state is just CX=0 and advanced SI/DI.
+        # (F2 is intentionally accepted: REPNE only means "check ZF" for
+        # CMPS/SCAS; for MOVS/STOS this loop treats it identically to F3.)
+        if rep is not None and count > 8 and op in (0xA4, 0xA5, 0xAA, 0xAB):
+            mem = self.mem
+            if mem.sel_base is None and delta > 0 and not mem.write_watchers:
+                n = count * width
+                di = s.di & 0xFFFF
+                dst = (((s.es & 0xFFFF) << 4) + di) & 0xFFFFF
+                dst_ok = (di + n <= 0x10000 and dst + n <= 0x100000
+                          and dst + n <= BIOS_ROM_BASE
+                          and (not mem.ega_planar
+                               or dst + n <= EGA_CPU_APERTURE or dst >= _EGA_WINDOW_END))
+                if dst_ok and op in (0xAA, 0xAB):        # rep stos
+                    if width == 1:
+                        mem.data[dst:dst + n] = bytes((s.ax & 0xFF,)) * count
+                    else:
+                        mem.data[dst:dst + n] = bytes((s.ax & 0xFF, (s.ax >> 8) & 0xFF)) * count
+                    s.di = (di + n) & 0xFFFF
+                    s.cx = 0
+                    return ("rep " if rep else "") + ("stosb" if width == 1 else "stosw") + f" ; {count}"
+                if dst_ok and op in (0xA4, 0xA5):        # rep movs
+                    si = s.si & 0xFFFF
+                    src_seg = getattr(s, seg_override or "ds") & 0xFFFF
+                    src = ((src_seg << 4) + si) & 0xFFFFF
+                    src_ok = (si + n <= 0x10000 and src + n <= 0x100000
+                              and (not mem.ega_planar
+                                   or src + n <= EGA_CPU_APERTURE or src >= _EGA_WINDOW_END))
+                    overlap_repeats = src < dst < src + n
+                    if src_ok and not overlap_repeats:
+                        mem.data[dst:dst + n] = mem.data[src:src + n]
+                        s.si = (si + n) & 0xFFFF
+                        s.di = (di + n) & 0xFFFF
+                        s.cx = 0
+                        return ("rep " if rep else "") + ("movsb" if width == 1 else "movsw") + f" ; {count}"
+
         done = 0
         while count > 0:
             done += 1

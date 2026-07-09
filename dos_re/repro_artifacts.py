@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace as _dc_replace
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Mapping, Any
@@ -87,7 +88,7 @@ def clone_runtime_state(src: Runtime) -> Runtime:
     dos.key_queue = list(src.dos.key_queue)
     dos.port_log = list(src.dos.port_log)
 
-    cpu = CPU8086(mem, CPUState(**src.cpu.s.__dict__))
+    cpu = CPU8086(mem, _dc_replace(src.cpu.s))
     cpu.halted = src.cpu.halted
     cpu.trace_enabled = False
     cpu.call_depth = src.cpu.call_depth

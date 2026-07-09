@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from typing import Callable, Protocol
 
 from .cpu import CPU8086, CPUState
@@ -243,7 +243,7 @@ class HookVerifier:
 
         call_no = self.counts.get(key, 0) + 1
         self.counts[key] = call_no
-        before = CPUState(**cpu.s.__dict__)
+        before = _dc_replace(cpu.s)  # CPUState is slotted; replace() is the clone
         if self.config.progress_callback is not None:
             self.config.progress_callback(
                 f"verifying {key[0]:04X}:{key[1]:04X} {name} call {call_no} "
@@ -581,7 +581,7 @@ class HookVerifier:
         dos.key_queue = list(src.dos.key_queue)
         dos.port_log = list(src.dos.port_log)
 
-        cpu = CPU8086(mem, CPUState(**src.cpu.s.__dict__))
+        cpu = CPU8086(mem, _dc_replace(src.cpu.s))
         cpu.halted = src.cpu.halted
         cpu.trace_enabled = False
         cpu.call_depth = src.cpu.call_depth
