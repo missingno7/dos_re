@@ -512,19 +512,29 @@ class HookVerifier:
         context: str = "<unknown hook>",
     ) -> int:
         target_set = set(targets)
+        # Hot loop: the target check runs per interpreted oracle instruction.
+        # Compare packed ints (no per-step (cs, ip) tuple allocation) and poll
+        # the wall clock every _WALL_POLL steps instead of every step — a
+        # time.monotonic() syscall per instruction was ~a third of the loop.
+        int_targets = {((cs & 0xFFFF) << 16) | (ip & 0xFFFF) for cs, ip in target_set}
         min_steps = max(0, int(min_steps))
         started_at = time.monotonic()
+        wall_timeout = self.config.asm_wall_timeout_s
+        wait_handler = self._asm_wait_handler
+        _WALL_POLL = 4096
         for steps in range(self.config.asm_max_steps + 1):
-            if steps >= min_steps and cpu.addr() in target_set:
+            s = cpu.s
+            if steps >= min_steps and ((s.cs & 0xFFFF) << 16) | (s.ip & 0xFFFF) in int_targets:
                 return steps
-            if self._asm_wait_handler is not None and self._asm_wait_handler(cpu, target_set):
-                if steps >= min_steps and cpu.addr() in target_set:
+            if wait_handler is not None and wait_handler(cpu, target_set):
+                s = cpu.s
+                if steps >= min_steps and ((s.cs & 0xFFFF) << 16) | (s.ip & 0xFFFF) in int_targets:
                     return steps
                 continue
             cpu.step()
-            if self.config.asm_wall_timeout_s is not None:
+            if wall_timeout is not None and steps % _WALL_POLL == 0:
                 elapsed = time.monotonic() - started_at
-                if elapsed >= self.config.asm_wall_timeout_s:
+                if elapsed >= wall_timeout:
                     labels = ", ".join(f"{cs:04X}:{ip:04X}" for cs, ip in targets)
                     raise HookVerifyDivergence(
                         "HOOK VERIFY ASM WALL TIMEOUT "
@@ -806,21 +816,59 @@ class HookVerifier:
     @staticmethod
     def _range_diff(asm: bytearray, hook: bytearray, rng: MemoryRange,
                     ignore: "frozenset[int] | None" = None) -> str | None:
+        # PERF: never compare memoryviews here — CPython compares them
+        # element-wise (~56x slower than bytes/bytearray memcmp on a 1MB
+        # buffer).  bytearray == bytearray and slice copies + memcmp are both
+        # C-speed; this function runs on EVERY verified hook call (the
+        # dead-stack scratch below SP legitimately differs whenever a hook
+        # composes a CALL/RET), so it is the verifier's hot path.
         start = max(0, rng.start)
         end = min(len(asm), len(hook), start + rng.size)
-        asm_view = memoryview(asm)[start:end]
-        hook_view = memoryview(hook)[start:end]
-        if asm_view == hook_view:
+        full = start == 0 and end == len(asm) and len(asm) == len(hook)
+
+        def _range_equal() -> bool:
+            if full:
+                return asm == hook
+            return asm[start:end] == hook[start:end]
+
+        if _range_equal():
             return None
+        ig = sorted(a for a in ignore if start <= a < end) if ignore else []
+        if ig:
+            # The common verdict is "only the ignored dead-stack bytes
+            # differ".  Prove it with ONE memcmp: temporarily patch those
+            # (<= _DEAD_STACK_BYTES) bytes on the ASM side — a throwaway
+            # oracle clone — to match the hook side, compare, and restore
+            # exactly (try/finally, so the buffer is unchanged either way).
+            saved = bytes(asm[a] for a in ig)
+            try:
+                for a in ig:
+                    asm[a] = hook[a]
+                clean = _range_equal()
+            finally:
+                for k, a in enumerate(ig):
+                    asm[a] = saved[k]
+            if clean:
+                return None
+        # Divergence path (rare, may be slow): exact first/count, identical to
+        # a plain per-byte loop.  Scan in chunks so equal regions stay memcmp.
         first = None
         count = 0
-        for rel, (asm_byte, hook_byte) in enumerate(zip(asm_view, hook_view)):
-            if asm_byte != hook_byte:
-                if ignore is not None and (start + rel) in ignore:
-                    continue  # dead stack scratch below SP -- ABI-undefined
-                count += 1
-                if first is None:
-                    first = start + rel
+        pos = start
+        _CHUNK = 4096
+        while pos < end:
+            hi = min(pos + _CHUNK, end)
+            if asm[pos:hi] == hook[pos:hi]:
+                pos = hi
+                continue
+            for adr in range(pos, hi):
+                if asm[adr] != hook[adr]:
+                    if ignore is not None and adr in ignore:
+                        continue  # dead stack scratch below SP -- ABI-undefined
+                    count += 1
+                    if first is None:
+                        first = adr
+            pos = hi
         if first is None:
             return None
         dump_start = max(start, first - 8)

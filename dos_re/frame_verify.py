@@ -313,11 +313,13 @@ class _BoundaryRunner:
 
     def _run_original_near_ret(self, cpu: CPU8086, key: Addr) -> None:
         target = (cpu.s.cs & 0xFFFF, cpu.mem.rw(cpu.s.ss, cpu.s.sp))
+        tcs, tip = target
         saved_hook = cpu.replacement_hooks.pop(key, None)
         saved_name = cpu.hook_names.pop(key, None)
         try:
             for _ in range(self.config.frame_budget):
-                if cpu.addr() == target:
+                s = cpu.s
+                if (s.cs & 0xFFFF) == tcs and (s.ip & 0xFFFF) == tip:
                     return
                 cpu.step()
         finally:
