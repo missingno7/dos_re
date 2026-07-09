@@ -23,12 +23,19 @@ into `dos_re` + `template_dos_port` + `pynuked_opl3`).
 Correctness beats speed. Traceability beats cleverness. Small verified progress
 beats large intuitive rewrites.
 
-- **`dos_re/` must stay game-agnostic and stdlib-only.** No game addresses,
-  filenames, formats, or third-party imports in the core. `tools/lint.py`
-  enforces this; run it before finishing any change. The one declared
-  exception is the FRONTEND RING (`player.py` + `display.py`, the unified
-  play-runner): those two files may use the optional viewer deps
-  (numpy/pygame), and `import dos_re` itself must never pull them in.
+- **`dos_re/` must stay game-agnostic, and the core stays stdlib-only.** No
+  game addresses, filenames, or formats in the core. The stdlib-only part is
+  NOT a purity rule — it is a measured performance and portability choice:
+  the interpreter's work is per-instruction *scalar* arithmetic, where numpy
+  is slower than plain ints/bytearray on CPython and poisons the JIT under
+  PyPy (which gives the core its biggest speedup, 13-17x — see
+  docs/performance.md). Third-party libs are welcome where they actually
+  win: the FRONTEND RING (`player.py`/`display.py`/`audio_sink.py` may use
+  numpy/pygame/pynuked_opl3 for bulk pixel/audio work) — and if a *bulk*
+  math hotspot ever appears in the core, an optional numpy accelerator
+  behind a stdlib fallback is acceptable (keep `import dos_re` and every
+  headless path clean so PyPy still runs it). `tools/lint.py` enforces the
+  boundary; run it before finishing any change.
 - **Do not make the emulator more general than a real target requires.** New
   CPU/DOS/hardware behaviour is added only when a concrete program exercises it,
   with the observed register/flag contract documented and a focused test added.
