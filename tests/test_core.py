@@ -18,6 +18,33 @@ def test_mov_add_ret():
     assert cpu.s.ax == 0x1235
 
 
+def test_x87_opcodes_grown_for_simant():
+    import struct
+    # FLD1; FLD1; FADDP; FSQRT -> sqrt(2)
+    cpu = run_bytes(bytes.fromhex("d9e8 d9e8 dec1 d9fa"), 4)
+    assert abs(cpu.s.fst[-1] - 2 ** 0.5) < 1e-9
+    # FLD1; FCHS -> -1.0
+    cpu = run_bytes(bytes.fromhex("d9e8 d9e0"), 2)
+    assert cpu.s.fst[-1] == -1.0
+    # FLDZ; FXAM; FNSTSW AX -> C3 (0x4000) set for zero
+    cpu = run_bytes(bytes.fromhex("d9ee d9e5 dfe0"), 3)
+    assert cpu.s.ax & 0x4700 == 0x4000
+    # FLD1; FTST; FNSTSW AX -> all condition bits clear (1.0 > 0)
+    cpu = run_bytes(bytes.fromhex("d9e8 d9e4 dfe0"), 3)
+    assert cpu.s.ax & 0x4700 == 0
+    # FXCH: FLD1; FLDZ; FXCH ST(1) -> top back to 1.0
+    cpu = run_bytes(bytes.fromhex("d9e8 d9ee d9c9"), 3)
+    assert cpu.s.fst[-1] == 1.0 and cpu.s.fst[-2] == 0.0
+    # single-precision m32 round-trip: FLD dword[0x200]; FSTP dword[0x204]
+    mem = Memory()
+    mem.load(0x1000, 0, bytes.fromhex("d9 06 00 02 d9 1e 04 02"))
+    mem.load(0x1000, 0x200, struct.pack("<f", 3.5))
+    cpu = CPU8086(mem, CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
+    cpu.run(2)
+    out = struct.unpack("<f", bytes(mem.rb(0x1000, 0x204 + i) for i in range(4)))[0]
+    assert out == 3.5 and not cpu.s.fst
+
+
 def test_pusha_popa_roundtrip():
     # PUSHA (60) saves AX,CX,DX,BX,SP,BP,SI,DI; scribble the regs; POPA (61)
     # restores them (SP's stack slot is discarded).  Seed via mov ax..di.
