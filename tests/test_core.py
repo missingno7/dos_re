@@ -422,6 +422,31 @@ def test_x87_integer_multiply_chain():
     assert cpu.s.fst == []          # stack fully popped
 
 
+def test_x87_integer_memory_arithmetic():
+    # DA-group (m32int) and DE-group (m16int) arithmetic straight from memory,
+    # the shape SimAnt's caste-allocation click uses: fild; fiadd dword; fidiv
+    # dword; then a DE m16int fisub, each fistp'd back.
+    code = bytes.fromhex(
+        "9b db 06 00 01"        # fild  dword [0x0100]  (=10)
+        "9b da 06 04 01"        # fiadd dword [0x0104]  (+5 -> 15)   DA /0
+        "9b da 36 08 01"        # fidiv dword [0x0108]  (/3 ->  5)   DA /6
+        "9b db 1e 20 01"        # fistp dword [0x0120]
+        "9b db 06 0c 01"        # fild  dword [0x010c]  (=20)
+        "9b de 26 10 01"        # fisub word  [0x0110]  (-8 -> 12)   DE /4
+        "9b db 1e 24 01"        # fistp dword [0x0124]
+        "f4")
+    mem = Memory()
+    mem.load(0x1000, 0, code)
+    for off, v in ((0x0100, 10), (0x0104, 5), (0x0108, 3), (0x010c, 20)):
+        mem.ww(0x1000, off, v); mem.ww(0x1000, off + 2, 0)
+    mem.ww(0x1000, 0x0110, 8)                    # m16int operand for FISUB
+    cpu = CPU8086(mem, CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
+    cpu.run(40)
+    assert int.from_bytes(bytes(mem.rb(0x1000, 0x0120 + i) for i in range(4)), "little") == 5
+    assert int.from_bytes(bytes(mem.rb(0x1000, 0x0124 + i) for i in range(4)), "little") == 12
+    assert cpu.s.fst == []
+
+
 def test_x87_compare_and_status_word():
     # fild [0x100]=3; fild [0x104]=5 ; fcomp st(1) -> ST0(5) > ST1(3): C0=0,C3=0
     code = bytes.fromhex(

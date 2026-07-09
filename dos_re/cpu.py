@@ -774,6 +774,24 @@ class CPU8086:
             if reg == 5: self._fst_set(0, b - a); return f"fsubr {text}"
             if reg == 6: self._fst_set(0, a / b); return f"fdiv {text}"
             if reg == 7: self._fst_set(0, b / a); return f"fdivr {text}"
+        if op in (0xDA, 0xDE):        # FIADD/FIMUL/FICOM/FISUB/FIDIV m32int/m16int
+            if op == 0xDA:                                       # m32int operand
+                v = self.mem.rw(seg, off) | (self.mem.rw(seg, (off + 2) & 0xFFFF) << 16)
+                if v & 0x80000000:
+                    v -= 1 << 32
+            else:                                                # m16int operand
+                v = self.mem.rw(seg, off)
+                if v & 0x8000:
+                    v -= 1 << 16
+            a, b = self._fst(0), float(v)
+            if reg == 0: self._fst_set(0, a + b); return f"fiadd {text}"
+            if reg == 1: self._fst_set(0, a * b); return f"fimul {text}"
+            if reg == 2: self._fcompare(a, b); return f"ficom {text}"
+            if reg == 3: self._fcompare(a, b); self._fpop(); return f"ficomp {text}"
+            if reg == 4: self._fst_set(0, a - b); return f"fisub {text}"
+            if reg == 5: self._fst_set(0, b - a); return f"fisubr {text}"
+            if reg == 6: self._fst_set(0, a / b); return f"fidiv {text}"
+            if reg == 7: self._fst_set(0, b / a); return f"fidivr {text}"
         raise UnsupportedInstruction(
             f"x87 opcode {op:02X} /{reg} mem at {s.cs:04X}:{s.ip:04X}")
 
