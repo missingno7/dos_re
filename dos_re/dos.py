@@ -1022,25 +1022,33 @@ class DOSMachine:
         if ah == 0x48:  # allocate memory (BX paragraphs)
             paragraphs = cpu.s.bx & 0xFFFF
             if paragraphs == 0:
-                cpu.s.ax = 8  # insufficient memory / invalid zero-size request for our narrow runtime
-                cpu.s.bx = max(0, self.allocation_limit_segment - self.next_alloc_segment) & 0xFFFF
+                cpu.s.ax = 8
+                cpu.s.bx = self._largest_free_gap() & 0xFFFF
                 cpu.set_flag(CF, True)
                 return
-            seg = self.next_alloc_segment & 0xFFFF
-            end = seg + paragraphs
-            if end > self.allocation_limit_segment:
+            seg = self._find_free_gap(paragraphs)
+            if seg is None:
                 cpu.s.ax = 8  # insufficient memory
-                cpu.s.bx = max(0, self.allocation_limit_segment - self.next_alloc_segment) & 0xFFFF
+                cpu.s.bx = self._largest_free_gap() & 0xFFFF
                 cpu.set_flag(CF, True)
                 return
             self.allocations[seg] = paragraphs
-            self.next_alloc_segment = end
+            end = seg + paragraphs
+            if end > self.next_alloc_segment:
+                self.next_alloc_segment = end
             cpu.s.ax = seg
             cpu.set_flag(CF, False)
             return
         if ah == 0x49:  # free memory block (ES segment)
-            # The current target does not need coalescing yet.  Removing the record
-            # is enough for traceability while keeping addresses deterministic.
+            # Reclaims the block: AH=48h/4Ah find free space by scanning gaps
+            # between the CURRENT live allocations (see _find_free_gap), so
+            # simply dropping the record is enough for the space to become
+            # available again — no separate coalescing/free-list bookkeeping
+            # needed. (Earlier this only dropped the record without ever
+            # freeing the address range itself: a bump-pointer allocator with
+            # no reuse, silently exhausting memory on any game that cycles
+            # scratch buffers — SkyRoads does, 255 frees against 269 allocs
+            # in one bring-up session; found 2026-07-09.)
             self.allocations.pop(cpu.s.es & 0xFFFF, None)
             cpu.set_flag(CF, False)
             return
@@ -1052,25 +1060,54 @@ class DOSMachine:
                 cpu.s.ax = 7  # memory control blocks destroyed / unknown block
                 cpu.set_flag(CF, True)
                 return
-            # Only support in-place shrink or growing the most recently allocated block.
             old_end = seg + old_size
             new_end = seg + new_size
-            if new_end <= old_end or old_end == self.next_alloc_segment:
-                if new_end > self.allocation_limit_segment:
-                    cpu.s.ax = 8
-                    cpu.s.bx = max(0, self.allocation_limit_segment - seg) & 0xFFFF
-                    cpu.set_flag(CF, True)
-                    return
+            if new_end <= old_end:
                 self.allocations[seg] = new_size
-                if old_end == self.next_alloc_segment:
-                    self.next_alloc_segment = new_end
                 cpu.set_flag(CF, False)
                 return
-            cpu.s.ax = 8
-            cpu.s.bx = old_size
-            cpu.set_flag(CF, True)
+            # Growing: fine as long as nothing else occupies [old_end, new_end).
+            next_used = min((s for s in self.allocations if s >= old_end), default=self.allocation_limit_segment)
+            if new_end > next_used or new_end > self.allocation_limit_segment:
+                cpu.s.ax = 8
+                cpu.s.bx = (min(next_used, self.allocation_limit_segment) - seg) & 0xFFFF
+                cpu.set_flag(CF, True)
+                return
+            self.allocations[seg] = new_size
+            if new_end > self.next_alloc_segment:
+                self.next_alloc_segment = new_end
+            cpu.set_flag(CF, False)
             return
         raise UnsupportedInstruction(f"Unhandled DOS INT 21h AH={ah:02X}h")
+
+    def _free_gaps(self):
+        """Yield (start, size_in_paragraphs) for every free gap between the
+        current live allocations, in address order, up to allocation_limit_segment.
+        First-fit, deterministic — matches how a real DOS MCB chain allocates
+        by default, and (unlike a bump pointer) correctly reuses space a freed
+        block gave back."""
+        # Any freed block below the historical high-water mark is a reusable
+        # gap too; start scanning from the lowest live allocation's floor
+        # (normally the PSP block itself, which is always present).
+        starts = sorted(self.allocations)
+        cursor = min(starts, default=self.next_alloc_segment)
+        for seg in starts:
+            if seg < cursor:
+                continue
+            if seg > cursor:
+                yield cursor, seg - cursor
+            cursor = max(cursor, seg + self.allocations[seg])
+        if cursor < self.allocation_limit_segment:
+            yield cursor, self.allocation_limit_segment - cursor
+
+    def _find_free_gap(self, paragraphs: int) -> int | None:
+        for start, size in self._free_gaps():
+            if size >= paragraphs:
+                return start
+        return None
+
+    def _largest_free_gap(self) -> int:
+        return max((size for _, size in self._free_gaps()), default=0)
 
     def int10(self, cpu: CPU8086) -> None:
         ah = (cpu.s.ax >> 8) & 0xFF

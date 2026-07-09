@@ -361,27 +361,71 @@ def _save_gap_snapshot(frontend: GameFrontend, rt, *, status: str) -> None:
         print(f"(could not save gap snapshot: {save_exc})")
 
 
+def _diagnostic_lines(rt) -> list[str]:
+    """Game-agnostic context printed on any halt/crash, cheap enough to
+    always compute (no per-instruction tracing overhead): DOS console output
+    (many DOS programs print a plain-text reason — "Not enough memory",
+    "Cannot find X" — before exiting, which otherwise vanishes silently), a
+    compact DOS memory-allocator summary, and open file handles (useful when
+    the failure is mid asset-load). "program halted" alone hides all of this."""
+    lines = []
+    dos = getattr(rt, "dos", None)
+    if dos is None:
+        return lines
+    stdout = "".join(getattr(dos, "stdout", [])).strip()
+    if stdout:
+        lines.append(f"dos stdout: {stdout!r}")
+    allocs = getattr(dos, "allocations", None)
+    if allocs:
+        total = sum(allocs.values()) * 16
+        lines.append(f"dos memory: {len(allocs)} live allocations, {total:,} bytes; "
+                     f"next_alloc_segment={dos.next_alloc_segment:04X} "
+                     f"limit={dos.allocation_limit_segment:04X}")
+    files = getattr(dos, "files", None)
+    if files:
+        names = ", ".join(f"{h}:{fh.path.name}@{fh.pos}/{len(fh.data)}" for h, fh in sorted(files.items()))
+        lines.append(f"open files: {names}")
+    return lines
+
+
 def _exit_report(rt, *, status: str, frames: int) -> int:
     print(f"status: {status}")
+    for line in _diagnostic_lines(rt):
+        print(f"  {line}")
     print(f"frames: {frames}  steps: {rt.cpu.instruction_count:,}")
     print(f"cpu: {rt.cpu.s.snapshot()}")
     return 0 if not status.startswith(("unsupported", "exception")) else 1
 
 
 def _step_frame(frontend: GameFrontend, rt, args, frame: int) -> tuple[str | None, bool]:
-    """One guarded frame advance.  Returns (status_or_None, keep_running)."""
+    """One guarded frame advance.  Returns (status_or_None, keep_running).
+
+    Every failure mode prints the cheap diagnostics (_diagnostic_lines) and
+    saves a resumable gap snapshot — not just unhandled exceptions. A bare
+    "program halted"/"unsupported instruction" with no further context meant
+    the only way to diagnose it was to reproduce it by hand from scratch."""
     try:
         frontend.advance_frame(rt, args, frame)
     except ConsoleInputWouldBlock:
         return "waiting for DOS key", True
     except HaltExecution:
-        return "program halted", False
+        status = "program halted"
+        for line in _diagnostic_lines(rt):
+            print(f"  {line}")
+        _save_gap_snapshot(frontend, rt, status=status)
+        return status, False
     except UnsupportedInstruction as exc:
-        return f"unsupported instruction: {exc}", False
+        status = f"unsupported instruction: {exc}"
+        for line in _diagnostic_lines(rt):
+            print(f"  {line}")
+        _save_gap_snapshot(frontend, rt, status=status)
+        return status, False
     except Exception as exc:  # noqa: BLE001 — keep bring-up useful
         import traceback
         traceback.print_exc()
         status = f"exception: {type(exc).__name__}: {exc}"
+        for line in _diagnostic_lines(rt):
+            print(f"  {line}")
         _save_gap_snapshot(frontend, rt, status=status)
         return status, False
     return None, True
