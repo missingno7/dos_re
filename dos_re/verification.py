@@ -765,6 +765,12 @@ class HookVerifier:
         return ", ".join(f"{cs:04X}:{ip:04X}" for cs, ip in targets)
 
     def _dos_diff(self, asm_rt: Runtime, hook_rt: Runtime) -> list[str]:
+        # Divergence-report detail for a DOS host. A host whose runtime is not a
+        # DOS VM (win16_re supplies its own via config.clone_runtime) has no
+        # `.dos` and no EGA aperture — it must not crash the reporter, or a real
+        # divergence is masked by an AttributeError.
+        if not hasattr(asm_rt, "dos") or not hasattr(hook_rt, "dos"):
+            return []
         lines = []
         for field in (
             "next_handle",

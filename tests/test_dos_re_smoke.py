@@ -8,6 +8,8 @@ They are the first command to run in constrained automation:
 from __future__ import annotations
 
 from pathlib import Path
+
+import pytest
 import struct
 
 from dos_re.cpu import CPU8086, CPUState
@@ -456,3 +458,40 @@ def test_asm_keeps_passthrough_hooks_when_a_hook_is_the_environment(tmp_path):
     assert env_key in asm_cpu.replacement_hooks, "environment hook was cleared"
     assert key not in asm_cpu.replacement_hooks, "hook under test must be dropped"
     assert cpu.s.ax == 0x0011        # and it verified byte-exact
+
+
+def test_divergence_report_survives_a_non_dos_runtime(tmp_path):
+    """A real divergence on a non-DOS host (no `.dos`, no EGA aperture) must be
+    REPORTED, not masked by an AttributeError from the DOS detail section."""
+    rt, cpu, key = _make_verifier_smoke_runtime(tmp_path)
+
+    def bad_hook(hook_cpu: CPU8086) -> None:
+        hook_cpu.s.ax = (hook_cpu.s.ax + 2) & 0xFFFF     # ASM does +1
+        hook_cpu.s.ip = hook_cpu.mem.rw(hook_cpu.s.ss, hook_cpu.s.sp)
+        hook_cpu.s.sp = (hook_cpu.s.sp + 2) & 0xFFFF
+
+    cpu.replacement_hooks[key] = bad_hook
+    cpu.hook_names[key] = "bad_inc_ret"
+
+    class _Program:
+        def __init__(self, memory): self.memory = memory
+
+    class _NonDosRuntime:          # duck-typed: .cpu + .program.memory only
+        def __init__(self, cpu): self.cpu, self.program = cpu, _Program(cpu.mem)
+
+    def custom_clone(src):
+        clone_rt = _make_verifier_smoke_runtime(tmp_path)[0]
+        clone_rt.cpu.mem.data[:] = src.program.memory.data
+        clone_rt.cpu.s = CPUState(**{k: getattr(src.cpu.s, k) for k in src.cpu.s.__slots__})
+        clone_rt.cpu.replacement_hooks = dict(src.cpu.replacement_hooks)
+        clone_rt.cpu.hook_names = dict(src.cpu.hook_names)
+        clone_rt.cpu.hook_verifier_passthrough = set(src.cpu.hook_verifier_passthrough)
+        return _NonDosRuntime(clone_rt.cpu)
+
+    install_hook_verifier(
+        rt,
+        HookVerifierConfig.strict(verify_all=True, hooks={key}, clone_runtime=custom_clone),
+        {},
+    )
+    with pytest.raises(HookVerifyDivergence, match="AX"):
+        cpu.step()                 # the real difference is reported, not an AttributeError
