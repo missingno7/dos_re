@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from dos_re.cpu import HaltExecution, UnsupportedInstruction  # noqa: E402
+from dos_re.interrupts import deliver_interrupt  # noqa: E402
 from dos_re.lift import scan_function  # noqa: E402
 from dos_re.lift.emit import EmitUnsupported, emit_function  # noqa: E402
 from dos_re.lift.manifest import LiftManifest, LiftRecord  # noqa: E402
@@ -103,6 +104,14 @@ def main(argv=None) -> int:
                         "that verification is abandoned (a function that reaches deep "
                         "into the program can be slow to re-interpret). Keep batches "
                         "small — this is a per-slice tool, not a whole-census sweep.")
+    p.add_argument("--timer-irqs", type=int, default=0, metavar="N",
+                   help="deliver N INT 08h timer interrupts per frame while running "
+                        "forward (0 = none). Interrupt-gated code — timer ISRs and "
+                        "everything they call — is never reached by a plain forward "
+                        "run; this is how you exercise it (mirror the game's own "
+                        "frontend, e.g. skyroads uses 6).")
+    p.add_argument("--frame-steps", type=int, default=30_000, metavar="N",
+                   help="(with --timer-irqs) VM instructions between IRQ bursts")
     p.add_argument("--emit-dir", default="lifted",
                    help="where the generated hook modules are written / read")
     p.add_argument("--manifest", default=None,
@@ -186,10 +195,13 @@ def main(argv=None) -> int:
     name_to_key = {v: k for k, v in rt.cpu.hook_names.items() if k in hooks}
     status = "budget reached"
     steps_done = 0
-    chunk = 200_000
+    chunk = args.frame_steps if args.timer_irqs else 200_000
     try:
         while steps_done < args.steps:
             try:
+                if args.timer_irqs:
+                    for _ in range(args.timer_irqs):
+                        deliver_interrupt(rt, 0x08)
                 steps_done += rt.cpu.run(min(chunk, args.steps - steps_done))
             except LiftRuntimeError as exc:
                 # A lifted hook ran away (unbounded internal wait — a poor lift
