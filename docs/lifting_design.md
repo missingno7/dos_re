@@ -402,6 +402,17 @@ Design points that made it practical:
   the function ran but wasn't sampled (raise `--steps`/`--samples`); only
   `blocks_covered==0` is a true `NOT_REACHED`. No function is silently
   mislabelled.
+- **Runaway guard — fail loud, never hang.** A lifted function runs
+  SYNCHRONOUSLY to completion; unlike the interpreter, no external I/O or
+  timing advances between its blocks. So a loop that waits on hardware state
+  (a retrace/timer poll) would spin forever in the generated dispatch loop.
+  The emitted loop is therefore bounded (`MAX_ITERATIONS`) and raises
+  `LiftRuntimeError` on overrun; `liftverify` catches it, retires just that
+  hook, marks it `DIVERGED` (runaway), and keeps verifying the rest. Confirmed
+  live: pointed at overkill's `0679` timer-wait, the lift failed loud and was
+  retired while `0162` still verified byte-exact in the same run — no hang.
+  (This is why the porting guide steers lifts at leaf COMPUTE routines;
+  environment-wait loops are hand-hook territory.)
 - **The ledger is separate.** Results land in `dos_re.lift.manifest`
   (`LIFTED → ORACLE_PASSING → INSTALLED → REFACTORED`), whose statuses are
   asserted *disjoint* from `islands.STATUSES` by a test — a lift cannot be

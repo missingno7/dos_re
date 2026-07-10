@@ -22,6 +22,11 @@ Usage:
 This is the optional accelerator a porting agent reaches for: instead of
 hand-translating a routine and hoping, lift it, run this, and either get a
 verified replacement island for free or a precise divergence to look at.
+
+Scope: a PER-SLICE tool. Each sampled call re-interprets the original ASM to
+the hook's continuation, so verify a handful of related entries at a time
+(the "one routine, one verification, per slice" loop) — not the whole census
+in one process. `liftgen --report` is the tool for whole-census questions.
 """
 from __future__ import annotations
 
@@ -37,6 +42,7 @@ from dos_re.cpu import HaltExecution, UnsupportedInstruction  # noqa: E402
 from dos_re.lift import scan_function  # noqa: E402
 from dos_re.lift.emit import EmitUnsupported, emit_function  # noqa: E402
 from dos_re.lift.manifest import LiftManifest, LiftRecord  # noqa: E402
+from dos_re.lift.runtime import LiftRuntimeError  # noqa: E402
 from dos_re.repro_artifacts import clone_runtime_state  # noqa: E402
 from dos_re.snapshot import load_snapshot, parse_addr  # noqa: E402
 from dos_re.verification import (HookVerifierConfig, HookVerifyDivergence,  # noqa: E402
@@ -92,6 +98,11 @@ def main(argv=None) -> int:
                         "oracle, so a hot function would otherwise crawl). Per-hook, "
                         "so one hot function never starves the sample budget of the "
                         "others — that sample is what proves the hook.")
+    p.add_argument("--verify-timeout", type=float, default=8.0,
+                   help="wall-clock seconds a single ASM-oracle re-run may take before "
+                        "that verification is abandoned (a function that reaches deep "
+                        "into the program can be slow to re-interpret). Keep batches "
+                        "small — this is a per-slice tool, not a whole-census sweep.")
     p.add_argument("--emit-dir", default="lifted",
                    help="where the generated hook modules are written / read")
     p.add_argument("--manifest", default=None,
@@ -160,18 +171,38 @@ def main(argv=None) -> int:
     #    running) once it has been sampled enough — per-hook fairness, so a hot
     #    function never starves the others' sample budget.
     to_verify = set(hooks)
+    if len(hooks) > 12:
+        print(f"note: verifying {len(hooks)} functions at once is slow (each sampled "
+              f"call re-runs the ASM oracle). liftverify is a per-slice tool — prefer "
+              f"batches of a handful of entries.\n")
     verifier = install_hook_verifier(
-        rt, HookVerifierConfig.strict(hooks=to_verify), stops={})
+        rt, HookVerifierConfig.strict(hooks=to_verify, asm_wall_timeout_s=args.verify_timeout),
+        stops={})
 
     # 3. Run the VM forward in chunks; between chunks, retire fully-sampled
     #    hooks from the verify set. The verifier reads config.hooks live.
     diverged: dict[tuple[int, int], str] = {}
+    runaway: dict[tuple[int, int], str] = {}
+    name_to_key = {v: k for k, v in rt.cpu.hook_names.items() if k in hooks}
     status = "budget reached"
     steps_done = 0
     chunk = 200_000
     try:
         while steps_done < args.steps:
-            steps_done += rt.cpu.run(min(chunk, args.steps - steps_done))
+            try:
+                steps_done += rt.cpu.run(min(chunk, args.steps - steps_done))
+            except LiftRuntimeError as exc:
+                # A lifted hook ran away (unbounded internal wait — a poor lift
+                # target). Retire just that hook and keep verifying the rest.
+                bad = next((k for nm, k in name_to_key.items() if nm in str(exc)), None)
+                if bad is None:
+                    raise
+                runaway[bad] = str(exc)
+                rt.cpu.replacement_hooks.pop(bad, None)
+                rt.cpu.hook_names.pop(bad, None)
+                to_verify.discard(bad)
+                print(f"runaway  {bad[0]:04X}:{bad[1]:04X}: {exc}")
+                continue
             for key in list(to_verify):
                 if verifier.counts.get(key, 0) >= args.samples:
                     to_verify.discard(key)          # keep running it, stop verifying
@@ -204,7 +235,10 @@ def main(argv=None) -> int:
         rec.calls = verified
         rec.verified = verified
         rec.blocks_covered = seen
-        if (cs, ip) in diverged:
+        if (cs, ip) in runaway:
+            rec.status, rec.note = "DIVERGED", "runaway: " + runaway[(cs, ip)][:180]
+            rec.divergences = 1
+        elif (cs, ip) in diverged:
             rec.status, rec.divergences, rec.note = "DIVERGED", 1, diverged[(cs, ip)][:200]
         elif verified > 0:
             rec.status = "ORACLE_PASSING"

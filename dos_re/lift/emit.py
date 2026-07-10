@@ -442,11 +442,13 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     A("")
     A("from dos_re.cpu import AF, CF, DF, IF, OF, PF, SF, ZF")
     A("from dos_re.hooks import self_disable_if_patched")
-    A("from dos_re.lift.runtime import (emulate_call, emulate_far_call, emulate_int,")
-    A("                                 interp_one)")
+    A("from dos_re.lift.runtime import (LiftRuntimeError, emulate_call, emulate_far_call,")
+    A("                                 emulate_int, interp_one)")
     A("")
     A(f"ENTRY = (0x{cs:04X}, 0x{scan.entry:04X})")
     A(f"SIGNATURE = bytes.fromhex({signature.hex()!r})")
+    A(f"MAX_ITERATIONS = {max(10_000, len(scan.insts) * 5_000)}  "
+      "# runaway guard: fail loud, never hang")
     if coverage:
         A("")
         A(f"BLOCK_COUNT = {len(leaders)}")
@@ -468,7 +470,12 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     if count_instructions:
         A("    cpu.instruction_count -= 1  # step() counts the hook as 1; count real instructions")
     A("    bb = 0")
-    A("    while True:")
+    A("    # A lifted function runs SYNCHRONOUSLY to completion — unlike the")
+    A("    # interpreter, no external I/O/timing advances between its blocks. A")
+    A("    # loop that waits on hardware state (retrace/timer polls) would spin")
+    A("    # forever here, so bound it and fail loud (such env-waits are poor lift")
+    A("    # targets — hook them by hand instead).")
+    A("    for _guard in range(MAX_ITERATIONS):")
 
     ind = " " * 12
     for bi, body in enumerate(blocks):
@@ -538,5 +545,11 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
                 raise EmitUnsupported(
                     f"block at {cs:04X}:{body[0].ip:04X} falls out of the region")
             A(f"{ind}bb = {bb_of[fall]}")
+    # The dispatch loop only exits via a block's `return`. Reaching here means
+    # MAX_ITERATIONS blocks executed without returning — an unbounded internal
+    # wait/spin. Fail loud instead of hanging.
+    A(f"    raise LiftRuntimeError(")
+    A(f"        {name!r} + ' exceeded MAX_ITERATIONS (unbounded internal loop -- "
+      f"likely an environment wait; hook it by hand)')")
     A("")
     return "\n".join(L) + "\n"
