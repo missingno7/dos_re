@@ -1,8 +1,11 @@
 # Automatic literal lifting: ASM function → Python hook → oracle → refactor
 
-> Status: **M0 LANDED** (census; approved 2026-07-10 — "go ahead"). The
-> decoder + CFG walker + `tools/liftgen.py` exist; §10a below has the measured
-> census. The emitter (M1) is the next stage.
+> Status: **M0 + M1 LANDED** (2026-07-10). Decoder + CFG walker +
+> `tools/liftgen.py` (M0, §10a census) and the emitter (`lift/emit.py` +
+> `lift/runtime.py`, M1, §10b) are in. `liftgen --emit` generates a literal
+> Python hook per liftable function; the real overkill `4537` lift passes its
+> own 300-case differential fuzz byte-exact. M2 (in-situ pipeline + status
+> ladder) is next.
 
 ## 0. The idea, in this ecosystem's terms
 
@@ -315,6 +318,58 @@ Notes from the field: the census probe found that the 2026-07-09 interpreter
 fetch-path inlining had silently broken `tools/lindis.py`'s fetch8-counting
 length trick; lindis now takes lengths from `dos_re.lift.decode` (and gained
 the ability to decode non-executable bytes).
+
+## 10b. M1 results (2026-07-10) — the emitter
+
+`dos_re/lift/emit.py` turns a `FunctionScan` into a self-contained Python
+module defining one hook, exactly as §5 specified: architectural state at
+every instruction boundary, a basic-block dispatch loop, per-line
+address/bytes/mnemonic comments, the fail-loud SMC entry guard, and
+`--count-instructions` for demo-clock transparency. `lift/runtime.py`
+provides the VM-delegation primitives (`emulate_call` / `emulate_far_call` /
+`emulate_int` — callees and ISRs run through the interpreter, so hooks
+compose and lifting order never matters) and `interp_one` (the exact
+single-instruction fallback for opcodes with no native form yet).
+
+**Faithfulness by reuse, not reimplementation.** Emitted code never
+re-derives semantics: ALU/flags call `cpu.set_add_flags`/`set_sub_flags`/
+`set_logic_flags`/`set_incdec_flags`, shifts call `cpu.shift`, string ops
+call the interpreter's IP-independent `cpu.string_op` (DF/REP/segment-override
+and the bulk MOVS/STOS fast path included), and all memory goes through
+`mem.rb/rw/wb/ww`. So a lifted function is byte-exact against the interpreter
+by construction — the only divergence surface is translation bugs, which the
+differential oracle catches.
+
+Measured over all 269 v1-liftable overkill functions (`liftgen --emit`):
+
+| Metric | Result |
+|---|---|
+| modules generated | 269 |
+| syntax errors | **0** |
+| instructions emitted | 10,253 |
+| **native** (real per-instruction Python) | **95.4%** |
+| interpreter-fallback | 4.6% (mostly `cli/sti/cld/std/cmc`, `mul/div/neg/not`, `in/out`) |
+
+**The load-bearing proof:** the emitted `lifted_1010_4537` — a real 43-
+instruction, 3-block game function — passes overkill's own
+`test_expand_4plane_row_4537_fuzz` harness **300/300 byte-exact** (registers
++ flags + full memory) against the interpreted ASM oracle, with no
+hand-editing. (It is also correct out of the box on the ZF/OF flag tail that
+the *hand-written* hook got wrong until it was fixed earlier the same day —
+evidence for the thesis that mechanical lifting removes a class of human
+translation error.)
+
+29 new differential tests (`tests/test_lift_emit.py`): each hand-assembles a
+function, lifts it, and diffs lifted-vs-interpreted over randomized states —
+covering the ALU/mov/inc-dec/push-pop/xchg/lea/shift/test/string families,
+every control-flow shape (jcc, loop*, jcxz, diamonds, ret imm), call
+composition with an installed callee hook, the SMC guard, and the
+instruction-count option.
+
+Deferred to keep M1 scoped: growing the native set to cover the 4.6% tail
+(flag ops and mul/div are easy next adds), block-local register caching, and
+a structurizer. None are needed for the thesis — the fallback keeps every
+function total and exact today.
 
 ## 11. Decisions wanted from the owner
 

@@ -38,6 +38,7 @@ HLT = "hlt"
 UNSUPPORTED = "unsupported"  # decoded length may still be valid (x87); never lifted
 
 PREFIXES = {0x26, 0x2E, 0x36, 0x3E, 0xF0, 0xF2, 0xF3}
+_SEG_PREFIX = {0x26: "es", 0x2E: "cs", 0x36: "ss", 0x3E: "ds"}
 _MAX_LEN = 15
 
 
@@ -52,10 +53,41 @@ class Inst:
     far_target: tuple[int, int] | None = None   # (seg, off) for direct far transfers
     int_no: int | None = None
     prefixes: tuple[int, ...] = field(default=())
+    # --- operand detail (the emitter's input) ---
+    op: int = 0                          # primary opcode byte
+    modrm: int | None = None
+    disp: int | None = None              # sign-extended displacement, when present
+    imm: int | None = None               # immediate, as encoded (emitter sign-extends)
 
     @property
     def next_ip(self) -> int:
         return (self.ip + self.length) & 0xFFFF
+
+    @property
+    def mod(self) -> int | None:
+        return None if self.modrm is None else self.modrm >> 6
+
+    @property
+    def reg(self) -> int | None:
+        return None if self.modrm is None else (self.modrm >> 3) & 7
+
+    @property
+    def rm(self) -> int | None:
+        return None if self.modrm is None else self.modrm & 7
+
+    @property
+    def seg_override(self) -> str | None:
+        for p in reversed(self.prefixes):
+            if p in _SEG_PREFIX:
+                return _SEG_PREFIX[p]
+        return None
+
+    @property
+    def rep(self) -> int | None:
+        for p in self.prefixes:
+            if p in (0xF2, 0xF3):
+                return p
+        return None
 
 
 def _modrm_disp_len(modrm: int) -> int:
@@ -229,13 +261,23 @@ def decode_one(fetch: Callable[[int], int], ip: int) -> Inst:
         length = (pos - ip) & 0xFFFF
         return Inst(ip, length, UNSUPPORTED, f"db 0x{op:02X}",
                     bytes(fetch((ip + i) & 0xFFFF) & 0xFF for i in range(length)),
-                    prefixes=tuple(prefixes))
+                    prefixes=tuple(prefixes), op=op)
     has_modrm, imm, kind, mnem = entry
 
     modrm = None
+    disp: int | None = None
     if has_modrm:
         modrm = fetch(pos) & 0xFF
-        pos = (pos + 1 + _modrm_disp_len(modrm)) & 0xFFFF
+        pos = (pos + 1) & 0xFFFF
+        dlen = _modrm_disp_len(modrm)
+        if dlen == 1:
+            d = fetch(pos) & 0xFF
+            disp = d - 0x100 if d & 0x80 else d
+        elif dlen == 2:
+            d = (fetch(pos) & 0xFF) | ((fetch((pos + 1) & 0xFFFF) & 0xFF) << 8)
+            # mod=0,rm=6 is a direct *unsigned* address; mod=2 is a signed disp16.
+            disp = d if (modrm >> 6) == 0 else (d - 0x10000 if d & 0x8000 else d)
+        pos = (pos + dlen) & 0xFFFF
 
     if imm == "grp3b":
         imm_len = 1 if modrm is not None and ((modrm >> 3) & 7) in (0, 1) else 0
@@ -248,6 +290,12 @@ def decode_one(fetch: Callable[[int], int], ip: int) -> Inst:
 
     length = (pos - ip) & 0xFFFF
     raw = bytes(fetch((ip + i) & 0xFFFF) & 0xFF for i in range(length))
+
+    imm_val: int | None = None
+    if imm_len == 1:
+        imm_val = fetch(imm_pos) & 0xFF
+    elif imm_len == 2:
+        imm_val = (fetch(imm_pos) & 0xFF) | ((fetch((imm_pos + 1) & 0xFFFF) & 0xFF) << 8)
 
     target: int | None = None
     far_target: tuple[int, int] | None = None
@@ -280,4 +328,5 @@ def decode_one(fetch: Callable[[int], int], ip: int) -> Inst:
         int_no = {0xCC: 3, 0xCE: 4}.get(op, raw[-1] if imm_len else None)
 
     return Inst(ip, length, kind, mnem, raw, target=target, far_target=far_target,
-                int_no=int_no, prefixes=tuple(prefixes))
+                int_no=int_no, prefixes=tuple(prefixes), op=op, modrm=modrm,
+                disp=disp, imm=imm_val)

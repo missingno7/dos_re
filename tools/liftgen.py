@@ -32,6 +32,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from dos_re.lift import scan_function  # noqa: E402
+from dos_re.lift.cfg import Refusal  # noqa: E402
+from dos_re.lift.emit import EmitUnsupported, emit_function  # noqa: E402
 from dos_re.repro_artifacts import clone_runtime_state  # noqa: E402
 from dos_re.snapshot import load_snapshot, parse_addr  # noqa: E402
 
@@ -77,6 +79,12 @@ def main(argv=None) -> int:
     p.add_argument("--entries-file")
     p.add_argument("--json", help="write full per-function results to this file")
     p.add_argument("--game-root", default=None)
+    p.add_argument("--emit", metavar="DIR",
+                   help="M1: also generate a literal Python hook per liftable entry "
+                        "into DIR (one module each, named lifted_<cs>_<ip>.py)")
+    p.add_argument("--count-instructions", action="store_true",
+                   help="(with --emit) make the lifted hook reproduce the ASM's "
+                        "instruction_count, so installing it is demo-clock transparent")
     args = p.parse_args(argv)
 
     entries = [parse_addr(e) for e in args.entry]
@@ -112,16 +120,40 @@ def main(argv=None) -> int:
             "refusals": [{"ip": f"{r.ip:04X}", "reason": r.reason, "detail": r.detail}
                          for r in scan.refusals],
         }
+        emitted = ""
+        if args.emit and scan.liftable:
+            try:
+                name = f"lifted_{cs:04x}_{ip:04x}"
+                entry_block_end = min(
+                    (i.next_ip for i in scan.insts.values()
+                     if i.kind != "seq" and i.ip >= ip), default=(ip + 8) & 0xFFFF)
+                sig_len = max(4, min(16, (entry_block_end - ip) & 0xFFFF))
+                sig = bytes(rt.cpu.mem.rb(cs, (ip + k) & 0xFFFF) for k in range(sig_len))
+                src = emit_function(scan, cs, name, signature=sig,
+                                    count_instructions=args.count_instructions)
+                out_dir = Path(args.emit)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / f"{name}.py").write_text(src, encoding="utf-8")
+                rec["emitted"] = f"{name}.py"
+                emitted = f" -> {name}.py"
+            except EmitUnsupported as exc:
+                rec["liftable"] = False
+                rec["refusals"].append({"ip": f"{ip:04X}", "reason": "emit-unsupported",
+                                        "detail": str(exc)})
+                refusal_hist["emit-unsupported"] += 1
+                scan.refusals.append(Refusal(ip, "emit-unsupported", str(exc)))
+
         results.append(rec)
         if scan.liftable:
             liftable += 1
         for r in scan.refusals:
-            refusal_hist[r.reason] += 1
+            if r.reason != "emit-unsupported":
+                refusal_hist[r.reason] += 1
         flag = "LIFTABLE " if scan.liftable else "refused  "
         reasons = ",".join(sorted({r.reason for r in scan.refusals})) or "-"
         print(f"{flag} {rec['entry']}  insts={rec['insts']:<4} blocks={rec['blocks']:<3} "
               f"calls={len(scan.calls_near)}+{rec['calls_indirect']}i "
-              f"ints={','.join(map(str, rec['ints'])) or '-':<6} {reasons}")
+              f"ints={','.join(map(str, rec['ints'])) or '-':<6} {reasons}{emitted}")
 
     print(f"\n{liftable}/{len(entries)} liftable "
           f"({100.0 * liftable / len(entries):.0f}%)")
