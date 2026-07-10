@@ -1,7 +1,8 @@
 # Automatic literal lifting: ASM function → Python hook → oracle → refactor
 
-> Status: **PROPOSAL** (design only, nothing implemented). Owner review wanted
-> on the decisions in §11 before any code. 2026-07-10.
+> Status: **M0 LANDED** (census; approved 2026-07-10 — "go ahead"). The
+> decoder + CFG walker + `tools/liftgen.py` exist; §10a below has the measured
+> census. The emitter (M1) is the next stage.
 
 ## 0. The idea, in this ecosystem's terms
 
@@ -285,6 +286,35 @@ translation at scale).
   register caching if profiling justifies; structurizer pass (source-to-
   source on verified artifacts, re-verified); Win16 boundary policy when
   win16_re exists.
+
+## 10a. M0 census results (2026-07-10)
+
+Ran over every REAL function entry available: all 335 registered hook
+addresses in overkill_port, all 44 in pre2_port, and the documented ledger
+addresses of the two young ports. Probe: every non-transfer instruction's
+length cross-checked against one interpreter step() (IP delta).
+
+| Port | entries (source) | liftable | dominant refusals |
+|---|---|---|---|
+| overkill_port | 335 (hook registry) | 269 (**80%**) | 52 indirect-jump, 10 unsupported, 10 no-exit, 9 region-budget |
+| pre2_port | 44 (hook registry) | 44 (**100%**) | — |
+| skyroads_port | 17 (symbol ledger) | 16 (94%) | 1 unsupported (likely a non-entry doc address) |
+| ancient_port | 27 (docs) | 22 (81%) | 5 indirect-jump, 1 unsupported |
+| **total** | **423** | **351 (83%)** | |
+
+**Zero decoder-mismatch refusals anywhere** — the static decoder agreed with
+the interpreter on every probeable instruction of every real function.
+Liftable-function size: median 25 instructions, max 199 (overkill). The
+refusal histogram confirms the §6 prediction: indirect jumps (dispatch
+tables) are the one class that matters for coverage beyond v1 — jump-table
+recognition is the highest-value M4 item. The unsupported/no-exit tail is
+small and partly non-entries (doc addresses that are labels, not function
+heads). Verdict: **the M1 emitter is justified.**
+
+Notes from the field: the census probe found that the 2026-07-09 interpreter
+fetch-path inlining had silently broken `tools/lindis.py`'s fetch8-counting
+length trick; lindis now takes lengths from `dos_re.lift.decode` (and gained
+the ability to decode non-executable bytes).
 
 ## 11. Decisions wanted from the owner
 

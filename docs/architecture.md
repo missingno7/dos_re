@@ -71,6 +71,13 @@ from the source projects). Grouped by concern:
 | `dosbox_savestate.py` | Import a DOSBox-X save state (memory + registers) as an alternative evidence source. |
 | `testing.py` | Stdlib-only test discovery/runner (pytest fallback for constrained sandboxes). |
 
+### The lifter (M0: census)
+
+| Module | What it is |
+|---|---|
+| `lift/decode.py` | Static 16-bit x86 decoder (lengths, control-flow class, branch targets) for the lifter — deliberately NOT a second semantic model; every non-transfer length is cross-checked against the interpreter (IP-delta probe) and disagreement refuses the function. OS-free (extractable for a future win16_re). |
+| `lift/cfg.py` | Function-region discovery from an entry offset: reachable instructions, basic-block leaders, exits (ret/retf/iret/far-jmp), call/INT dependencies, and the structured refusal taxonomy (indirect-jump, unsupported-opcode, no-exit, region-budget, decoder-mismatch). `tools/liftgen.py` is the census CLI. See docs/lifting_design.md. |
+
 ### The human frontend (the optional viewer ring)
 
 | Module | What it is |
