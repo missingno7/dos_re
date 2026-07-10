@@ -398,8 +398,15 @@ def _terminator_lines(inst: Inst, cs: int, bb_of: dict[int, int], out: list[str]
 
 
 def emit_function(scan: FunctionScan, cs: int, name: str, *,
-                  signature: bytes, count_instructions: bool = False) -> str:
-    """Return the source of a module defining the lifted hook ``name``."""
+                  signature: bytes, count_instructions: bool = False,
+                  coverage: bool = False) -> str:
+    """Return the source of a module defining the lifted hook ``name``.
+
+    ``coverage`` adds a module-level ``BLOCKS_SEEN`` set that records which
+    basic blocks actually executed, plus ``BLOCK_COUNT`` and ``coverage()`` —
+    so a verify run can report *which paths* were exercised, not just that the
+    hook passed (docs/lifting_design.md §7). It is inert otherwise.
+    """
     leaders = scan.block_leaders()
     bb_of = {ip: i for i, ip in enumerate(leaders)}
     leader_set = set(leaders)
@@ -440,6 +447,15 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     A("")
     A(f"ENTRY = (0x{cs:04X}, 0x{scan.entry:04X})")
     A(f"SIGNATURE = bytes.fromhex({signature.hex()!r})")
+    if coverage:
+        A("")
+        A(f"BLOCK_COUNT = {len(leaders)}")
+        A("BLOCKS_SEEN = set()  # basic blocks that actually executed")
+        A("")
+        A("")
+        A("def coverage():")
+        A('    """(len(seen), total) — how much of the function a verify run exercised."""')
+        A("    return len(BLOCKS_SEEN), BLOCK_COUNT")
     A("")
     A("")
     A(f"def {name}(cpu):")
@@ -458,6 +474,8 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     for bi, body in enumerate(blocks):
         A(f"        {'if' if bi == 0 else 'elif'} bb == {bi}:")
         lines: list[str] = []
+        if coverage:
+            lines.append(f"BLOCKS_SEEN.add({bi})")
         # Instructions executed natively (i.e. NOT re-entered through step(),
         # which does its own accounting). Calls/INTs count 1 for the transfer
         # instruction itself; their callees are counted by the VM.

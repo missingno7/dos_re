@@ -1,11 +1,14 @@
 # Automatic literal lifting: ASM function → Python hook → oracle → refactor
 
-> Status: **M0 + M1 LANDED** (2026-07-10). Decoder + CFG walker +
-> `tools/liftgen.py` (M0, §10a census) and the emitter (`lift/emit.py` +
-> `lift/runtime.py`, M1, §10b) are in. `liftgen --emit` generates a literal
-> Python hook per liftable function; the real overkill `4537` lift passes its
-> own 300-case differential fuzz byte-exact. M2 (in-situ pipeline + status
-> ladder) is next.
+> Status: **M0 + M1 + M2 LANDED** (2026-07-10). Decoder + CFG (M0, §10a),
+> emitter (M1, §10b), and the in-situ verify pipeline + proof ledger (M2,
+> §10c) are in. The full loop works: `liftverify` emits a literal hook per
+> entry, installs them, runs the VM, and differentially verifies each against
+> the interpreted original — writing `ORACLE_PASSING`/`DIVERGED`/`NOT_REACHED`
+> into a per-function ledger. It is the optional accelerator a porting agent
+> reaches for (wired into `template_dos_port`'s checklist + cookbook). M3 (an
+> AI refactoring a passing lift into clean recovered source) is the remaining
+> thesis step.
 
 ## 0. The idea, in this ecosystem's terms
 
@@ -370,6 +373,53 @@ Deferred to keep M1 scoped: growing the native set to cover the 4.6% tail
 (flag ops and mul/div are easy next adds), block-local register caching, and
 a structurizer. None are needed for the thesis — the fallback keeps every
 function total and exact today.
+
+## 10c. M2 results (2026-07-10) — the verify pipeline
+
+`tools/liftverify.py` closes the loop from *emitted* to *trusted*, and is the
+form a porting agent actually uses: point it at a snapshot (a moment where the
+target runs) and a set of entries, and it emits each lifted hook, installs
+them all, runs the VM forward, and — every time a lifted function executes —
+interprets the ORIGINAL ASM from the same pre-state to the hook's own
+continuation and diffs the full machine state. It uses the framework's strict
+**auto-continuation** verifier, so there is no hand-written stop metadata and
+no game-specific harness — any snapshot works.
+
+Design points that made it practical:
+
+- **Per-hook sampling (`--samples`, default 20).** Each verification clones
+  the runtime twice and re-runs the ASM oracle, so verifying every call of a
+  hot function would crawl. The driver verifies each function N times, then
+  retires it from verification (leaving it *running*) by pruning it from the
+  verify set between step chunks — so one hot function never starves the
+  others' sample budget. The sample is what proves the hook; block coverage
+  (below) reports how much of it the sample exercised.
+- **Block coverage (`emit(..., coverage=True)`).** Each generated hook records
+  which basic blocks executed (`BLOCKS_SEEN`), so a pass reports `M/K blocks`
+  and is flagged `PARTIAL COVERAGE` when the sample didn't reach every path —
+  "verified" never overstates (the §7 honesty rule, enforced in output).
+- **Coverage as the reached-signal.** `verified==0 but blocks_covered>0` means
+  the function ran but wasn't sampled (raise `--steps`/`--samples`); only
+  `blocks_covered==0` is a true `NOT_REACHED`. No function is silently
+  mislabelled.
+- **The ledger is separate.** Results land in `dos_re.lift.manifest`
+  (`LIFTED → ORACLE_PASSING → INSTALLED → REFACTORED`), whose statuses are
+  asserted *disjoint* from `islands.STATUSES` by a test — a lift cannot be
+  counted as recovered source.
+
+Smoke over real overkill functions from a live snapshot (6 entries, 400k
+steps): every entry emitted valid installable Python; the reached function
+(`1010:0162`, 69 instructions / 33 blocks, 97% native) verified **byte-exact
+against the interpreted original**, and the five that don't run from that
+snapshot state were reported `NOT_REACHED` — no false pass. The manifest
+round-trips as readable JSON. `tests/test_lift_manifest.py` adds ledger
+round-trip, the disjoint-status invariant, and accumulating block-coverage
+tests; the lift suite is now 77 cases.
+
+Discoverability: `template_dos_port` now teaches the tool — a new "Automatic
+lifting" cookbook entry (problem-indexed) and an "optional accelerator" block
+in the porting checklist's lifting-loop step, both stressing that a lift is
+recovered *only after* an AI refactors it and tags `@oracle_link` (M3).
 
 ## 11. Decisions wanted from the owner
 
