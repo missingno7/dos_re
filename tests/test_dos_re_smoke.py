@@ -354,3 +354,46 @@ def test_dos_re_strict_auto_continuation_reference_ignores_other_replacement_hoo
 
     assert cpu.s.ax == 0x0011
     assert cpu.s.ip == 0x0100
+
+
+def test_config_clone_runtime_overrides_the_dos_cloner(tmp_path):
+    """A host whose runtime is not a DOS VM (e.g. win16_re's Win16Machine, where
+    the OS is a Python hook layer that must be re-bound to the CLONE) supplies
+    its own cloner. The verifier must call it instead of building a DOSMachine,
+    and must verify correctly through it."""
+    rt, cpu, key = _make_verifier_smoke_runtime(tmp_path)
+
+    def inc_ret_hook(hook_cpu: CPU8086) -> None:
+        old_ax = hook_cpu.s.ax & 0xFFFF
+        result = old_ax + 1
+        hook_cpu.s.ax = result & 0xFFFF
+        hook_cpu.set_add_flags(old_ax, 1, result, 16)
+        hook_cpu.s.ip = hook_cpu.mem.rw(hook_cpu.s.ss, hook_cpu.s.sp)
+        hook_cpu.s.sp = (hook_cpu.s.sp + 2) & 0xFFFF
+
+    cpu.replacement_hooks[key] = inc_ret_hook
+    cpu.hook_names[key] = "smoke_inc_ret"
+
+    calls = []
+
+    def custom_clone(src):
+        calls.append(src)
+        clone = _make_verifier_smoke_runtime(tmp_path, ax=src.cpu.s.ax)[0]
+        clone.cpu.mem.data[:] = src.program.memory.data
+        clone.cpu.s = CPUState(**{k: getattr(src.cpu.s, k) for k in src.cpu.s.__slots__})
+        clone.cpu.instruction_count = src.cpu.instruction_count
+        clone.cpu.replacement_hooks = dict(src.cpu.replacement_hooks)
+        clone.cpu.hook_names = dict(src.cpu.hook_names)
+        clone.cpu.hook_verifier_passthrough = set(src.cpu.hook_verifier_passthrough)
+        return clone
+
+    install_hook_verifier(
+        rt,
+        HookVerifierConfig.strict(verify_all=True, hooks={key}, clone_runtime=custom_clone),
+        {},
+    )
+    cpu.step()                       # dispatches the hook -> verified via custom clone
+
+    assert calls, "custom clone_runtime was never called"
+    assert all(c is rt for c in calls), "cloner must receive the live runtime"
+    assert cpu.s.ax == 0x0011        # the hook ran, and matched the ASM oracle

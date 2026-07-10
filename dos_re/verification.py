@@ -140,6 +140,13 @@ class HookVerifierConfig:
     verify_nested_hooks: bool = True
     progress_callback: Callable[[str], None] | None = None
     asm_wall_timeout_s: float | None = 20.0
+    # How to detach a copy of the runtime for the ASM oracle side. Default
+    # (None) clones the DOS VM. A host whose runtime carries state beyond
+    # CPU+memory+DOSMachine — e.g. an OS-as-Python-hook-layer, where the API
+    # services must be re-bound to the CLONE and not the live machine — passes
+    # its own cloner here. It must return a detached runtime exposing `.cpu`
+    # and `.program.memory`; the verifier never inspects anything else.
+    clone_runtime: Callable[[object], object] | None = None
 
     @classmethod
     def strict(
@@ -151,6 +158,7 @@ class HookVerifierConfig:
         asm_max_steps: int = 1_000_000,
         progress_callback: Callable[[str], None] | None = None,
         asm_wall_timeout_s: float | None = 20.0,
+        clone_runtime: Callable[[object], object] | None = None,
     ) -> "HookVerifierConfig":
         """Create the slow, simple, fail-hard verification profile.
 
@@ -173,6 +181,7 @@ class HookVerifierConfig:
             verify_nested_hooks=True,
             progress_callback=progress_callback,
             asm_wall_timeout_s=asm_wall_timeout_s,
+            clone_runtime=clone_runtime,
         )
 
 
@@ -549,6 +558,8 @@ class HookVerifier:
         )
 
     def _clone_runtime(self) -> Runtime:
+        if self.config.clone_runtime is not None:
+            return self.config.clone_runtime(self.rt)
         src = self.rt
         mem = Memory(0)
         mem.data = src.program.memory.data.copy()
