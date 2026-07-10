@@ -64,22 +64,36 @@ def _run_until(cpu: CPU8086, done, max_steps: int, what: str) -> None:
                            f"(at {cpu.s.cs:04X}:{cpu.s.ip:04X})")
 
 
+def _returned(sp: int, sp_after_ret: int) -> bool:
+    """Stack unwound AT or ABOVE the pre-call depth (wrap-safe half-range).
+
+    ``ret n`` / ``retf n`` (pascal convention — every Win16 API and most
+    Win16 game code) pops the arguments too, ending ABOVE the caller's
+    pre-call SP, so exact equality would never fire and the emulated call
+    would run away through the rest of the program. Being at the return
+    CS:IP with the frame gone IS the return; a mid-body pass through the
+    return address is still excluded because the callee's frame keeps SP
+    BELOW the pre-call depth.
+    """
+    return ((sp - sp_after_ret) & 0xFFFF) < 0x8000
+
+
 def emulate_call(cpu: CPU8086, cs: int, target: int, ret_ip: int,
                  max_steps: int = MAX_NESTED_STEPS) -> None:
     """NEAR call: push ``ret_ip``, run the callee through the VM, return.
 
     Terminates when the VM is back at ``cs:ret_ip`` with the stack unwound to
-    its pre-call depth (SP alone is not enough — a callee may legitimately
-    pass through that SP mid-body).
+    its pre-call depth or above (``ret n`` cleans the args too; SP alone is
+    not enough — a callee may legitimately pass through that SP mid-body).
     """
     s = cpu.s
-    sp_after_ret = s.sp & 0xFFFF          # SP the RET restores
+    sp_after_ret = s.sp & 0xFFFF          # SP a plain RET restores
     cpu.push(ret_ip & 0xFFFF)
     s.cs, s.ip = cs & 0xFFFF, target & 0xFFFF
 
     def done() -> bool:
         return (s.cs & 0xFFFF) == (cs & 0xFFFF) and (s.ip & 0xFFFF) == (ret_ip & 0xFFFF) \
-            and (s.sp & 0xFFFF) == sp_after_ret
+            and _returned(s.sp & 0xFFFF, sp_after_ret)
 
     _run_until(cpu, done, max_steps, f"emulated call to {cs:04X}:{target:04X}")
 
@@ -95,7 +109,7 @@ def emulate_far_call(cpu: CPU8086, seg: int, off: int, ret_cs: int, ret_ip: int,
 
     def done() -> bool:
         return (s.cs & 0xFFFF) == (ret_cs & 0xFFFF) and (s.ip & 0xFFFF) == (ret_ip & 0xFFFF) \
-            and (s.sp & 0xFFFF) == sp_after_ret
+            and _returned(s.sp & 0xFFFF, sp_after_ret)
 
     _run_until(cpu, done, max_steps, f"emulated far call to {seg:04X}:{off:04X}")
 

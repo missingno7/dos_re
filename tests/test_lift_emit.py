@@ -413,3 +413,46 @@ def test_entry_fallback_does_not_recurse_into_its_own_hook():
     assert (hook.s.cs, hook.s.ip) == (CS, RET_IP)
     assert (CS, ENTRY) in hook.replacement_hooks    # hook restored after the step
     assert hook.s.ax == asm.s.ax and hook.s.flags == asm.s.flags
+
+
+def test_pascal_callee_ret_n_terminates_the_emulated_call():
+    """`ret n` / `retf n` (pascal — every Win16 API and most Win16 game code)
+    pops the args too, so the callee returns with SP ABOVE the pre-call mark.
+    The emulated call must recognize that as the return instead of running
+    away through the rest of the program (found by the first Win16 lift:
+    IsWindowVisible's `retf 2` never matched the strict-SP done())."""
+    code = bytes.fromhex(
+        "B80200"      # mov ax, 2          (0x0100)
+        "50"          # push ax            (the argument)
+        "E80300"      # call 0x010A
+        "01D8"        # add ax, bx         (0x0108, after the call)
+        "C3"          # ret                (0x010A-1... exits the function)
+        "5A"          # pop dx             (0x010A: callee — pop ret addr? no:)
+        )
+    # hand-build precisely: caller pushes arg, calls; callee does
+    #   mov ax, [sp+2] equivalent work then RET 2 (cleans the arg).
+    code = bytes.fromhex(
+        "B80700"      # 0100: mov ax, 7
+        "50"          # 0103: push ax          (arg)
+        "E8020000"    # won't use — lengths matter; rebuild below
+    )
+    code = bytes.fromhex(
+        "B80700"      # 0100: mov ax, 7
+        "50"          # 0103: push ax           arg for the callee
+        "E80400"      # 0104: call 0x010B
+        "050100"      # 0107: add ax, 1         (post-return)
+        "C3"          # 010A: ret               function exit
+        "8BDC"        # 010B: mov bx, sp        callee
+        "368B5F02"    # 010D: mov bx, ss:[bx+2] read the arg
+        "03C3"        # 0111: add ax, bx
+        "C20200")     # 0113: ret 2             pascal: pops the arg too
+    lifted, _scan, _src = _lift(code)
+    rng = random.Random(0x9A5C)
+    st = _rand_state(rng)
+    asm = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
+    hook = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
+    _run_interpreted(asm)
+    lifted(hook)
+    assert (hook.s.cs, hook.s.ip) == (CS, RET_IP)
+    assert hook.s.ax == asm.s.ax == ((7 + 7 + 1) & 0xFFFF)
+    assert hook.s.sp == asm.s.sp
