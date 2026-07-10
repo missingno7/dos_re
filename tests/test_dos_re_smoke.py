@@ -397,3 +397,62 @@ def test_config_clone_runtime_overrides_the_dos_cloner(tmp_path):
     assert calls, "custom clone_runtime was never called"
     assert all(c is rt for c in calls), "cloner must receive the live runtime"
     assert cpu.s.ax == 0x0011        # the hook ran, and matched the ASM oracle
+
+
+def test_asm_keeps_passthrough_hooks_when_a_hook_is_the_environment(tmp_path):
+    """An OS-as-hooks host (win16_re: the Windows API is hooks over INT3
+    tripwires) must be able to keep environment hooks on the ASM-oracle side.
+    Strict auto-continuation otherwise clears them and the oracle executes the
+    tripwire. The kept hook must come from the CLONE, and the hook under test
+    must still be dropped (it is what we are verifying against)."""
+    rt, cpu, key = _make_verifier_smoke_runtime(tmp_path)
+
+    # 1000:0000 add ax,1 ; ret   -- the routine under test (hooked)
+    # 2000:0000 int 3           -- an "API thunk": a tripwire, no ASM behind it
+    cpu.mem.load(0x2000, 0, bytes.fromhex("cc"))
+    env_key = (0x2000, 0x0000)
+    env_calls = []
+
+    def env_hook(hook_cpu: CPU8086) -> None:
+        env_calls.append(hook_cpu)          # records WHICH cpu called it
+        hook_cpu.s.ip = (hook_cpu.s.ip + 1) & 0xFFFF
+
+    def routine_hook(hook_cpu: CPU8086) -> None:
+        old_ax = hook_cpu.s.ax & 0xFFFF
+        result = old_ax + 1
+        hook_cpu.s.ax = result & 0xFFFF
+        hook_cpu.set_add_flags(old_ax, 1, result, 16)
+        hook_cpu.s.ip = hook_cpu.mem.rw(hook_cpu.s.ss, hook_cpu.s.sp)
+        hook_cpu.s.sp = (hook_cpu.s.sp + 2) & 0xFFFF
+
+    for c, h, n in ((key, routine_hook, "routine"), (env_key, env_hook, "env")):
+        cpu.replacement_hooks[c] = h
+        cpu.hook_names[c] = n
+    cpu.hook_verifier_passthrough = {env_key}
+
+    clones = []
+
+    def custom_clone(src):
+        clone = _make_verifier_smoke_runtime(tmp_path)[0]
+        clone.cpu.mem.data[:] = src.program.memory.data
+        clone.cpu.s = CPUState(**{k: getattr(src.cpu.s, k) for k in src.cpu.s.__slots__})
+        clone.cpu.instruction_count = src.cpu.instruction_count
+        clone.cpu.replacement_hooks = dict(src.cpu.replacement_hooks)
+        clone.cpu.hook_names = dict(src.cpu.hook_names)
+        clone.cpu.hook_verifier_passthrough = set(src.cpu.hook_verifier_passthrough)
+        clones.append(clone)
+        return clone
+
+    install_hook_verifier(
+        rt,
+        HookVerifierConfig.strict(verify_all=True, hooks={key},
+                                  clone_runtime=custom_clone,
+                                  asm_keeps_passthrough_hooks=True),
+        {},
+    )
+    cpu.step()                       # verifies the routine against the ASM oracle
+
+    asm_cpu = clones[-1].cpu         # the ASM-oracle clone
+    assert env_key in asm_cpu.replacement_hooks, "environment hook was cleared"
+    assert key not in asm_cpu.replacement_hooks, "hook under test must be dropped"
+    assert cpu.s.ax == 0x0011        # and it verified byte-exact

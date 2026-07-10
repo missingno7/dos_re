@@ -147,6 +147,16 @@ class HookVerifierConfig:
     # its own cloner here. It must return a detached runtime exposing `.cpu`
     # and `.program.memory`; the verifier never inspects anything else.
     clone_runtime: Callable[[object], object] | None = None
+    # Strict auto-continuation interprets the ORIGINAL program as the oracle, so
+    # it drops every replacement hook from the ASM side. That assumes each hook
+    # stands in for real ASM. It does not hold when a hook IS the environment:
+    # win16_re implements the Windows API as hooks over INT3 tripwires — there
+    # are no instructions behind them, and clearing them makes the oracle die on
+    # the tripwire. Setting this keeps `cpu.hook_verifier_passthrough` hooks on
+    # the ASM side, taken FROM THE CLONE (so they act on the clone, not on the
+    # live machine). The hook under test is still dropped, so it is still the
+    # original ASM that is being verified against.
+    asm_keeps_passthrough_hooks: bool = False
 
     @classmethod
     def strict(
@@ -159,6 +169,7 @@ class HookVerifierConfig:
         progress_callback: Callable[[str], None] | None = None,
         asm_wall_timeout_s: float | None = 20.0,
         clone_runtime: Callable[[object], object] | None = None,
+        asm_keeps_passthrough_hooks: bool = False,
     ) -> "HookVerifierConfig":
         """Create the slow, simple, fail-hard verification profile.
 
@@ -182,6 +193,7 @@ class HookVerifierConfig:
             progress_callback=progress_callback,
             asm_wall_timeout_s=asm_wall_timeout_s,
             clone_runtime=clone_runtime,
+            asm_keeps_passthrough_hooks=asm_keeps_passthrough_hooks,
         )
 
 
@@ -349,8 +361,22 @@ class HookVerifier:
         # The live side may still reach nested Python hooks and verify them, but
         # the reference side simply interprets the original program until it
         # reaches the hook's actual continuation address.
+        #
+        # Exception: hooks that ARE the environment rather than a stand-in for
+        # ASM (an OS implemented as hooks) must survive, or the oracle executes
+        # the tripwire behind them. They are kept as the CLONE bound them, so
+        # the oracle's OS calls mutate the clone and never the live machine.
+        kept_hooks, kept_names = {}, {}
+        if self.config.asm_keeps_passthrough_hooks:
+            for pkey in getattr(asm_cpu, "hook_verifier_passthrough", ()):
+                if pkey != key and pkey in asm_cpu.replacement_hooks:
+                    kept_hooks[pkey] = asm_cpu.replacement_hooks[pkey]
+                    if pkey in asm_cpu.hook_names:
+                        kept_names[pkey] = asm_cpu.hook_names[pkey]
         asm_cpu.replacement_hooks.clear()
         asm_cpu.hook_names.clear()
+        asm_cpu.replacement_hooks.update(kept_hooks)
+        asm_cpu.hook_names.update(kept_names)
 
         with self._live_passthrough_hooks(cpu):
             handler(cpu)
