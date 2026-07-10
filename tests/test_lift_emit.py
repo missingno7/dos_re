@@ -389,3 +389,27 @@ def test_randomized_mixed_function(seed):
         "F7D8"        # neg ax             (0x0119)
         "C3")         # ret
     _assert_equivalent(code, cases=40, data_len=0x80, seed=seed)
+
+
+def test_entry_fallback_does_not_recurse_into_its_own_hook():
+    """A function whose ENTRY instruction is an interpreter fallback must not
+    re-dispatch its own replacement hook through interp_one (infinite
+    recursion — found by the first Win16 lift: Borland/MS C prologues enter
+    via `enter`, a fallback op).  interp_one suppresses the hook at exactly
+    that CS:IP for its one step."""
+    code = bytes.fromhex(
+        "F5"          # cmc                (fallback op at the ENTRY)
+        "01D8"        # add ax, bx
+        "C3")         # ret
+    lifted, _scan, _src = _lift(code)
+    rng = random.Random(0xE117)
+    st = _rand_state(rng)
+    asm = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
+    hook = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
+    # install the lift AT ITS OWN ENTRY, exactly as liftverify does
+    hook.replacement_hooks[(CS, ENTRY)] = lambda cpu: lifted(cpu)
+    _run_interpreted(asm)
+    hook.step()                       # dispatches the hook -> runs the lift
+    assert (hook.s.cs, hook.s.ip) == (CS, RET_IP)
+    assert (CS, ENTRY) in hook.replacement_hooks    # hook restored after the step
+    assert hook.s.ax == asm.s.ax and hook.s.flags == asm.s.flags

@@ -37,10 +37,22 @@ def interp_one(cpu: CPU8086, cs: int, ip: int) -> None:
 
     Leaves CS:IP after the instruction (the caller's dispatch loop owns
     control flow) and lets ``step()`` do its own instruction accounting.
+
+    Any replacement hook at exactly ``cs:ip`` is suppressed for this one
+    step: when a lifted function's ENTRY instruction is itself a fallback,
+    ``step()`` would otherwise dispatch the lifted hook again — infinite
+    recursion (found by the first Win16 lift, whose functions enter via
+    ``enter``, a fallback op).
     """
     cpu.s.cs = cs & 0xFFFF
     cpu.s.ip = ip & 0xFFFF
-    cpu.step()
+    key = (cs & 0xFFFF, ip & 0xFFFF)
+    hook = cpu.replacement_hooks.pop(key, None)
+    try:
+        cpu.step()
+    finally:
+        if hook is not None:
+            cpu.replacement_hooks[key] = hook
 
 
 def _run_until(cpu: CPU8086, done, max_steps: int, what: str) -> None:
