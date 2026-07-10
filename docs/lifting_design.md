@@ -1,14 +1,14 @@
 # Automatic literal lifting: ASM function → Python hook → oracle → refactor
 
-> Status: **M0 + M1 + M2 LANDED** (2026-07-10). Decoder + CFG (M0, §10a),
-> emitter (M1, §10b), and the in-situ verify pipeline + proof ledger (M2,
-> §10c) are in. The full loop works: `liftverify` emits a literal hook per
-> entry, installs them, runs the VM, and differentially verifies each against
-> the interpreted original — writing `ORACLE_PASSING`/`DIVERGED`/`NOT_REACHED`
-> into a per-function ledger. It is the optional accelerator a porting agent
-> reaches for (wired into `template_dos_port`'s checklist + cookbook). M3 (an
-> AI refactoring a passing lift into clean recovered source) is the remaining
-> thesis step.
+> Status: **M0–M3 LANDED** (2026-07-10). Decoder + CFG (M0, §10a), emitter
+> (M1, §10b), in-situ verify pipeline + proof ledger (M2, §10c), and the
+> full-loop proof on a real game (M3, §10d). `liftverify` emits a literal
+> hook per entry and differentially verifies each against the interpreted
+> original; a passing lift is then refactored into clean recovered source
+> with the same oracle. Proven end to end: skyroads_port's first island (its
+> master timer ISR) was recovered this way. The lifter is the optional
+> accelerator a porting agent reaches for (wired into `template_dos_port`'s
+> checklist + cookbook, and adopted as an overkill_port workflow invariant).
 
 ## 0. The idea, in this ecosystem's terms
 
@@ -431,6 +431,36 @@ Discoverability: `template_dos_port` now teaches the tool — a new "Automatic
 lifting" cookbook entry (problem-indexed) and an "optional accelerator" block
 in the porting checklist's lifting-loop step, both stressing that a lift is
 recovered *only after* an AI refactors it and tags `@oracle_link` (M3).
+
+## 10d. M3 results (2026-07-10) — the full loop, on a real game
+
+The thesis — *ASM function → auto-lift → oracle-verify → refactor to clean
+recovered source, oracle unchanged* — proven end to end by recovering
+**skyroads_port's first island**, its master timer ISR (`1010:3B17`, the
+game's INT 08h clock + music-tempo driver):
+
+1. **Reach + verify.** A plain forward run never fires a timer ISR, so
+   `liftverify` gained `--timer-irqs` (deliver N INT 08h per frame — mirror the
+   game's frontend). With it, the lifted ISR verified **199 in-situ calls
+   byte-exact** against the interpreted original.
+2. **Refactor into the port's real architecture.** The mechanical lift became
+   the port's pure-rule + thin-adapter split:
+   `skyroads/recovered/timer_isr.py::advance_music_timer` (VM-free — the
+   prescaler/song/PIT-divisor decision, `@oracle_link ASM_MATCHED`, and it
+   passes the pure-layer VM-leak audit) plus `skyroads/hooks.py::
+   master_timer_isr` (the pusha/popa/iret frame, the sound-engine call via
+   `emulate_call`, the PIT/PIC ports).
+3. **Same oracle, full coverage.** A unit oracle drives **every prescaler value
+   0..9 × song-continue/end** and diffs full machine state — all 8 basic
+   blocks, 22/22 byte-exact, including the wrap→reset→chain-to-BIOS path whose
+   `dec` flags survive the far exit (the IRET path pops them away). The refactor
+   is now installed by default and transparent (skyroads suite green, 154).
+
+The payoff the exercise made concrete: the lift was correct on that flag
+detail *out of the box* — exactly the kind of thing hand translation gets
+wrong (as the hand-written overkill `4537` did, fixed the same day). The
+lifter turns "hand-decode and hope" into "auto-lift, verify, then refactor a
+proven artifact."
 
 ## 11. Decisions wanted from the owner
 
