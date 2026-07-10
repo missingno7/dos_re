@@ -10,7 +10,13 @@ continuation metadata, no game-specific harness.
 
 Reports, and writes into a lift manifest (dos_re.lift.manifest — the lifter's
 own proof ledger, kept separate from recovered-source islands):
-    ORACLE_PASSING  fired >=1x, every call byte-exact  (+ block coverage M/K)
+    ORACLE_PASSING  the first --samples calls (per hook) were byte-exact
+                    (+ block coverage M/K).  NOTE: this is a SAMPLE — verification
+                    retires each hook once it hits the --samples cap, so calls
+                    beyond it, and blocks the run never reached (M<K, flagged
+                    "PARTIAL COVERAGE"), are unproven.  A hook can pass here and
+                    still differ on an unsampled deeper path; for whole-run
+                    assurance raise --samples/--steps or use the frame-verifier.
     DIVERGED        a call differed from the ASM oracle (details printed)
     NOT_REACHED     never executed in this run — pick a snapshot where it does
 
@@ -266,7 +272,12 @@ def main(argv=None) -> int:
         flag = {"ORACLE_PASSING": "PASS    ", "DIVERGED": "DIVERGED",
                 "NOT_REACHED": "notreach", "LIFTED": "ran/uvf "}[rec.status]
         partial = "  (PARTIAL COVERAGE)" if rec.status == "ORACLE_PASSING" and not rec.fully_covered else ""
-        print(f"{flag} {entry}  verified={verified:<4} {cov:<10} native={rec.native_pct:.0f}%{partial}")
+        # Verification retires the hook at the --samples cap; if it was hit, later
+        # calls (if any) went unchecked — a pass here is a sample, not a full proof.
+        capped = ("  (hit --samples cap; later calls unverified)"
+                  if rec.status == "ORACLE_PASSING" and verified >= args.samples else "")
+        print(f"{flag} {entry}  verified={verified:<4} {cov:<10} "
+              f"native={rec.native_pct:.0f}%{partial}{capped}")
 
     manifest.save(manifest_path)
     npass, ndiv = len(passing), len(diverged)
