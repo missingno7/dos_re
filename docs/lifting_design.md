@@ -1,0 +1,295 @@
+# Automatic literal lifting: ASM function → Python hook → oracle → refactor
+
+> Status: **PROPOSAL** (design only, nothing implemented). Owner review wanted
+> on the decisions in §11 before any code. 2026-07-10.
+
+## 0. The idea, in this ecosystem's terms
+
+Today the recovery loop's expensive step is manual: the AI reads a routine's
+ASM and hand-translates it into a Python hook, then the differential oracle
+keeps it honest. This proposal adds a tool that does the first translation
+mechanically:
+
+```
+original ASM function (entry CS:IP, live snapshot bytes)
+  → dos_re.lift: literal, ugly, per-instruction Python hook  (automatic)
+  → differential oracle verification                          (existing machinery)
+  → installed as a replacement island                         (existing machinery)
+  → LATER: AI/human refactors it into real recovered Python   (manual, the actual goal)
+  → the SAME oracle tests keep the refactor honest            (existing machinery)
+```
+
+The lifter is **not a decompiler** and must never try to be one. It produces
+scaffolding: a faithful, verified, *refactorable* artifact, so the AI's job
+shifts from "translate 200 instructions without a mistake" to "simplify code
+that is already proven equivalent". Understanding still comes from the
+refactor step — a lifted island is a *liability ledger entry*, not recovered
+source (§8 keeps the metrics honest about that).
+
+## 1. First-principles anchors (what makes this tractable HERE)
+
+Three properties of this ecosystem remove the classic lifter risks:
+
+1. **The oracle IS the interpreter.** Correctness for a hook is defined as
+   "byte-identical to what `cpu.py` would have done", not "identical to a
+   real 8086". So the lifter does not need its own semantic model of x86 —
+   the target semantics are exactly the interpreter's. The right mental model
+   is **ahead-of-time specialization of the interpreter**: for each concrete
+   instruction, emit the same operations `step()` would perform, using the
+   same helpers (`set_sub_flags`, `mem.rb/rw/wb/ww`, `push/pop`,
+   `dos_re.asm`'s REP fast paths). Divergence surface shrinks to translation
+   bugs, which the existing verifier is specifically built to catch.
+2. **`dos_re.asm` already exists for exactly this.** Its docstring: "shared
+   8086-style arithmetic and string helpers for *lifted routines*". Hand
+   lifting has been the practice all along; this proposal industrializes it.
+   The emitter's runtime library is `asm.py`, grown deliberately.
+3. **Hooks already compose through the VM.** A lifted function that hits
+   `call 0x1234` does not need the callee lifted: it emulates the call
+   *through the interpreter*, and if the callee later gets its own hook, the
+   interpreter's dispatch runs it automatically. No whole-program lifting,
+   no link step, no lifting order constraints. Every function is independently
+   liftable, verifiable, and revertible.
+
+## 2. Non-goals
+
+- No structured control-flow recovery (if/while reconstruction), no variable
+  naming, no type inference — that is the refactor step's job, done by AI on
+  a verified artifact.
+- No performance target. Literal lifts will run maybe 2–5x faster than
+  interpretation on CPython (no fetch/decode; same helper costs) and that is
+  incidental. The value is recovery throughput, not speed.
+- No lifting from EXE files. Input is always a **live runtime or snapshot**
+  (post-bootstrap, post-relocation, overlays resolved) — the same evidence
+  source everything else uses.
+
+## 3. Where it lives
+
+**`dos_re/lift/` subpackage now; extraction later if win16_re wants it.**
+
+- The emitter targets dos_re's runtime API (`cpu.s`, `cpu.mem`, flag
+  helpers) — it cannot be meaningfully independent of dos_re today, and
+  win16_re does not exist yet. Creating a third shared repo now would violate
+  the ecosystem's own promote-on-second-consumer rule.
+- BUT the internal layering is enforced from day one, so extraction is a
+  `git mv`: `lift/decode.py` + `lift/cfg.py` are pure x86-16 (import nothing
+  from `dos.py`/`interrupts.py`; lint-enforced the same way the core/frontend
+  ring is). OS-specific behaviour enters only through a **boundary policy**
+  object (§6). Precedent: `runtime_code.py` and `player.py` both landed in
+  dos_re with internal discipline and clean extraction seams.
+- Win16 reality check: Win16 shares the CPU (cpu.py already grew 286
+  selectors), and a win16_re would almost certainly reuse the whole VM +
+  verifier + lifter stack, not just the lifter — so the real shared unit is
+  bigger than this tool, and that split is win16_re's bootstrap decision,
+  not this proposal's.
+
+Layer map:
+
+```
+dos_re/lift/decode.py    x86-16 table decoder → Instruction records   (OS-free)
+dos_re/lift/cfg.py       region discovery, basic blocks, exits        (OS-free)
+dos_re/lift/emit.py      Instruction → Python source lines            (targets cpu/mem API)
+dos_re/lift/runtime.py   emulate_call / emulate_int / bail helpers    (+ asm.py grows)
+dos_re/lift/policy.py    BoundaryPolicy protocol + DOSBoundaryPolicy  (Win16Policy later)
+tools/liftgen.py         CLI: snapshot + CS:IP → artifact + report
+```
+
+## 4. The decoder: new code, but self-verifying against the interpreter
+
+There is no reusable decoder today — `lindis` "decodes" by single-stepping a
+throwaway runtime and observing bytes consumed. The lifter needs static
+decode (a jcc has two successors; execution takes one). So `lift/decode.py`
+is a new table-driven decoder producing structured records
+(mnemonic, operands, length, branch kind + static targets), **cross-checked
+per region against the interpreter**: for every decoded instruction, single-
+step a throwaway CPU at that address (the lindis trick) and require the
+consumed byte count to match. Any disagreement = refuse the lift, loudly.
+The decoder therefore never needs to be trusted alone — it has the same
+oracle discipline as everything else. (Deliberately NOT capstone: a new
+non-stdlib core dependency for semantics we already own, and its decode
+quirks would not match cpu.py's, which is the only authority that matters.)
+
+## 5. The generated hook: anatomy
+
+Register/flag state stays **architectural at every instruction boundary** —
+the generated code reads and writes `cpu.s` / `cpu.mem` directly, exactly
+like the interpreter (no local register caching in v1). That buys: bail-out
+anywhere with coherent state, watcher/aperture/ROM semantics identical by
+construction (all memory access through `mem.rb/rw/wb/ww` — never raw
+`mem.data`), and trivially reviewable emission. Python has no goto, so the
+CFG is executed by the standard dispatch-loop pattern:
+
+```python
+# AUTOGENERATED by dos_re.lift v<N> — literal lift. Refactor freely; the
+# oracle tests are the contract. Regenerating overwrites this file.
+# region 1010:4537..45E0 (169 bytes) sha1=..., exits: near_ret
+REGION = (0x1010, 0x4537, bytes.fromhex("2e8b1e9c5b..."))
+
+@oracle_link(boundary="1010:4537", contract="...", status="LIFTED")
+def lifted_1010_4537(cpu):
+    if self_disable_if_patched(cpu, 0x4537, REGION[2], "lifted_1010_4537"):
+        return                       # SMC guard: fall back to interpretation
+    s, mem = cpu.s, cpu.mem
+    bb = 0
+    while True:
+        if bb == 0:
+            # 1010:4537  2E8B1E9C5B   mov bx, cs:[0x5B9C]
+            s.bx = mem.rw(s.cs, 0x5B9C)
+            # 1010:453C  8A04         mov al, [si]
+            ...
+            cpu.instruction_count += 9          # block-exact demo-clock preservation
+            bb = 2 if (s.flags & ZF) else 1
+        elif bb == 1:
+            ...
+        elif bb == 2:
+            # 1010:45E0  C3           ret
+            cpu.instruction_count += 1
+            s.ip = cpu.pop()
+            return
+```
+
+Non-negotiable properties:
+
+- **Original disassembly as per-line comments** — this is what the refactoring
+  AI reads; the artifact must be self-explanatory without re-disassembling.
+- **`instruction_count` preserved block-exactly**, so pre2-style
+  instruction-count clocks and demo determinism are unaffected by installing
+  a literal hook (a stronger transparency guarantee than hand hooks give).
+  Dropped deliberately (with re-record) only at refactor time.
+- **Entry signature guard** via the existing `self_disable_if_patched` — the
+  established defence for runtime-patched code.
+- **Never auto-installed.** The artifact lands in `<game>/lifted/`, carries
+  `status="LIFTED"`, and installation is gated on oracle status (§7).
+- One file per function, deterministic output (no timestamps), so re-lifting
+  after a tool upgrade diffs cleanly and git churn is reviewable.
+- The lifter also emits the verifier metadata for free: its discovered exits
+  map 1:1 onto the existing `GenericHookStop` kinds (`near_ret`, `far_ret`,
+  `iret`, `fixed_ips` for jump-out exits).
+
+## 6. Control flow and the outside world
+
+| Construct | v1 treatment |
+|---|---|
+| fallthrough, direct jmp/jcc/loop/jcxz | lifted (dispatch loop) |
+| `ret` / `ret n` / `retf` / `iret` | function exits, emitted literally |
+| **direct call** | `emulate_call(cpu, cs, ip)`: push return, run the *interpreter* until it returns (step-budgeted, fail-loud). Callee hooks dispatch automatically → free composition; lifting order never matters |
+| **indirect call** (`call bx`, `call [table]`) | same as direct — target resolves at runtime like the interpreter would; safe by construction |
+| `int n` | via BoundaryPolicy. DOS policy: `emulate_int` through the VM (dos.py services it — already the semantics being verified against) |
+| **indirect jmp** | **refuse at lift time** (v1). v2: recognise the bounded `cmp/jbe + jmp [table+reg*2]` dispatch pattern with static table bytes — Overkill's handler zoos will need this |
+| in/out, string ops, EGA aperture | through the same VM paths/helpers the interpreter uses (incl. `asm.py`'s guarded REP fast paths) |
+| unsupported opcode (x87, …) | refuse at lift time |
+
+Refusals are structured (address + reason), because M0 turns them into data.
+A later "runtime bail" tier (lift the common blocks, fall back to the
+interpreter at a precise CS:IP for rare tails — state is always architectural
+so bailing is just `s.ip = addr; return`) is possible but deliberately v2+:
+whole-function-or-nothing is easier to reason about and to trust first.
+The Win16 policy plugs in at the same seam later: far call to a selector
+owned by KERNEL/USER/GDI = API boundary, handled by whatever win16_re's
+runtime does — decoder/CFG/emitter unchanged.
+
+## 7. Verification and the proof ladder
+
+Primary verification is **in-situ over the demo corpus** with the existing
+`HookVerifier` (clone runtime → run interpreted original to the continuation
+→ run the lifted hook → diff registers + flags + full memory, dead-stack
+scratch excluded). The lifted artifact additionally gets **basic-block
+coverage instrumentation** (debug flag): "verified" must state *which paths*
+were exercised, or it overstates.
+
+Status ladder (extends `islands.STATUSES`):
+
+```
+LIFTED                generated; never executed as a replacement
+ORACLE_PASSING        in-situ verified: N calls, 0 divergence, M/K blocks covered
+INSTALLED             running as the default replacement (still guarded by entry signature)
+REFACTORED            human/AI rewrote into real recovered Python; SAME tests green
+```
+
+- Promotion LIFTED → ORACLE_PASSING is done by a driver
+  (`tools/liftverify.py`) that replays chosen demos with the verifier
+  attached and writes results into the island manifest — the same evidence
+  language the ports already speak.
+- Synthetic register/memory fuzz (the `test_expand_4plane_row_4537_fuzz`
+  house style) is opt-in per function with declared input ranges — random
+  environments can violate preconditions and send the *oracle* into garbage,
+  so it cannot be the default.
+- **Metrics honesty rule:** lifted islands are counted in their own tier.
+  Campaign "recovered %" continues to count REFACTORED code only. A thousand
+  lifted functions is coverage of the *verification* frontier, not of the
+  *understanding* frontier, and the dashboards must never blur that line.
+
+## 8. Failure safety (fail loud, never fake)
+
+- **Lift time**: refuse on decoder/interpreter disagreement, unsupported
+  opcode, indirect jmp, region overlapping a known `runtime_code.py` slot,
+  region exceeding a size budget, or CFG escaping a sanity window (ambiguous
+  boundary). Every refusal is a structured record.
+- **Run time**: the entry signature guard self-disables the hook if the
+  region bytes changed (SMC/overlay swap) — execution falls back to the
+  interpreter, and the event is counted, not silent. Mid-execution
+  self-modification by the function itself is the residual risk (statically
+  undecidable); it is caught by in-situ verification on real inputs and by
+  `RuntimeCodeWriteTracer` when suspected — same status as hand hooks today.
+- **Runtime-loaded code**: lifting from snapshots pins the bytes; the hash
+  in the artifact makes staleness detectable and re-lift automatable.
+
+## 9. Tradeoffs and risks, stated plainly
+
+- **Equivalence is vs the VM, not vs silicon.** Same epistemic status as
+  every existing hook; no regression, but worth restating: a cpu.py bug
+  reproduced by the lifter verifies as "equivalent". (Guarded, as today, by
+  real games working + DOSBox cross-checks.)
+- **The scaffolding trap.** Mechanically lifted code *feels* like progress.
+  If the refactor step lags, the ports accumulate unreadable-but-verified
+  Python and the actual goal (recovered source) stalls. Mitigations: the
+  metrics rule (§7), and the workflow prompt (`prompts/recover_one_routine.md`)
+  being updated so the refactor step starts from a lifted artifact by default
+  — the lifter exists to *feed* that step, not replace it.
+- **Helper API becomes a contract.** Generated code freezes today's
+  `cpu.set_sub_flags(...)`/`asm.py` signatures. Interpreter refactors must
+  keep them or regenerate; the consumer-suites-green equivalence gate already
+  enforces this in practice.
+- **Git/lint surface**: generated files must be exempted from oversized-file
+  checks but NOT from syntax/undefined-name guards; `<game>/lifted/` gets its
+  own lint category.
+- **PyPy interaction**: literal hooks neither help nor hurt the JIT much
+  (they replace already-hot interpreter traces with equivalent Python);
+  benchmark before claiming wins in either direction.
+
+Rejected alternatives: Ghidra/RetDec-based lifting (their IR/memory model
+does not map onto the `cpu.s`/`mem` hook contract; bridging faithfully is
+harder than direct emission, plus a heavyweight dependency); capstone as
+decoder (§4); "LLM does the literal translation" (that is the status quo —
+the failure mode this proposal removes is precisely unverified hand
+translation at scale).
+
+## 10. Staged roadmap (each stage ships value alone)
+
+- **M0 — the census (no codegen).** Decoder + CFG + refusal taxonomy;
+  `tools/liftgen.py --report` over the frontier/hot lists of all four ports.
+  Output: % of real functions v1-liftable, refusal histogram, size
+  distribution. Cheap, evidence-first; validates or kills the scope before
+  any emitter work.
+- **M1 — emitter + offline proof.** Lift the v1 subset; verify lifted-vs-
+  interpreted on functions that ALREADY have hand-written hooks (4537, the
+  sprite blits, 08F2…) — the hand hooks' fuzz suites become free test beds,
+  and disagreement with either the oracle or the hand hook is a tool bug.
+- **M2 — the pipeline.** `liftverify` in-situ driver + manifest/status
+  integration + block coverage; first real batch on skyroads_port (youngest
+  port, zero hooks, hot LZS/frame candidates already profiled).
+- **M3 — the refactor loop, proven end-to-end.** Take 2–3 ORACLE_PASSING
+  lifted islands, have the AI refactor them to clean Python with tests
+  unchanged, land as REFACTORED. Update `template_dos_port` methodology docs
+  + prompts. This is the milestone that proves the *actual* thesis.
+- **M4+ — widen.** Jump tables; runtime-bail partial lifts; block-local
+  register caching if profiling justifies; structurizer pass (source-to-
+  source on verified artifacts, re-verified); Win16 boundary policy when
+  win16_re exists.
+
+## 11. Decisions wanted from the owner
+
+1. Placement as `dos_re/lift/` (extraction-ready) vs separate repo now.
+2. The metrics honesty rule (§7) — lifted tier never counts as recovered.
+3. M0 first (census before emitter) — or straight to M1 on one port?
+4. Whether `instruction_count` preservation should be mandatory (my
+   recommendation: yes in literal mode; it makes installs demo-transparent).

@@ -23,6 +23,7 @@ Reading order for a newcomer to the framework itself: the repo
 | [`state_mirrors.md`](state_mirrors.md) | The state-view seam: human-named views over the DOS memory image with swappable backends, without weakening byte-exact verification. |
 | [`hardware_support.md`](hardware_support.md) | Honest, status-legend-based matrix of the video/audio/timing/DOS models, the unmodeled-I/O policy, and the rule for extending them. |
 | [`performance.md`](performance.md) | How to run dos_re fast: PyPy for headless workloads (~13-17x interpretation), pytest-xdist for suites, and the byte-exact equivalence-gate method required for any interpreter optimization. |
+| [`lifting_design.md`](lifting_design.md) | PROPOSAL: automatic literal lifting — ASM function → generated Python hook → oracle verification → AI refactor. Concept, architecture, failure policy, staged roadmap. |
 | [`glossary.md`](glossary.md) | Every project term (oracle, island, coastline, golden, heartbeat, …) in one table — shared vocabulary with `template_dos_port`'s methodology docs. |
 
 Related, outside `docs/`:
