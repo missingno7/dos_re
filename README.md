@@ -1,6 +1,6 @@
 # dos_re — an oracle-driven DOS game recovery framework
 
-A reusable framework for turning an original 16-bit DOS game into a verified,
+A reusable toolbox for turning an original 16-bit DOS game into a verified,
 native source port — one proven routine at a time. **It is a recovery
 laboratory, not an emulator**: the original executable runs as the *oracle*,
 individual routines are replaced with recovered source, and every replacement
@@ -8,42 +8,39 @@ is verified against the original execution. The key idea is not "AI writes
 code" — it is *AI writes code inside a verification loop where the original
 game remains executable truth.*
 
+**This is infrastructure for AI agents, not a library for end users.** The
+expected operator is an autonomous AI agent handed a porting repo (this
+framework plugged in as a submodule) plus a game's files. A human's role in
+that workflow is to supply the game and occasionally play it; nobody is
+expected to drive these internals by hand. This README is the one
+human-facing document here — everything else in the repo is the agent's
+operating manual.
+
 The framework grew out of two real recovery projects: **Prehistorik 2**, where
 the method reached a complete, playable, VM-less native source port, and
 **Overkill**, the earlier pilot that stress-tested the same ideas on a far
-more chaotic codebase (its endgame is still in progress). It packages the
-machinery and method they shared: a deterministic 8086 VM, differential hook
-verification, frame comparison, deterministic input demos, snapshots, and the
-discipline that keeps recovery honest.
-
-**This is a framework built by AI, for AI.** The expected user is an autonomous
-AI agent handed a porting repo (this framework plugged in as a submodule) plus
-a game's files, and told to port it. The porting agent's operating manual —
-boot sequence, methodology, prompts, adapter template — lives in
-[`template_dos_port`](https://github.com/missingno7/template_dos_port), which consumes
-this repo at `dos_re/`; this repo itself is the framework's reference manual
-(see [`docs/README.md`](docs/README.md)) plus its own contribution rules
-([`AGENTS.md`](AGENTS.md)). The framework itself is expected to *adapt*: every
-new game exercises hardware and DOS behaviour the last one didn't, and
-extending `dos_re` (under its rules) is part of the job, not a deviation from
-it. Humans are welcome; none are required.
+more chaotic codebase. It packages the machinery they shared — and it keeps
+growing: every new game exercises behaviour the last one didn't, and agents
+extend the framework (under [`AGENTS.md`](AGENTS.md)'s rules) as part of the
+job.
 
 ## What it is
 
-- **A real-mode VM built for reverse engineering** — an 8086 interpreter, DOS/
-  BIOS services, and hardware models (VGA/EGA planar video, PIT, PIC, keyboard,
-  PC speaker, AdLib/OPL2 register file, Sound Blaster + DMA), all stdlib-only
+- **A real-mode VM built for reverse engineering** — an 8086 interpreter,
+  DOS/BIOS services, and hardware models (VGA/EGA planar video, PIT, PIC,
+  keyboard, PC speaker, AdLib/OPL2, Sound Blaster + DMA), all stdlib-only
   Python, all deterministic by default.
-- **Two proof engines** — a per-hook differential verifier that diffs your
+- **Two proof engines** — a per-hook differential verifier that diffs a
   replacement against the interpreted original ASM (registers + flags + full
   memory) at every call, and a frame verifier that lockstep-diffs whole frames
-  between an ASM oracle and your hooked/native candidate.
-- **A determinism substrate** — full machine snapshots and input demos keyed to
-  an emulated boundary clock, so every finding is replayable and every claim of
-  equivalence is checkable.
-- **A method** — the AI Porting Charter (`template_dos_port/docs/ai_porting_charter.md`):
-  the lifting loop, the proof spine, the phased roadmap from "hook one routine"
-  to "flip the engine and keep the VM as an offline oracle".
+  between an ASM oracle and a hooked/native candidate.
+- **A determinism substrate** — full machine snapshots and input demos keyed
+  to an emulated boundary clock, so every finding is replayable and every
+  claim of equivalence is checkable.
+- **An automatic lifter** — a static decoder + emitter that turns a function
+  entry into a literal, per-instruction Python hook and proves it against the
+  oracle on every call, so recovery refactors a *verified* artifact instead of
+  hand-translating ASM.
 
 ## What it is not
 
@@ -81,105 +78,67 @@ original EXE ──▶ dos_re VM (the oracle) ──▶ traces / snapshots / dem
 ```
 
 1. The original EXE runs in a controlled VM; demos replay deterministic input.
-   At this stage the original game is still the source of truth.
-2. Individual routines are hooked at their original addresses — first the hot,
-   well-bounded leaf routines (asset decoders, decompression, blitters,
-   palette), which are easiest to verify and make the VM faster and more
-   observable; then the gameplay logic behind them.
-3. AI/human recovery rewrites each routine as source (a pure rule behind a thin
-   VM adapter).
-4. The framework compares memory, registers, flags, ports, state, timing, and
-   frames against the interpreted original.
-5. Verified islands merge into subsystems; recovered behaviour is lifted into
-   higher-level representations (objects, render state, game rules) — earned
-   from evidence, never invented.
-6. The game separates from the VM into a native source port. A state-mirror
-   bridge keeps the native state byte-comparable with the original memory
-   layout (readable code above, exact verification below), and the VM retires
-   into the oracle seat: testing, replay, debugging, and proof.
+2. Routines are hooked at their original addresses — mechanically lifted or
+   hand-recovered as source (a pure rule behind a thin VM adapter).
+3. The framework diffs memory, registers, flags, ports, state, and frames
+   against the interpreted original, on every call.
+4. Verified islands merge into subsystems; higher-level meaning is earned from
+   evidence, never invented.
+5. The game separates from the VM into a native source port; the VM retires
+   into the oracle seat: testing, replay, debugging, proof.
 
-The full arc, stage by stage: `template_dos_port/docs/lifecycle.md`.
+## Where the work happens
 
-## Quick start
+Game-specific work does **not** happen in this repo, and does not happen by a
+person driving these APIs by hand. It happens in a **porting repo** —
+[`template_dos_port`](https://github.com/missingno7/template_dos_port) is the
+starting point — where an AI agent follows the documented method with this
+framework wired in as the `dos_re/` submodule. The hard boundary, enforced by
+lint: `dos_re/` never learns any game's addresses, filenames, or formats;
+everything game-specific lives in the port's adapter package.
+
+## Sanity check
 
 ```bash
-git clone <this repo>
+git clone --recurse-submodules <this repo>
 cd dos_re
 python examples/minimal_adapter/example.py       # the hook/verify/snapshot loop, 5 minutes
-python examples/tiny_frame_game/walkthrough.py   # the WHOLE lifecycle on a synthetic frame-loop game
-python -m pytest tests -q                        # or: python tools/run_tests.py
+python examples/tiny_frame_game/walkthrough.py   # the whole lifecycle on a synthetic game
+python -m pytest tests -q                        # framework suite (no game assets needed)
 ```
 
-`minimal_adapter` builds a tiny MZ executable, runs it as the oracle, installs
-a wrong hook (and watches the verifier catch it), installs the correct hook
-(verified on every call), and proves snapshot-replay determinism.
-`tiny_frame_game` goes further — a synthetic game with a real frame loop,
-keyboard ISR, and framebuffer, driven through cold-start input demos, both
-verification oracles, and a state mirror
-([its README](examples/tiny_frame_game/README.md) is the 10-minute tour).
+## Who reads what
 
-To start on a real game, clone [`template_dos_port`](https://github.com/missingno7/template_dos_port)
-(this repo comes along as its `dos_re/` submodule) and read its
-`START_HERE.md` and `docs/porting_new_game.md`.
-
-## Adapting it to a new game (the short version)
-
-This lives in full in `template_dos_port`; in outline:
-
-1. Create a game adapter package (`template_dos_port/examples/adapter_skeleton/`
-   shows the shape).
-2. Configure EXE loading (packer bootstrap → snapshot past it) and data paths.
-3. Wire input delivery and see video output.
-4. Find the frame boundaries (timer wait, retrace wait, present) and stand up
-   the frame verifier.
-5. Build the input-wait registry, then record demos.
-6. Identify stable verification points and start replacing small routines —
-   one slice, one verification, at a time.
-7. Promote hook code into native subsystems as evidence accumulates.
-
-## What is game-specific vs framework
-
-The framework (`dos_re/`) knows the 8086, DOS, the hardware, and the proof
-engines — and is enforced game-agnostic (`tools/lint.py`). Everything that
-knows *your* game — addresses, formats, boot constants, frame boundaries, state
-layout, recovered logic — lives in your adapter. The boundary is documented in
-[`docs/architecture.md`](docs/architecture.md).
+| Audience | Read |
+|---|---|
+| A human wondering what this is | this README — you're done |
+| The agent porting a game | `template_dos_port`'s `AGENTS.md`/`START_HERE.md` (the method), then [`docs/agent_toolbox.md`](docs/agent_toolbox.md) (task → tool → command here) |
+| The agent extending this framework | [`AGENTS.md`](AGENTS.md) (the rules), [`docs/architecture.md`](docs/architecture.md) (the module map) |
+| Mechanism reference | [`docs/README.md`](docs/README.md) (hooks/verification, demos/snapshots, state mirrors, hardware status, lifting, performance, glossary) |
 
 ## Repository layout
 
 ```text
-dos_re/       the framework package (VM + proof engines) — stdlib-only
+dos_re/       the framework package (VM + proof engines + lifter) — stdlib-only
 pynuked_opl3/   submodule: Nuked-OPL3 FM synthesis backend (optional, cffi)
-docs/         framework reference docs        → start at docs/README.md
-examples/     runnable demos — optional and deletable as a whole; nothing in
-              the framework imports it (examples/README.md)
+docs/         reference docs + the agent toolbox   → docs/README.md
+examples/     runnable demos (deletable; nothing imports them)
 tests/        framework tests (no game assets needed)
-tools/        lint / test runner / disassembler / profiler / audits
+tools/        run/see/read, lift/verify, and guardrail CLIs → tools/README.md
 ```
-
-The porting methodology, prompts, and adapter template live in
-[`template_dos_port`](https://github.com/missingno7/template_dos_port), which consumes
-this repo as its `dos_re/` submodule.
 
 ## Requirements
 
 Python 3.11+. The core has **zero dependencies**. Optional: `pytest` (tests),
-`cffi` (build the OPL3 backend), `numpy`+`pygame` (if your adapter builds an
-interactive viewer).
+`cffi` (build the OPL3 backend), `numpy`+`pygame` (interactive viewers).
+Headless workloads run unchanged — and much faster — under PyPy.
 
 ## Provenance & honesty
 
-This repo was extracted from `pre2_port` (primary, the newer framework) and
-`overkill_port` (older sibling; contributed the cold-start demos, the asm
-helper library, the hook taxonomy, several tools, and the vendored OPL3
-backend). `template_dos_port`'s `MIGRATION.md` records exactly what came from
-where, what was deliberately left behind (game code, game-specific
-renderers/sound drivers), and what still needs cleanup — including this
-repo's later split into `dos_re` (framework) + `template_dos_port` (porting
-methodology) + `pynuked_opl3` (standalone OPL3 submodule).
+Extracted from `pre2_port` (primary) and `overkill_port` (earlier pilot);
+`template_dos_port`'s `MIGRATION.md` records exactly what came from where.
 [`docs/hardware_support.md`](docs/hardware_support.md) is the honest status of
-the hardware models — including what is *not* modeled (no generic CGA/Tandy
-rasterizer, no MPU-401/GUS).
+the hardware models — including what is *not* modeled.
 
 No game code, assets, or executables are included. Bring your own legally
 owned game to port.
@@ -187,8 +146,8 @@ owned game to port.
 ## License
 
 MIT ([LICENSE](LICENSE)), except the vendored [`pynuked_opl3/`](pynuked_opl3/)
-package (Nuked-OPL3 emulator core + binding), which is LGPL-2.1-or-later — see
-[`pynuked_opl3/LICENSE`](pynuked_opl3/LICENSE).
+submodule (Nuked-OPL3 emulator core + binding), which is LGPL-2.1-or-later —
+see [`pynuked_opl3/LICENSE`](pynuked_opl3/LICENSE).
 
 The framework's openness never extends to game IP: no game assets or
 executables are ever included here or in adapter repos; ports require a

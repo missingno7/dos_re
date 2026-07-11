@@ -81,7 +81,7 @@ from the source projects). Grouped by concern:
 | `lift/runtime.py` | Support imported by generated hooks: `emulate_call`/`emulate_far_call`/`emulate_int` run callees and ISRs through the VM (hooks compose; lifting order is irrelevant), and `interp_one` executes one instruction through the interpreter for the emitter's fallback tier. |
 | `lift/manifest.py` | The lifter's own proof ledger (`LiftManifest`/`LiftRecord`, JSON-backed): per-function status on the `LIFTED → ORACLE_PASSING → INSTALLED → REFACTORED` ladder, with call/verify/coverage counts. Deliberately disjoint from `islands.STATUSES` — lifted ≠ recovered (the metrics-honesty rule). `tools/liftverify.py` is the in-situ verify driver that installs lifted hooks with the strict auto-continuation verifier, runs the VM, diffs each call against the ASM oracle, and writes this ledger. |
 
-### The human frontend (the optional viewer ring)
+### The frontend ring (the optional viewer — the human owner's window)
 
 | Module | What it is |
 |---|---|

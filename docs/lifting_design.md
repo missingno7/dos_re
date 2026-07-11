@@ -22,7 +22,7 @@ original ASM function (entry CS:IP, live snapshot bytes)
   → dos_re.lift: literal, ugly, per-instruction Python hook  (automatic)
   → differential oracle verification                          (existing machinery)
   → installed as a replacement island                         (existing machinery)
-  → LATER: AI/human refactors it into real recovered Python   (manual, the actual goal)
+  → LATER: the agent refactors it into real recovered Python  (manual, the actual goal)
   → the SAME oracle tests keep the refactor honest            (existing machinery)
 ```
 
@@ -209,7 +209,7 @@ Status ladder (extends `islands.STATUSES`):
 LIFTED                generated; never executed as a replacement
 ORACLE_PASSING        in-situ verified: N calls, 0 divergence, M/K blocks covered
 INSTALLED             running as the default replacement (still guarded by entry signature)
-REFACTORED            human/AI rewrote into real recovered Python; SAME tests green
+REFACTORED            the agent rewrote into real recovered Python; SAME tests green
 ```
 
 - Promotion LIFTED → ORACLE_PASSING is done by a driver
