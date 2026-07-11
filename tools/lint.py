@@ -33,7 +33,7 @@ KNOWN_OPTIONAL = ("pynuked_opl3", "numpy", "pygame", "pytest", "cffi")
 # ``import dos_re`` itself must never pull them in — player.py keeps its
 # imports lazy; display.py and audio_sink.py are only imported by player.py
 # when a window actually opens.
-FRONTEND_RING = {"player.py", "display.py", "audio_sink.py"}
+FRONTEND_RING = {"player.py", "display.py", "audio_sink.py", "overlay_menu.py"}
 FRONTEND_ALLOWED = ("numpy", "pygame", "pynuked_opl3")
 
 
