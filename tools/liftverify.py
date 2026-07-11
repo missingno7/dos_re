@@ -120,6 +120,13 @@ def main(argv=None) -> int:
                    help="(with --timer-irqs) VM instructions between IRQ bursts")
     p.add_argument("--emit-dir", default="lifted",
                    help="where the generated hook modules are written / read")
+    p.add_argument("--max-iterations", type=int, default=None, metavar="N",
+                   help="raise the lifted hook's own runaway guard above the emitter's "
+                        "default (still at least instructions*5000 either way). Use "
+                        "when a hit MAX_ITERATIONS is a real large data-driven loop, "
+                        "not a decode bug -- the static census already cross-checks "
+                        "instruction lengths, so a bigger budget is the fix, not a "
+                        "hand rewrite.")
     p.add_argument("--manifest", default=None,
                    help="lift proof ledger to update (default: <emit-dir>/manifest.json)")
     p.add_argument("--install-passing", action="store_true",
@@ -161,7 +168,8 @@ def main(argv=None) -> int:
                          if i.kind != "seq" and i.ip >= ip), default=(ip + 8) & 0xFFFF)
         sig = bytes(mem.rb(cs, (ip + k) & 0xFFFF) for k in range(max(4, min(16, (block_end - ip) & 0xFFFF))))
         try:
-            src = emit_function(scan, cs, name, signature=sig, coverage=True)
+            src = emit_function(scan, cs, name, signature=sig, coverage=True,
+                                min_iterations=args.max_iterations)
         except EmitUnsupported as exc:
             print(f"skip     {entry}: emit-unsupported ({exc})")
             continue
