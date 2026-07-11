@@ -266,9 +266,20 @@ python tools/gen_island_manifest.py <game>.codecs <game>.recovered -o docs/recov
 
 - `@oracle_link(boundary, contract, status, merge_target)` on every recovered
   function (`dos_re.islands`); the manifest is generated, never hand-edited.
-- Native % = hooked / total `cpu.step()` counts over a demo replay —
-  `cpu.coverage_telemetry` provides the hook points; your adapter builds the
-  collector.
+- **Native %** over a demo replay — the framework collector:
+
+  ```python
+  from dos_re.coverage import CoverageCollector
+  cov = CoverageCollector(classifier=my_addr_to_island,      # the adapter's only job
+                          cache_path=Path("artifacts/coverage_cache.json"))
+  rt.cpu.coverage_telemetry = cov
+  ...replay a demo...; print(cov.format_summary()); cov.save_cache()
+  ```
+
+  Hooked work is measured in verifier-reported **ASM-equivalent instructions**
+  (never hook calls); unverified runs estimate from the cache; anything
+  unmeasurable is reported OUTSIDE the percentage. Wrap oracle reference runs
+  in `cov.bounded_original()` so they don't read as un-recovered ASM.
 - Endgame triage of the last unhooked addresses: `dos_re.frontier`.
 
 ## 14. Keep yourself honest (run with every change)
