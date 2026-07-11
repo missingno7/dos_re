@@ -10,7 +10,7 @@ import hashlib
 
 import pytest
 
-from dos_re.tick_demo import TickDemo, masked_digest, record_ticks, verify_ticks
+from dos_re.tick_demo import TickDemo, masked_digest, record_ticks, replay_to, verify_ticks
 
 
 # --- masked_digest --------------------------------------------------------------------------------
@@ -134,6 +134,49 @@ def test_verify_ticks_terminal_and_raise():
 
     n, div = verify_ticks(demo, bytearray(demo.seed), inject=_inject, tick=tick_raises, digest=_digest)
     assert n == 0 and "RuntimeError" in div and "unrecovered gap" in div
+
+
+def test_suffix_and_replay_to_reproduce_divergence_at_tick_zero():
+    # The divergence-repro workflow: verify reports tick i -> replay_to repositions a fresh state to just
+    # BEFORE tick i -> suffix(i, captured seed) reproduces the divergence at its OWN tick 0.
+    demo = _make_demo(6)
+    demo.digests[4] = "f" * 40                               # planted divergence at tick 4
+    n, div = verify_ticks(demo, bytearray(demo.seed), inject=_inject, tick=_tick, digest=_digest)
+    assert n == 4 and "tick 4" in div
+    st = bytearray(demo.seed)
+    replay_to(demo, st, n, inject=_inject, tick=_tick)       # fast reposition (no digest checks)
+    repro = demo.suffix(n, bytes(st))
+    assert repro.n_ticks == 2                                # ticks 4..5 remain
+    assert repro.sidebands["idle"] == demo.sidebands["idle"][4:]
+    n2, div2 = verify_ticks(repro, bytearray(repro.seed), inject=_inject, tick=_tick, digest=_digest)
+    assert n2 == 0 and "tick 0" in div2                      # the same divergence, now instant
+    # and a suffix carved at a CLEAN point verifies green to the end
+    clean = _make_demo(6)
+    st2 = bytearray(clean.seed)
+    replay_to(clean, st2, 3, inject=_inject, tick=_tick)
+    tail = clean.suffix(3, bytes(st2))
+    assert verify_ticks(tail, bytearray(tail.seed), inject=_inject, tick=_tick, digest=_digest) == (3, None)
+    # suffix round-trips through the file format too
+    import io as _io, tempfile, os
+    fd, p = tempfile.mkstemp(); os.close(fd)
+    try:
+        repro.save(p)
+        back = TickDemo.load(p)
+        assert back.keys == repro.keys and back.seed == repro.seed
+    finally:
+        os.unlink(p)
+
+
+def test_suffix_bounds_and_replay_to_terminal_raises():
+    demo = _make_demo(3)
+    with pytest.raises(ValueError, match="out of range"):
+        demo.suffix(7, b"")
+
+    def tick_terminal(state):
+        return "LEVEL-END"
+
+    with pytest.raises(RuntimeError, match="terminal outcome at tick 0"):
+        replay_to(demo, bytearray(demo.seed), 2, inject=_inject, tick=tick_terminal)
 
 
 # --- record_ticks (recorder plumbing on a fake CPU) --------------------------------------------------

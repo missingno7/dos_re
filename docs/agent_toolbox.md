@@ -256,6 +256,23 @@ learned from a real divergence — the module docstring has the full stories):
   (transitions whose VM frames have no native counterpart) — the compare ends
   there legitimately; an unrecovered path raises and is reported.
 
+**On divergence, carve a repro — never re-debug from the seed.** `verify_ticks`
+reported tick `i`; reposition and slice:
+
+```python
+st = make_state(demo.seed)
+replay_to(demo, st, i, inject=my_inject, tick=my_tick)   # fast: no digest checks
+demo.suffix(i, capture_bytes(st)).save("artifacts/.../repro_tick_i.bin")
+```
+
+The suffix reproduces the divergence at its own tick 0 — every subsequent
+debugging iteration replays one tick, not the whole recording. (The input-demo
+analogue is `InputDemoPlayback.write_suffix`.) The same rule applies to the
+native runner itself: **every gap/crash writes a resumable snapshot and prints
+the exact repro command** — `dos_re.player` does this for VM runners; your
+VM-less native runner must implement the same (endgame accelerator; the
+completed port's `dump_gap_snapshot` is the worked example).
+
 Inspect a recording: `python tools/tick_demo_info.py <demo.bin>`.
 
 ## 13. Measure progress (never estimate)

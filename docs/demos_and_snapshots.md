@@ -136,3 +136,8 @@ The engine, its file format, and the three soundness rules (consumption-point
 capture, sidebands, digest-as-ownership-mask):
 [`agent_toolbox.md`](agent_toolbox.md) §12 and `dos_re/tick_demo.py`'s module
 docstring. Inspect a recording with `python tools/tick_demo_info.py`.
+
+Divergence repro mirrors the input-demo suffix pattern: `replay_to` repositions
+a fresh state to just before the reported tick (no digest checks — fast), and
+`TickDemo.suffix(i, seed)` carves a sub-demo that reproduces the divergence at
+its own tick 0 — debug iterations replay one tick, never the whole recording.
