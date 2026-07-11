@@ -278,6 +278,7 @@ python tools/lint.py                        # the game-agnostic / stdlib-only bo
 python tools/audit_layers.py <game>/recovered   # pure layer never imports the VM
 python tools/audit_hook_oracle.py <game>    # no child hooks hidden from verification
 python tools/check_undefined_names.py       # latent-NameError guard
+python tools/check_doc_links.py .           # broken doc links (docs are agent-maintained; run after edits)
 python -m pytest tests -q                   # framework suite (pypy runs it ~4x faster)
 ```
 

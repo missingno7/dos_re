@@ -30,6 +30,7 @@ view (which tool for which recovery step, with context) is
 | `audit_layers.py` | `python tools/audit_layers.py <game>/recovered` | VM imports creeping into the pure recovered layer (the mistake that makes logic unmigratable). |
 | `audit_hook_oracle.py` | `python tools/audit_hook_oracle.py <game>` | Parent hooks calling child hooks' Python directly — hiding the child from verification. |
 | `check_undefined_names.py` | `python tools/check_undefined_names.py [pkg]` | Latent NameErrors (F821) on paths tests didn't reach. |
+| `check_doc_links.py` | `python tools/check_doc_links.py [root …] [--exclude NAME]` | Broken relative markdown links — run after any doc edit; porting repos run it as `python dos_re/tools/check_doc_links.py . --exclude dos_re`. |
 | `run_tests.py` | `python tools/run_tests.py` | Pytest-free fallback test runner for constrained sandboxes. |
 | `clean.py` | `python tools/clean.py [--artifacts]` | Generated junk; `--artifacts` also drops regenerable artifact families (promoted evidence stays). |
 
