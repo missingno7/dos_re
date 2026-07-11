@@ -214,7 +214,51 @@ recovered only after **you** rename and simplify it into clean pure-layer
 Python and tag it `@oracle_link` — with the same oracle tests unchanged. A
 wall of unread-but-verified lifted code must never inflate "recovered %".
 
-## 12. Measure progress (never estimate)
+## 12. Prove the VM-less native core (the endgame proof)
+
+`dos_re.tick_demo` — the mode-independent equivalence engine. Input demos ride
+an instruction-count clock, which is **mode-dependent** (a hook runs fewer
+emulated instructions than the ASM it replaces) and doesn't exist VM-less; a
+tick demo is keyed to the GAME TICK, so one recording replays identically in
+pure-ASM, hybrid, and native.
+
+```python
+from dos_re.tick_demo import TickDemo, masked_digest, record_ticks, verify_ticks
+
+# RECORD (VM = the oracle): adapter supplies the seam addresses + capture logic
+demo = record_ticks(rt, cs=0x1030, ds=0x1A0F,
+                    seed_ip=FRAME_TOP,            # main-loop top -> the native seed
+                    commit_ip=GAP_SITE,           # end-of-tick -> digest + commit
+                    observe={DECODE: grab_keys, KEY_SAMPLE: refine_keys},
+                    commit=finish_tick, digest=lambda rt: my_digest(rt),
+                    advance_one_frame=drive)      # an input-demo replay usually drives this
+demo.save("artifacts/.../tick_demo.bin")
+
+# VERIFY (no VM at all): every tick — inject keys+sidebands, ONE native tick, compare
+n_ok, div = verify_ticks(TickDemo.load(path), native_state,
+                         inject=my_inject, tick=my_tick, digest=my_digest)
+```
+
+All ticks matching = the VM-less game provably reproduced the oracle
+byte-for-byte (under the digest's ownership mask) over the whole recording —
+the "flip the engine" exit condition. The three rules that make it sound (each
+learned from a real divergence — the module docstring has the full stories):
+
+- **Capture at the consumption point** — keys are observed where the tick
+  *consumes* them (an ISR between frame-start and the read otherwise falsifies
+  the recording); later observers overwrite earlier ones by design.
+- **Sidebands** — state the native core can't reproduce (PIT-fed idle timers,
+  anything instruction-count-derived) is recorded per tick and *injected*.
+- **The digest is the ownership mask** — `masked_digest` neutralises
+  render/input-plumbing/audio state so a match means "same gameplay" by the
+  same definition the forward lockstep oracle proves.
+- `tick()` returns a terminal message for level-end/game-over/game-complete
+  (transitions whose VM frames have no native counterpart) — the compare ends
+  there legitimately; an unrecovered path raises and is reported.
+
+Inspect a recording: `python tools/tick_demo_info.py <demo.bin>`.
+
+## 13. Measure progress (never estimate)
 
 ```bash
 python tools/gen_island_manifest.py <game>.codecs <game>.recovered -o docs/recovered_islands.md
@@ -227,7 +271,7 @@ python tools/gen_island_manifest.py <game>.codecs <game>.recovered -o docs/recov
   collector.
 - Endgame triage of the last unhooked addresses: `dos_re.frontier`.
 
-## 13. Keep yourself honest (run with every change)
+## 14. Keep yourself honest (run with every change)
 
 ```bash
 python tools/lint.py                        # the game-agnostic / stdlib-only boundary

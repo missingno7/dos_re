@@ -20,6 +20,7 @@ view (which tool for which recovery step, with context) is
 | `liftgen.py` | `python tools/liftgen.py --exe <exe> --snapshot <snap> --entries-file <txt>` | Census: which function entries are mechanically liftable, and the refusal reason for the rest. `--emit` writes the literal hooks. |
 | `liftverify.py` | `python tools/liftverify.py --exe <exe> --snapshot <snap> --entry CS:IP --steps N --emit-dir <game>/lifted` | Lift + prove in situ: every call diffed against the ASM oracle; writes the `LIFTED → ORACLE_PASSING` proof ledger. Never hand-translate a first draft. |
 | `gen_island_manifest.py` | `python tools/gen_island_manifest.py <pkg>… -o docs/recovered_islands.md` | Regenerate the recovered-island ledger from `@oracle_link` tags. Generated, never hand-edited. |
+| `tick_demo_info.py` | `python tools/tick_demo_info.py <demo.bin>` | Inspect an endgame tick-demo recording (ticks, key record, sidebands, seed) before trusting it — corpus census, stale-file diagnosis. |
 
 ## Guardrails (run with every change)
 

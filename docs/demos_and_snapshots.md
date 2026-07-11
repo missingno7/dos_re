@@ -116,3 +116,23 @@ waits must return deterministically.
    with coverage *measured*, not vibed.
 
 See template_dos_port's `docs/ai_porting_charter.md` §5–6 for the full treatment.
+
+## Tick demos (`dos_re/tick_demo.py`) — the endgame's mode-independent clock
+
+Input demos ride the instruction-count clock, which is **mode-dependent**: a
+recovered hook executes far fewer emulated instructions than the ASM it
+replaces, so a demo recorded in one hook mode desyncs replayed in another —
+and the VM-less native core has no instruction count at all. The endgame proof
+("native ≡ oracle, tick by tick, over whole playthroughs") therefore uses a
+demo keyed to the **game tick** instead: per main-loop iteration, record the
+input the game *consumed*, any sideband values the native core cannot
+reproduce (PIT-fed idle timers and other instruction-count-derived state —
+record-and-inject, never re-derive), and a digest of the gameplay state under
+the ownership mask. Replay injects and steps ONE native tick; every digest
+matching proves the VM-less game reproduced the oracle byte-for-byte over the
+whole recording.
+
+The engine, its file format, and the three soundness rules (consumption-point
+capture, sidebands, digest-as-ownership-mask):
+[`agent_toolbox.md`](agent_toolbox.md) §12 and `dos_re/tick_demo.py`'s module
+docstring. Inspect a recording with `python tools/tick_demo_info.py`.
