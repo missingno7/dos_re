@@ -1,10 +1,22 @@
-"""Unit tests for the generic front-end timeline core (dos_re.frontend_timeline)."""
+"""Unit tests for the generic front-end timeline core (dos_re.frontend_timeline).
+
+Stdlib-only: dos_re core carries no numpy dependency (the CI env has none), so these tests exercise ``rgb_sha``
+with plain ``bytes`` and a tiny ``.tobytes()`` stand-in rather than importing numpy."""
 from __future__ import annotations
 
-import numpy as np
+import hashlib
 
 from dos_re.frontend_timeline import (FrameRecord, capture, collapse, diff_pixels, diff_sequence,
                                       format_sequence, rgb_sha)
+
+
+class _FakeArr:
+    """Stands in for a numpy array: ``rgb_sha`` hashes ``.tobytes()`` when present (the array path)."""
+    def __init__(self, buf: bytes):
+        self._buf = buf
+
+    def tobytes(self) -> bytes:
+        return self._buf
 
 
 def _mk(screens):
@@ -13,12 +25,12 @@ def _mk(screens):
 
 
 def test_rgb_sha_stable_and_blank():
-    a = np.zeros((4, 4, 3), dtype=np.uint8)
-    b = np.zeros((4, 4, 3), dtype=np.uint8)
-    assert rgb_sha(a) == rgb_sha(b)
-    a[0, 0, 0] = 1
-    assert rgb_sha(a) != rgb_sha(b)
-    assert rgb_sha(None) == ""
+    zeros = bytes(4 * 4 * 3)                                  # an all-zero "RGB" frame as raw bytes
+    assert rgb_sha(zeros) == rgb_sha(bytes(4 * 4 * 3))        # deterministic + stable
+    assert rgb_sha(b"\x01" + zeros[1:]) != rgb_sha(zeros)     # one changed pixel -> different digest
+    assert rgb_sha(None) == ""                                # blank / no frame
+    # the array branch (hasattr .tobytes): same bytes -> same digest as the bytes path, == a raw sha1
+    assert rgb_sha(_FakeArr(zeros)) == rgb_sha(zeros) == hashlib.sha1(zeros).hexdigest()
 
 
 def test_capture_stops_on_none_and_maxframes():
