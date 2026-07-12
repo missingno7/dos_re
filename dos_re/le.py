@@ -117,12 +117,20 @@ def _u32(d, o):
     return struct.unpack_from("<I", d, o)[0]
 
 
-def load_le(path: str | Path, *, image_limit: int | None = None) -> LEImage:
+def load_le(path: str | Path, *, image_limit: int | None = None,
+            rebase: int = 0) -> LEImage:
     """Parse and map an MZ+LE executable into a flat linear image.
 
     ``image_limit`` optionally caps the backing bytearray (default: just past
     the highest object).  The caller (the CPU/DPMI host) can grow it for the
     runtime heap/stack that DOS/4GW would normally supply.
+
+    ``rebase`` shifts every object (and so every fixup target, the entry and
+    the stack) by a constant delta.  The LE object bases are only *link*
+    bases: the real DOS/4G loader relocates the image into extended memory
+    above 1 MB, keeping the low megabyte 1:1-mapped (real-mode DOS, VGA at
+    A0000h).  A runtime host passes e.g. 0x100000; analysis tools keep 0 so
+    disassembly addresses match the link map.
     """
     data = Path(path).read_bytes()
     if data[:2] != b"MZ":
@@ -159,7 +167,7 @@ def load_le(path: str | Path, *, image_limit: int | None = None) -> LEImage:
         objects.append(LEObject(
             index=i + 1,
             virtual_size=_u32(data, o),
-            base=_u32(data, o + 4),
+            base=_u32(data, o + 4) + rebase,
             flags=_u32(data, o + 8),
             first_page=_u32(data, o + 12),
             page_count=_u32(data, o + 16),

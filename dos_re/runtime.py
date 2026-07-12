@@ -44,17 +44,33 @@ def create_pm_runtime(exe_path: str | Path, *, game_root: str | Path | None = No
     if isinstance(command_tail, str):
         command_tail = command_tail.encode("ascii")
     exe_path = Path(exe_path)
-    image = load_le(exe_path)
+    # Rebase the image above 1 MB like the real DOS/4G loader: the low
+    # megabyte stays 1:1 (real-mode DOS memory, VGA at A0000h) and the C
+    # runtime's sbrk can grow the heap above the image without ever crawling
+    # into the VGA aperture (observed: KE's heap free-list reached A0000h and
+    # was shredded by planar writes when loaded at the link base).
+    image = load_le(exe_path, rebase=0x100000)
     mem = FlatMemory(size=ram_bytes)
     seed_low_memory(mem)   # 1:1-mapped real-mode IVT + BIOS data area
     # Place the loaded objects at their own flat linear addresses.
     mem.data[image.mem_base:image.mem_base + len(image.mem)] = image.mem
     cpu = CPU386(mem, eip=image.entry_linear, esp=image.stack_linear)
     root = Path(game_root) if game_root else exe_path.parent
-    dos = DOS4GWHost(mem, root, command_tail=command_tail)
+    image_top = max(obj.end for obj in image.objects)
+    heap_base = (image_top + 0xFFFF) & ~0xFFFF        # 64K-align above the image
+    # Report a period-plausible 4 MB of free extended memory (KE's box asks
+    # for 2 MB minimum), regardless of the backing store's actual size.
+    dos = DOS4GWHost(mem, root, command_tail=command_tail,
+                     heap_base=heap_base,
+                     free_bytes=min(4 * 1024 * 1024, ram_bytes - heap_base - 0x10000))
     cpu.interrupt_handler = dos.interrupt
     cpu.port_reader = dos.port_read
     cpu.port_writer = dos.port_write
+    # The program's AH=25 vector installs land in dos.pm_vectors; sharing the
+    # dict as the CPU's IDT makes them the hardware-IRQ entry points too.
+    cpu.idt = dos.pm_vectors
+    cpu.pending_irq = dos.pending_irq
+    dos._cpu = cpu
     return PMRuntime(image=image, cpu=cpu, dos=dos, mem=mem)
 
 

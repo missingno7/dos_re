@@ -40,6 +40,85 @@ class DosInputExhausted(Exception):
     resume; headless runs treat it as the fail-loud boundary."""
 
 
+class UnsupportedVGAOperation(NotImplementedError):
+    """A VGA GC/sequencer feature outside the modelled subset was exercised."""
+
+
+class VGASequencer:
+    """Planar (unchained / Mode X) VGA memory model for the flat 386 path.
+
+    Four 64 KB planes behind the A000h aperture; the sequencer map mask picks
+    write planes, the GC read-map select picks the read plane.  Only write
+    mode 0 with bit mask FFh is modelled — anything else fails loud (the same
+    narrow-but-honest policy as Memory's 16-bit EGA model).  Attached to
+    ``FlatMemory.vga`` only while chain-4 is off, so chained mode 13h keeps
+    its direct linear path.
+    """
+
+    def __init__(self):
+        self.planes = [bytearray(0x10000) for _ in range(4)]
+        self.map_mask = 0x0F
+        self.read_map = 0
+        self.write_mode = 0
+        self.bit_mask = 0xFF
+        self.chain4 = True
+        self.display_start = 0
+        self.crtc = bytearray(0x20)
+        self.seq_index = 0
+        self.gc_index = 0
+        self.crtc_index = 0
+        self.latches = [0, 0, 0, 0]
+
+    def write(self, off: int, v: int) -> None:
+        wm = self.write_mode
+        m = self.map_mask
+        if wm == 1:
+            # Write mode 1: CPU data ignored; the latches loaded by the last
+            # read are written to the enabled planes — the hardware
+            # VRAM-to-VRAM block copy (KE's title->menu transition uses it).
+            lt = self.latches
+            if m & 1:
+                self.planes[0][off] = lt[0]
+            if m & 2:
+                self.planes[1][off] = lt[1]
+            if m & 4:
+                self.planes[2][off] = lt[2]
+            if m & 8:
+                self.planes[3][off] = lt[3]
+            return
+        if wm != 0:
+            raise UnsupportedVGAOperation(f"VGA write mode {wm} not modelled")
+        if self.bit_mask != 0xFF:
+            raise UnsupportedVGAOperation(f"VGA bit mask {self.bit_mask:02X}h not modelled")
+        if m & 1:
+            self.planes[0][off] = v
+        if m & 2:
+            self.planes[1][off] = v
+        if m & 4:
+            self.planes[2][off] = v
+        if m & 8:
+            self.planes[3][off] = v
+
+    def read(self, off: int) -> int:
+        # Every CPU read loads the four hardware latches (the write-mode-1
+        # copy source), then returns the read-map-selected plane byte.
+        self.latches = [self.planes[0][off], self.planes[1][off],
+                        self.planes[2][off], self.planes[3][off]]
+        return self.planes[self.read_map & 3][off]
+
+    def render_mode_x(self, width: int = 320, height: int = 240) -> bytes:
+        """Compose linear pixels from the planes at the current display start.
+        Row stride is CRTC offset (reg 13h) * 2 bytes per plane (default 80)."""
+        stride = (self.crtc[0x13] or 40) * 2
+        out = bytearray(width * height)
+        base = self.display_start
+        for y in range(height):
+            row = base + y * stride
+            for x in range(width):
+                out[y * width + x] = self.planes[x & 3][(row + (x >> 2)) & 0xFFFF]
+        return bytes(out)
+
+
 def seed_low_memory(mem) -> None:
     """Populate the 1:1-mapped low megabyte with a power-on BIOS environment.
 
@@ -110,8 +189,59 @@ class DOS4GWHost:
         self.dac_write_index = 0
         self.dac_rgb_phase = 0
         self.dac = bytearray(768)
+        # Planar VGA (Mode X) model; attached to mem.vga while unchained.
+        self.vga = VGASequencer()
+        # 8042 keyboard controller: bytes awaiting port-60h reads.  Every
+        # queued byte holds IRQ1 pending until drained (per-byte interrupts,
+        # like the real output buffer).  ``_kbc_param_cmd`` tracks a keyboard
+        # command awaiting its parameter byte (F3 rate, ED LEDs, F0 set).
+        self.kbc_queue: list[int] = []
+        self._kbc_param_cmd: int | None = None
+        # Deterministic timer: raise IRQ0 every N emulated instructions when
+        # set (instruction-count-driven, so replays stay deterministic).  Off
+        # by default per the framework's determinism rule.
+        self.timer_period_instructions: int | None = None
+        self._timer_next: int | None = None
+        self._cpu = None   # set by create_pm_runtime for the IRQ source
         self.unmodeled_port_reads: dict[int, int] = {}
         self.unmodeled_port_writes: dict[int, int] = {}
+
+    # ---- IRQ source (cpu.pending_irq) ----------------------------------------
+    def pending_irq(self):
+        if self.kbc_queue:
+            return 1
+        t = self.timer_period_instructions
+        if t is not None and self._cpu is not None:
+            if self._timer_next is None:
+                self._timer_next = self._cpu.instruction_count + t
+            if self._cpu.instruction_count >= self._timer_next:
+                self._timer_next += t
+                return 0
+        return None
+
+    def press_scancode(self, code: int) -> None:
+        """Queue a raw scancode (make or break) for the game's INT 9 handler."""
+        self.kbc_queue.append(code & 0xFF)
+
+    def _kbc_keyboard_write(self, value: int) -> None:
+        if self._kbc_param_cmd is not None:
+            self._kbc_param_cmd = None
+            self.kbc_queue.append(0xFA)              # ACK the parameter
+            return
+        if value in (0xF3, 0xED, 0xF0):              # rate / LEDs / scancode set
+            self._kbc_param_cmd = value
+            self.kbc_queue.append(0xFA)
+            return
+        if value == 0xF2:                            # identify
+            self.kbc_queue.extend((0xFA, 0xAB, 0x83))
+            return
+        if value in (0xF4, 0xF5, 0xF6):              # enable / disable / defaults
+            self.kbc_queue.append(0xFA)
+            return
+        if value == 0xFF:                            # reset -> ACK + BAT ok
+            self.kbc_queue.extend((0xFA, 0xAA))
+            return
+        raise NotImplementedError(f"8042 keyboard command 0x{value:02X} not modelled")
 
     # ---- register helpers ---------------------------------------------------
     @staticmethod
@@ -378,6 +508,22 @@ class DOS4GWHost:
         ah = self._ah(cpu)
         if ah == 0x00:                       # set video mode (AL=mode)
             self.video_mode = self._al(cpu) & 0x7F
+            # A BIOS mode-set reprograms the sequencer: mode 13h is chained,
+            # planes/masks return to defaults, VRAM is cleared (bit 7 of AL
+            # suppresses the clear; the mask above drops it deliberately —
+            # honour it if a game is observed to rely on no-clear).
+            v = self.vga
+            v.chain4 = True
+            v.map_mask = 0x0F
+            v.read_map = 0
+            v.write_mode = 0
+            v.bit_mask = 0xFF
+            v.display_start = 0
+            self.mem.vga = None
+            if not (self._al(cpu) & 0x80):
+                for p in v.planes:
+                    p[:] = bytes(0x10000)
+                self.mem.data[0xA0000:0xB0000] = bytes(0x10000)
             return
         if ah == 0x0F:                       # get video mode -> AL=mode, AH=cols
             cpu.set_reg(EAX, 2, (40 << 8) | getattr(self, "video_mode", 0x03))
@@ -395,6 +541,23 @@ class DOS4GWHost:
 
     # ---- I/O ports -----------------------------------------------------------
     def port_read(self, cpu: CPU386, port: int, bits: int) -> int:
+        vga = self.vga
+        if port == 0x3C5:                     # sequencer data
+            if vga.seq_index == 0x02:
+                return vga.map_mask
+            if vga.seq_index == 0x04:
+                return 0x0E if vga.chain4 else 0x06
+            return 0
+        if port == 0x3CF:                     # GC data
+            if vga.gc_index == 0x04:
+                return vga.read_map
+            if vga.gc_index == 0x05:
+                return vga.write_mode
+            if vga.gc_index == 0x08:
+                return vga.bit_mask
+            return 0
+        if port == 0x3D5:                     # CRTC data
+            return vga.crtc[vga.crtc_index & 0x1F]
         if port in (0x3DA, 0x3BA):           # VGA input status 1
             ts = self.time_source
             if ts is None:
@@ -406,10 +569,64 @@ class DOS4GWHost:
             return 0x09 if phase >= (1.0 - self.vga_retrace_active_fraction) else 0x00
         if port == 0x3C7:                     # DAC state
             return 0x00
+        if port == 0x60:                      # KBC output buffer
+            return self.kbc_queue.pop(0) if self.kbc_queue else 0x00
+        if port == 0x64:                      # KBC status: bit0 = output full
+            return 0x1C | (0x01 if self.kbc_queue else 0x00)
         self.unmodeled_port_reads[port] = self.unmodeled_port_reads.get(port, 0) + 1
         return 0
 
     def port_write(self, cpu: CPU386, port: int, value: int, bits: int) -> None:
+        vga = self.vga
+        if port == 0x3C4:                     # sequencer index (word write: index+data)
+            vga.seq_index = value & 0xFF
+            if bits == 16:
+                self.port_write(cpu, 0x3C5, (value >> 8) & 0xFF, 8)
+            return
+        if port == 0x3C5:                     # sequencer data
+            if vga.seq_index == 0x02:
+                vga.map_mask = value & 0x0F
+            elif vga.seq_index == 0x04:
+                # Memory mode: bit 3 = chain-4.  Attach the planar model to the
+                # aperture only while unchained; chained mode 13h keeps the
+                # direct linear path.
+                vga.chain4 = bool(value & 0x08)
+                self.mem.vga = None if vga.chain4 else vga
+            return
+        if port == 0x3CE:                     # GC index (word write: index+data)
+            vga.gc_index = value & 0xFF
+            if bits == 16:
+                self.port_write(cpu, 0x3CF, (value >> 8) & 0xFF, 8)
+            return
+        if port == 0x3CF:                     # GC data
+            if vga.gc_index == 0x04:
+                vga.read_map = value & 3
+            elif vga.gc_index == 0x05:
+                vga.write_mode = value & 3
+            elif vga.gc_index == 0x08:
+                vga.bit_mask = value & 0xFF
+            return
+        if port == 0x3D4:                     # CRTC index (word write: index+data)
+            vga.crtc_index = value & 0xFF
+            if bits == 16:
+                self.port_write(cpu, 0x3D5, (value >> 8) & 0xFF, 8)
+            return
+        if port == 0x3D5:                     # CRTC data
+            idx = vga.crtc_index & 0x1F
+            vga.crtc[idx] = value & 0xFF
+            if idx in (0x0C, 0x0D):
+                vga.display_start = (vga.crtc[0x0C] << 8) | vga.crtc[0x0D]
+            return
+        if port == 0x60:                      # KBC: byte to the keyboard
+            self._kbc_keyboard_write(value & 0xFF)
+            return
+        if port == 0x64:                      # KBC controller command
+            # AD/AE disable/enable keyboard — accepted, no state needed yet.
+            if (value & 0xFF) in (0xAD, 0xAE):
+                return
+            raise NotImplementedError(f"8042 controller command 0x{value:02X} not modelled")
+        if port == 0x20:                      # PIC EOI — accepted (no PIC state)
+            return
         if port == 0x3C8:                     # DAC write index
             self.dac_write_index = value & 0xFF
             self.dac_rgb_phase = 0

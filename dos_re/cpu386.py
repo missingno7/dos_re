@@ -59,20 +59,37 @@ class FlatMemory:
     Large enough to hold the loaded image, the low-1 MB region DOS/4GW maps for
     VGA (A0000h) / BIOS, and the runtime heap the DOS host hands out above the
     program.  ``data`` is a plain bytearray so snapshot/renderers can view it.
+
+    When ``vga`` is attached AND unchained (Mode X), accesses to the A000h
+    aperture route through the planar model; otherwise (the common case and
+    plain mode 13h) every access is a direct bytearray hit — the hot path pays
+    one attribute test per access only while a VGA device is attached.
     """
 
     def __init__(self, size: int = 16 * 1024 * 1024):
         self.data = bytearray(size)
         self.size = size
+        self.vga = None    # VGASequencer, attached by the host when unchained
 
     def r8(self, a: int) -> int:
+        v = self.vga
+        if v is not None and 0xA0000 <= a < 0xB0000:
+            return v.read(a - 0xA0000)
         return self.data[a]
 
     def r16(self, a: int) -> int:
+        v = self.vga
+        if v is not None and 0xA0000 <= a < 0xB0000:
+            return v.read(a - 0xA0000) | (v.read(a - 0xA0000 + 1) << 8)
         d = self.data
         return d[a] | (d[a + 1] << 8)
 
     def r32(self, a: int) -> int:
+        v = self.vga
+        if v is not None and 0xA0000 <= a < 0xB0000:
+            o = a - 0xA0000
+            return (v.read(o) | (v.read(o + 1) << 8) |
+                    (v.read(o + 2) << 16) | (v.read(o + 3) << 24))
         d = self.data
         return d[a] | (d[a + 1] << 8) | (d[a + 2] << 16) | (d[a + 3] << 24)
 
@@ -80,14 +97,32 @@ class FlatMemory:
         return self.r8(a) if size == 1 else (self.r16(a) if size == 2 else self.r32(a))
 
     def w8(self, a: int, v: int) -> None:
+        g = self.vga
+        if g is not None and 0xA0000 <= a < 0xB0000:
+            g.write(a - 0xA0000, v & 0xFF)
+            return
         self.data[a] = v & 0xFF
 
     def w16(self, a: int, v: int) -> None:
+        g = self.vga
+        if g is not None and 0xA0000 <= a < 0xB0000:
+            o = a - 0xA0000
+            g.write(o, v & 0xFF)
+            g.write(o + 1, (v >> 8) & 0xFF)
+            return
         d = self.data
         d[a] = v & 0xFF
         d[a + 1] = (v >> 8) & 0xFF
 
     def w32(self, a: int, v: int) -> None:
+        g = self.vga
+        if g is not None and 0xA0000 <= a < 0xB0000:
+            o = a - 0xA0000
+            g.write(o, v & 0xFF)
+            g.write(o + 1, (v >> 8) & 0xFF)
+            g.write(o + 2, (v >> 16) & 0xFF)
+            g.write(o + 3, (v >> 24) & 0xFF)
+            return
         d = self.data
         d[a] = v & 0xFF
         d[a + 1] = (v >> 8) & 0xFF
@@ -141,7 +176,12 @@ class CPU386:
         self.port_reader = None
         self.port_writer = None
         self.coverage_telemetry = None
+        # Hardware-IRQ source: polled each step while IF is set; returning an
+        # IRQ number delivers it through ``idt`` (the protected-mode vectors
+        # the program installed via the DOS/4GW host's AH=25).  None on the
+        # deterministic default path, same contract as CPU8086.pending_irq.
         self.pending_irq = None
+        self.idt: dict[int, tuple[int, int]] = {}
         # Decode scratch reset each instruction.
         self._opsize = 4
         self._adsize = 4
@@ -354,7 +394,31 @@ class CPU386:
     def addr(self):
         return self.seg["cs"], self.eip
 
+    def deliver_interrupt(self, vec: int) -> bool:
+        """Hardware-interrupt entry into an installed protected-mode handler.
+
+        Pushes EFLAGS/CS/EIP (32-bit frames, matching the IRET(D) this core
+        implements), clears IF/TF, and jumps to the ``idt`` vector.  Returns
+        False when no handler is installed (the BIOS stub would IRET — a
+        no-op)."""
+        handler = self.idt.get(vec)
+        if handler is None:
+            return False
+        sel, off = handler
+        self.push(self.eflags, 4)
+        self.push(self.seg["cs"], 4)
+        self.push(self.eip, 4)
+        self.eflags &= ~(IF | TF)
+        self.set_seg("cs", sel)
+        self.eip = off & 0xFFFFFFFF
+        return True
+
     def step(self) -> None:
+        if self.pending_irq is not None and (self.eflags & IF):
+            irq = self.pending_irq()
+            if irq is not None:
+                # Master PIC base 08h, slave 70h — the mapping DOS/4GW keeps.
+                self.deliver_interrupt(0x08 + irq if irq < 8 else 0x70 + irq - 8)
         start = self.eip
         if self.coverage_telemetry is not None:
             self.coverage_telemetry.record_interpreted_instruction((self.seg["cs"], start))
