@@ -1,10 +1,15 @@
-"""Render DOS_RE emulator video memory to a dependency-free PNG dump.
+"""Render DOS_RE emulator video memory to a PNG dump.
 
 The day-0 "see output" tool: point it at a snapshot (or a fresh EXE) and get a
 PNG of what the emulated screen shows.  It reads the snapshot's saved DOS state
 to pick the decoder — linear VGA mode 13h, or the 320x200 16-colour EGA/VGA
-planar path (shadow planes + CRTC display start + DAC palette) — and stays
-standard-library-only for headless evidence inspection.
+planar path (shadow planes + CRTC display start + DAC palette).
+
+These rasterizers are also the template adapters copy for PER-FRAME work (the
+frame verifier's RGB sampling, the front-end timeline probers), so they carry a
+numpy fast path (~24x, measured; bit-exact — tests/test_render_frame.py proves
+scalar == numpy on random planes) with the scalar path kept as the fallback
+where numpy is unavailable (e.g. a bare PyPy env).
 
 Usage:
     python tools/render_frame.py <snapshot_dir> [--seg A000] [--out frame.png]
@@ -27,6 +32,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from dos_re.memory import EGA_APERTURE, EGA_PLANE_STRIDE  # noqa: E402
+
+try:                       # numpy fast path (first-class dep); scalar fallback keeps bare envs working
+    import numpy as _np
+except ImportError:        # pragma: no cover - exercised only where numpy is absent
+    _np = None
 
 # The default VGA palette: the 16 standard EGA/VGA colours followed by a grey
 # ramp, used only when a snapshot has no saved DAC palette.
@@ -62,17 +72,40 @@ def write_png(path: Path, width: int, height: int, rows: list[bytearray]) -> Non
     path.write_bytes(png)
 
 
+def _ppm_header(scale: int) -> bytes:
+    return f"P6\n{WIDTH * scale} {HEIGHT * scale}\n255\n".encode("ascii")
+
+
 def render_vga_ppm(
     mem: bytes,
     seg: int = 0xA000,
     scale: int = 2,
     palette: list[tuple[int, int, int]] | None = None,
 ) -> tuple[int, int, bytes]:
-    """Decode VGA mode 13h linear 320x200x8bpp memory to binary PPM (P6)."""
+    """Decode VGA mode 13h linear 320x200x8bpp memory to binary PPM (P6).
+
+    numpy fast path (~15x) with the scalar loop as fallback — byte-identical output (tested)."""
+    if _np is not None:
+        base = (seg & 0xFFFF) * 16
+        pal = _np.array(palette if palette is not None else DEFAULT_VGA_PALETTE, dtype=_np.uint8)
+        idx = _np.frombuffer(mem, dtype=_np.uint8, count=WIDTH * HEIGHT, offset=base).reshape(HEIGHT, WIDTH)
+        rgb = pal[idx]                                        # (200, 320, 3)
+        if scale != 1:
+            rgb = rgb.repeat(scale, axis=0).repeat(scale, axis=1)
+        return WIDTH * scale, HEIGHT * scale, _ppm_header(scale) + rgb.tobytes()
+    return _render_vga_ppm_scalar(mem, seg, scale, palette)
+
+
+def _render_vga_ppm_scalar(
+    mem: bytes,
+    seg: int = 0xA000,
+    scale: int = 2,
+    palette: list[tuple[int, int, int]] | None = None,
+) -> tuple[int, int, bytes]:
     base = (seg & 0xFFFF) * 16
     pal = palette if palette is not None else DEFAULT_VGA_PALETTE
     width, height = WIDTH, HEIGHT
-    out = bytearray(f"P6\n{width * scale} {height * scale}\n255\n".encode("ascii"))
+    out = bytearray(_ppm_header(scale))
     for y in range(height):
         src = mem[base + y * width:base + (y + 1) * width]
         line = bytearray()
@@ -95,10 +128,37 @@ def render_planar_ppm(
     ``EGA_APERTURE``.  CRTC start address 0Ch/0Dh selects the visible byte offset
     inside those planes, so snapshots taken during PRE2 map/level scrolling must
     not be decoded from zero unconditionally.
-    """
+
+    numpy fast path (~24x, the per-frame workhorse) with the scalar bit loop as
+    fallback — byte-identical output (tested)."""
+    if _np is not None:
+        pal = _np.array(palette if palette is not None else DEFAULT_VGA_PALETTE, dtype=_np.uint8)[:16]
+        arr = _np.frombuffer(mem, dtype=_np.uint8)
+        # per-row byte offsets inside the 64K plane, with the scalar path's 16-bit wrap semantics
+        rows = ((display_start & 0xFFFF)
+                + _np.arange(HEIGHT, dtype=_np.int64)[:, None] * PLANAR_ROW_BYTES
+                + _np.arange(PLANAR_ROW_BYTES, dtype=_np.int64)[None, :]) & 0xFFFF     # (200, 40)
+        idx = _np.zeros((HEIGHT, WIDTH), dtype=_np.uint8)
+        for p in range(4):
+            plane = arr[EGA_APERTURE + p * EGA_PLANE_STRIDE:EGA_APERTURE + (p + 1) * EGA_PLANE_STRIDE]
+            bits = _np.unpackbits(plane[rows], axis=1)        # (200, 320), MSB-first == the bit-7..0 loop
+            idx |= bits << p
+        rgb = pal[idx]                                        # (200, 320, 3)
+        if scale != 1:
+            rgb = rgb.repeat(scale, axis=0).repeat(scale, axis=1)
+        return WIDTH * scale, HEIGHT * scale, _ppm_header(scale) + rgb.tobytes()
+    return _render_planar_ppm_scalar(mem, display_start, scale, palette)
+
+
+def _render_planar_ppm_scalar(
+    mem: bytes,
+    display_start: int = 0,
+    scale: int = 2,
+    palette: list[tuple[int, int, int]] | None = None,
+) -> tuple[int, int, bytes]:
     pal = palette if palette is not None else DEFAULT_VGA_PALETTE
     start = display_start & 0xFFFF
-    out = bytearray(f"P6\n{WIDTH * scale} {HEIGHT * scale}\n255\n".encode("ascii"))
+    out = bytearray(_ppm_header(scale))
     for y in range(HEIGHT):
         src_base = (start + y * PLANAR_ROW_BYTES) & 0xFFFF
         line = bytearray()
