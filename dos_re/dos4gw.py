@@ -401,8 +401,15 @@ class DOS4GWHost:
             self.pm_vectors[self._al(cpu)] = (cpu.seg["ds"], cpu.r[EDX])
             return
         if ah == 0x35:                       # get interrupt vector: AL=int -> ES:EBX
-            sel, off = self.pm_vectors.get(self._al(cpu), (0, 0))
-            cpu.seg["es"] = sel
+            # Never report a NULL vector: real DOS/4GW returns its own default
+            # handler for uninstalled interrupts.  A program that saves the
+            # "original" vector and RESTORES it after probing (KE's SB detect
+            # does, for IRQ7) would otherwise reinstall (0,0) — and the next
+            # delivery through it slides execution from linear 0 into the
+            # image.  The default is the BIOS IRET stub seed_low_memory wrote.
+            sel, off = self.pm_vectors.get(self._al(cpu),
+                                           (cpu.seg["cs"], 0xFFF53))
+            cpu.set_seg("es", sel)
             cpu.set_reg(EBX, 4, off)
             return
         if ah == 0x19:                       # current drive -> AL (0=A)
