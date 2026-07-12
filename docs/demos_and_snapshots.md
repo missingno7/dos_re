@@ -136,3 +136,22 @@ The engine, its file format, and the three soundness rules (consumption-point
 capture, sidebands, digest-as-ownership-mask):
 [`agent_toolbox.md`](agent_toolbox.md) §12 and `dos_re/tick_demo.py`'s module
 docstring. Inspect a recording with `python tools/tick_demo_info.py`.
+
+## Front-end timelines (`dos_re/frontend_timeline.py`) — the non-gameplay proof
+
+The tick demo captures **zero** of the front end: intro / title / menu /
+attract / world-map / tally all run with no game tick, so the tick digest never
+sees them. Those screens are exactly where a VM-less port drifts undetected — a
+screen shown in the wrong ORDER, a dropped fade, a screen before/after the wrong
+transition (the class of bug where a "you must be expert" wall showed *after* the
+map + level load instead of *before*). The front-end proof is therefore a
+per-**present-frame** timeline: at each frame, a coarse logical SCREEN id (which
+screen — the 13h title/menu images fingerprinted to a name) plus an RGB digest.
+Capture it from the reference VM (ground truth) and from the native front end,
+then diff two ways — **sequence** (screen order + per-run frame count; robust to
+sub-frame pacing) always, **pixels** (per-frame RGB, byte-exact) opt-in. The
+native side is kept honest by the same oracle trick as the tick demo: while
+replaying a demo on the VM, capture the raw keyboard scancode flags the front end
+sampled each frame and **inject those same flags** into the native front end — no
+synthetic keystrokes. Needs a **cold-start demo** so the native cold-boot entry
+aligns with the VM. Details: [`agent_toolbox.md`](agent_toolbox.md) §12b.
