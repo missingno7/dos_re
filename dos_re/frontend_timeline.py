@@ -28,16 +28,17 @@ import hashlib
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-import numpy as np
-
 
 def rgb_sha(rgb) -> str:
     """The canonical per-frame pixel digest: sha1 of the C-contiguous RGB array (or "" for a blank/None frame).
 
-    Both sides MUST digest the same way for the pixel diff to mean anything — always go through this helper."""
+    Both sides MUST digest the same way for the pixel diff to mean anything — always go through this helper.
+    Stdlib-only: ``tobytes()`` yields C-order bytes (like ``np.ascontiguousarray``) for a numpy array; bytes-like
+    inputs are hashed directly. dos_re core stays stdlib-only (no numpy import)."""
     if rgb is None:
         return ""
-    return hashlib.sha1(np.ascontiguousarray(rgb)).hexdigest()
+    buf = rgb.tobytes() if hasattr(rgb, "tobytes") else bytes(rgb)
+    return hashlib.sha1(buf).hexdigest()
 
 
 @dataclass(frozen=True)
