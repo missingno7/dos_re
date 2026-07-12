@@ -166,3 +166,86 @@ def filter_runs(runs: "list[ScreenRun]", ignore: "frozenset[str] | set[str]" = f
 def format_sequence(runs: "list[ScreenRun]") -> str:
     """A one-line human-readable rendering of a screen sequence: ``screenxCOUNT -> screenxCOUNT -> ...``."""
     return " -> ".join(f"{r.screen}x{r.count}" for r in runs)
+
+
+# --------------------------------------------------------------------------------------------------------------
+# The TRANSITION-STATE proof pieces (the front-end analogue of the tick demo's digest machinery). Developed on
+# the first completed port's verify_native_frontend; the 4-gate pattern they compose is documented in
+# docs/agent_toolbox.md §12b:  [1] screen ORDER  [2] a WITNESS byte-compared at every transition
+# [3] entry-state equality outside an OWNED byte set  [4] the owned set proven INERT by dual replay.
+# --------------------------------------------------------------------------------------------------------------
+
+def pack_fields(data, fields, base: int = 0) -> bytes:
+    """Pack a WITNESS from ``data``: ``fields`` = ((name, offset, size), ...) — the adapter's decision-state
+    contract (the state the front end is FOR: chosen level/mode/lives/attract-flag/password...). Byte-compare
+    the packed witness at every screen transition; a mismatch is a real behaviour divergence, cadence-free."""
+    return b"".join(bytes(data[base + off:base + off + n]) for _, off, n in fields)
+
+
+def diff_fields(a: bytes, b: bytes, fields) -> "list[str]":
+    """Human-readable per-field diff of two :func:`pack_fields` witnesses (empty list = identical)."""
+    out, pos = [], 0
+    for name, _off, n in fields:
+        va, vb = a[pos:pos + n], b[pos:pos + n]
+        if va != vb:
+            out.append(f"{name}: ref={va.hex()} cand={vb.hex()}")
+        pos += n
+    return out
+
+
+def input_segments(filtered_runs: "list[ScreenRun]", per_frame_inputs: "list[bytes]", total_frames: int):
+    """Split the reference's per-frame raw-input stream into PER-SCREEN segments.
+
+    The reference and the candidate share no frame clock (a timed screen lasts a different number of frames on
+    each), so absolute-index input injection desyncs after the first timed screen. Causal alignment instead:
+    segment the input by the reference's LOGICAL screen runs — segment k = the input frames recorded while
+    screen k was up (including any trailing transition frames, so nothing is lost). The candidate then consumes
+    segment k while ITS OWN screen is runs[k].screen (see :class:`SegmentedInput`), so a keypress lands on the
+    same screen at the same relative moment on both sides."""
+    bounds = [r.start for r in filtered_runs] + [total_frames]
+    return [(filtered_runs[j].screen, per_frame_inputs[bounds[j]:bounds[j + 1]])
+            for j in range(len(filtered_runs))]
+
+
+class SegmentedInput:
+    """Feed :func:`input_segments` to a candidate front end, advancing causally with ITS screen changes.
+
+    Call :meth:`next` every candidate frame with the candidate's current canonical screen (``None`` for a
+    transition state): it returns the input bytes to inject for this frame. While the candidate stays on
+    segment k's screen it consumes that segment frame-by-frame; when its screen becomes segment k+1's, the
+    cursor jumps there (a timed screen the candidate finishes faster just skips the unused idle input — the
+    presses recorded for LATER screens are still delivered on those screens). Exhausted segment = ``blank``
+    (keys released)."""
+
+    def __init__(self, segments, blank: bytes):
+        self.segments = segments
+        self.blank = blank
+        self.k = 0
+        self.c = 0
+
+    def next(self, current_screen) -> bytes:
+        if (current_screen is not None and self.k + 1 < len(self.segments)
+                and current_screen == self.segments[self.k + 1][0]
+                and current_screen != self.segments[self.k][0]):
+            self.k += 1
+            self.c = 0
+        seg = self.segments[self.k][1] if self.k < len(self.segments) else ()
+        buf = seg[self.c] if self.c < len(seg) else self.blank
+        self.c += 1
+        return buf
+
+
+def diff_offsets(a, b) -> "list[int]":
+    """All offsets where two equal-length buffers differ — the OWNED set for the inertness gate: the bytes
+    where a candidate's entry state legitimately differs from the reference's (audio-driver data, load-layout
+    pointers, scene scratch). Gate [4] then replays the recorded gameplay from BOTH states and requires every
+    tick to stay byte-identical OUTSIDE this set (:func:`spread_beyond`) — proving the owned bytes inert
+    rather than assuming them irrelevant."""
+    return [o for o in range(min(len(a), len(b))) if a[o] != b[o]]
+
+
+def spread_beyond(a, b, owned: "set[int] | frozenset[int]") -> "list[int]":
+    """Offsets differing between ``a`` and ``b`` that are NOT in ``owned`` — the inertness violation set.
+    Non-empty = the owned-region difference PROPAGATED into state both sides were supposed to compute
+    identically; the first offsets localize the leak."""
+    return [o for o in range(min(len(a), len(b))) if a[o] != b[o] and o not in owned]

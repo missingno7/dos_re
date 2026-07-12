@@ -88,3 +88,45 @@ def test_diff_pixels_first_divergence_and_length():
     longer = _mk([("a", "h0"), ("a", "h1"), ("b", "h2"), ("b", "h3")])
     dl = diff_pixels(ref, longer)
     assert not dl.ok and dl.frame == 3
+
+
+def test_pack_and_diff_fields():
+    from dos_re.frontend_timeline import diff_fields, pack_fields
+    fields = (("level", 0x10, 1), ("score", 0x20, 4))
+    data = bytearray(0x40); data[0x10] = 7; data[0x20:0x24] = (1234).to_bytes(4, "little")
+    w1 = pack_fields(data, fields)
+    data2 = bytearray(data); data2[0x10] = 8
+    w2 = pack_fields(data2, fields)
+    assert w1 != w2
+    d = diff_fields(w1, w2, fields)
+    assert d == ["level: ref=07 cand=08"]                      # only the changed field, named
+    assert diff_fields(w1, w1, fields) == []
+
+
+def test_input_segments_and_segmented_feeder():
+    from dos_re.frontend_timeline import ScreenRun, SegmentedInput, input_segments
+    # reference: screen A for 3 frames, B for 2, C for 3 (8 frames of input i0..i7)
+    runs = [ScreenRun("A", 0, 3), ScreenRun("B", 3, 2), ScreenRun("C", 5, 3)]
+    inputs = [bytes([i]) for i in range(8)]
+    segs = input_segments(runs, inputs, 8)
+    assert [(s, [x[0] for x in frames]) for s, frames in segs] == [
+        ("A", [0, 1, 2]), ("B", [3, 4]), ("C", [5, 6, 7])]
+    # candidate: finishes A in ONE frame (timed screen), then B for 3 frames (longer than recorded), then C
+    feeder = SegmentedInput(segs, blank=b"\xff")
+    out = [feeder.next("A")[0]]                                # A frame 0 -> input 0
+    out.append(feeder.next("B")[0])                            # screen advanced -> B segment from its start (3)
+    out.append(feeder.next("B")[0])                            # 4
+    out.append(feeder.next("B")[0])                            # B exhausted -> blank
+    out.append(feeder.next("C")[0])                            # C segment start (5)
+    assert out == [0, 3, 4, 0xFF, 5]
+
+
+def test_diff_offsets_and_spread_beyond():
+    from dos_re.frontend_timeline import diff_offsets, spread_beyond
+    a = bytes([0, 1, 2, 3, 4]); b = bytes([0, 9, 2, 8, 4])
+    owned = set(diff_offsets(a, b))
+    assert owned == {1, 3}
+    # a tick later: candidate diverges at a NEW offset -> the leak is localized
+    a2 = bytes([0, 1, 5, 3, 4]); b2 = bytes([0, 9, 6, 8, 4])
+    assert spread_beyond(a2, b2, owned) == [2]
+    assert spread_beyond(a2, b2, owned | {2}) == []

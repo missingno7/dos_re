@@ -284,36 +284,59 @@ screen before/after the wrong transition (e.g. a "you must be expert" wall shown
 *after* the map+level load instead of *before*). `dos_re.frontend_timeline` is
 the front-end analogue of the tick demo: a per-PRESENT-FRAME timeline.
 
+A per-frame pixel diff is the WRONG proof here — the reference recording rides a
+wall-clock/instruction budget the native scene generator does not share, so frame
+cadences are incomparable. What IS well-defined and cadence-free is the flow's
+DISCRETE structure, proven by **four gates** (all in `dos_re.frontend_timeline`;
+worked end-to-end in pre2's `scripts/verify_native_frontend.py`):
+
 ```python
-from dos_re.frontend_timeline import capture, collapse, diff_sequence, diff_pixels, rgb_sha
+from dos_re.frontend_timeline import (capture, collapse, filter_runs, diff_sequence,
+                                      pack_fields, diff_fields,                 # gate 2
+                                      input_segments, SegmentedInput,           # causal input
+                                      diff_offsets, spread_beyond)              # gates 3+4
 
-# sample(i): advance ONE present-frame, return (coarse SCREEN id, rgb_sha) — or None at the end.
-# The adapter classifies a frame from BOTH sides to the SAME (screen_id, rgb): the VM framebuffer
-# (13h/0Dh/text, named by fingerprinting the image asset) and the native scene generator's output.
-vm     = capture(vm_sample,     max_frames)   # ground truth: replay a demo through the VM
-native = capture(native_sample, max_frames)   # candidate: drive the native front-end generator
+ref  = filter_runs(collapse(capture(vm_sample, N)),  ignore=TRANSIENT)   # ground truth
+segs = input_segments(ref, per_frame_raw_input, N)   # the VM's input, segmented PER SCREEN
+feeder = SegmentedInput(segs, blank=ZEROS)           # candidate consumes it causally
+cand = filter_runs(collapse(capture(native_sample, N)), ignore=TRANSIENT)
 
-diff_sequence(collapse(vm), collapse(native), duration_tolerance=2)  # screen ORDER + per-run frame count
-diff_pixels(vm, native)                                              # opt-in: per-frame RGB, byte-exact
+diff_sequence(ref, cand, duration_tolerance=None)          # [1] screen ORDER
+diff_fields(pack_fields(vm_d, FIELDS), pack_fields(nat_d, FIELDS), FIELDS)   # [2] per transition
+owned = set(diff_offsets(masked(seed_dgroup), masked(native_end_dgroup)))    # [3] ownership split
+spread_beyond(masked(a_tick), masked(b_tick), owned)                         # [4] inertness
 ```
 
-Two gates, cheap→strong:
+- **[1] ORDER**: the filtered run-length screen sequence must match. Catches
+  out-of-order / extra / missing screens (e.g. a "you must be expert" wall shown
+  after the map+level load instead of before).
+- **[2] WITNESS at every transition**: the adapter declares the DECISION-STATE
+  fields (chosen level/mode, live-vs-attract input source, lives, password state)
+  and they are byte-compared at each screen change. Cadence-free; a mismatch is a
+  real behaviour divergence. (In pre2 this caught a fresh-start block the VM runs
+  at MENU entry that native deferred to level load.)
+- **[3] ENTRY-STATE OWNERSHIP**: the candidate's gameplay-entry state must be
+  byte-identical to the reference's first-gameplay-tick seed OUTSIDE an OWNED byte
+  set (`diff_offsets`) — the bytes where a VM-less product legitimately differs
+  (sound-driver module data in DGROUP, load-layout pointers, scene scratch).
+- **[4] INERTNESS — the ownership claim is PROVEN, not assumed**: replay the
+  demo's recorded gameplay ticks TWICE (from the reference seed and from the
+  candidate's own front-end output) with identical injected input; every tick must
+  show `spread_beyond(...) == []` — the owned bytes demonstrably never influence
+  gameplay. All four green = the native front end behaves like the original, from
+  cold boot through byte-identical gameplay.
 
-- **SEQUENCE** (always): the ordered run-length list of distinct screens. Catches
-  out-of-order / extra / missing / mis-timed screens and is robust to sub-frame
-  pacing noise. This alone catches the "wrong screen order" class of bug.
-- **PIXELS** (opt-in): the per-frame RGB digest, frame-for-frame — byte-exact
-  rendering AND identical cadence. It surfaces cadence bugs a single golden-frame
-  test misses (e.g. a native screen that jumps to the settled image and drops the
-  VM's multi-frame fade-in — the steady-state pixels match, the timeline does not).
-
-The oracle trick that makes the native side honest (same as the tick demo): while
-replaying the demo on the VM, capture the raw keyboard scancode flags the front end
-sampled each frame, then **inject those same flags** into the native front end — no
-synthetic keystrokes, the candidate makes the VM's choices. A cold-start demo (boot
-→ oldies → titles → menu → level) is required so the native `cold_boot` entry aligns
-with the VM. pre2 adapter: `scripts/probe_frontend_timeline.py` (VM ground-truth
-prober — run it on ANY demo to see what the original does) + `verify_native_frontend.py`.
+Input honesty (same oracle trick as the tick demo, plus causal alignment): while
+replaying the demo on the VM, capture the raw key-flag window the front end samples
+each frame (include EVERYTHING the flow reads — pre2's menu reads '1'/'2' flags at
+[0x27F6/F7] *below* the scancode table, and the idle counter drives the attract
+timeout). Then `input_segments` + `SegmentedInput` deliver it per-SCREEN, so a
+keypress lands on the same screen at the same relative moment with no shared clock.
+A cold-start demo (boot → oldies → titles → menu → level) is required so the native
+cold-boot entry aligns with the VM — and seed the candidate from the FRONT-END entry
+state (boot constants), not a level-jump bootstrap. pre2 adapters:
+`scripts/probe_frontend_timeline.py` (ground-truth prober — run on ANY demo to see
+what the original does) + `scripts/verify_native_frontend.py` (the 4-gate proof).
 
 ## 13. Measure progress (never estimate)
 
