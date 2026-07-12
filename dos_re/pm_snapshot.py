@@ -71,6 +71,13 @@ def capture_pm_state(rt) -> dict:
             "crtc_index": vga.crtc_index,
         },
         "mem_size": rt.mem.size,
+        # Attached Sound Blaster (optional device): config + DSP/DMA state so
+        # a resumed run keeps streaming (sblaster.snapshot_state contract).
+        "sb": None if dos.sound_blaster is None else {
+            "base": dos.sound_blaster.base, "irq": dos.sound_blaster.irq,
+            "dma": dos.sound_blaster.dma,
+            "state": dos.sound_blaster.snapshot_state(),
+        },
     }
 
 
@@ -123,6 +130,13 @@ def apply_pm_state(rt, state: dict, mem_bytes, planes_bytes) -> None:
         f = open(name, mode if "b" in mode else mode + "b")
         f.seek(pos)
         dos.files[int(h)] = f
+
+    sb_state = state.get("sb")
+    if sb_state is not None:
+        sb = dos.attach_sound_blaster(base=sb_state["base"], irq=sb_state["irq"],
+                                      dma=sb_state["dma"])
+        sb.restore_state(sb_state["state"])
+        sb.rearm_after_restore()
 
     v = state["vga"]
     vga.map_mask = v["map_mask"]

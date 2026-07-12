@@ -66,16 +66,47 @@ def send_key(dos, name: str, make: bool) -> None:
         dos.press_scancode(sc | (0x00 if make else 0x80))
 
 
+class _PcmSink:
+    """Minimal Sound Blaster PCM consumer: drains ``sb.pcm_out`` (8-bit
+    unsigned mono at the DSP-programmed rate) into a pygame mixer channel.
+    Lazy: the mixer initializes at the first chunk, at the stream's rate."""
+
+    def __init__(self, sb):
+        self.sb = sb
+        self.channel = None
+
+    def pump(self):
+        import pygame
+        sb = self.sb
+        if sb is None or not sb.pcm_out or not sb.sample_rate:
+            return
+        data = bytes(sb.pcm_out)
+        del sb.pcm_out[:]
+        if self.channel is None:
+            pygame.mixer.quit()
+            pygame.mixer.init(frequency=sb.sample_rate, size=8, channels=1, buffer=512)
+            self.channel = pygame.mixer.Channel(0)
+        snd = pygame.mixer.Sound(buffer=data)
+        if self.channel.get_busy():
+            self.channel.queue(snd)
+        else:
+            self.channel.play(snd)
+
+
 def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                artifacts_dir: str | Path = "artifacts") -> int:
     import pygame
 
     pygame.init()
-    win = pygame.display.set_mode((320 * scale, 200 * scale))
+    # A fixed 4:3 canvas: every VGA geometry this runtime produces (320x200
+    # mode 13h, Mode X 320x240 / 320x400) displays at the aspect a real
+    # monitor showed — the frame is scaled to the canvas each present.
+    win = pygame.display.set_mode((320 * scale, 240 * scale))
     pygame.display.set_caption(title)
 
     dos, cpu = rt.dos, rt.cpu
     dos.time_source = time.monotonic     # 3DAh retrace advances at 70 Hz real time
+    pcm = _PcmSink(dos.sound_blaster)
     artifacts = Path(artifacts_dir)
 
     # DOS console reads (a boot screen's "press any key") block until a real
@@ -83,6 +114,7 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     # KEYDOWN character lands in dos.key_queue, then resume the CPU.
     waiting_console = False
     next_present = time.monotonic()
+    frame_w, frame_h = 320, 200            # last presented geometry (mouse mapping)
     running = True
     while running:
         if not waiting_console:
@@ -129,8 +161,10 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                         waiting_console = False
             elif ev.type == pygame.MOUSEMOTION:
                 mx, my = ev.pos
-                dos.mouse_x = min(639, mx * 2 // scale)   # MS driver: 0-639 virtual x
-                dos.mouse_y = min(199, my // scale)
+                ww, wh = win.get_size()
+                # MS driver: 0-639 virtual x; y follows the live frame height
+                dos.mouse_x = min(639, mx * 640 // ww)
+                dos.mouse_y = min(frame_h - 1, my * frame_h // wh)
             elif ev.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP):
                 down = ev.type == pygame.MOUSEBUTTONDOWN
                 bit = {1: 1, 3: 2}.get(ev.button, 0)
@@ -138,9 +172,11 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                 dos.mouse_buttons = (cur | bit) if down else (cur & ~bit)
 
         rgb, w, h = render_pm_frame(dos)
+        frame_w, frame_h = w, h
         frame = pygame.image.frombuffer(rgb, (w, h), "RGB").convert(win)
         pygame.transform.scale(frame, win.get_size(), win)
         pygame.display.flip()
+        pcm.pump()
     pygame.quit()
     return 0
 
@@ -164,7 +200,8 @@ def run_headless(rt, *, steps: int, png: str = "", boot_keys=()) -> int:
 
 def main(argv=None, *, default_exe: str | None = None, create_runtime=None,
          title: str = "dos_re PM", boot_keys=(), description: str | None = None,
-         artifacts_dir: str | Path = "artifacts") -> int:
+         artifacts_dir: str | Path = "artifacts",
+         sound_blaster: tuple[int, int, int] | None = None) -> int:
     """The standard PM play-runner CLI.  Game wrappers supply the defaults."""
     from .pm_snapshot import load_pm_snapshot
     from .runtime import create_pm_runtime
@@ -177,6 +214,8 @@ def main(argv=None, *, default_exe: str | None = None, create_runtime=None,
     ap.add_argument("--png", default="", help="headless: render the final screen")
     ap.add_argument("--scale", type=int, default=3, help="window scale factor")
     ap.add_argument("--snapshot", default="", help="resume from a saved snapshot dir")
+    ap.add_argument("--no-sound", action="store_true",
+                    help="do not attach the emulated Sound Blaster")
     args = ap.parse_args(argv)
 
     build = create_runtime or create_pm_runtime
@@ -184,6 +223,11 @@ def main(argv=None, *, default_exe: str | None = None, create_runtime=None,
         rt = load_pm_snapshot(args.exe, args.snapshot)
     else:
         rt = build(args.exe)
+    if sound_blaster is not None and not args.no_sound:
+        base, irq, dma = sound_blaster
+        rt.dos.attach_sound_blaster(base=base, irq=irq, dma=dma,
+                                    clock=None if args.headless else time.monotonic,
+                                    anchor_cadence=not args.headless)
     if args.headless:
         return run_headless(rt, steps=args.steps, png=args.png, boot_keys=boot_keys)
     return run_viewer(rt, scale=args.scale, title=title, artifacts_dir=artifacts_dir)

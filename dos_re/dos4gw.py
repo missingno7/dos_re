@@ -106,6 +106,25 @@ class VGASequencer:
                         self.planes[2][off], self.planes[3][off]]
         return self.planes[self.read_map & 3][off]
 
+    def geometry(self) -> tuple[int, int]:
+        """(width, height) in pixels, derived from the programmed CRTC.
+
+        Width from Horizontal Display End (reg 01h, +1 chars x 8 px); height
+        from Vertical Display End (reg 12h + overflow bits 1/6 of reg 07h)
+        divided by the scanline repeat (Max Scan Line reg 09h low 5 bits +1
+        — mode 13h doubles 400 lines to 200; Mode X variants reprogram
+        these: 320x240 = VDE 479 doubled, 320x400 = repeat 1).  Falls back
+        to 320x200 while the CRTC still looks unprogrammed."""
+        c = self.crtc
+        if c[0x01] == 0 or c[0x12] == 0:
+            return 320, 200
+        # 256-color modes shift one byte per two dot clocks: 4 px per
+        # character clock (mode 13h programs HDE=0x4F -> 320), not 8.
+        width = (c[0x01] + 1) * 4
+        vde = c[0x12] | ((c[0x07] >> 1) & 1) << 8 | ((c[0x07] >> 6) & 1) << 9
+        repeat = (c[0x09] & 0x1F) + 1
+        return width, (vde + 1) // repeat
+
     def render_mode_x(self, width: int = 320, height: int = 240) -> bytes:
         """Compose linear pixels from the planes at the current display start.
         Row stride is CRTC offset (reg 13h) * 2 bytes per plane (default 80)."""
@@ -132,6 +151,7 @@ def render_pm_frame(host: "DOS4GWHost", *, width: int = 320,
     if vga.chain4:
         pixels = bytes(host.mem.data[0xA0000:0xA0000 + width * height])
     else:
+        width, height = vga.geometry()
         pixels = vga.render_mode_x(width, height)
     dac = host.dac
     rgb = bytearray(width * height * 3)
@@ -230,9 +250,43 @@ class DOS4GWHost:
         self._cpu = None   # set by create_pm_runtime for the IRQ source
         self.unmodeled_port_reads: dict[int, int] = {}
         self.unmodeled_port_writes: dict[int, int] = {}
+        # Optional emulated Sound Blaster (attach_sound_blaster) + the generic
+        # hardware-IRQ queue it (and future devices) raise into.  Deterministic
+        # default path leaves it absent, same policy as the 16-bit runtime.
+        self.sound_blaster = None
+        self.irq_queue: list[int] = []
+        # Console output written through INT 21h AH=40 to handles 1/2 is also
+        # captured here (probes/tests read it; os.write still happens).
+        self.console_log = bytearray()
+
+    def attach_sound_blaster(self, *, base: int = 0x220, irq: int = 7,
+                             dma: int = 1, clock=None, anchor_cadence: bool = False):
+        """Attach the emulated Sound Blaster (dos_re.sblaster) to this host.
+
+        Opt-in, like the 16-bit ``enable_sound_blaster``: the deterministic
+        demo/test path leaves the hardware absent.  ``base`` is whatever the
+        program's config probes (KE probes $210).  Block IRQs pace against
+        ``clock`` (wall time in a viewer; None fires immediately)."""
+        from .sblaster import SoundBlaster
+        sb = SoundBlaster(base=base, irq=irq, dma=dma,
+                          raise_irq=self.raise_hw_irq,
+                          read_mem=lambda a: self.mem.data[a])
+        sb.clock = clock
+        sb.anchor_cadence = anchor_cadence
+        self.sound_blaster = sb
+        return sb
+
+    def raise_hw_irq(self, irq: int) -> None:
+        if irq not in self.irq_queue:
+            self.irq_queue.append(irq)
 
     # ---- IRQ source (cpu.pending_irq) ----------------------------------------
     def pending_irq(self):
+        sb = self.sound_blaster
+        if sb is not None and sb.clock is not None:
+            sb.service()                     # fire due block IRQs
+        if self.irq_queue:
+            return self.irq_queue.pop(0)
         if self.kbc_queue:
             return 1
         t = self.timer_period_instructions
@@ -458,6 +512,7 @@ class DOS4GWHost:
         n = cpu.r[ECX]
         buf = cpu.r[EDX]
         if h in (1, 2):                      # stdout / stderr
+            self.console_log += self.mem.data[buf:buf + n]
             os.write(h, self.mem.data[buf:buf + n])
             cpu.set_reg(EAX, 4, n)
             return
@@ -544,6 +599,13 @@ class DOS4GWHost:
             v.write_mode = 0
             v.bit_mask = 0xFF
             v.display_start = 0
+            # Standard mode 13h CRTC so geometry() reads 320x200 until the
+            # game reprograms it (Mode X 240/400-line variants patch these).
+            v.crtc[0x01] = 0x4F                   # HDE: (79+1)*4 = 320 (256-color)
+            v.crtc[0x07] = 0x1F                   # overflow (VDE bit 8)
+            v.crtc[0x09] = 0x41                   # max scan line: doubled
+            v.crtc[0x12] = 0x8F                   # VDE low: 399 -> 400 scanlines
+            v.crtc[0x13] = 0x28                   # offset: 40 -> 80-byte stride
             self.mem.vga = None
             if not (self._al(cpu) & 0x80):
                 for p in v.planes:
@@ -566,6 +628,9 @@ class DOS4GWHost:
 
     # ---- I/O ports -----------------------------------------------------------
     def port_read(self, cpu: CPU386, port: int, bits: int) -> int:
+        sb = self.sound_blaster
+        if sb is not None and bits == 8 and sb.owns_port(port):
+            return sb.port_read(port)
         vga = self.vga
         if port == 0x3C5:                     # sequencer data
             if vga.seq_index == 0x02:
@@ -602,6 +667,17 @@ class DOS4GWHost:
         return 0
 
     def port_write(self, cpu: CPU386, port: int, value: int, bits: int) -> None:
+        sb = self.sound_blaster
+        if sb is not None and bits == 8:
+            if sb.owns_port(port):
+                sb.port_write(port, value)
+                return
+            if port <= 0x0F:                 # 8237 DMA controller #1
+                sb.dma_controller_write(port, value)
+                return
+            if 0x80 <= port <= 0x8F:         # DMA page registers
+                sb.page_write(port, value)
+                return
         vga = self.vga
         if port == 0x3C4:                     # sequencer index (word write: index+data)
             vga.seq_index = value & 0xFF

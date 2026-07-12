@@ -172,3 +172,22 @@ def test_neg_sets_flags():
     cpu, _ = run_blob(bytes.fromhex("B801000000 F7D8".replace(" ", "")))
     assert cpu.r[EAX] == 0xFFFFFFFF
     assert cpu.get_flag(CF) and cpu.get_flag(SF)
+
+
+def test_vga_geometry_from_crtc():
+    vga = VGASequencer()
+    assert vga.geometry() == (320, 200)          # unprogrammed fallback
+    # mode 13h: HDE 0x4F, VDE 399 (overflow bit1), doubled scanlines
+    vga.crtc[0x01] = 0x4F
+    vga.crtc[0x07] = 0x1F
+    vga.crtc[0x09] = 0x41
+    vga.crtc[0x12] = 0x8F
+    assert vga.geometry() == (320, 200)
+    # Mode X 320x400: scanline repeat 1
+    vga.crtc[0x09] = 0x40
+    assert vga.geometry() == (320, 400)
+    # Mode X 320x240: VDE 479 (0x1DF), doubled
+    vga.crtc[0x09] = 0x41
+    vga.crtc[0x12] = 0xDF
+    vga.crtc[0x07] = 0x1F                        # bit1 set -> VDE bit 8
+    assert vga.geometry() == (320, 240)
