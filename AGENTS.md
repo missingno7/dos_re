@@ -17,8 +17,9 @@ use to build verified DOS source ports. Two roles arrive here:
 ## What this repository is
 
 The reusable, game-agnostic core of an oracle-driven DOS recovery method: a
-real-mode VM, differential hook verification, frame comparison, deterministic
-demos/snapshots, and the automatic lifter. Extracted from two real recovery
+real-mode (8086) VM and a flat protected-mode (386 / DOS4GW-LE) VM,
+differential hook verification, frame comparison, deterministic
+demos/snapshots, and the automatic lifter (16- and 32-bit pipelines). Extracted from two real recovery
 projects — Prehistorik 2 (primary; the method's completed VM-less proof) and
 Overkill (the earlier pilot); `template_dos_port`'s `MIGRATION.md` records the
 provenance of every part.
@@ -82,12 +83,14 @@ around it locally. The next game hits the same gap.
 ```text
 dos_re/         the framework package — docs/architecture.md is the module map
   cpu.py memory.py mz.py dos.py runtime.py pic.py sblaster.py interrupts.py
-  keyboard.py bootstrap_lzexe.py asm.py            ← the machine
+  keyboard.py bootstrap_lzexe.py asm.py            ← the machine (real mode)
+  le.py cpu386.py dos4gw.py                        ← the machine (DOS/4GW protected mode)
   hooks.py gaps.py verification.py frame_verify.py snapshot.py input_demo.py
+  pm_snapshot.py pm_verification.py                ← the PM proof engines
   repro_artifacts.py hook_taxonomy.py runtime_code.py islands.py state_view.py
   checkpoints.py frontier.py dosbox_savestate.py   ← the proof engines
   lift/                                            ← the automatic lifter
-  player.py display.py audio_sink.py               ← the frontend ring (numpy/pygame allowed)
+  player.py display.py audio_sink.py pm_player.py  ← the frontend ring (numpy/pygame allowed)
 pynuked_opl3/   submodule: third-party OPL backend; independent of dos_re
 docs/           reference docs; docs/README.md is the index, agent_toolbox.md the task index
 examples/       minimal_adapter (runnable), tiny_frame_game (full-stack demo)

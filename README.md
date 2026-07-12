@@ -1,6 +1,7 @@
 # dos_re — an oracle-driven DOS game recovery framework
 
-A reusable toolbox for turning an original 16-bit DOS game into a verified,
+A reusable toolbox for turning an original DOS game (16-bit real mode or
+32-bit DOS/4GW protected mode) into a verified,
 native source port — one proven routine at a time. **It is a recovery
 laboratory, not an emulator**: the original executable runs as the *oracle*,
 individual routines are replaced with recovered source, and every replacement
@@ -26,7 +27,9 @@ job.
 
 ## What it is
 
-- **A real-mode VM built for reverse engineering** — an 8086 interpreter,
+- **Two VMs built for reverse engineering** — an 8086 real-mode interpreter
+  and a flat 386 protected-mode interpreter (`cpu386.py` + DOS/4GW host
+  `dos4gw.py` + LE loader `le.py`) — each an interpreter,
   DOS/BIOS services, and hardware models (VGA/EGA planar video, PIT, PIC,
   keyboard, PC speaker, AdLib/OPL2, Sound Blaster + DMA), all pure Python
   (stdlib + numpy), all deterministic by default.

@@ -29,6 +29,19 @@ behaviour looks impossible, alongside `dos.port_log`), and setting
 `rt.dos.strict_ports = True` makes such reads **fail loud**
 (`UnmodeledPortRead`, with the reading CS:IP) for recovery/audit sessions.
 
+## Protected mode (DOS/4GW / LE titles) — the flat-386 path
+
+| Area | Status | Where |
+|---|---|---|
+| LE (MZ+`LE`) loading, internal fixups, rebase above 1 MB | modeled | `le.py` |
+| Flat 386 CPU (32-bit regs, ModRM+SIB, x87 subset, selector bases, IRQ delivery via installed IDT) | modeled — unimplemented opcodes **fail loud** | `cpu386.py` |
+| DOS/4GW services (INT 21h/2Fh/10h/31h/33h subset, DPMI DOS-memory alloc, extender probes FF00/ED/1687) | modeled from observed calls — unknown services **fail loud** | `dos4gw.py` |
+| 8042 keyboard controller (command/ACK protocol, per-byte IRQ1 scancodes) | modeled | `dos4gw.py` |
+| VGA on the PM path: mode 13h linear, Mode X planar (map mask, read map, write modes 0–1 w/ latches), DAC, CRTC display start, 3DAh retrace (deterministic toggle or wall clock) | modeled — write modes 2–3 and non-FF bit mask **fail loud** | `dos4gw.py` (`VGASequencer`), `cpu386.py` (aperture routing) |
+| PM timer IRQ0 (instruction-count-driven, deterministic, off by default) | modeled | `dos4gw.py` |
+| Sound Blaster on the PM path | **not yet wired** — the game detects no SB and continues; `sblaster.py` is the model to attach | — |
+| Real-mode callbacks / mode-switch DPMI services | **not modeled** — no target exercised them | — |
+
 ## Video
 
 | Area | Status | Where |

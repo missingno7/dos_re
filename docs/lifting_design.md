@@ -1,5 +1,12 @@
 # Automatic literal lifting: ASM function → Python hook → oracle → refactor
 
+> **Two ISA pipelines.** This document describes the design in its original
+> 16-bit terms; the 32-bit flat (DOS/4GW / CPU386) counterpart mirrors it
+> module for module — `decode32`/`cfg32`/`emit32`/`runtime32`, verified by
+> `pm_verification.PMHookVerifier`, driven by `tools/pmlift.py`. Design
+> deltas: x87 lines are interp-fallbacks (not refusals), and hooks key on
+> flat linear EIP instead of CS:IP.
+
 > Status: **M0–M3 LANDED** (2026-07-10). Decoder + CFG (M0, §10a), emitter
 > (M1, §10b), in-situ verify pipeline + proof ledger (M2, §10c), and the
 > full-loop proof on a real game (M3, §10d). `liftverify` emits a literal

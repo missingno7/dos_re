@@ -73,6 +73,10 @@ routine you're studying (the verifier's fixture), at any divergence. In the
 viewer: F12. Snapshots are evidence, never a runtime dependency of the
 shipped port.
 
+PM (DOS/4GW) runtimes use `dos_re.pm_snapshot` instead: `save_pm_snapshot` /
+`load_pm_snapshot` (same directory convention), plus `clone_pm_runtime` for
+in-memory oracle clones. Same F12 in the PM viewer.
+
 ## 4. See what the screen shows
 
 ```bash
