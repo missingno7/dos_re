@@ -16,6 +16,45 @@ class Runtime:
     dos: DOSMachine
 
 
+@dataclass
+class PMRuntime:
+    """Protected-mode (DOS/4GW LE) runtime: a flat 386 core + a DPMI/DOS host.
+
+    The 32-bit analogue of :class:`Runtime`.  Built by :func:`create_pm_runtime`
+    for Watcom/DOS4GW LE games (added for Krypton Egg)."""
+    image: "object"          # dos_re.le.LEImage
+    cpu: "object"            # dos_re.cpu386.CPU386
+    dos: "object"            # dos_re.dos4gw.DOS4GWHost
+    mem: "object"            # dos_re.cpu386.FlatMemory
+
+
+def create_pm_runtime(exe_path: str | Path, *, game_root: str | Path | None = None,
+                      command_tail: bytes | str = b"", ram_bytes: int = 16 * 1024 * 1024):
+    """Load an MZ+LE executable into a flat 386 protected-mode runtime.
+
+    Maps the LE image into a :class:`FlatMemory` at its own linear addresses,
+    seeds the entry point/stack from the LE header, and attaches a
+    :class:`DOS4GWHost` for INT 21h/31h/10h/33h.  Game knowledge (which EXE,
+    command tail) stays in the adapter; this is the game-agnostic wiring.
+    """
+    from .le import load_le
+    from .cpu386 import CPU386, FlatMemory
+    from .dos4gw import DOS4GWHost
+
+    if isinstance(command_tail, str):
+        command_tail = command_tail.encode("ascii")
+    exe_path = Path(exe_path)
+    image = load_le(exe_path)
+    mem = FlatMemory(size=ram_bytes)
+    # Place the loaded objects at their own flat linear addresses.
+    mem.data[image.mem_base:image.mem_base + len(image.mem)] = image.mem
+    cpu = CPU386(mem, eip=image.entry_linear, esp=image.stack_linear)
+    root = Path(game_root) if game_root else exe_path.parent
+    dos = DOS4GWHost(mem, root, command_tail=command_tail)
+    cpu.interrupt_handler = dos.interrupt
+    return PMRuntime(image=image, cpu=cpu, dos=dos, mem=mem)
+
+
 def create_runtime(
     exe_path: str | Path,
     *,
