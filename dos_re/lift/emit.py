@@ -399,13 +399,22 @@ def _terminator_lines(inst: Inst, cs: int, bb_of: dict[int, int], out: list[str]
 
 def emit_function(scan: FunctionScan, cs: int, name: str, *,
                   signature: bytes, count_instructions: bool = False,
-                  coverage: bool = False) -> str:
+                  coverage: bool = False, min_iterations: int | None = None) -> str:
     """Return the source of a module defining the lifted hook ``name``.
 
     ``coverage`` adds a module-level ``BLOCKS_SEEN`` set that records which
     basic blocks actually executed, plus ``BLOCK_COUNT`` and ``coverage()`` —
     so a verify run can report *which paths* were exercised, not just that the
     hook passed (docs/lifting_design.md §7). It is inert otherwise.
+
+    ``min_iterations`` raises the runaway guard's floor above the default
+    10,000 (the guard is still at least ``len(scan.insts) * 5_000`` either
+    way). A data-driven loop over a large real dataset can legitimately need
+    more block-transitions than a small function's instruction count alone
+    would predict — e.g. a per-boot buffer-init loop iterating hundreds of
+    records, each a handful of blocks. Raise this rather than treat a hit
+    guard as proof of a decode bug; the static census (``scan_function``)
+    already cross-checks every instruction length against live execution.
     """
     leaders = scan.block_leaders()
     bb_of = {ip: i for i, ip in enumerate(leaders)}
@@ -447,7 +456,7 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     A("")
     A(f"ENTRY = (0x{cs:04X}, 0x{scan.entry:04X})")
     A(f"SIGNATURE = bytes.fromhex({signature.hex()!r})")
-    A(f"MAX_ITERATIONS = {max(10_000, len(scan.insts) * 5_000)}  "
+    A(f"MAX_ITERATIONS = {max(min_iterations or 10_000, len(scan.insts) * 5_000)}  "
       "# runaway guard: fail loud, never hang")
     if coverage:
         A("")

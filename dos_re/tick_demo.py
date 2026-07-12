@@ -51,7 +51,7 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, MutableMapping
 
-__all__ = ["TickDemo", "masked_digest", "record_ticks", "verify_ticks"]
+__all__ = ["TickDemo", "masked_digest", "record_ticks", "replay_to", "verify_ticks"]
 
 
 def masked_digest(region: bytes | bytearray | memoryview, *,
@@ -102,6 +102,17 @@ class TickDemo:
     def sideband_at(self, i: int) -> dict[str, int]:
         """The sideband values for tick ``i`` as ``{name: value}`` (missing/short channels are omitted)."""
         return {name: ch[i] for name, ch in self.sidebands.items() if i < len(ch)}
+
+    def suffix(self, start: int, seed: bytes) -> "TickDemo":
+        """A sub-demo beginning at tick ``start``, with ``seed`` as its new bootstrap state — the tick-demo
+        analogue of ``InputDemoPlayback.write_suffix``. The divergence-repro workflow: when ``verify_ticks``
+        reports tick ``i``, reposition a fresh state with :func:`replay_to` (fast — no digest checks),
+        capture its bytes as the new seed, and save ``demo.suffix(i, seed)``: subsequent runs then reproduce
+        the divergence at tick 0 instead of replaying the whole recording."""
+        if not 0 <= start <= self.n_ticks:
+            raise ValueError(f"suffix start {start} out of range (0..{self.n_ticks})")
+        return TickDemo(seed=bytes(seed), keys=list(self.keys[start:]), digests=list(self.digests[start:]),
+                        sidebands={name: list(ch[start:]) for name, ch in self.sidebands.items()})
 
     # --- on-disk format (a single compact, stdlib-only file) -----------------------------------------
     def save(self, path) -> None:
@@ -218,6 +229,21 @@ def record_ticks(rt, *, cs: int, seed_ip: int, commit_ip: int,
     finally:
         cpu.step = orig
     return out
+
+
+def replay_to(demo: TickDemo, state, tick_index: int, *,
+              inject: Callable[[Any, bytes, Mapping[str, int]], None],
+              tick: Callable[[Any], str | None]) -> None:
+    """Advance ``state`` (freshly seeded from ``demo.seed``) through ticks ``0..tick_index-1`` with NO digest
+    checks — the fast repositioner for divergence repro. After it returns, ``state`` sits exactly where the
+    recording stood BEFORE tick ``tick_index``; capture its bytes and carve :meth:`TickDemo.suffix` there.
+    A terminal outcome or exception before ``tick_index`` means the demo/adapter changed since the verify
+    run that chose the index — that is a finding, so it raises rather than repositioning wrong."""
+    for i in range(tick_index):
+        inject(state, demo.keys[i], demo.sideband_at(i))
+        outcome = tick(state)
+        if outcome is not None:
+            raise RuntimeError(f"replay_to: terminal outcome at tick {i} (before target {tick_index}): {outcome}")
 
 
 def verify_ticks(demo: TickDemo, state, *,

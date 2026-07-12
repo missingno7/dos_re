@@ -85,6 +85,9 @@ def main(argv=None) -> int:
     p.add_argument("--count-instructions", action="store_true",
                    help="(with --emit) make the lifted hook reproduce the ASM's "
                         "instruction_count, so installing it is demo-clock transparent")
+    p.add_argument("--max-iterations", type=int, default=None, metavar="N",
+                   help="(with --emit) raise the emitted hook's runaway guard above "
+                        "the default -- for large data-driven loops, not decode bugs")
     args = p.parse_args(argv)
 
     entries = [parse_addr(e) for e in args.entry]
@@ -130,7 +133,8 @@ def main(argv=None) -> int:
                 sig_len = max(4, min(16, (entry_block_end - ip) & 0xFFFF))
                 sig = bytes(rt.cpu.mem.rb(cs, (ip + k) & 0xFFFF) for k in range(sig_len))
                 src = emit_function(scan, cs, name, signature=sig,
-                                    count_instructions=args.count_instructions)
+                                    count_instructions=args.count_instructions,
+                                    min_iterations=args.max_iterations)
                 out_dir = Path(args.emit)
                 out_dir.mkdir(parents=True, exist_ok=True)
                 (out_dir / f"{name}.py").write_text(src, encoding="utf-8")
