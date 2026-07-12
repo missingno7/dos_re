@@ -1,15 +1,21 @@
-"""Save/load snapshots of a protected-mode (DOS/4GW) runtime.
+"""Save/load/clone the state of a protected-mode (DOS/4GW) runtime.
 
 The PM counterpart of :mod:`dos_re.snapshot`: capture everything a
 :class:`~dos_re.runtime.PMRuntime` needs to resume deterministically — CPU
 registers/segments/x87/selector table, the flat memory image, the DOS/4GW
 host (DPMI allocator, KBC/key queues, VGA sequencer planes + DAC, open file
-handles by path+position) — into a directory of ``state.json`` + compressed
-binaries.  Loading rebuilds the runtime from the EXE and overlays the state.
+handles by path+position).
+
+One state list, three consumers: :func:`save_pm_snapshot` /
+:func:`load_pm_snapshot` serialize to a directory (``state.json`` +
+compressed binaries); :func:`clone_pm_runtime` transfers the same state to a
+fresh in-memory runtime (the differential verifier's pre-state / oracle
+clones).  Keeping capture/apply shared means a field added to one cannot be
+silently missed by the others.
 
 Resume proof obligation: a snapshot taken mid-run and resumed must produce
-the same execution as never having stopped (the determinism test in the
-port's suite runs exactly that comparison).
+the same execution as never having stopped (the port suite runs exactly that
+comparison; the clone path is proven by the PM hook verifier's tests).
 """
 from __future__ import annotations
 
@@ -22,12 +28,11 @@ MEM_FILE = "pm_mem.bin.zlib"
 PLANES_FILE = "pm_planes.bin.zlib"
 
 
-def save_pm_snapshot(rt, directory: str | Path) -> Path:
-    d = Path(directory)
-    d.mkdir(parents=True, exist_ok=True)
-    cpu, dos, mem = rt.cpu, rt.dos, rt.mem
+def capture_pm_state(rt) -> dict:
+    """Everything except the two big binaries (memory image, VGA planes)."""
+    cpu, dos = rt.cpu, rt.dos
     vga = dos.vga
-    state = {
+    return {
         "cpu": {
             "r": list(cpu.r), "eip": cpu.eip, "eflags": cpu.eflags,
             "seg": dict(cpu.seg), "sbase": dict(cpu.sbase),
@@ -65,29 +70,16 @@ def save_pm_snapshot(rt, directory: str | Path) -> Path:
             "seq_index": vga.seq_index, "gc_index": vga.gc_index,
             "crtc_index": vga.crtc_index,
         },
-        "mem_size": mem.size,
+        "mem_size": rt.mem.size,
     }
-    (d / STATE_FILE).write_text(json.dumps(state))
-    (d / MEM_FILE).write_bytes(zlib.compress(bytes(mem.data), 6))
-    (d / PLANES_FILE).write_bytes(zlib.compress(b"".join(vga.planes), 6))
-    return d
 
 
-def load_pm_snapshot(exe_path: str | Path, directory: str | Path, *,
-                     game_root: str | Path | None = None):
-    from .runtime import create_pm_runtime
-
-    d = Path(directory)
-    state = json.loads((d / STATE_FILE).read_text())
-    rt = create_pm_runtime(exe_path, game_root=game_root,
-                           ram_bytes=state["mem_size"])
+def apply_pm_state(rt, state: dict, mem_bytes, planes_bytes) -> None:
     cpu, dos, mem = rt.cpu, rt.dos, rt.mem
-
-    mem.data[:] = zlib.decompress((d / MEM_FILE).read_bytes())
-    planes = zlib.decompress((d / PLANES_FILE).read_bytes())
     vga = dos.vga
+    mem.data[:] = mem_bytes
     for i in range(4):
-        vga.planes[i][:] = planes[i * 0x10000:(i + 1) * 0x10000]
+        vga.planes[i][:] = planes_bytes[i * 0x10000:(i + 1) * 0x10000]
 
     c = state["cpu"]
     cpu.r[:] = c["r"]
@@ -124,6 +116,9 @@ def load_pm_snapshot(exe_path: str | Path, directory: str | Path, *,
     dos.timer_period_instructions = s["timer_period_instructions"]
     dos._timer_next = s["timer_next"]
     dos._next_handle = s["next_handle"]
+    for f in dos.files.values():
+        f.close()
+    dos.files = {}
     for h, (name, pos, mode) in s["files"].items():
         f = open(name, mode if "b" in mode else mode + "b")
         f.seek(pos)
@@ -141,4 +136,53 @@ def load_pm_snapshot(exe_path: str | Path, directory: str | Path, *,
     vga.seq_index, vga.gc_index, vga.crtc_index = (
         v["seq_index"], v["gc_index"], v["crtc_index"])
     mem.vga = None if vga.chain4 else vga
+
+
+def save_pm_snapshot(rt, directory: str | Path) -> Path:
+    d = Path(directory)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / STATE_FILE).write_text(json.dumps(capture_pm_state(rt)))
+    (d / MEM_FILE).write_bytes(zlib.compress(bytes(rt.mem.data), 6))
+    (d / PLANES_FILE).write_bytes(zlib.compress(b"".join(rt.dos.vga.planes), 6))
+    return d
+
+
+def load_pm_snapshot(exe_path: str | Path, directory: str | Path, *,
+                     game_root: str | Path | None = None):
+    from .runtime import create_pm_runtime
+
+    d = Path(directory)
+    state = json.loads((d / STATE_FILE).read_text())
+    rt = create_pm_runtime(exe_path, game_root=game_root,
+                           ram_bytes=state["mem_size"])
+    apply_pm_state(rt, state,
+                   zlib.decompress((d / MEM_FILE).read_bytes()),
+                   zlib.decompress((d / PLANES_FILE).read_bytes()))
     return rt
+
+
+def clone_pm_runtime(rt):
+    """A fresh, fully independent PMRuntime with identical state.
+
+    Built bare (no LE reload — the memory image is transferred wholesale) so
+    it also works for runtimes that were never created from an EXE (tests).
+    Open files are reopened on the clone at the same positions, so oracle
+    file reads never move the live runtime's cursors.
+    """
+    from .cpu386 import CPU386, FlatMemory
+    from .dos4gw import DOS4GWHost
+    from .runtime import PMRuntime
+
+    state = capture_pm_state(rt)
+    mem = FlatMemory(size=rt.mem.size)
+    cpu = CPU386(mem, eip=0, esp=0)
+    dos = DOS4GWHost(mem, rt.dos.root)
+    cpu.interrupt_handler = dos.interrupt
+    cpu.port_reader = dos.port_read
+    cpu.port_writer = dos.port_write
+    cpu.idt = dos.pm_vectors
+    cpu.pending_irq = dos.pending_irq
+    dos._cpu = cpu
+    clone = PMRuntime(image=rt.image, cpu=cpu, dos=dos, mem=mem)
+    apply_pm_state(clone, state, rt.mem.data, b"".join(rt.dos.vga.planes))
+    return clone

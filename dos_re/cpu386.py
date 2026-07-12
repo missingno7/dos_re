@@ -29,6 +29,7 @@ Stdlib-only, scalar hot path.
 from __future__ import annotations
 
 import struct
+from typing import Any
 
 from .cpu import CF, PF, AF, ZF, SF, TF, IF, DF, OF, _PARITY, UnsupportedInstruction, HaltExecution
 
@@ -182,6 +183,15 @@ class CPU386:
         # deterministic default path, same contract as CPU8086.pending_irq.
         self.pending_irq = None
         self.idt: dict[int, tuple[int, int]] = {}
+        # Replacement hooks, keyed by flat linear EIP (the PM analogue of
+        # CPU8086's (cs, ip) keys).  Same dispatch contract: when the next
+        # instruction's address has a hook, the handler runs INSTEAD of the
+        # original code and counts as one instruction; a hook_verifier wraps
+        # the call for differential proof (pm_verification.py).
+        self.replacement_hooks: dict[int, Any] = {}
+        self.hook_names: dict[int, str] = {}
+        self.hook_verifier = None
+        self.hook_verifier_passthrough: set[int] = set()
         # Decode scratch reset each instruction.
         self._opsize = 4
         self._adsize = 4
@@ -420,6 +430,20 @@ class CPU386:
                 # Master PIC base 08h, slave 70h — the mapping DOS/4GW keeps.
                 self.deliver_interrupt(0x08 + irq if irq < 8 else 0x70 + irq - 8)
         start = self.eip
+        hooks = self.replacement_hooks
+        if hooks and start in hooks:
+            handler = hooks[start]
+            name = self.hook_names.get(start, "replacement")
+            if self.hook_verifier is not None and start not in self.hook_verifier_passthrough:
+                self.hook_verifier(self, start, handler, name)
+            else:
+                try:
+                    handler(self)
+                finally:
+                    if self.coverage_telemetry is not None:
+                        self.coverage_telemetry.record_hook_unverified(start, name)
+            self.instruction_count += 1
+            return
         if self.coverage_telemetry is not None:
             self.coverage_telemetry.record_interpreted_instruction((self.seg["cs"], start))
         self.instruction_count += 1
