@@ -93,6 +93,10 @@ python tools/pm_boot.py --exe assets/GAME.EXE --png frame.png \
     --keys 20 --scancodes 39,b9 --at 30000000            # run to the frontier
 ```
 
+`tools/pm_view.py` is the zero-setup live window for these titles (the
+PM `view.py`); `dos_re.pm_player.main` is the same runner as a library for a
+port's own `scripts/play.py`.
+
 `pm_boot` is the bring-up loop: each run stops at the first unimplemented
 opcode/service and names it — implement the observed behaviour, re-run.  The
 PNG render follows the live VGA state (chained 13h or unchained Mode X).

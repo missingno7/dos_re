@@ -9,6 +9,7 @@ view (which tool for which recovery step, with context) is
 | Tool | Command | When |
 |---|---|---|
 | `view.py` | `python tools/view.py --exe assets/GAME.EXE` | Watch any EXE run, zero setup — the standard player CLI (`--headless`, `--snapshot`, `--record-demo`, `--play-demo`; F10/F11/F12). Your port's `scripts/play.py` supersedes it once an adapter exists. |
+| `pm_view.py` | `python tools/pm_view.py --exe assets/GAME.EXE` | Watch any DOS/4GW (MZ+LE) EXE run, zero setup — live viewer over the flat 386 runtime (KBC keys, INT 33h mouse, wall-clock vsync, F10/F12, `--snapshot` resume, `--headless`). A port's `scripts/play.py` (thin wrapper over `dos_re.pm_player.main`) supersedes it. |
 | `render_frame.py` | `python tools/render_frame.py <snapshot_dir>` | Day-0 "see output": snapshot (or `--exe` + `--steps`) → PNG. VGA 13h + EGA/VGA planar. |
 | `lindis.py` | `python tools/lindis.py <exe> <snapshot_dir> <CS> <START> <END>` | Read code: linear disassembly at a snapshot (static lengths, interpreter-rendered text). |
 | `profile_hotspots.py` | `python tools/profile_hotspots.py <exe> <steps> --snapshot <snap> --top 40` | FIRST, before manual tracing: hot routines, tight backward edges (= wait loops / frame boundaries), boundary crossings. |
