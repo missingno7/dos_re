@@ -255,14 +255,21 @@ class DOS4GWHost:
         # until then); positions are reported inside it.
         self.mouse_x, self.mouse_y, self.mouse_buttons = 320, 100, 0
         self.mouse_range = [0, 639, 0, 199]
-        # Optional emulated Sound Blaster (attach_sound_blaster) + the generic
-        # hardware-IRQ queue it (and future devices) raise into.  Deterministic
-        # default path leaves it absent, same policy as the 16-bit runtime.
+        # Optional emulated Sound Blaster (attach_sound_blaster); devices raise
+        # IRQs into the 8259 PIC model, whose in-service bit gates redelivery
+        # until the ISR's EOI (without it a block-complete IRQ re-entered the
+        # ISR the instant it queued the next block — KE's sound stack
+        # overflowed into its own mixing buffer).  Deterministic default path
+        # leaves the SB absent, same policy as the 16-bit runtime.
+        from .pic import PIC8259
         self.sound_blaster = None
-        self.irq_queue: list[int] = []
+        self.pic = PIC8259(imr=0x00)
         # Console output written through INT 21h AH=40 to handles 1/2 is also
         # captured here (probes/tests read it; os.write still happens).
         self.console_log = bytearray()
+
+    #: nominal emulated instruction rate for the deterministic SB block clock
+    EMULATED_IPS = 10_000_000
 
     def attach_sound_blaster(self, *, base: int = 0x220, irq: int = 7,
                              dma: int = 1, clock=None, anchor_cadence: bool = False):
@@ -271,37 +278,44 @@ class DOS4GWHost:
         Opt-in, like the 16-bit ``enable_sound_blaster``: the deterministic
         demo/test path leaves the hardware absent.  ``base`` is whatever the
         program's config probes (KE probes $210).  Block IRQs pace against
-        ``clock`` (wall time in a viewer; None fires immediately)."""
+        ``clock`` — wall time in a viewer; the default (None) is a
+        DETERMINISTIC emulated clock derived from the instruction count.
+        A block-complete IRQ must arrive after the block's playback time:
+        firing it immediately re-enters the driver's ISR the moment it queues
+        the next block, and the nesting overflows the game's sound stack
+        (observed: KE's return addresses overwritten by its own mix buffer)."""
         from .sblaster import SoundBlaster
         sb = SoundBlaster(base=base, irq=irq, dma=dma,
                           raise_irq=self.raise_hw_irq,
-                          read_mem=lambda a: self.mem.data[a])
+                          read_mem=lambda a: self.mem.data[a],
+                          write_mem=lambda a, v: self.mem.data.__setitem__(a, v))
+        if clock is None:
+            def clock():
+                cpu = self._cpu
+                return (cpu.instruction_count / self.EMULATED_IPS) if cpu else 0.0
         sb.clock = clock
         sb.anchor_cadence = anchor_cadence
         self.sound_blaster = sb
         return sb
 
     def raise_hw_irq(self, irq: int) -> None:
-        if irq not in self.irq_queue:
-            self.irq_queue.append(irq)
+        self.pic.raise_irq(irq)
 
     # ---- IRQ source (cpu.pending_irq) ----------------------------------------
     def pending_irq(self):
         sb = self.sound_blaster
         if sb is not None and sb.clock is not None:
             sb.service()                     # fire due block IRQs
-        if self.irq_queue:
-            return self.irq_queue.pop(0)
         if self.kbc_queue:
-            return 1
+            self.pic.raise_irq(1)            # level-ish: re-raised until drained
         t = self.timer_period_instructions
         if t is not None and self._cpu is not None:
             if self._timer_next is None:
                 self._timer_next = self._cpu.instruction_count + t
             if self._cpu.instruction_count >= self._timer_next:
                 self._timer_next += t
-                return 0
-        return None
+                self.pic.raise_irq(0)
+        return self.pic.acknowledge()
 
     def set_mouse_norm(self, u: float, v: float, buttons: int | None = None) -> None:
         """Update the mouse from window-relative coordinates (0.0..1.0).
@@ -649,8 +663,11 @@ class DOS4GWHost:
     # ---- I/O ports -----------------------------------------------------------
     def port_read(self, cpu: CPU386, port: int, bits: int) -> int:
         sb = self.sound_blaster
-        if sb is not None and bits == 8 and sb.owns_port(port):
-            return sb.port_read(port)
+        if sb is not None and bits == 8:
+            if sb.owns_port(port):
+                return sb.port_read(port)
+            if port <= 0x0F:                  # 8237 DMA controller readback
+                return sb.dma_controller_read(port)
         vga = self.vga
         if port == 0x3C5:                     # sequencer data
             if vga.seq_index == 0x02:
@@ -679,6 +696,8 @@ class DOS4GWHost:
             return 0x09 if phase >= (1.0 - self.vga_retrace_active_fraction) else 0x00
         if port == 0x3C7:                     # DAC state
             return 0x00
+        if port == 0x21:                      # PIC mask register
+            return self.pic.get_mask()
         if port == 0x60:                      # KBC output buffer
             return self.kbc_queue.pop(0) if self.kbc_queue else 0x00
         if port == 0x64:                      # KBC status: bit0 = output full
@@ -746,7 +765,12 @@ class DOS4GWHost:
             if (value & 0xFF) in (0xAD, 0xAE):
                 return
             raise NotImplementedError(f"8042 controller command 0x{value:02X} not modelled")
-        if port == 0x20:                      # PIC EOI — accepted (no PIC state)
+        if port == 0x20:                      # PIC command: non-specific EOI
+            if (value & 0xFF) == 0x20:
+                self.pic.eoi()
+            return
+        if port == 0x21:                      # PIC mask register
+            self.pic.set_mask(value & 0xFF)
             return
         if port == 0x3C8:                     # DAC write index
             self.dac_write_index = value & 0xFF

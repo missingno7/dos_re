@@ -39,7 +39,8 @@ behaviour looks impossible, alongside `dos.port_log`), and setting
 | 8042 keyboard controller (command/ACK protocol, per-byte IRQ1 scancodes) | modeled | `dos4gw.py` |
 | VGA on the PM path: mode 13h linear, Mode X planar (map mask, read map, write modes 0–1 w/ latches), DAC, CRTC display start, 3DAh retrace (deterministic toggle or wall clock) | modeled — write modes 2–3 and non-FF bit mask **fail loud** | `dos4gw.py` (`VGASequencer`), `cpu386.py` (aperture routing) |
 | PM timer IRQ0 (instruction-count-driven, deterministic, off by default) | modeled | `dos4gw.py` |
-| Sound Blaster on the PM path | **not yet wired** — the game detects no SB and continues; `sblaster.py` is the model to attach | — |
+| Sound Blaster on the PM path (DSP detection, DMA-channel autodetect via real memory effects + 8237 readback/TC status, block-paced PCM via PIC-gated IRQs, deterministic emulated block clock) | modeled — `attach_sound_blaster`; the viewer's `_PcmSink` plays the stream | `dos4gw.py`, `sblaster.py`, `pic.py` |
+| 8259 PIC on the PM path (mask, in-service EOI gating) | modeled | `dos4gw.py` + `pic.py` |
 | Real-mode callbacks / mode-switch DPMI services | **not modeled** — no target exercised them | — |
 
 ## Video

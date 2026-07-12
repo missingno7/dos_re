@@ -103,6 +103,7 @@ class SoundBlaster:
     dma: int = 1
     raise_irq: Callable[[int], None] | None = None  # called with the IRQ number
     read_mem: Callable[[int], int] | None = None     # phys addr -> byte (DMA fetch)
+    write_mem: Callable[[int, int], None] | None = None  # DMA input (ADC) stores
     # Detection-stub mode: a card that answers the DSP probe + the IRQ-wiring test of the
     # detection handshake, but never streams PCM or sustains continuous playback. The
     # front-end uses this when the actual audio is produced elsewhere (a recovered/native
@@ -165,6 +166,20 @@ class SoundBlaster:
 
     # ---- 8237 DMA controller #1 ports (0x00-0x0F) + page registers (0x80-0x8F) -
     _PAGE_PORT_TO_CH = {0x87: 0, 0x83: 1, 0x81: 2, 0x82: 3}
+
+    dma_tc: int = 0     # 8237 status: terminal-count-reached bits (read clears)
+
+    def dma_controller_read(self, port: int) -> int:
+        """8237 register reads: current address/count (flip-flop paired) for
+        ports 0-7, the status register (TC bits, cleared by reading) at 8."""
+        if port == 0x08:
+            v = self.dma_tc & 0x0F
+            self.dma_tc = 0
+            return v
+        ch = self.channels[(port >> 1) & 3]
+        word = ch.cur_addr if (port & 1) == 0 else ch.cur_count
+        ch.flipflop_high = not ch.flipflop_high
+        return (word >> 8) & 0xFF if ch.flipflop_high else word & 0xFF
 
     def dma_controller_write(self, port: int, value: int) -> None:
         value &= 0xFF
@@ -268,12 +283,23 @@ class SoundBlaster:
                 self._fire_irq()
             return
         ch = self.channels[self.dma]
-        # Pull the block out of memory over DMA (8-bit unsigned PCM) and capture
-        # it.  Input transfers (ADC) and silence blocks move no output PCM; the
-        # completion IRQ is the observable the driver waits on either way.
-        if self.read_mem is not None and not input_transfer and not silence:
-            addr = ch.physical()
-            self.pcm_out.extend(self.read_mem((addr + i) & 0xFFFFF) for i in range(length))
+        addr = ch.physical()
+        # Move the block over DMA and leave the 8237 channel in its
+        # post-transfer state (address advanced, count at terminal 0xFFFF,
+        # TC status bit set) — SB drivers detect their DMA channel by
+        # observing exactly these effects.
+        if input_transfer:
+            # ADC with no source records silence level (~0x80); the bytes
+            # LAND IN MEMORY — KE's autodetect sentinels a buffer per
+            # candidate channel and checks which one the card overwrote.
+            if self.write_mem is not None:
+                for i in range(length):
+                    self.write_mem((addr + i) & 0xFFFFFF, 0x80)
+        elif not silence and self.read_mem is not None:
+            self.pcm_out.extend(self.read_mem((addr + i) & 0xFFFFFF) for i in range(length))
+        ch.cur_addr = (ch.cur_addr + length) & 0xFFFF
+        ch.cur_count = 0xFFFF                     # terminal count reached
+        self.dma_tc |= 1 << self.dma              # 8237 status TC bit
         self.log.append(("dma_start", {"len": length, "auto": auto, "rate": self.sample_rate,
                                        "input": input_transfer, "silence": silence}))
         # The card raises its IRQ when the block finishes playing.  Pace it by the

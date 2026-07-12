@@ -61,6 +61,7 @@ def capture_pm_state(rt) -> dict:
             "files": {str(h): [f.name, f.tell(), f.mode]
                       for h, f in dos.files.items()},
             "next_handle": dos._next_handle,
+            "pic": [dos.pic.imr, dos.pic.irr, dos.pic.isr],
         },
         "vga": {
             "map_mask": vga.map_mask, "read_map": vga.read_map,
@@ -123,6 +124,8 @@ def apply_pm_state(rt, state: dict, mem_bytes, planes_bytes) -> None:
     dos.timer_period_instructions = s["timer_period_instructions"]
     dos._timer_next = s["timer_next"]
     dos._next_handle = s["next_handle"]
+    if "pic" in s:
+        dos.pic.imr, dos.pic.irr, dos.pic.isr = s["pic"]
     for f in dos.files.values():
         f.close()
     dos.files = {}
