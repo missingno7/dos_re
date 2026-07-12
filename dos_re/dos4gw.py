@@ -250,6 +250,11 @@ class DOS4GWHost:
         self._cpu = None   # set by create_pm_runtime for the IRQ source
         self.unmodeled_port_reads: dict[int, int] = {}
         self.unmodeled_port_writes: dict[int, int] = {}
+        # Microsoft mouse driver state.  ``mouse_range`` is the virtual
+        # coordinate box the program chose via INT 33h AX=7/8 (MS defaults
+        # until then); positions are reported inside it.
+        self.mouse_x, self.mouse_y, self.mouse_buttons = 320, 100, 0
+        self.mouse_range = [0, 639, 0, 199]
         # Optional emulated Sound Blaster (attach_sound_blaster) + the generic
         # hardware-IRQ queue it (and future devices) raise into.  Deterministic
         # default path leaves it absent, same policy as the 16-bit runtime.
@@ -297,6 +302,21 @@ class DOS4GWHost:
                 self._timer_next += t
                 return 0
         return None
+
+    def set_mouse_norm(self, u: float, v: float, buttons: int | None = None) -> None:
+        """Update the mouse from window-relative coordinates (0.0..1.0).
+
+        Maps onto the program's OWN virtual range (AX=7/8) so the pointer is
+        proportionally correct whatever coordinate box the game chose — the
+        window's left edge is min_x, its right edge max_x, same vertically.
+        The front-end calls this; probes can too."""
+        r = self.mouse_range
+        u = 0.0 if u < 0 else (1.0 if u > 1 else u)
+        v = 0.0 if v < 0 else (1.0 if v > 1 else v)
+        self.mouse_x = r[0] + int(u * (r[1] - r[0]))
+        self.mouse_y = r[2] + int(v * (r[3] - r[2]))
+        if buttons is not None:
+            self.mouse_buttons = buttons
 
     def press_scancode(self, code: int) -> None:
         """Queue a raw scancode (make or break) for the game's INT 9 handler."""
@@ -770,19 +790,33 @@ class DOS4GWHost:
             cpu.set_reg(EAX, 2, 0xFFFF)
             cpu.set_reg(EBX, 2, 2)
             self.mouse_x, self.mouse_y, self.mouse_buttons = 320, 100, 0
+            # Driver reset restores the full default ranges.
+            self.mouse_range = [0, 639, 0, 199]      # min_x, max_x, min_y, max_y
             return
         if ax in (0x0001, 0x0002):           # show / hide cursor
             return
-        if ax == 0x0003:                     # get position + buttons
+        if ax == 0x0003:                     # get position + buttons (range-clamped)
+            r = getattr(self, "mouse_range", [0, 639, 0, 199])
             cpu.set_reg(EBX, 2, getattr(self, "mouse_buttons", 0))
-            cpu.set_reg(ECX, 2, getattr(self, "mouse_x", 320))
-            cpu.set_reg(EDX, 2, getattr(self, "mouse_y", 100))
+            cpu.set_reg(ECX, 2, max(r[0], min(r[1], getattr(self, "mouse_x", 320))))
+            cpu.set_reg(EDX, 2, max(r[2], min(r[3], getattr(self, "mouse_y", 100))))
             return
         if ax == 0x0004:                     # set position (CX, DX)
             self.mouse_x = cpu.r[ECX] & 0xFFFF
             self.mouse_y = cpu.r[EDX] & 0xFFFF
             return
-        if ax in (0x0007, 0x0008):           # set horizontal / vertical range
+        if ax == 0x0007:                     # set horizontal range (CX..DX)
+            r = getattr(self, "mouse_range", [0, 639, 0, 199])
+            r[0], r[1] = cpu.r[ECX] & 0xFFFF, cpu.r[EDX] & 0xFFFF
+            self.mouse_range = r
+            return
+        if ax == 0x0008:                     # set vertical range (CX..DX)
+            # THE breakout-pad lock: the game pins the pad's row by narrowing
+            # the vertical range; ignoring this let the pad fly anywhere
+            # (observed as an accidental cheat in KE's first playtest).
+            r = getattr(self, "mouse_range", [0, 639, 0, 199])
+            r[2], r[3] = cpu.r[ECX] & 0xFFFF, cpu.r[EDX] & 0xFFFF
+            self.mouse_range = r
             return
         if ax == 0x000B:                     # read motion counters -> CX/DX deltas
             cpu.set_reg(ECX, 2, 0)

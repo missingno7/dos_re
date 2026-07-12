@@ -103,6 +103,7 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     # monitor showed — the frame is scaled to the canvas each present.
     win = pygame.display.set_mode((320 * scale, 240 * scale))
     pygame.display.set_caption(title)
+    pygame.mouse.set_visible(False)      # the game draws its own cursor
 
     dos, cpu = rt.dos, rt.cpu
     dos.time_source = time.monotonic     # 3DAh retrace advances at 70 Hz real time
@@ -114,7 +115,6 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     # KEYDOWN character lands in dos.key_queue, then resume the CPU.
     waiting_console = False
     next_present = time.monotonic()
-    frame_w, frame_h = 320, 200            # last presented geometry (mouse mapping)
     running = True
     while running:
         if not waiting_console:
@@ -162,9 +162,9 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
             elif ev.type == pygame.MOUSEMOTION:
                 mx, my = ev.pos
                 ww, wh = win.get_size()
-                # MS driver: 0-639 virtual x; y follows the live frame height
-                dos.mouse_x = min(639, mx * 640 // ww)
-                dos.mouse_y = min(frame_h - 1, my * frame_h // wh)
+                # Window-relative position, mapped onto the game's own
+                # INT 33h virtual range by the host.
+                dos.set_mouse_norm(mx / max(1, ww - 1), my / max(1, wh - 1))
             elif ev.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP):
                 down = ev.type == pygame.MOUSEBUTTONDOWN
                 bit = {1: 1, 3: 2}.get(ev.button, 0)
@@ -172,7 +172,6 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                 dos.mouse_buttons = (cur | bit) if down else (cur & ~bit)
 
         rgb, w, h = render_pm_frame(dos)
-        frame_w, frame_h = w, h
         frame = pygame.image.frombuffer(rgb, (w, h), "RGB").convert(win)
         pygame.transform.scale(frame, win.get_size(), win)
         pygame.display.flip()

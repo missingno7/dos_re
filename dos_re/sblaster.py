@@ -235,6 +235,17 @@ class SoundBlaster:
             self.block_len = args[0] | (args[1] << 8)
         elif c == 0x14:                      # 8-bit single-cycle DMA output
             self._start_dma(length=(args[0] | (args[1] << 8)) + 1, auto=False)
+        elif c == 0x24:                      # 8-bit single-cycle DMA input (ADC)
+            # Observed (KE's driver): the DMA-channel autodetect records a tiny
+            # block and waits for the completion IRQ.  Complete the transfer
+            # with silence-level input; the block IRQ paces like output.
+            self._start_dma(length=(args[0] | (args[1] << 8)) + 1, auto=False,
+                            input_transfer=True)
+        elif c == 0x80:                      # output a silence block (len+1 samples)
+            # The block-complete IRQ still fires after the playback time —
+            # drivers use this as a DMA-less pacing/keep-alive tick.
+            self._start_dma(length=(args[0] | (args[1] << 8)) + 1, auto=False,
+                            silence=True)
         elif c in (0x1C, 0x90):              # 8-bit auto-init DMA output
             self._start_dma(length=self.block_len + 1, auto=True)
         elif c == 0xF2:                      # force IRQ
@@ -242,7 +253,8 @@ class SoundBlaster:
         # other no-arg commands (pause/continue/etc.) are accepted silently.
 
     # ---- DMA / IRQ -----------------------------------------------------------
-    def _start_dma(self, *, length: int, auto: bool) -> None:
+    def _start_dma(self, *, length: int, auto: bool,
+                   input_transfer: bool = False, silence: bool = False) -> None:
         self.auto_init = auto
         self.dma_active = True
         self._dma_requests += 1
@@ -256,11 +268,14 @@ class SoundBlaster:
                 self._fire_irq()
             return
         ch = self.channels[self.dma]
-        # Pull the block out of memory over DMA (8-bit unsigned PCM) and capture it.
-        if self.read_mem is not None:
+        # Pull the block out of memory over DMA (8-bit unsigned PCM) and capture
+        # it.  Input transfers (ADC) and silence blocks move no output PCM; the
+        # completion IRQ is the observable the driver waits on either way.
+        if self.read_mem is not None and not input_transfer and not silence:
             addr = ch.physical()
             self.pcm_out.extend(self.read_mem((addr + i) & 0xFFFFF) for i in range(length))
-        self.log.append(("dma_start", {"len": length, "auto": auto, "rate": self.sample_rate}))
+        self.log.append(("dma_start", {"len": length, "auto": auto, "rate": self.sample_rate,
+                                       "input": input_transfer, "silence": silence}))
         # The card raises its IRQ when the block finishes playing.  Pace it by the
         # block's playback time when a clock is available; otherwise fire at once.
         if self.clock is None:

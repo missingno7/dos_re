@@ -191,3 +191,19 @@ def test_vga_geometry_from_crtc():
     vga.crtc[0x12] = 0xDF
     vga.crtc[0x07] = 0x1F                        # bit1 set -> VDE bit 8
     assert vga.geometry() == (320, 240)
+
+
+def test_mouse_norm_maps_onto_game_range():
+    from dos_re.dos4gw import DOS4GWHost
+    host = DOS4GWHost(FlatMemory(size=0x1000), ".")
+    # MS defaults: full window spans 0..639 / 0..199
+    host.set_mouse_norm(0.5, 0.5)
+    assert (host.mouse_x, host.mouse_y) == (319, 99)
+    # The game narrows the box (a breakout pad row): mapping follows it
+    host.mouse_range = [16, 623, 180, 180]
+    host.set_mouse_norm(0.0, 0.9)
+    assert (host.mouse_x, host.mouse_y) == (16, 180)
+    host.set_mouse_norm(1.0, 0.1)
+    assert (host.mouse_x, host.mouse_y) == (623, 180)
+    host.set_mouse_norm(2.5, -3.0)          # clamped
+    assert (host.mouse_x, host.mouse_y) == (623, 180)
