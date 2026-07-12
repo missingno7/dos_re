@@ -84,6 +84,21 @@ Decodes VGA mode 13h and the EGA/VGA planar path (shadow planes + CRTC start
 + DAC). A mode it doesn't cover means your adapter grows a rasterizer — this
 tool is the template.
 
+**DOS/4GW (MZ+LE, 32-bit protected mode) titles** use the flat-386 pair
+instead:
+
+```bash
+python tools/le_info.py assets/GAME.EXE                  # objects/entry/fixups
+python tools/pm_boot.py --exe assets/GAME.EXE --png frame.png \
+    --keys 20 --scancodes 39,b9 --at 30000000            # run to the frontier
+```
+
+`pm_boot` is the bring-up loop: each run stops at the first unimplemented
+opcode/service and names it — implement the observed behaviour, re-run.  The
+PNG render follows the live VGA state (chained 13h or unchained Mode X).
+Programmatic use: `dos_re.runtime.create_pm_runtime` +
+`dos_re.dos4gw.render_pm_frame`.
+
 ## 5. Trace / read code
 
 ```python

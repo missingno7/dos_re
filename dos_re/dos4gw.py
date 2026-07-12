@@ -119,6 +119,31 @@ class VGASequencer:
         return bytes(out)
 
 
+def render_pm_frame(host: "DOS4GWHost", *, width: int = 320,
+                    height: int = 200) -> tuple[bytes, int, int]:
+    """Rasterize the current PM-runtime screen to RGB bytes.
+
+    Picks the decode from the live VGA state: chained (plain mode 13h linear
+    at A0000h) or unchained Mode X (composed from the planes at the CRTC
+    display start).  Colors come through the captured DAC.  Pair with
+    ``frame_verify.write_rgb_png`` for the day-0 "see output" PNG.
+    """
+    vga = host.vga
+    if vga.chain4:
+        pixels = bytes(host.mem.data[0xA0000:0xA0000 + width * height])
+    else:
+        pixels = vga.render_mode_x(width, height)
+    dac = host.dac
+    rgb = bytearray(width * height * 3)
+    for i, c in enumerate(pixels):
+        o = i * 3
+        b = c * 3
+        rgb[o] = dac[b] << 2
+        rgb[o + 1] = dac[b + 1] << 2
+        rgb[o + 2] = dac[b + 2] << 2
+    return bytes(rgb), width, height
+
+
 def seed_low_memory(mem) -> None:
     """Populate the 1:1-mapped low megabyte with a power-on BIOS environment.
 

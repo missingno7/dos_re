@@ -12,6 +12,8 @@ view (which tool for which recovery step, with context) is
 | `render_frame.py` | `python tools/render_frame.py <snapshot_dir>` | Day-0 "see output": snapshot (or `--exe` + `--steps`) → PNG. VGA 13h + EGA/VGA planar. |
 | `lindis.py` | `python tools/lindis.py <exe> <snapshot_dir> <CS> <START> <END>` | Read code: linear disassembly at a snapshot (static lengths, interpreter-rendered text). |
 | `profile_hotspots.py` | `python tools/profile_hotspots.py <exe> <steps> --snapshot <snap> --top 40` | FIRST, before manual tracing: hot routines, tight backward edges (= wait loops / frame boundaries), boundary crossings. |
+| `le_info.py` | `python tools/le_info.py assets/GAME.EXE` | Day-0 for a DOS/4GW (MZ+LE) title: object table, entry/stack, fixup census, entry disassembly. `--rebase 0x100000` prints addresses where the runtime loads them. |
+| `pm_boot.py` | `python tools/pm_boot.py --exe assets/GAME.EXE --png frame.png` | The protected-mode bring-up loop: run an LE on the flat 386 runtime to the fail-loud frontier; stop reason + recent/hot EIPs + unmodeled ports + screen render (13h or Mode X). `--keys`/`--scancodes --at N` drive input. |
 
 ## Lift / verify
 

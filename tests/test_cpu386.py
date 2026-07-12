@@ -150,6 +150,23 @@ def test_x87_masked_divide_by_zero_is_inf():
     assert cpu.st[-1] == float("inf")
 
 
+def test_render_pm_frame_chained_and_planar():
+    from dos_re.dos4gw import DOS4GWHost, render_pm_frame
+    mem = FlatMemory(size=0xC0000)
+    host = DOS4GWHost(mem, ".")
+    host.dac[3:6] = bytes((0x3F, 0x00, 0x00))     # palette index 1 = bright red
+    # Chained: linear byte at A0000 is pixel (0,0).
+    mem.data[0xA0000] = 1
+    rgb, w, h = render_pm_frame(host)
+    assert (w, h) == (320, 200)
+    assert rgb[0:3] == bytes((0xFC, 0x00, 0x00))
+    # Unchained Mode X: pixel x=1 comes from plane 1 offset 0.
+    host.vga.chain4 = False
+    host.vga.planes[1][0] = 1
+    rgb, _, _ = render_pm_frame(host)
+    assert rgb[3:6] == bytes((0xFC, 0x00, 0x00))
+
+
 def test_neg_sets_flags():
     # mov eax, 1 ; neg eax
     cpu, _ = run_blob(bytes.fromhex("B801000000 F7D8".replace(" ", "")))
