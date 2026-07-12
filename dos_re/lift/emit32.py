@@ -437,7 +437,7 @@ def emit_function32(scan: FunctionScan32, name: str, *, signature: bytes,
     A("")
     A("Refactor freely: the oracle tests are the contract, not this text. Lines")
     A('marked "(interpreter fallback)" are instructions the emitter has no native')
-    A("form for yet — they are exact, but they are also the to-do list.")
+    A("form for yet -- they are exact, but they are also the to-do list.")
     A('"""')
     A("from __future__ import annotations")
     A("")
