@@ -144,6 +144,25 @@ def diff_pixels(ref: "list[FrameRecord]", cand: "list[FrameRecord]") -> PixelDif
     return PixelDiff(True, None, compared=n)
 
 
+def filter_runs(runs: "list[ScreenRun]", ignore: "frozenset[str] | set[str]" = frozenset()) -> "list[ScreenRun]":
+    """Drop TRANSITION-state runs and merge the adjacent same-screen runs they separated.
+
+    A reference VM shows short transition states a native front end legitimately never renders as frames of
+    their own — a black 'loading' head while a 13h image is being copied in, an 'other' frame mid mode-switch,
+    a 'blanked' display during a palette load. Filtering them (and merging what they split) leaves the REAL
+    screen order, which is the invariant to compare when the capture's frame cadence is not retrace-faithful
+    (e.g. a workbench demo recorded under an instruction-budget clock inflates TIMED screens' durations)."""
+    out: "list[ScreenRun]" = []
+    for r in runs:
+        if r.screen in ignore:
+            continue
+        if out and out[-1].screen == r.screen:
+            out[-1] = ScreenRun(out[-1].screen, out[-1].start, out[-1].count + r.count)
+        else:
+            out.append(r)
+    return out
+
+
 def format_sequence(runs: "list[ScreenRun]") -> str:
     """A one-line human-readable rendering of a screen sequence: ``screenxCOUNT -> screenxCOUNT -> ...``."""
     return " -> ".join(f"{r.screen}x{r.count}" for r in runs)

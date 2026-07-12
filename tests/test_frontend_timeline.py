@@ -67,6 +67,17 @@ def test_diff_sequence_screen_mismatch_and_extra():
     assert not d2.ok and d2.reason == "missing screen"
 
 
+def test_filter_runs_drops_transitions_and_merges():
+    from dos_re.frontend_timeline import filter_runs
+    runs = collapse(_mk([("oldies", "")] * 3 + [("loading", "")] * 2 + [("title", "")] * 4
+                        + [("blanked", "")] + [("title", "")] * 2 + [("menu", "")]))
+    got = filter_runs(runs, ignore={"loading", "blanked"})
+    # the blanked run split 'title' in two — filtering merges them back; counts are preserved
+    assert [(r.screen, r.count) for r in got] == [("oldies", 3), ("title", 6), ("menu", 1)]
+    # nothing ignored -> unchanged
+    assert filter_runs(runs) == runs
+
+
 def test_diff_pixels_first_divergence_and_length():
     ref = _mk([("a", "h0"), ("a", "h1"), ("b", "h2")])
     same = _mk([("a", "h0"), ("a", "h1"), ("b", "h2")])
