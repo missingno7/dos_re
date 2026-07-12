@@ -258,6 +258,46 @@ learned from a real divergence — the module docstring has the full stories):
 
 Inspect a recording: `python tools/tick_demo_info.py <demo.bin>`.
 
+## 12b. Prove the VM-less FRONT END (the non-gameplay screens)
+
+The tick demo captures **zero** of the front end: intro / title / menu / attract
+/ world-map / tally all run with no game tick. Those are exactly where a VM-less
+port drifts undetected — a screen shown in the wrong ORDER, a dropped fade, a
+screen before/after the wrong transition (e.g. a "you must be expert" wall shown
+*after* the map+level load instead of *before*). `dos_re.frontend_timeline` is
+the front-end analogue of the tick demo: a per-PRESENT-FRAME timeline.
+
+```python
+from dos_re.frontend_timeline import capture, collapse, diff_sequence, diff_pixels, rgb_sha
+
+# sample(i): advance ONE present-frame, return (coarse SCREEN id, rgb_sha) — or None at the end.
+# The adapter classifies a frame from BOTH sides to the SAME (screen_id, rgb): the VM framebuffer
+# (13h/0Dh/text, named by fingerprinting the image asset) and the native scene generator's output.
+vm     = capture(vm_sample,     max_frames)   # ground truth: replay a demo through the VM
+native = capture(native_sample, max_frames)   # candidate: drive the native front-end generator
+
+diff_sequence(collapse(vm), collapse(native), duration_tolerance=2)  # screen ORDER + per-run frame count
+diff_pixels(vm, native)                                              # opt-in: per-frame RGB, byte-exact
+```
+
+Two gates, cheap→strong:
+
+- **SEQUENCE** (always): the ordered run-length list of distinct screens. Catches
+  out-of-order / extra / missing / mis-timed screens and is robust to sub-frame
+  pacing noise. This alone catches the "wrong screen order" class of bug.
+- **PIXELS** (opt-in): the per-frame RGB digest, frame-for-frame — byte-exact
+  rendering AND identical cadence. It surfaces cadence bugs a single golden-frame
+  test misses (e.g. a native screen that jumps to the settled image and drops the
+  VM's multi-frame fade-in — the steady-state pixels match, the timeline does not).
+
+The oracle trick that makes the native side honest (same as the tick demo): while
+replaying the demo on the VM, capture the raw keyboard scancode flags the front end
+sampled each frame, then **inject those same flags** into the native front end — no
+synthetic keystrokes, the candidate makes the VM's choices. A cold-start demo (boot
+→ oldies → titles → menu → level) is required so the native `cold_boot` entry aligns
+with the VM. pre2 adapter: `scripts/probe_frontend_timeline.py` (VM ground-truth
+prober — run it on ANY demo to see what the original does) + `verify_native_frontend.py`.
+
 ## 13. Measure progress (never estimate)
 
 ```bash
