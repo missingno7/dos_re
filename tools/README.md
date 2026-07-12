@@ -14,6 +14,7 @@ view (which tool for which recovery step, with context) is
 | `profile_hotspots.py` | `python tools/profile_hotspots.py <exe> <steps> --snapshot <snap> --top 40` | FIRST, before manual tracing: hot routines, tight backward edges (= wait loops / frame boundaries), boundary crossings. |
 | `le_info.py` | `python tools/le_info.py assets/GAME.EXE` | Day-0 for a DOS/4GW (MZ+LE) title: object table, entry/stack, fixup census, entry disassembly. `--rebase 0x100000` prints addresses where the runtime loads them. |
 | `pm_boot.py` | `python tools/pm_boot.py --exe assets/GAME.EXE --png frame.png` | The protected-mode bring-up loop: run an LE on the flat 386 runtime to the fail-loud frontier; stop reason + recent/hot EIPs + unmodeled ports + screen render (13h or Mode X). `--keys`/`--scancodes --at N` drive input. |
+| `pmlift.py` | `python tools/pmlift.py --exe GAME.EXE --auto-entries 300 --census` / `--verify --steps N` | The 32-bit liftgen+liftverify: census entries (static scan over decode32, `--auto-entries` sweeps direct call targets), emit literal Python hooks, install under the strict PM differential verifier, report ORACLE_PASSING / DIVERGED / NOT_REACHED per hook (samples cap retires proven hooks). |
 
 ## Lift / verify
 

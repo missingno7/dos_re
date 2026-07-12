@@ -42,6 +42,11 @@ class PMHookVerifierConfig:
     stop_on_diff: bool = True
     log_diffs: bool = True
     max_diff_lines: int = 16
+    # Verified-call sample cap per hook: after this many byte-exact calls the
+    # hook retires to the passthrough (unverified) fast path — the same
+    # SAMPLE semantics as the 16-bit liftverify: calls beyond the cap are
+    # unproven.  None = verify every call (focused investigations).
+    samples: int | None = 8
 
 
 class PMHookVerifier:
@@ -51,6 +56,7 @@ class PMHookVerifier:
         self.rt = rt
         self.config = config or PMHookVerifierConfig()
         self.total_verified = 0
+        self.calls_per_hook: dict[int, int] = {}
 
     def __call__(self, cpu, key: int, handler: Callable, name: str) -> None:
         cfg = self.config
@@ -95,6 +101,10 @@ class PMHookVerifier:
                               "asm_steps": steps},
                 )
         self.total_verified += 1
+        n = self.calls_per_hook.get(key, 0) + 1
+        self.calls_per_hook[key] = n
+        if self.config.samples is not None and n >= self.config.samples:
+            cpu.hook_verifier_passthrough.add(key)   # retired: sampled enough
         if cpu.coverage_telemetry is not None:
             cpu.coverage_telemetry.record_hook_verified(key, name, steps)
 

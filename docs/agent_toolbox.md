@@ -99,6 +99,16 @@ PNG render follows the live VGA state (chained 13h or unchained Mode X).
 Programmatic use: `dos_re.runtime.create_pm_runtime` +
 `dos_re.dos4gw.render_pm_frame`.
 
+For lifting, the 32-bit pipeline is `tools/pmlift.py` (census + emit +
+in-situ differential verify in one CLI; the pieces are
+`lift/decode32|cfg32|emit32|runtime32` + `pm_verification.PMHookVerifier`):
+
+```bash
+python tools/pmlift.py --exe GAME.EXE --auto-entries 300 --census
+python tools/pmlift.py --exe GAME.EXE --boot-steps 2000000 \
+    --auto-entries 40 --verify --steps 8000000 --emit-dir mygame/lifted32
+```
+
 ## 5. Trace / read code
 
 ```python
