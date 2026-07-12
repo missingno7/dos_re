@@ -33,6 +33,40 @@ class DosError(Exception):
         self.code = code
 
 
+class DosInputExhausted(Exception):
+    """A blocking console read found the key queue empty.
+
+    The front-end catches this to pump real input (or a demo script) and
+    resume; headless runs treat it as the fail-loud boundary."""
+
+
+def seed_low_memory(mem) -> None:
+    """Populate the 1:1-mapped low megabyte with a power-on BIOS environment.
+
+    DOS/4GW maps real-mode low memory into the flat address space, and programs
+    read it directly: KE probes the real-mode IVT entry for INT 33h (linear
+    0xCC) to detect a mouse driver.  A real machine has every vector pointing
+    at a BIOS handler/IRET stub — none are null.  Mirrors
+    runtime._init_bios_environment (the 16-bit power-on state).
+    """
+    d = mem.data
+    # IVT entries -> F000:FF53 (the conventional BIOS dummy IRET) for the
+    # ranges a real BIOS+DOS+mouse-driver setup populates: CPU/BIOS services
+    # (00-1F), DOS (20-2F), mouse (33 — the driver KE requires and this host
+    # services), and the IRQ vectors (08-0F live in 00-1F; 70-77).  EMS/VCPI
+    # (67h) and other user vectors stay null: seeding them non-null makes
+    # programs probe for services we do not host (observed: KE called VCPI
+    # DE00h when 67h looked installed).
+    for vec in (*range(0x00, 0x30), 0x33, *range(0x70, 0x78)):
+        base = vec * 4
+        d[base:base + 4] = b"\x53\xFF\x00\xF0"
+    d[0xFFF53] = 0xCF  # the IRET itself
+    # BIOS data area: CRTC base port (color) at 0040:0063.
+    d[0x463], d[0x464] = 0xD4, 0x03
+    # Equipment word at 0040:0010: 80x25 color, 1 floppy, FPU present.
+    d[0x410], d[0x411] = 0x23, 0x44
+
+
 class DOS4GWHost:
     def __init__(self, mem, game_root: str | Path, *,
                  command_tail: bytes = b"", psp_linear: int = 0x500,
@@ -46,14 +80,38 @@ class DOS4GWHost:
         self._heap_end = heap_base + free_bytes
         self.free_bytes = free_bytes
         self.pm_vectors: dict[int, tuple[int, int]] = {}   # int# -> (selector, offset)
+        # "Conventional memory" for DPMI DOS-block allocation (INT 31h AX=0100):
+        # paragraph-aligned low-linear space between the LE image (ends well
+        # below 0x60000 for typical titles) and the VGA aperture at 0xA0000.
+        self.dos_next = 0x60000
+        self.dos_end = 0xA0000
+        self.dos_blocks: dict[int, tuple[int, int]] = {}   # selector -> (base, size)
+        self._next_selector = 0x80
         self.files: dict[int, object] = {}                 # DOS handle -> python file
         self._next_handle = 5                              # 0-4 reserved (stdin/out/err/aux/prn)
         self.dta = psp_linear + 0x80
         self.exit_code: int | None = None
+        # Console input queue (ASCII codes) consumed by INT 21h AH=01/07/08.
+        # The front-end/probe seeds it; an empty queue on a blocking read fails
+        # loud rather than spinning or inventing a key.
+        self.key_queue: list[int] = []
         # Case-insensitive on-disk name resolution cache (DOS games ship
         # upper-case names; the host FS may be case-sensitive).
         self._dir_cache: dict[str, dict[str, str]] = {}
         self.unhandled: list[str] = []
+        # VGA input-status reads (03DAh): deterministic per-read toggle of the
+        # vertical-retrace bit, the same model DOSMachine._vga_status proved on
+        # the 16-bit ports — busy-wait loops make progress in headless runs; an
+        # interactive front-end can install a time source later.
+        self.vga_status_reads = 0
+        self.time_source = None
+        self.vga_retrace_active_fraction = 0.28
+        # DAC (palette) write state, mirroring the VGA 3C8/3C9 protocol.
+        self.dac_write_index = 0
+        self.dac_rgb_phase = 0
+        self.dac = bytearray(768)
+        self.unmodeled_port_reads: dict[int, int] = {}
+        self.unmodeled_port_writes: dict[int, int] = {}
 
     # ---- register helpers ---------------------------------------------------
     @staticmethod
@@ -113,6 +171,23 @@ class DOS4GWHost:
             # can in the flat model), taking the AH=4A DS-resize path.
             cpu.set_reg(EAX, 1, 0)
             return
+        if ah == 0x48:                       # allocate DOS memory (BX=paragraphs)
+            # DOS/4G maps the low megabyte 1:1 into the flat space, so the
+            # returned real-mode segment is directly usable at seg*16 via the
+            # flat DS.  BX=0xFFFF is the classic "largest block?" probe.
+            paras = cpu.r[EBX] & 0xFFFF
+            base = (self.dos_next + 15) & ~15
+            avail = (self.dos_end - base) // 16
+            if paras > avail:
+                self._set_cf(cpu, True)
+                cpu.set_reg(EAX, 2, 8)       # insufficient memory
+                cpu.set_reg(EBX, 2, avail)
+                return
+            self.dos_next = base + paras * 16
+            cpu.set_reg(EAX, 2, base >> 4)
+            return
+        if ah == 0x49:                       # free DOS memory block — pool model, no-op
+            return
         if ah == 0x4A:                       # resize memory block (ES=sel, BX=paras)
             # Flat 16 MB space: the DS/flat segment is effectively unbounded, so
             # any in-place grow succeeds.  Return CF clear.
@@ -127,6 +202,18 @@ class DOS4GWHost:
         if ah == 0x4C:                       # terminate with exit code
             self.exit_code = self._al(cpu)
             cpu.halted = True
+            return
+        if ah in (0x01, 0x07, 0x08):         # console input (blocking) -> AL
+            # 01 echoes, 07/08 don't (08 honors Ctrl-C; not modelled).  A real
+            # DOS blocks; an empty queue here is a driver bug, so fail loud.
+            if not self.key_queue:
+                raise DosInputExhausted(
+                    f"INT 21h AH={ah:02X}h console read with empty key_queue "
+                    f"at eip=0x{cpu.eip:X}")
+            cpu.set_reg(EAX, 1, self.key_queue.pop(0) & 0xFF)
+            return
+        if ah == 0x0B:                       # console input status -> AL=FF/00
+            cpu.set_reg(EAX, 1, 0xFF if self.key_queue else 0x00)
             return
         if ah == 0x1A:                       # set DTA (EDX)
             self.dta = cpu.r[EDX]
@@ -239,9 +326,50 @@ class DOS4GWHost:
         return
 
     # ---- INT 31h (DPMI) -----------------------------------------------------
+    def _alloc_selector(self, cpu: CPU386, base: int) -> int:
+        sel = self._next_selector
+        self._next_selector += 8
+        cpu.selector_bases[sel & 0xFFFC] = base
+        return sel
+
     def _int31(self, cpu: CPU386) -> None:
         ax = self._ax(cpu)
         self._set_cf(cpu, False)
+        if ax == 0x0100:                     # allocate DOS memory block (BX=paragraphs)
+            paras = cpu.r[EBX] & 0xFFFF
+            size = paras * 16
+            base = (self.dos_next + 15) & ~15
+            if base + size > self.dos_end:
+                self._set_cf(cpu, True)
+                cpu.set_reg(EAX, 2, 0x0008)              # insufficient memory
+                cpu.set_reg(EBX, 2, (self.dos_end - base) // 16)
+                return
+            self.dos_next = base + size
+            sel = self._alloc_selector(cpu, base)
+            self.dos_blocks[sel] = (base, size)
+            cpu.set_reg(EAX, 2, base >> 4)               # real-mode segment
+            cpu.set_reg(EDX, 2, sel)                     # protected-mode selector
+            return
+        if ax == 0x0101:                     # free DOS memory block (DX=selector)
+            self.dos_blocks.pop(cpu.r[EDX] & 0xFFFF, None)
+            return
+        if ax == 0x0500:                     # get free memory information (ES:EDI buf)
+            # 0x30-byte block; first dword = largest available free block in
+            # bytes (the field games gate their minimum-RAM check on — KE's
+            # box says 2 MB minimum, we report the extended-heap size, 4 MB by
+            # default).  Unsupported fields are -1 per the DPMI spec.
+            buf = cpu.sbase["es"] + cpu.r[EDI]
+            self.mem.data[buf:buf + 0x30] = b"\xFF" * 0x30
+            free = self._heap_end - self._heap_next
+            self.mem.w32(buf + 0x00, free)               # largest free block
+            self.mem.w32(buf + 0x14, free >> 12)         # free pages
+            self.mem.w32(buf + 0x18, (self._heap_end - 0x100000) >> 12)  # total pages
+            return
+        if ax == 0x0006:                     # get segment base address (BX=selector)
+            base = cpu.selector_bases.get(cpu.r[EBX] & 0xFFFC, 0)
+            cpu.set_reg(ECX, 2, (base >> 16) & 0xFFFF)
+            cpu.set_reg(EDX, 2, base & 0xFFFF)
+            return
         raise NotImplementedError(
             f"INT 31h (DPMI) AX=0x{ax:04X} not implemented at eip=0x{cpu.eip:X}")
 
@@ -265,6 +393,36 @@ class DOS4GWHost:
             f"INT 10h AH=0x{ah:02X} (AX=0x{self._ax(cpu):04X}) not implemented at "
             f"eip=0x{cpu.eip:X}")
 
+    # ---- I/O ports -----------------------------------------------------------
+    def port_read(self, cpu: CPU386, port: int, bits: int) -> int:
+        if port in (0x3DA, 0x3BA):           # VGA input status 1
+            ts = self.time_source
+            if ts is None:
+                self.vga_status_reads += 1
+                # bit 3 = vertical retrace, bit 0 = display-enable NOT active;
+                # both track the toggle so either wait style makes progress.
+                return 0x09 if (self.vga_status_reads & 1) else 0x00
+            phase = (ts() * 70.0) % 1.0
+            return 0x09 if phase >= (1.0 - self.vga_retrace_active_fraction) else 0x00
+        if port == 0x3C7:                     # DAC state
+            return 0x00
+        self.unmodeled_port_reads[port] = self.unmodeled_port_reads.get(port, 0) + 1
+        return 0
+
+    def port_write(self, cpu: CPU386, port: int, value: int, bits: int) -> None:
+        if port == 0x3C8:                     # DAC write index
+            self.dac_write_index = value & 0xFF
+            self.dac_rgb_phase = 0
+            return
+        if port == 0x3C9:                     # DAC data (r, g, b per index)
+            self.dac[(self.dac_write_index * 3 + self.dac_rgb_phase) % 768] = value & 0x3F
+            self.dac_rgb_phase += 1
+            if self.dac_rgb_phase == 3:
+                self.dac_rgb_phase = 0
+                self.dac_write_index = (self.dac_write_index + 1) & 0xFF
+            return
+        self.unmodeled_port_writes[port] = self.unmodeled_port_writes.get(port, 0) + 1
+
     # ---- INT 2Fh (multiplex) ------------------------------------------------
     def _int2f(self, cpu: CPU386) -> None:
         ax = self._ax(cpu)
@@ -286,7 +444,48 @@ class DOS4GWHost:
             f"INT 2Fh AX=0x{ax:04X} not implemented at eip=0x{cpu.eip:X}")
 
     # ---- INT 33h (mouse) ----------------------------------------------------
+    # Minimal Microsoft mouse driver: state fed by the front-end (or left at
+    # rest for headless runs).  Services grown as the game issues them.
     def _int33(self, cpu: CPU386) -> None:
         ax = self._ax(cpu)
+        if ax == 0x0000:                     # reset/detect -> AX=FFFF, BX=#buttons
+            cpu.set_reg(EAX, 2, 0xFFFF)
+            cpu.set_reg(EBX, 2, 2)
+            self.mouse_x, self.mouse_y, self.mouse_buttons = 320, 100, 0
+            return
+        if ax in (0x0001, 0x0002):           # show / hide cursor
+            return
+        if ax == 0x0003:                     # get position + buttons
+            cpu.set_reg(EBX, 2, getattr(self, "mouse_buttons", 0))
+            cpu.set_reg(ECX, 2, getattr(self, "mouse_x", 320))
+            cpu.set_reg(EDX, 2, getattr(self, "mouse_y", 100))
+            return
+        if ax == 0x0004:                     # set position (CX, DX)
+            self.mouse_x = cpu.r[ECX] & 0xFFFF
+            self.mouse_y = cpu.r[EDX] & 0xFFFF
+            return
+        if ax in (0x0007, 0x0008):           # set horizontal / vertical range
+            return
+        if ax == 0x000B:                     # read motion counters -> CX/DX deltas
+            cpu.set_reg(ECX, 2, 0)
+            cpu.set_reg(EDX, 2, 0)
+            return
+        if ax == 0x0024:                     # get driver version/type/IRQ
+            cpu.set_reg(EBX, 2, 0x0814)      # version 8.20 (MS MOUSE.COM convention)
+            cpu.set_reg(ECX, 2, 0x0400)      # CH=4 (PS/2), CL=0 (no IRQ for PS/2)
+            return
+        if ax in (0x0005, 0x0006):           # button press/release data
+            cpu.set_reg(EAX, 2, getattr(self, "mouse_buttons", 0))
+            cpu.set_reg(EBX, 2, 0)           # count since last query
+            cpu.set_reg(ECX, 2, getattr(self, "mouse_x", 320))
+            cpu.set_reg(EDX, 2, getattr(self, "mouse_y", 100))
+            return
+        if ax in (0x000C, 0x000F, 0x0010, 0x001A):  # set handler/ratio/region/sens.
+            return
+        if ax == 0x001B:                     # get sensitivity -> BX/CX/DX
+            cpu.set_reg(EBX, 2, 50)
+            cpu.set_reg(ECX, 2, 50)
+            cpu.set_reg(EDX, 2, 50)          # double-speed threshold
+            return
         raise NotImplementedError(
             f"INT 33h AX=0x{ax:04X} not implemented at eip=0x{cpu.eip:X}")

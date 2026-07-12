@@ -39,19 +39,22 @@ def create_pm_runtime(exe_path: str | Path, *, game_root: str | Path | None = No
     """
     from .le import load_le
     from .cpu386 import CPU386, FlatMemory
-    from .dos4gw import DOS4GWHost
+    from .dos4gw import DOS4GWHost, seed_low_memory
 
     if isinstance(command_tail, str):
         command_tail = command_tail.encode("ascii")
     exe_path = Path(exe_path)
     image = load_le(exe_path)
     mem = FlatMemory(size=ram_bytes)
+    seed_low_memory(mem)   # 1:1-mapped real-mode IVT + BIOS data area
     # Place the loaded objects at their own flat linear addresses.
     mem.data[image.mem_base:image.mem_base + len(image.mem)] = image.mem
     cpu = CPU386(mem, eip=image.entry_linear, esp=image.stack_linear)
     root = Path(game_root) if game_root else exe_path.parent
     dos = DOS4GWHost(mem, root, command_tail=command_tail)
     cpu.interrupt_handler = dos.interrupt
+    cpu.port_reader = dos.port_read
+    cpu.port_writer = dos.port_write
     return PMRuntime(image=image, cpu=cpu, dos=dos, mem=mem)
 
 

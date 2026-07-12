@@ -117,6 +117,13 @@ class CPU386:
         self.eip = eip & 0xFFFFFFFF
         self.eflags = 0x0202
         self.seg = {"es": ds, "cs": cs, "ss": ds, "ds": ds, "fs": 0, "gs": 0}
+        # Mini descriptor table: selector (RPL masked) -> linear base.  The
+        # LE's own flat selectors resolve to 0; DPMI-allocated DOS-memory
+        # selectors (base = paragraph*16) are registered here by the host.
+        # ``sbase`` caches the resolved base per segment register so the hot
+        # path pays one attribute read + add, not a dict probe per access.
+        self.selector_bases: dict[int, int] = {}
+        self.sbase = {"es": 0, "cs": 0, "ss": 0, "ds": 0, "fs": 0, "gs": 0}
         self.halted = False
         self.instruction_count = 0
         # x87 FPU: st[-1] is ST(0).  Doubles stand in for the 80-bit registers
@@ -139,6 +146,17 @@ class CPU386:
         self._opsize = 4
         self._adsize = 4
         self._segovr = None
+        self._defseg = "ds"
+
+    # ---- segments ------------------------------------------------------------
+    def set_seg(self, name: str, sel: int) -> None:
+        """Load a segment register: store the selector and cache its base.
+
+        RPL (low 2 bits) is masked for the base lookup, like real descriptor
+        resolution; unknown selectors are flat (base 0) — the LE model."""
+        sel &= 0xFFFF
+        self.seg[name] = sel
+        self.sbase[name] = self.selector_bases.get(sel & 0xFFFC, 0)
 
     # ---- registers ----------------------------------------------------------
     def reg(self, i: int, size: int) -> int:
@@ -251,13 +269,21 @@ class CPU386:
         rm = modrm & 7
         if mod == 3:
             return reg, True, rm
+        return reg, False, self._memaddr(mod, rm)
+
+    def _memaddr(self, mod: int, rm: int) -> int:
+        """Decode a memory operand into a final linear address: offset plus the
+        segment base (override prefix, else the addressing-form default —
+        SS for EBP/ESP-based forms, DS otherwise)."""
         if self._adsize == 4:
-            addr = self._addr32(mod, rm)
+            off = self._addr32(mod, rm)
         else:
-            addr = self._addr16(mod, rm)
-        return reg, False, addr & 0xFFFFFFFF
+            off = self._addr16(mod, rm)
+        seg = self._segovr or self._defseg
+        return (self.sbase[seg] + off) & 0xFFFFFFFF
 
     def _addr32(self, mod: int, rm: int) -> int:
+        self._defseg = "ds"
         if rm == 4:  # SIB
             sib = self._fetch8()
             scale = sib >> 6
@@ -270,22 +296,28 @@ class CPU386:
                 addr += self._fetch32()
             else:
                 addr += self.r[base]
+                if base in (ESP, EBP):
+                    self._defseg = "ss"
         elif rm == 5 and mod == 0:
             return self._fetch32()
         else:
             addr = self.r[rm]
+            if rm == EBP:
+                self._defseg = "ss"
         if mod == 1:
             addr += _sign(self._fetch8(), 8)
         elif mod == 2:
             addr += self._fetch32()
-        return addr
+        return addr & 0xFFFFFFFF
 
     def _addr16(self, mod: int, rm: int) -> int:
+        self._defseg = "ss" if rm in (2, 3) or (rm == 6 and mod != 0) else "ds"
         bx, bp, si, di = self.r[EBX] & 0xFFFF, self.r[EBP] & 0xFFFF, self.r[ESI] & 0xFFFF, self.r[EDI] & 0xFFFF
         base = (
             (bx + si), (bx + di), (bp + si), (bp + di), si, di, bp, bx,
         )[rm]
         if rm == 6 and mod == 0:
+            self._defseg = "ds"
             return self._fetch16()
         if mod == 1:
             base += _sign(self._fetch8(), 8)
@@ -305,10 +337,10 @@ class CPU386:
     # ---- stack --------------------------------------------------------------
     def push(self, v: int, size: int = 4) -> None:
         self.r[ESP] = (self.r[ESP] - size) & 0xFFFFFFFF
-        self.mem.write(self.r[ESP], size, v)
+        self.mem.write(self.sbase["ss"] + self.r[ESP], size, v)
 
     def pop(self, size: int = 4) -> int:
-        v = self.mem.read(self.r[ESP], size)
+        v = self.mem.read(self.sbase["ss"] + self.r[ESP], size)
         self.r[ESP] = (self.r[ESP] + size) & 0xFFFFFFFF
         return v
 
@@ -361,7 +393,7 @@ class CPU386:
             if is_push:
                 self.push(self.seg[sname], osz)
             else:
-                self.seg[sname] = self.pop(osz) & 0xFFFF
+                self.set_seg(sname, self.pop(osz))
             return
 
         # ---- ALU family 0x00..0x3B (add/or/adc/sbb/and/sub/xor/cmp) ---------
@@ -467,7 +499,7 @@ class CPU386:
             return
         if op == 0x8E:  # mov sreg, r/m16
             reg, is_reg, val = self._modrm()
-            self.seg[_SEG[reg]] = self._rm_read(is_reg, val, 2)
+            self.set_seg(_SEG[reg], self._rm_read(is_reg, val, 2))
             return
         if op == 0x8F:  # pop r/m
             reg, is_reg, val = self._modrm()
@@ -512,10 +544,11 @@ class CPU386:
         if op in (0xA0, 0xA1, 0xA2, 0xA3):
             sz = 1 if op in (0xA0, 0xA2) else osz
             disp = self._fetch32() if self._adsize == 4 else self._fetch16()
+            addr = (self.sbase[self._segovr or "ds"] + disp) & 0xFFFFFFFF
             if op in (0xA0, 0xA1):
-                self.set_reg(EAX, sz, self.mem.read(disp, sz))
+                self.set_reg(EAX, sz, self.mem.read(addr, sz))
             else:
-                self.mem.write(disp, sz, self.reg(EAX, sz))
+                self.mem.write(addr, sz, self.reg(EAX, sz))
             return
         if op in (0xA8, 0xA9):  # test al/eax, imm
             sz = 1 if op == 0xA8 else osz
@@ -572,7 +605,7 @@ class CPU386:
             return
         if op == 0xCF:  # iret(d)
             self.eip = self.pop(osz)
-            self.seg["cs"] = self.pop(osz)
+            self.set_seg("cs", self.pop(osz))
             self.eflags = (self.pop(osz) & 0x0FD5) | 0x0002
             return
 
@@ -900,24 +933,26 @@ class CPU386:
         sz = 1 if op in (0xA4, 0xAA, 0xAC, 0xAE) else self._opsize
         asz = self._adsize
         step = sz if not self.get_flag(DF) else -sz
+        sbase = self.sbase[self._segovr or "ds"]   # source segment (overridable)
+        dbase = self.sbase["es"]                    # destination is always ES
         def once():
             si = self.reg(ESI, asz)
             di = self.reg(EDI, asz)
             if op in (0xA4, 0xA5):      # movs
-                self.mem.write(di, sz, self.mem.read(si, sz))
+                self.mem.write(dbase + di, sz, self.mem.read(sbase + si, sz))
                 self.set_reg(ESI, asz, si + step); self.set_reg(EDI, asz, di + step)
             elif op in (0xAA, 0xAB):    # stos
-                self.mem.write(di, sz, self.reg(EAX, sz))
+                self.mem.write(dbase + di, sz, self.reg(EAX, sz))
                 self.set_reg(EDI, asz, di + step)
             elif op in (0xAC, 0xAD):    # lods
-                self.set_reg(EAX, sz, self.mem.read(si, sz))
+                self.set_reg(EAX, sz, self.mem.read(sbase + si, sz))
                 self.set_reg(ESI, asz, si + step)
             elif op in (0xAE, 0xAF):    # scas
-                a = self.reg(EAX, sz); b = self.mem.read(di, sz)
+                a = self.reg(EAX, sz); b = self.mem.read(dbase + di, sz)
                 self._flags_sub(a, b, a - b, sz * 8)
                 self.set_reg(EDI, asz, di + step)
             else:                        # cmps A6/A7
-                a = self.mem.read(si, sz); b = self.mem.read(di, sz)
+                a = self.mem.read(sbase + si, sz); b = self.mem.read(dbase + di, sz)
                 self._flags_sub(a, b, a - b, sz * 8)
                 self.set_reg(ESI, asz, si + step); self.set_reg(EDI, asz, di + step)
         if not rep:
@@ -973,11 +1008,11 @@ class CPU386:
         if op2 == 0xA0:              # push fs
             self.push(self.seg["fs"], osz); return
         if op2 == 0xA1:              # pop fs
-            self.seg["fs"] = self.pop(osz) & 0xFFFF; return
+            self.set_seg("fs", self.pop(osz)); return
         if op2 == 0xA8:              # push gs
             self.push(self.seg["gs"], osz); return
         if op2 == 0xA9:              # pop gs
-            self.seg["gs"] = self.pop(osz) & 0xFFFF; return
+            self.set_seg("gs", self.pop(osz)); return
         if op2 in (0xA3, 0xAB, 0xB3, 0xBB):   # bt/bts/btr/btc r/m, reg
             self._bit_op({0xA3: "bt", 0xAB: "bts", 0xB3: "btr", 0xBB: "btc"}[op2])
             return
@@ -1190,8 +1225,7 @@ class CPU386:
         if mod == 3:
             self._fpu_reg(op, reg, rm, modrm)
             return
-        addr = self._addr32(mod, rm) if self._adsize == 4 else self._addr16(mod, rm)
-        self._fpu_mem(op, reg, addr)
+        self._fpu_mem(op, reg, self._memaddr(mod, rm))
 
     def _fpu_reg(self, op, reg, rm, modrm):
         if op == 0xDB and reg == 4:
