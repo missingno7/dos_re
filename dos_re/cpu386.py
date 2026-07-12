@@ -197,6 +197,7 @@ class CPU386:
         self._adsize = 4
         self._segovr = None
         self._defseg = "ds"
+        self._irq_decim = 0
 
     # ---- segments ------------------------------------------------------------
     def set_seg(self, name: str, sel: int) -> None:
@@ -425,10 +426,18 @@ class CPU386:
 
     def step(self) -> None:
         if self.pending_irq is not None and (self.eflags & IF):
-            irq = self.pending_irq()
-            if irq is not None:
-                # Master PIC base 08h, slave 70h — the mapping DOS/4GW keeps.
-                self.deliver_interrupt(0x08 + irq if irq < 8 else 0x70 + irq - 8)
+            # Poll the IRQ source every 16 instructions, not every one: the
+            # dict/PIC probe was ~10% of the whole interpreter (measured).
+            # Delivery granularity stays deterministic (a fixed decimation of
+            # the instruction count), and 16 instructions is far finer than
+            # any real IRQ latency the era's software could observe.
+            self._irq_decim += 1
+            if self._irq_decim >= 16:
+                self._irq_decim = 0
+                irq = self.pending_irq()
+                if irq is not None:
+                    # Master PIC base 08h, slave 70h — DOS/4GW's mapping.
+                    self.deliver_interrupt(0x08 + irq if irq < 8 else 0x70 + irq - 8)
         start = self.eip
         hooks = self.replacement_hooks
         if hooks and start in hooks:
@@ -1023,6 +1032,12 @@ class CPU386:
         step = sz if not self.get_flag(DF) else -sz
         sbase = self.sbase[self._segovr or "ds"]   # source segment (overridable)
         dbase = self.sbase["es"]                    # destination is always ES
+        # Bulk fast path for forward REP MOVS/STOS: byte-identical semantics
+        # to the per-unit loop (equivalence-tested), orders of magnitude
+        # faster for the clears/copies that dominate rendering.
+        if (rep and step > 0 and asz == 4 and op in (0xA4, 0xA5, 0xAA, 0xAB)
+                and self._bulk_string(op, sz, sbase, dbase)):
+            return
         def once():
             si = self.reg(ESI, asz)
             di = self.reg(EDI, asz)
@@ -1202,6 +1217,97 @@ class CPU386:
             sf, not sf, pf, not pf, sf != of, sf == of,
             zf or (sf != of), not zf and (sf == of),
         )[cc]
+
+    def _bulk_string(self, op, sz, sbase, dbase) -> bool:
+        """Forward REP MOVS/STOS as slice operations.  Returns False when any
+        byte of the transfer would need per-byte semantics the slices don't
+        reproduce (planar write modes other than 0, partial bit mask, ranges
+        straddling the A000h aperture boundary) — the caller then runs the
+        exact per-unit loop."""
+        r = self.r
+        count = r[1]
+        if count == 0:
+            r[1] = 0
+            return True
+        n = count * sz
+        mem = self.mem
+        vga = mem.vga
+        dst = (dbase + r[7]) & 0xFFFFFFFF
+        movs = op in (0xA4, 0xA5)
+
+        def region(a):
+            if vga is not None and 0xA0000 <= a < 0xB0000:
+                return 1
+            return 0
+
+        if region(dst) != region(dst + n - 1):
+            return False
+        dst_planar = region(dst)
+        if movs:
+            src = (sbase + r[6]) & 0xFFFFFFFF
+            if region(src) != region(src + n - 1):
+                return False
+            src_planar = region(src)
+        else:
+            src = 0
+            src_planar = 0
+
+        if (dst_planar or src_planar):
+            if vga.bit_mask != 0xFF:
+                return False
+            wm = vga.write_mode
+            if dst_planar and wm not in (0, 1):
+                return False
+
+        # ---- gather source bytes -------------------------------------------
+        if movs:
+            if src_planar:
+                off = src - 0xA0000
+                if off + n > 0x10000:
+                    return False
+                if dst_planar and vga.write_mode == 1:
+                    # write-mode-1 block copy: latched plane-to-plane, CPU data
+                    # ignored.  Copy each enabled plane's slice; the latches end
+                    # holding the LAST source byte per plane.
+                    doff = dst - 0xA0000
+                    if doff + n > 0x10000:
+                        return False
+                    m = vga.map_mask
+                    for pi in range(4):
+                        if m & (1 << pi):
+                            vga.planes[pi][doff:doff + n] = vga.planes[pi][off:off + n]
+                    vga.latches = [vga.planes[pi][off + n - 1] for pi in range(4)]
+                    r[6] = (r[6] + n) & 0xFFFFFFFF
+                    r[7] = (r[7] + n) & 0xFFFFFFFF
+                    r[1] = 0
+                    return True
+                data = bytes(vga.planes[vga.read_map & 3][off:off + n])
+                vga.latches = [vga.planes[pi][off + n - 1] for pi in range(4)]
+            else:
+                data = bytes(mem.data[src:src + n])
+        else:
+            v = self.reg(EAX, sz)
+            data = v.to_bytes(sz, "little") * count
+
+        # ---- scatter to destination ----------------------------------------
+        if dst_planar:
+            if vga.write_mode == 1:
+                return False                      # wm1 with RAM source: per-byte
+            doff = dst - 0xA0000
+            if doff + n > 0x10000:
+                return False
+            m = vga.map_mask
+            for pi in range(4):
+                if m & (1 << pi):
+                    vga.planes[pi][doff:doff + n] = data
+        else:
+            mem.data[dst:dst + n] = data
+
+        if movs:
+            r[6] = (r[6] + n) & 0xFFFFFFFF
+        r[7] = (r[7] + n) & 0xFFFFFFFF
+        r[1] = 0
+        return True
 
     # ---- x87 FPU -----------------------------------------------------------
     # Semantics ported from CPU8086.execute_fpu (doubles stand in for the 80-bit

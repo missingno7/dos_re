@@ -80,7 +80,9 @@ def test_selector_base_resolution():
 
 
 def test_irq_delivery_and_iret():
-    # Handler at 0x4000: inc ebx ; iretd.  Main: sti ; nop ; nop.
+    # Handler at 0x4000: inc ebx ; iretd.  Main: sti ; nop x 40.
+    # The IRQ source is polled every 16 instructions (the decimation the
+    # measured hot path earned), so give delivery a full window.
     fired = []
 
     def setup(cpu, mem):
@@ -92,9 +94,9 @@ def test_irq_delivery_and_iret():
                 return 0                     # IRQ0 -> vector 8
             return None
         cpu.pending_irq = pending
-    cpu, _ = run_blob(bytes.fromhex("FB9090"), setup=setup)
+    cpu, _ = run_blob(bytes.fromhex("FB" + "90" * 40), setup=setup)
     assert cpu.r[EBX] == 1                   # handler ran exactly once
-    assert cpu.eip == CODE + 4               # resumed and hit the HLT
+    assert cpu.eip == CODE + 42              # resumed and hit the HLT
 
 
 def test_vga_planar_write_and_readback():
@@ -207,3 +209,57 @@ def test_mouse_norm_maps_onto_game_range():
     assert (host.mouse_x, host.mouse_y) == (623, 180)
     host.set_mouse_norm(2.5, -3.0)          # clamped
     assert (host.mouse_x, host.mouse_y) == (623, 180)
+
+
+def _string_state(seed, *, planar_dst=False, planar_src=False, wm=0, op=0xA5, count=37):
+    import random
+    rng = random.Random(seed)
+    mem = FlatMemory(size=0x110000)
+    cpu = CPU386(mem, eip=CODE, esp=STACK)
+    vga = VGASequencer()
+    vga.chain4 = False
+    vga.write_mode = wm
+    vga.map_mask = rng.randrange(1, 16)
+    vga.read_map = rng.randrange(4)
+    for pl in vga.planes:
+        pl[:0x400] = bytes(rng.randrange(256) for _ in range(0x400))
+    mem.vga = vga
+    for a in range(0x20000, 0x20400):
+        mem.data[a] = rng.randrange(256)
+    cpu.r[1] = count                                   # ecx
+    cpu.r[6] = 0xA0000 + 0x40 if planar_src else 0x20000   # esi
+    cpu.r[7] = 0xA0000 + 0x200 if planar_dst else 0x20200  # edi
+    cpu.r[0] = 0xDEADBEEF                              # eax (stos fill)
+    blob = {0xA4: bytes((0xF3, 0xA4)), 0xA5: bytes((0xF3, 0xA5)),
+            0xAA: bytes((0xF3, 0xAA)), 0xAB: bytes((0xF3, 0xAB))}[op]
+    mem.load(CODE, blob + bytes((0xF4,)))
+    return cpu, mem, vga
+
+
+def _digest(cpu, mem, vga):
+    import zlib
+    return (tuple(cpu.r), cpu.eflags,
+            zlib.crc32(bytes(mem.data)), zlib.crc32(b"".join(vga.planes)),
+            tuple(vga.latches))
+
+
+@pytest.mark.parametrize("kw", [
+    dict(op=0xA5),                                     # RAM -> RAM movsd
+    dict(op=0xA4, planar_dst=True),                    # RAM -> planes movsb
+    dict(op=0xA5, planar_dst=True),                    # RAM -> planes movsd
+    dict(op=0xA4, planar_src=True),                    # planes -> RAM
+    dict(op=0xA4, planar_src=True, planar_dst=True, wm=1),  # wm1 block copy
+    dict(op=0xAA, planar_dst=True),                    # stosb -> planes
+    dict(op=0xAB),                                     # stosd -> RAM
+    dict(op=0xAB, planar_dst=True, count=3),           # small: below any threshold
+])
+def test_bulk_string_equals_per_unit_loop(kw):
+    fast_cpu, fast_mem, fast_vga = _string_state(7, **kw)
+    slow_cpu, slow_mem, slow_vga = _string_state(7, **kw)
+    slow_cpu._bulk_string = lambda *a: False           # force the per-unit loop
+    for c in (fast_cpu, slow_cpu):
+        try:
+            c.run(10_000)
+        except HaltExecution:
+            pass
+    assert _digest(fast_cpu, fast_mem, fast_vga) == _digest(slow_cpu, slow_mem, slow_vga)
