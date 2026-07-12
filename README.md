@@ -28,8 +28,8 @@ job.
 
 - **A real-mode VM built for reverse engineering** — an 8086 interpreter,
   DOS/BIOS services, and hardware models (VGA/EGA planar video, PIT, PIC,
-  keyboard, PC speaker, AdLib/OPL2, Sound Blaster + DMA), all stdlib-only
-  Python, all deterministic by default.
+  keyboard, PC speaker, AdLib/OPL2, Sound Blaster + DMA), all pure Python
+  (stdlib + numpy), all deterministic by default.
 - **Two proof engines** — a per-hook differential verifier that diffs a
   replacement against the interpreted original ASM (registers + flags + full
   memory) at every call, and a frame verifier that lockstep-diffs whole frames
@@ -119,7 +119,7 @@ python -m pytest tests -q                        # framework suite (no game asse
 ## Repository layout
 
 ```text
-dos_re/       the framework package (VM + proof engines + lifter) — stdlib-only
+dos_re/       the framework package (VM + proof engines + lifter) — stdlib + numpy
 pynuked_opl3/   submodule: Nuked-OPL3 FM synthesis backend (optional, cffi)
 docs/         reference docs + the agent toolbox   → docs/README.md
 examples/     runnable demos (deletable; nothing imports them)

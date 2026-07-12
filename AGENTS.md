@@ -28,16 +28,18 @@ provenance of every part.
 Correctness beats speed. Traceability beats cleverness. Small verified progress
 beats large intuitive rewrites.
 
-- **`dos_re/` must stay game-agnostic, and the core stays stdlib-only.** No
-  game addresses, filenames, or formats in the core. The stdlib-only part is
-  NOT a purity rule — it is a measured performance and portability choice:
-  the interpreter's work is per-instruction *scalar* arithmetic, where numpy
-  is slower than plain ints/bytearray on CPython and poisons the JIT under
-  PyPy (which gives the core its biggest speedup, 13-17x — see
-  docs/performance.md). Third-party libs are welcome where they actually
-  win: the FRONTEND RING (`player.py`/`display.py`/`audio_sink.py` may use
-  numpy/pygame/pynuked_opl3 for bulk pixel/audio work). `tools/lint.py`
-  enforces the boundary; run it before finishing any change.
+- **`dos_re/` must stay game-agnostic; numpy is first-class, pygame is
+  viewer-only.** No game addresses, filenames, or formats in the core. numpy
+  is a real dependency (`pyproject` `dependencies`) — use it anywhere it
+  actually wins: bulk pixel/array work in proof engines, renderers, digests.
+  The ONE measured exception (judgment, not lint): the interpreter's
+  per-instruction path is *scalar* arithmetic, where numpy is slower than
+  plain ints/bytearray on CPython and poisons the JIT under PyPy (which gives
+  the core its biggest speedup, 13-17x — see docs/performance.md); keep that
+  path numpy-free. pygame/pynuked_opl3 remain optional extras confined to the
+  FRONTEND RING (`player.py`/`display.py`/`audio_sink.py`/`overlay_menu.py`),
+  and `import dos_re` must never pull them in. `tools/lint.py` enforces the
+  boundary; run it before finishing any change.
 - **Do not make the emulator more general than a real target requires.** New
   CPU/DOS/hardware behaviour is added only when a concrete program exercises it,
   with the observed register/flag contract documented and a focused test added.

@@ -342,7 +342,7 @@ python tools/gen_island_manifest.py <game>.codecs <game>.recovered -o docs/recov
 ## 14. Keep yourself honest (run with every change)
 
 ```bash
-python tools/lint.py                        # the game-agnostic / stdlib-only boundary
+python tools/lint.py                        # the game-agnostic / lean-deps boundary (stdlib+numpy core)
 python tools/audit_layers.py <game>/recovered   # pure layer never imports the VM
 python tools/audit_hook_oracle.py <game>    # no child hooks hidden from verification
 python tools/check_undefined_names.py       # latent-NameError guard

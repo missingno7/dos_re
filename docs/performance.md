@@ -1,14 +1,16 @@
 # Performance — how to run dos_re fast (and how to make it faster safely)
 
-The interpreter is pure Python by design (stdlib-only core, hookable at any
+The interpreter is pure Python by design (scalar stdlib hot path, hookable at any
 CS:IP, byte-exact verifiable). That means the two biggest speedups are *free*
 — they come from how you run it, not from changing it.
 
 ## 1. Run under PyPy (~13–17x interpretation; ~2x the live viewer)
 
-The core never imports anything outside the stdlib, so every path — oracle
-runs, hook verification, demo replay, the test suites, **and the live
-viewer** — runs unchanged under [PyPy](https://pypy.org). Measured (PyPy 3.11
+The interpreter's per-instruction path is scalar stdlib code (numpy — a core
+dependency for bulk pixel/array work — installs fine under PyPy and stays OFF
+that hot path), so every path — oracle runs, hook verification, demo replay,
+the test suites, **and the live viewer** — runs unchanged under
+[PyPy](https://pypy.org). Measured (PyPy 3.11
 v7.3.20 vs CPython 3.11, Windows, 20M-instruction steady state):
 
 | Workload | CPython | PyPy | speedup |

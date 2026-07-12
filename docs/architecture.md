@@ -10,7 +10,7 @@ native source port and the VM is demoted to an offline proof harness.
 
 ```text
 dos_re/       the reusable, game-agnostic core: VM + verification engines.
-              Stdlib-only.  Knows NOTHING about any specific game's addresses,
+              Stdlib + numpy.  Knows NOTHING about any specific game's addresses,
               filenames, video layout, or data formats.  Enforced by tools/lint.py.
 
 <your game>/  the per-game adapter you create at your porting repo's root,
@@ -146,7 +146,10 @@ keeps each layer honest.
 
 ## Third-party code and dependencies
 
-The `dos_re` core is stdlib-only — this is enforced by `tools/lint.py`. Optional
-extras (`pyproject.toml`): `numpy`/`pygame` for interactive viewers,
-`cffi` to build the vendored `pynuked_opl3` backend, `pytest` for the test suite.
+The `dos_re` core is stdlib + numpy — numpy is the one first-class third-party
+dependency (bulk pixel/array work in proof engines, renderers, digests; keep the
+interpreter's per-instruction scalar path numpy-free — AGENTS.md has the measured
+why). `tools/lint.py` enforces the boundary. Optional extras (`pyproject.toml`):
+`pygame` for interactive viewers, `cffi` to build the vendored `pynuked_opl3`
+backend, `pytest` for the test suite.
 `pynuked_opl3` must remain independent of `dos_re` and of any game.

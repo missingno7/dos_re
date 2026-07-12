@@ -4,10 +4,13 @@
 Two checks:
 
 1. Every Python file parses (syntax).
-2. The framework core stays game-agnostic and dependency-free: ``dos_re/``
-   may import only the Python stdlib and other ``dos_re`` modules.  Anything
-   that knows a specific game's addresses, filenames, or formats belongs in a
-   game adapter built *on top of* this repo, never inside ``dos_re/``.
+2. The framework core stays game-agnostic and lean on dependencies: ``dos_re/``
+   may import the Python stdlib, other ``dos_re`` modules, and numpy (the one
+   first-class third-party dependency — use it wherever bulk array/pixel work
+   makes sense, but keep the interpreter's per-instruction scalar path plain
+   ints/bytearray; see AGENTS.md for the measured why). Anything that knows a
+   specific game's addresses, filenames, or formats belongs in a game adapter
+   built *on top of* this repo, never inside ``dos_re/``.
 
 Game adapters that vendor this framework should extend PACKAGE_ROOTS with
 their own package and add a rule that ``dos_re`` does not import it (see the
@@ -23,18 +26,20 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_ROOTS = (ROOT / "dos_re", ROOT / "tools", ROOT / "examples", ROOT / "tests")
 
 # Modules the framework core is allowed to import besides the stdlib.
-CORE_ALLOWED_PREFIXES = ("dos_re",)
+# numpy is first-class: allowed anywhere in the package (pyproject dependencies) — used where bulk
+# array/pixel work wins. Judgment, not lint, keeps it off the interpreter's per-instruction path.
+CORE_ALLOWED_PREFIXES = ("dos_re", "numpy")
 
 # Optional third-party backends the *non-core* layers may use.
 KNOWN_OPTIONAL = ("pynuked_opl3", "numpy", "pygame", "pytest", "cffi")
 
 # The FRONTEND RING: the viewer-facing modules inside the package that may use
-# the optional viewer dependencies (numpy + pygame + the OPL backend).
-# ``import dos_re`` itself must never pull them in — player.py keeps its
-# imports lazy; display.py and audio_sink.py are only imported by player.py
-# when a window actually opens.
+# the optional VIEWER dependencies (pygame + the OPL backend — the `viewer`/`adlib`
+# extras, not installed by default). ``import dos_re`` itself must never pull them
+# in — player.py keeps its imports lazy; display.py and audio_sink.py are only
+# imported by player.py when a window actually opens.
 FRONTEND_RING = {"player.py", "display.py", "audio_sink.py", "overlay_menu.py"}
-FRONTEND_ALLOWED = ("numpy", "pygame", "pynuked_opl3")
+FRONTEND_ALLOWED = ("pygame", "pynuked_opl3")
 
 
 def _stdlib_names() -> set[str]:
@@ -77,8 +82,8 @@ def main() -> int:
                 if path.name in FRONTEND_RING and top in FRONTEND_ALLOWED:
                     continue
                 errors.append(
-                    f"{path.relative_to(ROOT)}:{node.lineno}: dos_re core must stay "
-                    f"stdlib-only and game-agnostic; imports {name!r}"
+                    f"{path.relative_to(ROOT)}:{node.lineno}: dos_re core must stay game-agnostic and lean "
+                    f"(stdlib + numpy; pygame/OPL only in the frontend ring); imports {name!r}"
                 )
     if errors:
         print("lint failed:")

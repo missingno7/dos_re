@@ -10,8 +10,10 @@ readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "missingno7" }]
 requires-python = ">=3.11"
-# The framework core is deliberately stdlib-only.
-dependencies = []
+# numpy is a first-class dependency — used wherever bulk array/pixel work makes sense (proof engines,
+# renderers, digests). The one measured exception is the interpreter's per-instruction scalar path, which
+# stays plain ints/bytearray (numpy is slower there on CPython and poisons the PyPy JIT — AGENTS.md).
+dependencies = ["numpy>=1.23"]
 keywords = ["dos", "reverse-engineering", "emulator", "8086", "source-port", "oracle"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -30,7 +32,6 @@ pythonpath = ["."]
 
 [project.optional-dependencies]
 viewer = [
-    "numpy>=1.23",
     "pygame>=2.5",
 ]
 test = [

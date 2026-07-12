@@ -1,7 +1,7 @@
 """Unit tests for the generic front-end timeline core (dos_re.frontend_timeline).
 
-Stdlib-only: dos_re core carries no numpy dependency (the CI env has none), so these tests exercise ``rgb_sha``
-with plain ``bytes`` and a tiny ``.tobytes()`` stand-in rather than importing numpy."""
+``rgb_sha`` is duck-typed (ndarray ``.tobytes()`` or bytes-like), so these tests exercise both branches with
+plain ``bytes`` and a tiny ``.tobytes()`` stand-in — no numpy needed for what is being proven here."""
 from __future__ import annotations
 
 import hashlib

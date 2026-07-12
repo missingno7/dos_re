@@ -33,8 +33,8 @@ def rgb_sha(rgb) -> str:
     """The canonical per-frame pixel digest: sha1 of the C-contiguous RGB array (or "" for a blank/None frame).
 
     Both sides MUST digest the same way for the pixel diff to mean anything — always go through this helper.
-    Stdlib-only: ``tobytes()`` yields C-order bytes (like ``np.ascontiguousarray``) for a numpy array; bytes-like
-    inputs are hashed directly. dos_re core stays stdlib-only (no numpy import)."""
+    Duck-typed on purpose: ``tobytes()`` yields C-order bytes for a numpy array; bytes-like inputs are hashed
+    directly — so both a rendered ndarray and a raw framebuffer slice digest identically."""
     if rgb is None:
         return ""
     buf = rgb.tobytes() if hasattr(rgb, "tobytes") else bytes(rgb)
