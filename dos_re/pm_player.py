@@ -36,6 +36,11 @@ from pathlib import Path
 from .dos4gw import DosInputExhausted, render_pm_frame
 from .frame_verify import write_rgb_png
 
+try:                       # numpy is a first-class dep; audio resampling needs it
+    import numpy as _np
+except ImportError:        # pragma: no cover
+    _np = None
+
 # pygame key name -> set-1 scancode (make code; break = make | 0x80).
 # Extended keys (arrows...) are (0xE0, code) tuples.
 SCANCODES = {
@@ -72,59 +77,72 @@ def send_key(dos, name: str, make: bool) -> None:
 
 class _PcmSink:
     """Sound Blaster PCM consumer: drains ``sb.pcm_out`` (8-bit unsigned mono
-    at the DSP-programmed rate) and feeds a pygame mixer channel gap-free.
+    at the DSP-programmed rate), RESAMPLES to a standard 22050 Hz / 16-bit
+    signed stream, and feeds a pygame mixer channel gap-free.
 
-    The game streams short single-cycle DMA blocks (~80 ms); the viewer drains
-    them every present.  Two problems this solves: a pygame Channel holds only
-    ONE queued sound, so per-present submits would drop audio; and the blocks
-    arrive with frame-granularity JITTER, so playing each as it lands clicks
-    when one is late.  So this ACCUMULATES the stream behind a cushion, then
-    feeds fixed-size chunks into whatever play/queue slot is free (current + 1
-    queued = lookahead) — never dropping, decoupled from arrival jitter.  The
-    mixer re-initializes if the game reprograms the sample rate."""
+    Resampling to a standard rate + 16-bit is what makes it portable: the raw
+    8-bit-unsigned-at-an-odd-rate (e.g. 7936 Hz) mixer format is silently
+    unsupported by some SDL backends (no audio under pypy's build).  Playback
+    problems this also solves: a pygame Channel holds only ONE queued sound so
+    per-present submits would drop audio, and the DMA blocks arrive with
+    frame-granularity jitter — so it buffers a cushion, then feeds fixed chunks
+    into whatever play/queue slot is free (never dropping), decoupled from
+    arrival jitter."""
 
-    CHUNK = 512                    # samples per submitted Sound (~65 ms @ 7936)
-    CUSHION = 2048                 # samples buffered before playback starts (~260 ms)
+    OUT_RATE = 22050               # standard rate every SDL backend supports
+    CHUNK = 1024                   # output samples per Sound (~46 ms)
+    CUSHION = 4096                 # output samples buffered before start (~186 ms)
 
     def __init__(self, sb):
         self.sb = sb
         self.channel = None
-        self.rate = 0
-        self.buf = bytearray()
+        self.inbuf = bytearray()   # raw 8-bit unsigned input
+        self.out = bytearray()     # resampled 16-bit signed output
+        self.pos = 0.0             # fractional read position into inbuf (phase-continuous)
         self.playing = False
 
     def pump(self):
         import pygame
         sb = self.sb
-        if sb is None or not sb.sample_rate:
+        if sb is None or not sb.sample_rate or _np is None:
             return
         if sb.pcm_out:
-            self.buf += sb.pcm_out
+            self.inbuf += sb.pcm_out
             del sb.pcm_out[:]
-        if self.channel is None or sb.sample_rate != self.rate:
-            self.rate = sb.sample_rate
+        if self.channel is None:
             pygame.mixer.quit()
-            pygame.mixer.init(frequency=self.rate, size=8, channels=1, buffer=2048)
+            pygame.mixer.init(frequency=self.OUT_RATE, size=-16, channels=1, buffer=1024)
             self.channel = pygame.mixer.Channel(0)
             self.playing = False
+        # Resample the available input (8-bit unsigned @ sb.sample_rate) to the
+        # output rate, 16-bit signed, keeping the read phase continuous.
+        if len(self.inbuf) > 1:
+            ratio = sb.sample_rate / self.OUT_RATE
+            inb = _np.frombuffer(bytes(self.inbuf), dtype=_np.uint8).astype(_np.float32) - 128.0
+            n_out = int((len(inb) - 1 - self.pos) / ratio)
+            if n_out > 0:
+                idx = self.pos + _np.arange(n_out) * ratio
+                samp = _np.interp(idx, _np.arange(len(inb)), inb)
+                self.out += (samp * 256.0).clip(-32768, 32767).astype("<i2").tobytes()
+                new_pos = self.pos + n_out * ratio
+                consumed = int(new_pos)
+                self.pos = new_pos - consumed
+                del self.inbuf[:consumed]
         if not self.playing:
-            if len(self.buf) < self.CUSHION:
+            if len(self.out) < self.CUSHION * 2:
                 return             # build a cushion so jitter can't underrun
             self.playing = True
-        # Feed fixed chunks into free slots (play if idle, else fill the one
-        # queue slot); keep the remainder buffered.
-        while len(self.buf) >= self.CHUNK:
+        cb = self.CHUNK * 2        # bytes per chunk (16-bit)
+        while len(self.out) >= cb:
             if not self.channel.get_busy():
-                self.channel.play(pygame.mixer.Sound(buffer=bytes(self.buf[:self.CHUNK])))
+                self.channel.play(pygame.mixer.Sound(buffer=bytes(self.out[:cb])))
             elif self.channel.get_queue() is None:
-                self.channel.queue(pygame.mixer.Sound(buffer=bytes(self.buf[:self.CHUNK])))
+                self.channel.queue(pygame.mixer.Sound(buffer=bytes(self.out[:cb])))
             else:
                 break              # both slots full — hold the rest
-            del self.buf[:self.CHUNK]
-        # Underran (fell behind) — re-cushion before resuming so it doesn't
-        # stutter chunk-by-chunk.
-        if self.playing and not self.channel.get_busy() and len(self.buf) < self.CHUNK:
-            self.playing = False
+            del self.out[:cb]
+        if self.playing and not self.channel.get_busy() and len(self.out) < cb:
+            self.playing = False   # re-cushion after an underrun
 
 
 def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
