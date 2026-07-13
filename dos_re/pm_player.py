@@ -74,18 +74,24 @@ class _PcmSink:
     """Sound Blaster PCM consumer: drains ``sb.pcm_out`` (8-bit unsigned mono
     at the DSP-programmed rate) and feeds a pygame mixer channel gap-free.
 
-    The game streams in short single-cycle DMA blocks; the viewer drains them
-    every present (~70/sec).  A pygame Channel holds only ONE queued sound, so
-    submitting a chunk every present drops audio (the "cut off").  Instead this
-    ACCUMULATES the stream and submits only when a play/queue slot is actually
-    free — never dropping, coalescing tiny blocks into steady chunks.  The
+    The game streams short single-cycle DMA blocks (~80 ms); the viewer drains
+    them every present.  Two problems this solves: a pygame Channel holds only
+    ONE queued sound, so per-present submits would drop audio; and the blocks
+    arrive with frame-granularity JITTER, so playing each as it lands clicks
+    when one is late.  So this ACCUMULATES the stream behind a cushion, then
+    feeds fixed-size chunks into whatever play/queue slot is free (current + 1
+    queued = lookahead) — never dropping, decoupled from arrival jitter.  The
     mixer re-initializes if the game reprograms the sample rate."""
+
+    CHUNK = 512                    # samples per submitted Sound (~65 ms @ 7936)
+    CUSHION = 2048                 # samples buffered before playback starts (~260 ms)
 
     def __init__(self, sb):
         self.sb = sb
         self.channel = None
         self.rate = 0
         self.buf = bytearray()
+        self.playing = False
 
     def pump(self):
         import pygame
@@ -98,18 +104,27 @@ class _PcmSink:
         if self.channel is None or sb.sample_rate != self.rate:
             self.rate = sb.sample_rate
             pygame.mixer.quit()
-            pygame.mixer.init(frequency=self.rate, size=8, channels=1, buffer=1024)
+            pygame.mixer.init(frequency=self.rate, size=8, channels=1, buffer=2048)
             self.channel = pygame.mixer.Channel(0)
-        if not self.buf:
-            return
-        # Submit only into a free slot (play if idle, else queue if the single
-        # queue slot is empty); otherwise keep the buffer for the next present.
-        if not self.channel.get_busy():
-            self.channel.play(pygame.mixer.Sound(buffer=bytes(self.buf)))
-            self.buf = bytearray()
-        elif self.channel.get_queue() is None:
-            self.channel.queue(pygame.mixer.Sound(buffer=bytes(self.buf)))
-            self.buf = bytearray()
+            self.playing = False
+        if not self.playing:
+            if len(self.buf) < self.CUSHION:
+                return             # build a cushion so jitter can't underrun
+            self.playing = True
+        # Feed fixed chunks into free slots (play if idle, else fill the one
+        # queue slot); keep the remainder buffered.
+        while len(self.buf) >= self.CHUNK:
+            if not self.channel.get_busy():
+                self.channel.play(pygame.mixer.Sound(buffer=bytes(self.buf[:self.CHUNK])))
+            elif self.channel.get_queue() is None:
+                self.channel.queue(pygame.mixer.Sound(buffer=bytes(self.buf[:self.CHUNK])))
+            else:
+                break              # both slots full — hold the rest
+            del self.buf[:self.CHUNK]
+        # Underran (fell behind) — re-cushion before resuming so it doesn't
+        # stutter chunk-by-chunk.
+        if self.playing and not self.channel.get_busy() and len(self.buf) < self.CHUNK:
+            self.playing = False
 
 
 def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
@@ -198,13 +213,41 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
             print(f"program exited (code {dos.exit_code})")
             running = False
 
+    def service_audio():
+        """Deliver a due SB block-complete IRQ while the frame is parked.
+
+        The game refills its single-cycle DMA in the IRQ handler; with the CPU
+        idle between presents, that IRQ would wait up to a present period and
+        the audio would gap/click.  Running here delivers the ISR (the frame
+        clock is parked, so the pending-IRQ poll fires the audio ISR and IRETs
+        back to the parked frame — no game advance) and refills promptly."""
+        nonlocal waiting_console, running
+        sb = dos.sound_blaster
+        if not paced or waiting_console or sb is None or sb.clock is None:
+            return False
+        if not (sb._block_pending and sb.clock() >= sb._block_due):
+            return False
+        try:
+            cpu.run(500_000)
+        except FramePaced:
+            pass
+        except DosInputExhausted:
+            waiting_console = True
+        except Exception as e:  # noqa: BLE001
+            print(f"STOP at eip=0x{cpu.eip:X}: {type(e).__name__}: {e}")
+            running = False
+        return True
+
     waiting_console = False
     next_present = time.monotonic()
     running = True
     while running:
         now = time.monotonic()
         if now < next_present:
-            time.sleep(min(next_present - now, 0.003))
+            if service_audio():
+                pcm.pump()
+            else:
+                time.sleep(min(next_present - now, 0.002))
             continue
         next_present = max(next_present + period, now)
         advance()                    # one bounded step per present
