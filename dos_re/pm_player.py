@@ -90,8 +90,9 @@ class _PcmSink:
     arrival jitter."""
 
     OUT_RATE = 22050               # standard rate every SDL backend supports
-    CHUNK = 1024                   # output samples per Sound (~46 ms)
-    CUSHION = 4096                 # output samples buffered before start (~186 ms)
+    CHUNK = 512                    # output samples per Sound (~23 ms)
+    CUSHION = 1536                 # output samples buffered before start (~70 ms)
+    MAX_LAG = 6000                 # bound buffered latency (~270 ms); drop oldest beyond
 
     def __init__(self, sb):
         self.sb = sb
@@ -101,33 +102,59 @@ class _PcmSink:
         self.pos = 0.0             # fractional read position into inbuf (phase-continuous)
         self.playing = False
 
+    def _resample(self, in_rate):
+        """Append inbuf (8-bit unsigned @ in_rate) to out (16-bit signed @
+        OUT_RATE), phase-continuous.  numpy fast path, scalar fallback so it
+        works where numpy is absent (e.g. a bare pypy)."""
+        ratio = in_rate / self.OUT_RATE
+        if _np is not None:
+            inb = _np.frombuffer(bytes(self.inbuf), dtype=_np.uint8).astype(_np.float32) - 128.0
+            n = int((len(inb) - 1 - self.pos) / ratio)
+            if n <= 0:
+                return
+            idx = self.pos + _np.arange(n) * ratio
+            samp = _np.interp(idx, _np.arange(len(inb)), inb)
+            self.out += (samp * 256.0).clip(-32768, 32767).astype("<i2").tobytes()
+            new_pos = self.pos + n * ratio
+        else:
+            import struct
+            inb = self.inbuf
+            pos = self.pos
+            ob = bytearray()
+            end = len(inb) - 1
+            while pos < end:
+                i = int(pos)
+                frac = pos - i
+                s = (inb[i] * (1.0 - frac) + inb[i + 1] * frac) - 128.0
+                val = int(s * 256.0)
+                ob += struct.pack("<h", -32768 if val < -32768 else 32767 if val > 32767 else val)
+                pos += ratio
+            self.out += ob
+            new_pos = pos
+        consumed = int(new_pos)
+        self.pos = new_pos - consumed
+        del self.inbuf[:consumed]
+
     def pump(self):
         import pygame
         sb = self.sb
-        if sb is None or not sb.sample_rate or _np is None:
+        if sb is None or not sb.sample_rate:
             return
         if sb.pcm_out:
             self.inbuf += sb.pcm_out
             del sb.pcm_out[:]
         if self.channel is None:
             pygame.mixer.quit()
-            pygame.mixer.init(frequency=self.OUT_RATE, size=-16, channels=1, buffer=1024)
+            pygame.mixer.init(frequency=self.OUT_RATE, size=-16, channels=1, buffer=512)
             self.channel = pygame.mixer.Channel(0)
             self.playing = False
-        # Resample the available input (8-bit unsigned @ sb.sample_rate) to the
-        # output rate, 16-bit signed, keeping the read phase continuous.
         if len(self.inbuf) > 1:
-            ratio = sb.sample_rate / self.OUT_RATE
-            inb = _np.frombuffer(bytes(self.inbuf), dtype=_np.uint8).astype(_np.float32) - 128.0
-            n_out = int((len(inb) - 1 - self.pos) / ratio)
-            if n_out > 0:
-                idx = self.pos + _np.arange(n_out) * ratio
-                samp = _np.interp(idx, _np.arange(len(inb)), inb)
-                self.out += (samp * 256.0).clip(-32768, 32767).astype("<i2").tobytes()
-                new_pos = self.pos + n_out * ratio
-                consumed = int(new_pos)
-                self.pos = new_pos - consumed
-                del self.inbuf[:consumed]
+            self._resample(sb.sample_rate)
+        # Bound latency: if the output has grown too far ahead (the game
+        # produced faster than real time), drop the oldest — keeps audio in
+        # sync instead of lagging further and further behind the action.
+        if len(self.out) > self.MAX_LAG * 2:
+            del self.out[:len(self.out) - self.MAX_LAG * 2]
         if not self.playing:
             if len(self.out) < self.CUSHION * 2:
                 return             # build a cushion so jitter can't underrun
