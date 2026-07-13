@@ -71,30 +71,45 @@ def send_key(dos, name: str, make: bool) -> None:
 
 
 class _PcmSink:
-    """Minimal Sound Blaster PCM consumer: drains ``sb.pcm_out`` (8-bit
-    unsigned mono at the DSP-programmed rate) into a pygame mixer channel.
-    Lazy: the mixer initializes at the first chunk, at the stream's rate."""
+    """Sound Blaster PCM consumer: drains ``sb.pcm_out`` (8-bit unsigned mono
+    at the DSP-programmed rate) and feeds a pygame mixer channel gap-free.
+
+    The game streams in short single-cycle DMA blocks; the viewer drains them
+    every present (~70/sec).  A pygame Channel holds only ONE queued sound, so
+    submitting a chunk every present drops audio (the "cut off").  Instead this
+    ACCUMULATES the stream and submits only when a play/queue slot is actually
+    free — never dropping, coalescing tiny blocks into steady chunks.  The
+    mixer re-initializes if the game reprograms the sample rate."""
 
     def __init__(self, sb):
         self.sb = sb
         self.channel = None
+        self.rate = 0
+        self.buf = bytearray()
 
     def pump(self):
         import pygame
         sb = self.sb
-        if sb is None or not sb.pcm_out or not sb.sample_rate:
+        if sb is None or not sb.sample_rate:
             return
-        data = bytes(sb.pcm_out)
-        del sb.pcm_out[:]
-        if self.channel is None:
+        if sb.pcm_out:
+            self.buf += sb.pcm_out
+            del sb.pcm_out[:]
+        if self.channel is None or sb.sample_rate != self.rate:
+            self.rate = sb.sample_rate
             pygame.mixer.quit()
-            pygame.mixer.init(frequency=sb.sample_rate, size=8, channels=1, buffer=512)
+            pygame.mixer.init(frequency=self.rate, size=8, channels=1, buffer=1024)
             self.channel = pygame.mixer.Channel(0)
-        snd = pygame.mixer.Sound(buffer=data)
-        if self.channel.get_busy():
-            self.channel.queue(snd)
-        else:
-            self.channel.play(snd)
+        if not self.buf:
+            return
+        # Submit only into a free slot (play if idle, else queue if the single
+        # queue slot is empty); otherwise keep the buffer for the next present.
+        if not self.channel.get_busy():
+            self.channel.play(pygame.mixer.Sound(buffer=bytes(self.buf)))
+            self.buf = bytearray()
+        elif self.channel.get_queue() is None:
+            self.channel.queue(pygame.mixer.Sound(buffer=bytes(self.buf)))
+            self.buf = bytearray()
 
 
 def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
