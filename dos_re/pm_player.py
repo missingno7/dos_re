@@ -13,10 +13,13 @@ Audio: the Sound Blaster PCM plays through a low-latency callback ring buffer
 (``sounddevice``/PortAudio) when available, falling back to a chunked pygame
 mixer sink.  ``pip install sounddevice`` for smooth playback.
 
-Demos are keyed to the game's own frame counter (an adapter-supplied
-``frame_tick_addr`` hit once per frame — see ``pm_input_demo``), so a demo
-recorded live replays identically headless: the perfect way to hand a
-captured game state back for oracle-verified recovery.
+A demo is a self-contained BUNDLE directory: F11 writes a start snapshot plus
+an input manifest keyed to the game's own frame counter (an adapter-supplied
+``frame_tick_addr`` hit once per frame — see ``pm_input_demo``).  ``--play-demo
+<dir>`` boots from that snapshot and re-injects the input at the same frame
+boundaries, so a demo recorded live replays identically headless — the perfect
+way to hand a captured game state back for oracle-verified recovery.  The
+snapshot is an internal detail: the user only ever names the bundle directory.
 
 FRONTEND RING module: pygame imports stay lazy so headless use (and
 ``import dos_re``) never require it.
@@ -296,7 +299,8 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                frame_tick_addr: int | None = None,
                record_demo: str | None = None) -> int:
     import pygame
-    from .pm_input_demo import PMInputDemo, FrameClock, FramePaced
+    from .pm_input_demo import (PMInputDemo, FrameClock, FramePaced,
+                                SNAPSHOT_NAME)
 
     pygame.init()
     # A fixed 4:3 canvas: every VGA geometry this runtime produces (320x200
@@ -314,7 +318,7 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     # Demo recording (F11): a FrameClock keyed to the game's per-frame entry
     # tags input with the frame index, so the demo replays deterministically.
     mouse_norm = [0.5, 0.5]
-    rec = {"demo": None, "start": 0, "last_mouse": None}
+    rec = {"demo": None, "start": 0, "last_mouse": None, "dir": None}
 
     def on_frame(frame):
         if rec["demo"] is not None:
@@ -439,19 +443,30 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                     if clock is None:
                         print("demo recording needs a frame_tick_addr (adapter)")
                     elif rec["demo"] is None:
-                        rec["demo"] = PMInputDemo(frame_tick_addr)
-                        rec["start"] = clock.frame
-                        rec["last_mouse"] = None
-                        print("demo recording STARTED (F11 again to stop)")
+                        # Start a demo BUNDLE: a directory holding the start
+                        # snapshot the replay boots from + the input manifest
+                        # keyed to it.  The snapshot is what makes a mid-game
+                        # demo replay deterministically.
+                        from .pm_snapshot import save_pm_snapshot
+                        demo = PMInputDemo(frame_tick_addr)
+                        bundle = (Path(record_demo) if record_demo else
+                                  artifacts / "demos" / f"demo_{int(now * 1000)}")
+                        bundle.mkdir(parents=True, exist_ok=True)
+                        save_pm_snapshot(rt, bundle / SNAPSHOT_NAME)
+                        demo.snapshot = SNAPSHOT_NAME
+                        demo.write_manifest(bundle, status="recording")
+                        rec.update(demo=demo, dir=bundle, start=clock.frame,
+                                   last_mouse=None)
+                        print(f"demo recording STARTED -> {bundle} "
+                              f"(snapshot + input; F11 again to stop)")
                     else:
                         demo = rec["demo"]
                         demo.total_frames = clock.frame - rec["start"]
-                        path = record_demo or (artifacts / "demos" /
-                                               f"demo_{int(now * 1000)}.json")
-                        demo.save(path)
+                        demo.write_manifest(rec["dir"], status="complete")
+                        print(f"demo recording STOPPED -> {rec['dir']} "
+                              f"({demo.total_frames} frames, "
+                              f"{len(demo.events)} events)")
                         rec["demo"] = None
-                        print(f"demo recording STOPPED -> {path} "
-                              f"({demo.total_frames} frames, {len(demo.events)} events)")
                     continue
                 record_key(make, name)
                 send_key(dos, name, make)
@@ -500,8 +515,11 @@ def run_replay(rt, demo_path, *, boot_keys=(), extra_frames: int = 30,
     if demo.frame_tick_addr is None:
         print("demo has no frame_tick_addr; cannot replay")
         return 1
-    for k in boot_keys:
-        rt.dos.key_queue.append(k)
+    # A bundle with a start snapshot already holds the mid-game state, so the
+    # title-screen boot keys apply only to a cold-start (snapshot-less) replay.
+    if demo.snapshot is None:
+        for k in boot_keys:
+            rt.dos.key_queue.append(k)
     dos = rt.dos
     by_frame = demo.by_frame()
     end_frame = demo.total_frames + extra_frames
@@ -597,22 +615,38 @@ def main(argv=None, *, default_exe: str | None = None, create_runtime=None,
     ap.add_argument("--no-sound", action="store_true",
                     help="do not attach the emulated Sound Blaster")
     ap.add_argument("--record-demo", default="",
-                    help="viewer: default path for an F11 recording")
+                    help="viewer: directory for the next F11 recording "
+                         "(default: artifacts/demos/demo_<stamp>/)")
     ap.add_argument("--play-demo", default="",
-                    help="replay an input demo deterministically (headless unless --show)")
+                    help="replay a demo bundle DIRECTORY deterministically "
+                         "(boots from the bundle's own snapshot; "
+                         "headless unless --show)")
     ap.add_argument("--save-snapshot", default="",
                     help="replay: save a snapshot of the final state here")
     ap.add_argument("--show", action="store_true",
                     help="replay: show the final frame in a window")
     args = ap.parse_args(argv)
 
+    from .pm_input_demo import PMInputDemo
+
     build = create_runtime or create_pm_runtime
     headless_clock = args.headless or (args.play_demo and not args.show)
-    if args.snapshot:
+
+    # Resolve the starting runtime.  Priority: an explicit --snapshot, then a
+    # demo bundle's OWN start snapshot (so a mid-game replay is deterministic),
+    # else a fresh boot.  A demo bundle is self-contained — the user points
+    # --play-demo at the directory and never has to supply the snapshot.
+    snapshot_src = args.snapshot or None
+    if args.play_demo and not snapshot_src:
+        bundle_snap = PMInputDemo.snapshot_dir(args.play_demo)
+        if bundle_snap is not None:
+            snapshot_src = str(bundle_snap)
+
+    if snapshot_src:
         # Resume the frozen state, then re-install the adapter's recovered
         # hooks (load_pm_snapshot rebuilds a bare runtime; without this the
         # resumed game runs pure-interpreted — ~10x slower).
-        rt = load_pm_snapshot(args.exe, args.snapshot)
+        rt = load_pm_snapshot(args.exe, snapshot_src)
         if install_hooks is not None:
             install_hooks(rt.cpu)
     else:

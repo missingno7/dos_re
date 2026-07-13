@@ -19,14 +19,26 @@ from pathlib import Path
 
 from .lift.runtime32 import interp_one32
 
+# A PM demo is a self-contained BUNDLE directory (not a lone file), exactly
+# like the real-mode player's demos: a start snapshot the replay boots from,
+# plus the input manifest keyed to it.  This makes a demo deterministic and
+# game-agnostic — the same "record here, replay from here" flow for every
+# title, with snapshots/demos an internal detail the user never has to wire up.
+DEMO_VERSION = 1
+INPUT_JSON = "input_demo.json"        # the manifest inside the bundle
+SNAPSHOT_NAME = "snapshot"            # the start-snapshot subdir inside the bundle
+
 
 class PMInputDemo:
-    """A recorded input timeline: events tagged with a 0-based frame index."""
+    """A recorded input timeline: events tagged with a 0-based frame index,
+    plus the name of the start snapshot the replay boots from."""
 
     def __init__(self, frame_tick_addr: int | None = None):
         self.frame_tick_addr = frame_tick_addr
         self.events: list = []        # [frame, kind, payload]
         self.total_frames = 0
+        self.snapshot: str | None = None   # start-snapshot subdir name (None = cold start)
+        self.metadata: dict = {}
 
     def add(self, frame: int, kind: str, payload) -> None:
         self.events.append([int(frame), kind, payload])
@@ -37,23 +49,61 @@ class PMInputDemo:
             m.setdefault(frame, []).append((kind, payload))
         return m
 
+    def _manifest(self, status: str) -> dict:
+        return {
+            "version": DEMO_VERSION,
+            "status": status,
+            "frame_tick_addr": self.frame_tick_addr,
+            "snapshot": self.snapshot,
+            "total_frames": self.total_frames,
+            "metadata": self.metadata,
+            "events": self.events,
+        }
+
+    def write_manifest(self, bundle_dir: str | Path, *, status: str) -> Path:
+        """Write ``input_demo.json`` into the bundle directory."""
+        d = Path(bundle_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / INPUT_JSON
+        p.write_text(json.dumps(self._manifest(status), indent=2))
+        return p
+
     def save(self, path: str | Path) -> Path:
+        """Back-compat: write just the manifest to an explicit path."""
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({
-            "frame_tick_addr": self.frame_tick_addr,
-            "total_frames": self.total_frames,
-            "events": self.events,
-        }))
+        p.write_text(json.dumps(self._manifest("complete"), indent=2))
         return p
 
     @classmethod
     def load(cls, path: str | Path) -> "PMInputDemo":
-        d = json.loads(Path(path).read_text())
+        """Load a demo from a bundle directory (reads ``input_demo.json``) or,
+        for back-compat, directly from a manifest JSON file."""
+        p = Path(path)
+        manifest = p / INPUT_JSON if p.is_dir() else p
+        d = json.loads(manifest.read_text())
         o = cls(d.get("frame_tick_addr"))
         o.events = d["events"]
         o.total_frames = d.get("total_frames", 0)
+        o.snapshot = d.get("snapshot")
+        o.metadata = d.get("metadata", {})
         return o
+
+    @classmethod
+    def snapshot_dir(cls, path: str | Path) -> Path | None:
+        """The start-snapshot directory inside a demo bundle, or None if the
+        demo is a cold-start (no snapshot) or a legacy lone-JSON demo."""
+        p = Path(path)
+        if not p.is_dir():
+            return None
+        manifest = p / INPUT_JSON
+        if not manifest.exists():
+            return None
+        name = json.loads(manifest.read_text()).get("snapshot")
+        if not name:
+            return None
+        snap = p / name
+        return snap if snap.exists() else None
 
 
 class FramePaced(Exception):
