@@ -563,13 +563,6 @@ def run_replay(rt, demo_path, *, boot_keys=(), extra_frames: int = 30,
     end_frame = demo.total_frames + extra_frames
     done = {"flag": False}
 
-    win = surf = None
-    if show:
-        import pygame
-        pygame.init()
-        win = pygame.display.set_mode((320 * scale, 240 * scale))
-        pygame.display.set_caption(title)
-
     def on_frame(frame):
         for kind, payload in by_frame.get(frame, ()):
             if kind == "key":
@@ -580,36 +573,82 @@ def run_replay(rt, demo_path, *, boot_keys=(), extra_frames: int = 30,
         if frame >= end_frame:
             done["flag"] = True
 
-    FrameClock(rt.cpu, demo.frame_tick_addr, on_frame)
-    steps = 0
-    try:
-        while not done["flag"] and steps < max_steps and not rt.cpu.halted:
-            rt.cpu.run(50_000)
-            steps += 50_000
-    except Exception as e:  # noqa: BLE001
-        print(f"STOP at eip=0x{rt.cpu.eip:X}: {type(e).__name__}: {e}")
-    print(f"replayed to frame ~{demo.total_frames}+{extra_frames}; "
-          f"{rt.cpu.instruction_count} instructions")
-    if snapshot_dir:
-        from .pm_snapshot import save_pm_snapshot
-        save_pm_snapshot(rt, snapshot_dir)
-        print(f"snapshot -> {snapshot_dir}")
-    if png:
-        rgb, w, h = render_pm_frame(dos)
-        write_rgb_png(Path(png), rgb, width=w, height=h)
-        print(f"wrote {png}")
-    if show:
-        import pygame
+    clock = FrameClock(rt.cpu, demo.frame_tick_addr, on_frame)
+
+    def _finish():
+        if snapshot_dir:
+            from .pm_snapshot import save_pm_snapshot
+            save_pm_snapshot(rt, snapshot_dir)
+            print(f"snapshot -> {snapshot_dir}")
+        if png:
+            rgb, w, h = render_pm_frame(dos)
+            write_rgb_png(Path(png), rgb, width=w, height=h)
+            print(f"wrote {png}")
+
+    if not show:
+        # Headless deterministic replay (verification): run flat-out, no window.
+        steps = 0
+        try:
+            while not done["flag"] and steps < max_steps and not rt.cpu.halted:
+                rt.cpu.run(50_000)
+                steps += 50_000
+        except Exception as e:  # noqa: BLE001
+            print(f"STOP at eip=0x{rt.cpu.eip:X}: {type(e).__name__}: {e}")
+        print(f"replayed to frame ~{demo.total_frames}+{extra_frames}; "
+              f"{rt.cpu.instruction_count} instructions "
+              f"(no window — pass --show to WATCH the replay)")
+        _finish()
+        return 0
+
+    # Live, paced playback so a recorded demo can be WATCHED (verify by eye):
+    # one game frame per iteration, rendered and throttled to 70 fps.  Esc or
+    # closing the window quits early; the final frame stays up until dismissed.
+    import pygame
+    from .pm_input_demo import FramePaced
+    pygame.init()
+    win = pygame.display.set_mode((320 * scale, 240 * scale))
+    pygame.display.set_caption(title)
+    pygame.mouse.set_visible(False)          # the game draws its own cursor
+    pcm = _make_audio_sink(rt.dos.sound_blaster)
+    rt.dos.time_source = None                # frame clock paces; deterministic retrace
+    period = 1 / 70.0
+
+    def _present():
         rgb, w, h = render_pm_frame(dos)
         img = pygame.image.frombuffer(rgb, (w, h), "RGB").convert(win)
         pygame.transform.scale(img, win.get_size(), win)
         pygame.display.flip()
-        waiting = True
-        while waiting:
-            for ev in pygame.event.get():
-                if ev.type in (pygame.QUIT, pygame.KEYDOWN):
-                    waiting = False
-        pygame.quit()
+
+    running = True
+    while running and not done["flag"] and not rt.cpu.halted:
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT or (
+                    ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE):
+                running = False
+        t0 = time.monotonic()
+        clock.stop_at = clock.frame + 1
+        try:
+            rt.cpu.run(4_000_000)
+        except FramePaced:
+            pass
+        except Exception as e:  # noqa: BLE001
+            print(f"STOP at eip=0x{rt.cpu.eip:X}: {type(e).__name__}: {e}")
+            break
+        if pcm is not None:
+            pcm.pump()
+        _present()
+        dt = time.monotonic() - t0
+        if dt < period:
+            time.sleep(period - dt)
+
+    print(f"replayed to frame {clock.frame}; {rt.cpu.instruction_count} instructions")
+    _finish()
+    _present()                               # hold the final frame until dismissed
+    while running:
+        for ev in pygame.event.get():
+            if ev.type in (pygame.QUIT, pygame.KEYDOWN):
+                running = False
+    pygame.quit()
     return 0
 
 

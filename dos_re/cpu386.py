@@ -395,6 +395,39 @@ class CPU386:
         self.r[ESP] = (self.r[ESP] + size) & 0xFFFFFFFF
         return v
 
+    def call_through(self, target: int, args=(), *, max_steps: int = 2_000_000) -> int:
+        """Execute a sub-routine through the interpreter and return, as if the
+        current instruction stream had ``call target`` with cdecl ``args``.
+
+        For recovered *composed* hooks that must delegate a not-yet-recovered
+        sub-call to the interpreter: push the args and a sentinel return
+        address, run until the callee's final ``ret`` pops the sentinel, then
+        clean up the args (cdecl).  Async IRQ delivery is suppressed for the
+        duration so the delegated call stays atomic — matching the composition
+        verifier's oracle.  Returns EAX.
+        """
+        SENTINEL = 0xFFFFFFF0            # not a valid code address in this image
+        saved_irq = self.pending_irq
+        self.pending_irq = None
+        try:
+            for a in reversed(tuple(args)):
+                self.push(a & 0xFFFFFFFF, 4)
+            self.push(SENTINEL, 4)
+            self.eip = target & 0xFFFFFFFF
+            steps = 0
+            while self.eip != SENTINEL:
+                self.step()
+                steps += 1
+                if steps > max_steps:
+                    raise RuntimeError(
+                        f"call_through(0x{target:X}) did not return after "
+                        f"{steps} steps (eip=0x{self.eip:X})")
+            if args:
+                self.r[ESP] = (self.r[ESP] + 4 * len(args)) & 0xFFFFFFFF
+            return self.r[EAX]
+        finally:
+            self.pending_irq = saved_irq
+
     # ---- run loop -----------------------------------------------------------
     def run(self, max_instructions: int = 1_000_000) -> None:
         for _ in range(max_instructions):
