@@ -9,6 +9,10 @@ pacing by wall-clock vsync (``dos.time_source`` drives the program's own
 3DAh retrace waits at ~70 Hz real time), F10 screenshot / F12 snapshot, F11
 demo record, ``--play-demo`` deterministic replay, and ``--snapshot`` resume.
 
+Audio: the Sound Blaster PCM plays through a low-latency callback ring buffer
+(``sounddevice``/PortAudio) when available, falling back to a chunked pygame
+mixer sink.  ``pip install sounddevice`` for smooth playback.
+
 Demos are keyed to the game's own frame counter (an adapter-supplied
 ``frame_tick_addr`` hit once per frame — see ``pm_input_demo``), so a demo
 recorded live replays identically headless: the perfect way to hand a
@@ -30,6 +34,7 @@ title), generalized to any PM runtime.
 from __future__ import annotations
 
 import argparse
+import threading as _threading
 import time
 from pathlib import Path
 
@@ -40,6 +45,19 @@ try:                       # numpy is a first-class dep; audio resampling needs 
     import numpy as _np
 except ImportError:        # pragma: no cover
     _np = None
+
+
+def _make_audio_sink(sb):
+    """The low-latency sounddevice sink when available (+ numpy); else the
+    pygame chunk sink."""
+    if sb is not None and _np is not None:
+        try:
+            import sounddevice  # noqa: F401
+            return _SoundDeviceSink(sb)
+        except Exception:  # noqa: BLE001 — no PortAudio device / not installed
+            pass
+    return _PcmSink(sb)
+
 
 # pygame key name -> set-1 scancode (make code; break = make | 0x80).
 # Extended keys (arrows...) are (0xE0, code) tuples.
@@ -73,6 +91,106 @@ def send_key(dos, name: str, make: bool) -> None:
         dos.press_scancode(sc[1] | (0x00 if make else 0x80))
     else:
         dos.press_scancode(sc | (0x00 if make else 0x80))
+
+
+class _SoundDeviceSink:
+    """Callback-based low-latency Sound Blaster playback via sounddevice.
+
+    A PortAudio callback drains a ring buffer on its OWN audio thread at
+    exactly the output rate, so playback is smooth and low-latency regardless
+    of the frame loop's pacing — unlike chunked pygame Sound/queue streaming
+    (which jittered/underran, the lag and pypy cut-off).  ``pump`` resamples
+    the SB's 8-bit PCM into the ring, phase-continuous; the callback pulls from
+    it, outputting silence on underrun and priming a small cushion at the
+    start.  numpy-only (both CPython and pypy have it); ``run_viewer`` falls
+    back to :class:`_PcmSink` if sounddevice is unavailable."""
+
+    OUT_RATE = 22050
+    RING = OUT_RATE                 # 1 s ring
+    CUSHION = 1764                  # samples buffered before draining (~80 ms)
+    MAX_FILL = 4410                 # cap buffered latency (~200 ms); drop oldest beyond
+
+    def __init__(self, sb):
+        import sounddevice as sd
+        self.sb = sb
+        self.ring = _np.zeros(self.RING, dtype=_np.int16)
+        self.w = 0
+        self.r = 0
+        self.primed = False
+        self.pos = 0.0              # resample phase into inbuf
+        self.inbuf = bytearray()
+        self._lock = _threading.Lock()
+        self.stream = sd.OutputStream(samplerate=self.OUT_RATE, channels=1,
+                                      dtype="int16", callback=self._callback)
+        self.stream.start()
+
+    def _callback(self, outdata, frames, time_info, status):  # PortAudio thread
+        with self._lock:
+            avail = (self.w - self.r) % self.RING
+            if not self.primed:
+                if avail < self.CUSHION:
+                    outdata[:] = 0
+                    return
+                self.primed = True
+            n = frames if frames < avail else avail
+            r = self.r
+            if r + n <= self.RING:
+                outdata[:n, 0] = self.ring[r:r + n]
+            else:
+                k = self.RING - r
+                outdata[:k, 0] = self.ring[r:]
+                outdata[k:n, 0] = self.ring[:n - k]
+            self.r = (r + n) % self.RING
+            if n < avail:
+                pass
+            else:
+                self.primed = False        # fully drained -> re-cushion
+        if n < frames:
+            outdata[n:] = 0
+
+    def pump(self):
+        sb = self.sb
+        if sb is None or not sb.sample_rate:
+            return
+        if sb.pcm_out:
+            self.inbuf += sb.pcm_out
+            del sb.pcm_out[:]
+        if len(self.inbuf) <= 1:
+            return
+        ratio = sb.sample_rate / self.OUT_RATE
+        inb = _np.frombuffer(bytes(self.inbuf), dtype=_np.uint8).astype(_np.float32) - 128.0
+        n = int((len(inb) - 1 - self.pos) / ratio)
+        if n <= 0:
+            return
+        idx = self.pos + _np.arange(n) * ratio
+        out16 = (_np.interp(idx, _np.arange(len(inb)), inb) * 256.0).clip(
+            -32768, 32767).astype(_np.int16)
+        new_pos = self.pos + n * ratio
+        consumed = int(new_pos)
+        self.pos = new_pos - consumed
+        del self.inbuf[:consumed]
+        with self._lock:
+            m = len(out16)
+            used = (self.w - self.r) % self.RING
+            # Bound latency: if the ring is already full of buffered audio, drop
+            # the oldest so playback stays in sync instead of lagging.
+            if used + m > self.MAX_FILL:
+                self.r = (self.r + (used + m - self.MAX_FILL)) % self.RING
+            w = self.w
+            if w + m <= self.RING:
+                self.ring[w:w + m] = out16
+            else:
+                k = self.RING - w
+                self.ring[w:] = out16[:k]
+                self.ring[:m - k] = out16[k:]
+            self.w = (w + m) % self.RING
+
+    def close(self):
+        try:
+            self.stream.stop()
+            self.stream.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 class _PcmSink:
@@ -190,7 +308,7 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
 
     dos, cpu = rt.dos, rt.cpu
     dos.time_source = time.monotonic     # 3DAh retrace advances at 70 Hz real time
-    pcm = _PcmSink(dos.sound_blaster)
+    pcm = _make_audio_sink(dos.sound_blaster)
     artifacts = Path(artifacts_dir)
 
     # Demo recording (F11): a FrameClock keyed to the game's per-frame entry
@@ -361,6 +479,8 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
         pygame.transform.scale(frame, win.get_size(), win)
         pygame.display.flip()
         pcm.pump()
+    if hasattr(pcm, "close"):
+        pcm.close()
     pygame.quit()
     return 0
 
