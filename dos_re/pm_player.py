@@ -90,9 +90,10 @@ class _PcmSink:
     arrival jitter."""
 
     OUT_RATE = 22050               # standard rate every SDL backend supports
-    CHUNK = 512                    # output samples per Sound (~23 ms)
-    CUSHION = 1536                 # output samples buffered before start (~70 ms)
-    MAX_LAG = 6000                 # bound buffered latency (~270 ms); drop oldest beyond
+    MIXER_BUF = 2048               # SDL callback buffer (~93 ms) — slack against underruns
+    CHUNK = 1024                   # output samples per Sound (~46 ms)
+    CUSHION = 3072                 # output samples buffered before start (~140 ms)
+    MAX_LAG = 9000                 # bound buffered latency (~400 ms); drop oldest beyond
 
     def __init__(self, sb):
         self.sb = sb
@@ -145,7 +146,7 @@ class _PcmSink:
             del sb.pcm_out[:]
         if self.channel is None:
             pygame.mixer.quit()
-            pygame.mixer.init(frequency=self.OUT_RATE, size=-16, channels=1, buffer=512)
+            pygame.mixer.init(frequency=self.OUT_RATE, size=-16, channels=1, buffer=self.MIXER_BUF)
             self.channel = pygame.mixer.Channel(0)
             self.playing = False
         if len(self.inbuf) > 1:
