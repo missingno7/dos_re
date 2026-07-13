@@ -22,7 +22,7 @@ Watcom code doesn't emit them.
 from __future__ import annotations
 
 from .cfg32 import FunctionScan32
-from .decode import CALL, CALL_IND, INT, IRET, JCC, JMP, RET, SEQ
+from .decode import CALL, CALL_IND, INT, IRET, JCC, JMP, JMP_IND, RET, SEQ
 from .decode32 import Inst32
 
 _REG32 = ("r[0]", "r[1]", "r[2]", "r[3]", "r[4]", "r[5]", "r[6]", "r[7]")
@@ -400,6 +400,19 @@ def _terminator_lines(inst: Inst32, bb_of: dict[int, int], out: list[str],
         out.append(f"{indent}cpu.eip = cpu.pop(4)")
         out.append(f'{indent}cpu.set_seg("cs", cpu.pop(4))')
         out.append(f"{indent}cpu.eflags = (cpu.pop(4) & 0x0FD5) | 0x0002")
+        out.append(f"{indent}return")
+    elif kind == JMP_IND:
+        # Tail jump: compute the target and hand control back to the VM (the
+        # lifted function ends here; a hook installed at the target re-enters).
+        if inst.reg == 5:
+            raise EmitUnsupported(f"far indirect jump at 0x{inst.ip:X}")
+        if inst.mod == 3:
+            out.append(f"{indent}cpu.eip = {_reg_read(inst.rm, 4)}")
+        elif inst.adsize == 4:
+            out.append(f"{indent}_o = {_addr_expr(inst)}")
+            out.append(f"{indent}cpu.eip = mem.r32(_o)")
+        else:
+            raise EmitUnsupported(f"16-bit-address indirect jump at 0x{inst.ip:X}")
         out.append(f"{indent}return")
     else:
         raise EmitUnsupported(f"terminator {kind} at 0x{inst.ip:X}")

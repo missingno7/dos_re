@@ -117,3 +117,32 @@ def test_signature_tripwire():
     rt.mem.data[FUNC] ^= 0xFF                     # self-modified entry
     with pytest.raises(LiftRuntimeError):
         run_to_halt(rt)
+
+
+def test_indirect_jump_lifts_as_tail_jump():
+    """A switch-style `jmp [table + reg*4]` lifts: the prologue runs native,
+    then the computed target is set and control returns to the VM."""
+    from dos_re.lift.cfg32 import scan_function32
+    from dos_re.lift.emit32 import emit_function32
+
+    # FUNC: mov eax,[0x3000] ; jmp dword [eax*4 + 0x3100]
+    # table at 0x3100: [0]=0x2400 [1]=0x2450 ; targets set eax and hlt
+    func = bytes.fromhex("A100300000" "FF248500310000".replace(" ", ""))
+    rt = build_rt(func)
+    mem = rt.mem
+    mem.w32(DATA, 1)                     # switch selector = 1
+    mem.w32(0x3100 + 0, 0x2400)
+    mem.w32(0x3100 + 4, 0x2450)
+    mem.load(0x2400, bytes.fromhex("B8AA000000F4"))   # mov eax,0xAA ; hlt
+    mem.load(0x2450, bytes.fromhex("B8BB000000F4"))   # mov eax,0xBB ; hlt
+    scan = scan_function32(mem.data.__getitem__, FUNC)
+    assert scan.liftable, scan.refusals
+    src = emit_function32(scan, "sw", signature=bytes(mem.data[FUNC:FUNC + 8]))
+    assert "cpu.eip = mem.r32(_o)" in src
+    ns = {}
+    exec(compile(src, "<sw>", "exec"), ns)
+    rt.cpu.replacement_hooks[FUNC] = ns["sw"]
+    rt.cpu.hook_names[FUNC] = "sw"
+    # main: call FUNC (which tail-jumps to case 1 -> eax=0xBB)
+    run_to_halt(rt)
+    assert rt.cpu.r[0] == 0xBB           # eax == case-1 result

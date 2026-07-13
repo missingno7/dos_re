@@ -16,7 +16,11 @@ from .decode import (CALL, CALL_IND, HLT, INT, IRET, JCC, JMP, JMP_IND,
                      RET, SEQ, UNSUPPORTED)
 from .decode32 import Inst32, decode32
 
-EXIT_KINDS = (RET, IRET)
+# An indirect jump ends the reachable region: the emitter reproduces it as a
+# TAIL JUMP (compute the target, set eip, hand control back to the VM), so a
+# switch-dispatcher lifts as a native prologue + a tail transfer — byte-exact,
+# with the cases left to the VM (which re-enters any hook installed at them).
+EXIT_KINDS = (RET, IRET, JMP_IND)
 
 
 @dataclass
@@ -93,15 +97,14 @@ def scan_function32(fetch: Callable[[int], int], entry: int, *,
             scan.refusals.append(Refusal(ip, "unsupported-opcode",
                                          f"{inst.mnemonic} bytes={inst.raw.hex()}"))
             continue
-        if kind == JMP_IND:
-            scan.refusals.append(Refusal(ip, "indirect-jump", inst.mnemonic))
-            continue
         if kind == HLT:
             scan.refusals.append(Refusal(ip, "hlt", ""))
             continue
 
         if kind in EXIT_KINDS:
             scan.exits.append(inst)
+            if kind == JMP_IND:
+                scan.calls_indirect.append(ip)   # census: tail-jump dispatch site
             continue
         if kind == SEQ:
             work.append(inst.next_ip)
