@@ -146,21 +146,26 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     if paced:
         dos.time_source = None
     period = 1 / 70.0
-    start = time.monotonic()
-    next_present = start
+    MAX_CATCHUP = 2                 # frames advanced per present — bounded so a
+                                    # slow game degrades smoothly (1-2 frames /
+                                    # present) instead of bursting dozens at once
     frame_budget = 4_000            # small chunks so we stop near a frame boundary
+    last_time = time.monotonic()
 
     def advance():
-        """Run the game forward to the frame due by wall-clock (paced) or one
-        present's worth (unpaced)."""
-        nonlocal waiting_console, running
+        """Advance the game by the frames due since the last present (paced),
+        capped at MAX_CATCHUP so it never catches up in one big burst."""
+        nonlocal waiting_console, running, last_time
         if waiting_console:
             return
         try:
             if paced:
-                due = int((time.monotonic() - start) / period)
+                now = time.monotonic()
+                n = min(MAX_CATCHUP, max(1, round((now - last_time) / period)))
+                last_time = now
+                target = clock.frame + n
                 guard = 0
-                while clock.frame < due and guard < 600 and not cpu.halted:
+                while clock.frame < target and guard < 200 and not cpu.halted:
                     cpu.run(frame_budget)
                     guard += 1
             else:
@@ -175,15 +180,15 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
             running = False
 
     waiting_console = False
+    next_present = time.monotonic()
     running = True
     while running:
-        advance()
-
         now = time.monotonic()
         if now < next_present:
-            time.sleep(min(next_present - now, 0.005))
+            time.sleep(min(next_present - now, 0.003))
             continue
         next_present = max(next_present + period, now)
+        advance()                    # one bounded step per present
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 running = False
@@ -345,7 +350,7 @@ def main(argv=None, *, default_exe: str | None = None, create_runtime=None,
          title: str = "dos_re PM", boot_keys=(), description: str | None = None,
          artifacts_dir: str | Path = "artifacts",
          sound_blaster: tuple[int, int, int] | None = None,
-         frame_tick_addr: int | None = None) -> int:
+         frame_tick_addr: int | None = None, install_hooks=None) -> int:
     """The standard PM play-runner CLI.  Game wrappers supply the defaults.
 
     ``frame_tick_addr`` (an address the program executes once per frame)
@@ -376,7 +381,12 @@ def main(argv=None, *, default_exe: str | None = None, create_runtime=None,
     build = create_runtime or create_pm_runtime
     headless_clock = args.headless or (args.play_demo and not args.show)
     if args.snapshot:
+        # Resume the frozen state, then re-install the adapter's recovered
+        # hooks (load_pm_snapshot rebuilds a bare runtime; without this the
+        # resumed game runs pure-interpreted — ~10x slower).
         rt = load_pm_snapshot(args.exe, args.snapshot)
+        if install_hooks is not None:
+            install_hooks(rt.cpu)
     else:
         rt = build(args.exe)
     if sound_blaster is not None and not args.no_sound:
