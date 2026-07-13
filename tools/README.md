@@ -25,6 +25,8 @@ view (which tool for which recovery step, with context) is
 | `liftverify.py` | `python tools/liftverify.py --exe <exe> --snapshot <snap> --entry CS:IP --steps N --emit-dir <game>/lifted` | Lift + prove in situ: every call diffed against the ASM oracle; writes the `LIFTED → ORACLE_PASSING` proof ledger. Never hand-translate a first draft. |
 | `gen_island_manifest.py` | `python tools/gen_island_manifest.py <pkg>… -o docs/recovered_islands.md` | Regenerate the recovered-island ledger from `@oracle_link` tags. Generated, never hand-edited. |
 | `tick_demo_info.py` | `python tools/tick_demo_info.py <demo.bin>` | Inspect an endgame tick-demo recording (ticks, key record, sidebands, seed) before trusting it — corpus census, stale-file diagnosis. |
+| `pm_verify_demo.py` | `python dos_re/tools/pm_verify_demo.py --exe <exe> --demo <bundle> --install pkg.mod:install_hooks [--focus 0xADDR]` | The PM recovery proof loop: replay an input-demo bundle with `PMHookVerifier` diffing every hooked call against the interpreted original. `--focus` = fast loop while recovering one routine; unfocused = the pre-commit full pass. Run from the port root. |
+| `pm_census.py` | `python dos_re/tools/pm_census.py --exe <exe> --demo <bundle> --install … --region 0x110000:0x120000 [--leaf-only]` | "What do I recover next": rank the demo's hot `E8` call targets, statically profiled (ins/calls/INT/port-I/O, HOOKED tag). The top un-hooked pure LEAF in the game's code region is usually the next slice. |
 
 ## Guardrails (run with every change)
 
