@@ -382,6 +382,7 @@ class SoundBlaster:
             "sample_rate": self.sample_rate, "block_len": self.block_len,
             "auto_init": self.auto_init, "dma_active": self.dma_active,
             "irq_line": self.irq_line, "resetting": self._resetting,
+            "dma_tc": self.dma_tc,      # 8237 terminal-count status (read clears)
             "args_needed": self._args_needed, "cmd": self._cmd, "args": list(self._args),
             "out": list(self._out), "block_pending": self._block_pending,
             # Store the pending block as a REMAINING duration on the current
@@ -404,6 +405,7 @@ class SoundBlaster:
         self.auto_init = d.get("auto_init", False)
         self.dma_active = d.get("dma_active", False)
         self.irq_line = d.get("irq_line", False)
+        self.dma_tc = d.get("dma_tc", 0)
         self._resetting = d.get("resetting", False)
         self._args_needed = d.get("args_needed", 0)
         self._cmd = d.get("cmd", 0)
