@@ -592,6 +592,26 @@ def run_headless(rt, *, steps: int, png: str = "", boot_keys=()) -> int:
     return 0
 
 
+def _configure_sound(dos, sound_blaster, *, headless_clock: bool):
+    """Set up the emulated Sound Blaster for a run.
+
+    On a fresh boot this attaches a new device.  On a resumed snapshot the
+    host ALREADY carries the SB restored mid-stream (DMA programming, ring
+    position, auto-init, a re-armed block IRQ) — rebuilding it would blank all
+    that and cut the audio off, so we keep the restored device and only
+    retarget its clock at the viewer's wall time (the snapshot left it on the
+    deterministic instruction-count clock)."""
+    base, irq, dma = sound_blaster
+    clk = None if headless_clock else time.monotonic
+    if dos.sound_blaster is not None:
+        if clk is not None:                  # viewer: switch to wall-clock pacing
+            dos.sound_blaster.clock = clk
+            dos.sound_blaster.anchor_cadence = True
+        return dos.sound_blaster
+    return dos.attach_sound_blaster(base=base, irq=irq, dma=dma, clock=clk,
+                                    anchor_cadence=not headless_clock)
+
+
 def main(argv=None, *, default_exe: str | None = None, create_runtime=None,
          title: str = "dos_re PM", boot_keys=(), description: str | None = None,
          artifacts_dir: str | Path = "artifacts",
@@ -652,10 +672,7 @@ def main(argv=None, *, default_exe: str | None = None, create_runtime=None,
     else:
         rt = build(args.exe)
     if sound_blaster is not None and not args.no_sound:
-        base, irq, dma = sound_blaster
-        rt.dos.attach_sound_blaster(base=base, irq=irq, dma=dma,
-                                    clock=None if headless_clock else time.monotonic,
-                                    anchor_cadence=not headless_clock)
+        _configure_sound(rt.dos, sound_blaster, headless_clock=headless_clock)
     if args.play_demo:
         return run_replay(rt, args.play_demo, boot_keys=boot_keys,
                           snapshot_dir=args.save_snapshot or None, png=args.png,

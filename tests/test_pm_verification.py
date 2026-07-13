@@ -56,6 +56,32 @@ def correct_hook(cpu):
     cpu.eip = cpu.pop(4)                   # RET
 
 
+def test_configure_sound_preserves_restored_sb():
+    """Regression: resuming a snapshot must NOT rebuild the Sound Blaster.
+
+    A snapshot restores the SB mid-stream (DMA active, ring position, a
+    re-armed block IRQ).  The viewer only needs to retarget its clock at wall
+    time — rebuilding the device would blank the DMA programming and cut the
+    audio off on resume."""
+    from dos_re.pm_player import _configure_sound
+    rt = make_rt()
+    # Stand in for a snapshot-restored, actively-streaming device.
+    sb = rt.dos.attach_sound_blaster(base=0x210, irq=7, dma=1)
+    sb.dma_active = True
+    sb.sample_rate = 5128
+    _configure_sound(rt.dos, (0x210, 7, 1), headless_clock=False)
+    assert rt.dos.sound_blaster is sb           # same device, not rebuilt
+    assert rt.dos.sound_blaster.dma_active is True
+    assert rt.dos.sound_blaster.sample_rate == 5128
+    assert rt.dos.sound_blaster.clock is not None  # retargeted to wall clock
+
+    # Fresh boot (no SB yet) still attaches one.
+    rt2 = make_rt()
+    assert rt2.dos.sound_blaster is None
+    _configure_sound(rt2.dos, (0x210, 7, 1), headless_clock=False)
+    assert rt2.dos.sound_blaster is not None
+
+
 def test_snapshot_preserves_mouse_range():
     """Regression: the INT 33h virtual range (AX=7/8) the game programs must
     survive a snapshot round-trip.  Without it a resume reverts to the
