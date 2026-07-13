@@ -174,6 +174,14 @@ class _SoundDeviceSink:
         del self.inbuf[:consumed]
         with self._lock:
             m = len(out16)
+            # A long stall (e.g. the game paused, so the frame clock never
+            # advanced and one present ran a huge instruction burst) can
+            # resample to far more than the ring holds.  Keep only the newest
+            # MAX_FILL samples — the rest would be dropped by the latency bound
+            # below anyway — so the wraparound write can never overflow the ring.
+            if m > self.MAX_FILL:
+                out16 = out16[-self.MAX_FILL:]
+                m = self.MAX_FILL
             used = (self.w - self.r) % self.RING
             # Bound latency: if the ring is already full of buffered audio, drop
             # the oldest so playback stays in sync instead of lagging.
@@ -347,13 +355,27 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     MAX_CATCHUP = 2                 # frames advanced per present — bounded so a
                                     # slow game degrades smoothly (1-2 frames /
                                     # present) instead of bursting dozens at once
+    PACE_CHUNK = 40_000            # instructions per inner run before re-checking
+                                    # (small enough that one chunk ~ the wall cap
+                                    # even on the slow CPython path, so a paused
+                                    # game stays responsive; a normal frame breaks
+                                    # via FramePaced inside the first chunk anyway)
+    PACE_WALL_CAP = 0.05           # ... and a wall-time ceiling per present, so a
+                                    # frame that never arrives can't stall the loop
     last_time = time.monotonic()
 
     def advance():
-        """Advance EXACTLY the frames due since the last present (paced),
-        capped at MAX_CATCHUP.  The frame clock breaks each run precisely at the
-        next frame boundary (FramePaced), so the game runs at its true rate
-        instead of overshooting a chunk past each frame."""
+        """Advance the frames due since the last present (paced), capped at
+        MAX_CATCHUP.  The frame clock breaks each run precisely at the next
+        frame boundary (FramePaced), so the game runs at its true rate.
+
+        A frame that never completes — the game's pause loop doesn't hit the
+        per-frame tick, so FramePaced never fires — is bounded by a wall-time
+        ceiling instead of running the whole multi-million-instruction budget.
+        Otherwise one present would stall for seconds (the UI 'freezes') and the
+        Sound Blaster would produce that many seconds of PCM in a single burst,
+        overflowing the audio sink.  Chunking + a wall cap keeps the present
+        responsive regardless of interpreter speed."""
         nonlocal waiting_console, running, last_time
         if waiting_console:
             return
@@ -362,14 +384,21 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                 now = time.monotonic()
                 n = min(MAX_CATCHUP, max(1, round((now - last_time) / period)))
                 last_time = now
+                deadline = now + PACE_WALL_CAP
                 for _ in range(n):
                     if cpu.halted:
                         break
                     clock.stop_at = clock.frame + 1
+                    frame_done = False
                     try:
-                        cpu.run(4_000_000)          # runs until the next frame boundary
+                        while True:
+                            cpu.run(PACE_CHUNK)     # until the next frame boundary
+                            if time.monotonic() >= deadline:
+                                break
                     except FramePaced:
-                        pass
+                        frame_done = True
+                    if not frame_done:
+                        break                       # no frame yet (paused/stuck)
             else:
                 cpu.run(20_000)
         except DosInputExhausted:
@@ -395,8 +424,17 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
             return False
         if not (sb._block_pending and sb.clock() >= sb._block_due):
             return False
+        # Normally the frame is parked at a boundary, so the ISR fires and IRETs
+        # straight back (FramePaced).  If it isn't (e.g. the game is paused in a
+        # loop that never hits the frame tick), bound the run by wall time the
+        # same way advance() does, so delivering the ISR can't turn into a
+        # multi-hundred-thousand-instruction stall.
+        deadline = time.monotonic() + PACE_WALL_CAP
         try:
-            cpu.run(500_000)
+            while True:
+                cpu.run(PACE_CHUNK)
+                if time.monotonic() >= deadline:
+                    break
         except FramePaced:
             pass
         except DosInputExhausted:
