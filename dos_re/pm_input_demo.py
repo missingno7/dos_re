@@ -16,25 +16,44 @@ from __future__ import annotations
 
 import hashlib
 import json
+import struct
 from pathlib import Path
 
 from .lift.runtime32 import interp_one32
 
 
 def frame_digest(cpu) -> str:
-    """A short, game-agnostic fingerprint of the full VM state at a frame seam.
+    """A short, game-agnostic fingerprint of the FULL VM state at a frame seam.
 
-    With the deterministic clock the entire flat memory is reproducible, so
-    hashing it detects ANY divergence between a recording and its replay.  Kept
-    short (8 bytes) — enough to catch drift, cheap to store per frame."""
-    return hashlib.sha1(cpu.mem.data).hexdigest()[:16]
+    Hashing memory ALONE misses a divergence that lives only in a register or
+    the instruction count until the game happens to store it — a demo can then
+    read "matched" for hundreds of frames and diverge the instant a stale
+    register hits memory.  So the fingerprint covers the whole architectural
+    state the next frame depends on: flat memory + GP registers + eip/eflags +
+    the x87 stack + segments + the instruction count (which the SB clock and
+    RDTSC derive from, so it must match for strict determinism).  Kept to 8
+    bytes — enough to catch drift, cheap to store per frame."""
+    h = hashlib.sha1(cpu.mem.data)
+    h.update(struct.pack("<8I", *(r & 0xFFFFFFFF for r in cpu.r)))
+    h.update(struct.pack("<IIQ", cpu.eip & 0xFFFFFFFF, cpu.eflags & 0xFFFFFFFF,
+                         cpu.instruction_count & 0xFFFFFFFFFFFFFFFF))
+    h.update(struct.pack("<HH", cpu.fcw & 0xFFFF, cpu.fsw & 0xFFFF))
+    for f in cpu.st:                       # x87 stack (doubles stand in for ST(i))
+        h.update(struct.pack("<d", f))
+    for k in sorted(cpu.seg):              # segment selectors + their bases
+        h.update(struct.pack("<II", cpu.seg[k] & 0xFFFFFFFF,
+                             cpu.sbase.get(k, 0) & 0xFFFFFFFF))
+    return h.hexdigest()[:16]
 
 # A PM demo is a self-contained BUNDLE directory (not a lone file), exactly
 # like the real-mode player's demos: a start snapshot the replay boots from,
 # plus the input manifest keyed to it.  This makes a demo deterministic and
 # game-agnostic — the same "record here, replay from here" flow for every
 # title, with snapshots/demos an internal detail the user never has to wire up.
-DEMO_VERSION = 1
+# v2: frame_digest covers the full CPU state (not memory alone), and the demo
+# carries a per-frame instruction_count channel for divergence diagnosis.  A v1
+# demo's memory-only digests are incomparable, so replay skips its digest check.
+DEMO_VERSION = 2
 INPUT_JSON = "input_demo.json"        # the manifest inside the bundle
 SNAPSHOT_NAME = "snapshot"            # the start-snapshot subdir inside the bundle
 
@@ -50,7 +69,9 @@ class PMInputDemo:
         self.snapshot: str | None = None   # start-snapshot subdir name (None = cold start)
         self.metadata: dict = {}
         self.digests: dict[int, str] = {}  # frame index -> frame_digest(cpu) at record time
+        self.icounts: dict[int, int] = {}  # frame index -> instruction_count (divergence diagnosis)
         self.status: str | None = None     # "complete" once F11-stopped; "recording" = never finished
+        self.version = DEMO_VERSION
 
     def add(self, frame: int, kind: str, payload) -> None:
         self.events.append([int(frame), kind, payload])
@@ -71,6 +92,7 @@ class PMInputDemo:
             "metadata": self.metadata,
             "events": self.events,
             "digests": {str(k): v for k, v in self.digests.items()},
+            "icounts": {str(k): v for k, v in self.icounts.items()},
         }
 
     def write_manifest(self, bundle_dir: str | Path, *, status: str) -> Path:
@@ -101,7 +123,9 @@ class PMInputDemo:
         o.snapshot = d.get("snapshot")
         o.metadata = d.get("metadata", {})
         o.digests = {int(k): v for k, v in d.get("digests", {}).items()}
+        o.icounts = {int(k): v for k, v in d.get("icounts", {}).items()}
         o.status = d.get("status")
+        o.version = d.get("version", 1)
         return o
 
     @classmethod

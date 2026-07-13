@@ -341,6 +341,7 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
             f = frame - rec["start"]
             from .pm_input_demo import frame_digest
             rec["demo"].digests[f] = frame_digest(cpu)   # seam BEFORE this frame's input
+            rec["demo"].icounts[f] = cpu.instruction_count
             # Apply + record the input buffered since the previous boundary.
             # Apply EXACTLY the value we record (the rounded sample), not the
             # full-precision mouse_norm: the game maps the normalized mouse onto
@@ -617,15 +618,34 @@ def run_replay(rt, demo_path, *, boot_keys=(), extra_frames: int = 30,
     by_frame = demo.by_frame()
     end_frame = demo.total_frames + extra_frames
     done = {"flag": False}
+    # A v1 demo's digests fingerprint memory only; the current frame_digest
+    # covers the full CPU state, so they are incomparable — replay it, but skip
+    # the (guaranteed-to-mismatch) digest check.
+    check_digests = demo.version >= 2
 
     def on_frame(frame):
         # Verify the replay against the recording BEFORE injecting this frame's
         # input, so the digest compares the same end-of-previous-frame seam.
-        if diverged["frame"] is None and frame in demo.digests:
+        if check_digests and diverged["frame"] is None and frame in demo.digests:
             if frame_digest(rt.cpu) != demo.digests[frame]:
                 diverged["frame"] = frame
+                # Report whether the instruction count also diverged here: a
+                # mismatch means the game ran a different NUMBER of instructions
+                # into this frame (a wall-clock-sensitive spin/poll drifted);
+                # matching icount but a differing digest means a register/FPU
+                # value diverged with the same instruction path.
+                rec_ic = demo.icounts.get(frame)
+                ic = rt.cpu.instruction_count
+                if rec_ic is None:
+                    tail = ""
+                elif rec_ic == ic:
+                    tail = f"; instruction_count MATCHES ({ic}) -> a register/FPU value diverged"
+                else:
+                    tail = (f"; instruction_count DIFFERS recording={rec_ic} "
+                            f"replay={ic} (delta {ic - rec_ic}) -> an instruction "
+                            f"path/spin drifted")
                 print(f"DEMO DIVERGED at frame {frame}: replay no longer matches "
-                      f"the recording (state fingerprint differs)")
+                      f"the recording (state fingerprint differs){tail}")
         for kind, payload in by_frame.get(frame, ()):
             if kind == "key":
                 send_key(dos, payload[1], payload[0])
@@ -638,7 +658,11 @@ def run_replay(rt, demo_path, *, boot_keys=(), extra_frames: int = 30,
     clock = FrameClock(rt.cpu, demo.frame_tick_addr, on_frame)
 
     def _finish():
-        if demo.digests:
+        if demo.digests and not check_digests:
+            print(f"demo replayed (v{demo.version} digests are memory-only and "
+                  f"predate the full-state fingerprint — self-verification "
+                  f"skipped; re-record to self-verify)")
+        elif demo.digests:
             if diverged["frame"] is None:
                 print(f"demo VERIFIED: replay matched the recording on all "
                       f"{len(demo.digests)} fingerprinted frames")
