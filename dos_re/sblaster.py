@@ -283,11 +283,18 @@ class SoundBlaster:
                 self._fire_irq()
             return
         ch = self.channels[self.dma]
-        addr = ch.physical()
+        # A DMA block always plays from the channel's BASE address — for
+        # single-cycle the driver reprograms it per block, and in auto-init
+        # mode (mode bit 4, which KE uses) the 8237 reloads base->cur each
+        # block.  Reading cur_addr instead walked PAST the buffer into silence
+        # after the first block (the "clicking instead of music" bug).
+        addr = ((ch.page << 16) | ch.base_addr) & 0xFFFFF
+        auto_init = bool(ch.mode & 0x10)
         # Move the block over DMA and leave the 8237 channel in its
-        # post-transfer state (address advanced, count at terminal 0xFFFF,
-        # TC status bit set) — SB drivers detect their DMA channel by
-        # observing exactly these effects.
+        # post-transfer state (count at terminal 0xFFFF, TC status bit set) —
+        # SB drivers detect their DMA channel by observing exactly these
+        # effects.  cur_addr reloads to base under auto-init, else ends past
+        # the block.
         if input_transfer:
             # ADC with no source records silence level (~0x80); the bytes
             # LAND IN MEMORY — KE's autodetect sentinels a buffer per
@@ -297,7 +304,7 @@ class SoundBlaster:
                     self.write_mem((addr + i) & 0xFFFFFF, 0x80)
         elif not silence and self.read_mem is not None:
             self.pcm_out.extend(self.read_mem((addr + i) & 0xFFFFFF) for i in range(length))
-        ch.cur_addr = (ch.cur_addr + length) & 0xFFFF
+        ch.cur_addr = ch.base_addr if auto_init else (ch.base_addr + length) & 0xFFFF
         ch.cur_count = 0xFFFF                     # terminal count reached
         self.dma_tc |= 1 << self.dma              # 8237 status TC bit
         self.log.append(("dma_start", {"len": length, "auto": auto, "rate": self.sample_rate,
