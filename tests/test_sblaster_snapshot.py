@@ -66,3 +66,31 @@ def test_rearm_is_noop_when_not_streaming():
     sb.raise_irq = fired.append
     sb.rearm_after_restore()
     assert fired == []
+
+
+def test_rearm_resumes_a_pending_block_faithfully_without_firing():
+    """A block PENDING at save must resume at the same remaining offset on the
+    resuming clock — NOT fire at load.  Force-firing made a recorded demo's
+    block-IRQ land at load instead of its due instant, so the replay diverged
+    ~one frame in.  Regression for that fix."""
+    fired = []
+    sb = _programmed_sb()
+    sb.clock = lambda: 10.0        # save-time clock
+    sb.raise_irq = fired.append
+    sb._block_pending = True
+    sb._block_due = 10.05          # 0.05 ahead of now
+    state = sb.snapshot_state()    # stores block_remaining == 0.05
+
+    fresh = _programmed_sb()
+    now = [3.0]                    # resume on a DIFFERENT clock origin
+    fresh.clock = lambda: now[0]
+    fresh.raise_irq = fired.append
+    fresh.restore_state(state)
+    fresh.rearm_after_restore()
+
+    assert fired == []                                 # did NOT fire at load
+    assert fresh._block_pending is True
+    assert abs(fresh._block_due - 3.05) < 1e-6         # re-armed 0.05 ahead of new now
+    now[0] = 3.06                                       # advance clearly past due
+    fresh.service()
+    assert fired == [fresh.irq]                        # fires at the due instant

@@ -488,6 +488,13 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                         # keyed to it.  The snapshot is what makes a mid-game
                         # demo replay deterministically.
                         from .pm_snapshot import save_pm_snapshot
+                        # Flip the SB to the deterministic instruction-count
+                        # clock BEFORE snapshotting: the casual viewer paces
+                        # audio by wall time, but a recording made on that clock
+                        # can't be replayed (its block-IRQ timeline diverges).
+                        # The snapshot then captures the re-based block state, so
+                        # replay continues it identically.
+                        dos.set_sound_clock(deterministic=True)
                         demo = PMInputDemo(frame_tick_addr)
                         bundle = (Path(record_demo) if record_demo else
                                   artifacts / "demos" / f"demo_{int(now * 1000)}")
@@ -507,6 +514,7 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                               f"({demo.total_frames} frames, "
                               f"{len(demo.events)} events)")
                         rec["demo"] = None
+                        dos.set_sound_clock(deterministic=False)  # back to live audio
                     continue
                 record_key(make, name)
                 send_key(dos, name, make)

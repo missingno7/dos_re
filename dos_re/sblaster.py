@@ -141,6 +141,7 @@ class SoundBlaster:
     anchor_cadence: bool = False
     _block_due: float = 0.0
     _block_pending: bool = False
+    _block_remaining: float = 0.0   # pending-block time left at snapshot (for faithful restore)
     # If the front-end falls more than this far behind the block grid (a long render
     # or GC stall), drop the accumulated lateness and re-anchor instead of firing a
     # catch-up storm.  Bare assignment => class attribute, not a dataclass field.
@@ -383,6 +384,12 @@ class SoundBlaster:
             "irq_line": self.irq_line, "resetting": self._resetting,
             "args_needed": self._args_needed, "cmd": self._cmd, "args": list(self._args),
             "out": list(self._out), "block_pending": self._block_pending,
+            # Store the pending block as a REMAINING duration on the current
+            # clock, not the absolute _block_due: the resumed run re-arms it the
+            # same distance ahead on whatever clock it uses, so the block-IRQ
+            # fires at the identical emulated instant (a demo replays exactly).
+            "block_remaining": (max(0.0, self._block_due - self.clock())
+                                if self._block_pending and self.clock else 0.0),
             "channels": {str(c): ch.snapshot_state() for c, ch in self.channels.items()},
         }
 
@@ -403,19 +410,27 @@ class SoundBlaster:
         self._args = list(d.get("args", []))
         self._out = list(d.get("out", []))
         self._block_pending = d.get("block_pending", False)
+        self._block_remaining = d.get("block_remaining", 0.0)
         for c, chd in d.get("channels", {}).items():
             self.channels[int(c)].restore_state(chd)
 
     def rearm_after_restore(self) -> None:
-        """Re-arm a block-complete IRQ if a restored snapshot was mid-stream.
+        """Restore the block-complete IRQ timeline after a snapshot load.
 
         The driver drives continuous playback by re-issuing single-cycle DMA on
-        each block IRQ; restoring the programmed state but no pending IRQ would
-        leave it waiting forever. Raise the IRQ line directly (the PIC holds it
-        until the CPU delivers it, in either inline or batch-boundary mode) so the
-        driver's refill ISR runs, re-issues DMA, and the stream self-sustains.
-        Clock-independent — works in both the live viewer and headless paths.
+        each block IRQ, so a restored mid-stream snapshot must resume that IRQ
+        cadence or the audio stalls forever.
+
+        FAITHFUL (reproducible) path: if a block was pending at save, re-arm it
+        the SAME remaining distance ahead on the current clock — it then fires
+        at the identical emulated instant it would have in the run that saved,
+        so a demo recorded live replays byte-for-byte.  Only when nothing is
+        pending AND the stream is genuinely stalled (DMA active, no queued IRQ)
+        do we kick-start it by raising the IRQ directly — the old unconditional
+        fire broke replay determinism (the block fired at load, not at due).
         """
-        if self.dma_active:
-            self._block_pending = False
+        if self._block_pending:
+            now = self.clock() if self.clock else 0.0
+            self._block_due = now + self._block_remaining
+        elif self.dma_active and not self.irq_line:
             self._fire_irq()

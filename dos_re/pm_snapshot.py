@@ -40,6 +40,11 @@ def capture_pm_state(rt) -> dict:
             "st": list(cpu.st), "fcw": cpu.fcw, "fsw": cpu.fsw,
             "cr": {str(k): v for k, v in cpu.cr.items()},
             "halted": cpu.halted, "instruction_count": cpu.instruction_count,
+            # The every-16-instructions IRQ-poll phase: a resumed run must keep
+            # the same phase, or a hardware IRQ (SB block, timer) lands at a
+            # different instruction than in the run that saved — enough to make
+            # a demo replay diverge one frame in.
+            "irq_decim": cpu._irq_decim,
         },
         "dos": {
             "pm_vectors": {str(k): list(v) for k, v in dos.pm_vectors.items()},
@@ -104,6 +109,7 @@ def apply_pm_state(rt, state: dict, mem_bytes, planes_bytes) -> None:
     cpu.cr = {int(k): v for k, v in c["cr"].items()}
     cpu.halted = c["halted"]
     cpu.instruction_count = c["instruction_count"]
+    cpu._irq_decim = c.get("irq_decim", 0)     # IRQ-poll phase (older snaps: 0)
 
     s = state["dos"]
     dos.pm_vectors.clear()

@@ -320,6 +320,34 @@ class DOS4GWHost:
         self.sound_blaster = sb
         return sb
 
+    def _deterministic_sb_clock(self):
+        def clock():
+            cpu = self._cpu
+            return (cpu.instruction_count / self.EMULATED_IPS) if cpu else 0.0
+        return clock
+
+    def set_sound_clock(self, *, deterministic: bool) -> None:
+        """Switch the Sound Blaster block-IRQ clock at runtime, re-basing any
+        pending block onto the new origin.
+
+        ``deterministic=True`` uses the instruction-count clock (reproducible —
+        the ONLY clock under which a demo records and replays identically);
+        ``False`` uses wall time (smoother live audio, not reproducible).  A
+        viewer that starts recording must flip to the deterministic clock, or
+        the recorded block-IRQ timeline can't be replayed (it diverges at the
+        first block ~frame 5)."""
+        import time
+        sb = self.sound_blaster
+        if sb is None:
+            return
+        if deterministic:
+            sb.clock = self._deterministic_sb_clock()
+            sb.anchor_cadence = False
+        else:
+            sb.clock = time.monotonic
+            sb.anchor_cadence = True
+        sb.resync_clock(sb.clock())
+
     def raise_hw_irq(self, irq: int) -> None:
         self.pic.raise_irq(irq)
 
