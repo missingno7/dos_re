@@ -331,6 +331,8 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     def on_frame(frame):
         if rec["demo"] is not None:
             f = frame - rec["start"]
+            from .pm_input_demo import frame_digest
+            rec["demo"].digests[f] = frame_digest(cpu)   # fingerprint each frame seam
             sample = [round(mouse_norm[0], 4), round(mouse_norm[1], 4),
                       getattr(dos, "mouse_buttons", 0)]
             if sample != rec["last_mouse"]:
@@ -547,12 +549,13 @@ def run_replay(rt, demo_path, *, boot_keys=(), extra_frames: int = 30,
     Re-injects each frame's recorded input at the game's own frame boundary,
     then runs ``extra_frames`` past the demo's end.  Optionally saves a
     snapshot / PNG of the resulting state, or shows it in a window."""
-    from .pm_input_demo import PMInputDemo, FrameClock, FramePaced
+    from .pm_input_demo import PMInputDemo, FrameClock, FramePaced, frame_digest
 
     demo = PMInputDemo.load(demo_path)
     if demo.frame_tick_addr is None:
         print("demo has no frame_tick_addr; cannot replay")
         return 1
+    diverged = {"frame": None}       # first frame whose digest disagrees, if any
     # A bundle with a start snapshot already holds the mid-game state, so the
     # title-screen boot keys apply only to a cold-start (snapshot-less) replay.
     if demo.snapshot is None:
@@ -564,6 +567,13 @@ def run_replay(rt, demo_path, *, boot_keys=(), extra_frames: int = 30,
     done = {"flag": False}
 
     def on_frame(frame):
+        # Verify the replay against the recording BEFORE injecting this frame's
+        # input, so the digest compares the same end-of-previous-frame seam.
+        if diverged["frame"] is None and frame in demo.digests:
+            if frame_digest(rt.cpu) != demo.digests[frame]:
+                diverged["frame"] = frame
+                print(f"DEMO DIVERGED at frame {frame}: replay no longer matches "
+                      f"the recording (state fingerprint differs)")
         for kind, payload in by_frame.get(frame, ()):
             if kind == "key":
                 send_key(dos, payload[1], payload[0])
@@ -576,6 +586,14 @@ def run_replay(rt, demo_path, *, boot_keys=(), extra_frames: int = 30,
     clock = FrameClock(rt.cpu, demo.frame_tick_addr, on_frame)
 
     def _finish():
+        if demo.digests:
+            if diverged["frame"] is None:
+                print(f"demo VERIFIED: replay matched the recording on all "
+                      f"{len(demo.digests)} fingerprinted frames")
+            else:
+                print(f"demo DIVERGED at frame {diverged['frame']} "
+                      f"(of {demo.total_frames}); replay did not reproduce the "
+                      f"recording")
         if snapshot_dir:
             from .pm_snapshot import save_pm_snapshot
             save_pm_snapshot(rt, snapshot_dir)
@@ -596,7 +614,7 @@ def run_replay(rt, demo_path, *, boot_keys=(), extra_frames: int = 30,
             print(f"STOP at eip=0x{rt.cpu.eip:X}: {type(e).__name__}: {e}")
         print(f"replayed to frame ~{demo.total_frames}+{extra_frames}; "
               f"{rt.cpu.instruction_count} instructions "
-              f"(no window — pass --show to WATCH the replay)")
+              f"(no window; pass --show to WATCH the replay)")
         _finish()
         return 0
 
@@ -669,24 +687,32 @@ def run_headless(rt, *, steps: int, png: str = "", boot_keys=()) -> int:
     return 0
 
 
-def _configure_sound(dos, sound_blaster, *, headless_clock: bool):
+def _configure_sound(dos, sound_blaster, *, deterministic: bool):
     """Set up the emulated Sound Blaster for a run.
 
-    On a fresh boot this attaches a new device.  On a resumed snapshot the
-    host ALREADY carries the SB restored mid-stream (DMA programming, ring
-    position, auto-init, a re-armed block IRQ) — rebuilding it would blank all
-    that and cut the audio off, so we keep the restored device and only
-    retarget its clock at the viewer's wall time (the snapshot left it on the
-    deterministic instruction-count clock)."""
+    DETERMINISM CONTRACT.  The block-complete IRQ's firing point steers the
+    whole execution (its ISR runs mid-frame; where it lands changes the
+    instruction stream the game sees — enough to make a demo replay diverge, or
+    even crash).  So every reproducible path — recording a demo, replaying one,
+    headless verify — keeps the SB on the DETERMINISTIC instruction-count clock
+    (``instruction_count / EMULATED_IPS``, auto-serviced by ``pending_irq``), so
+    the IRQ fires at the same emulated instant every run.  A demo recorded on
+    this clock replays byte-identically on it.  ONLY the casual live viewer
+    (not recording) retargets to wall-clock pacing — smoother audio when the
+    interpreter keeps up, but explicitly NOT reproducible.
+
+    On a resumed snapshot the host already carries the SB restored mid-stream on
+    that instruction-count clock, so the deterministic paths leave it alone."""
     base, irq, dma = sound_blaster
-    clk = None if headless_clock else time.monotonic
     if dos.sound_blaster is not None:
-        if clk is not None:                  # viewer: switch to wall-clock pacing
-            dos.sound_blaster.clock = clk
+        if not deterministic:                # casual viewer: wall-clock pacing
+            dos.sound_blaster.clock = time.monotonic
             dos.sound_blaster.anchor_cadence = True
-        return dos.sound_blaster
-    return dos.attach_sound_blaster(base=base, irq=irq, dma=dma, clock=clk,
-                                    anchor_cadence=not headless_clock)
+        return dos.sound_blaster             # else keep the instruction-count clock
+    return dos.attach_sound_blaster(
+        base=base, irq=irq, dma=dma,
+        clock=None if deterministic else time.monotonic,   # None => instruction-count
+        anchor_cadence=not deterministic)
 
 
 def main(argv=None, *, default_exe: str | None = None, create_runtime=None,
@@ -727,7 +753,10 @@ def main(argv=None, *, default_exe: str | None = None, create_runtime=None,
     from .pm_input_demo import PMInputDemo
 
     build = create_runtime or create_pm_runtime
-    headless_clock = args.headless or (args.play_demo and not args.show)
+    # Reproducible paths keep the deterministic instruction-count SB clock:
+    # recording a demo (so it can replay), replaying one, or a headless run.
+    # Only a casual live viewer (none of these) uses wall-clock audio pacing.
+    deterministic = bool(args.headless or args.play_demo or args.record_demo)
 
     # Resolve the starting runtime.  Priority: an explicit --snapshot, then a
     # demo bundle's OWN start snapshot (so a mid-game replay is deterministic),
@@ -749,7 +778,7 @@ def main(argv=None, *, default_exe: str | None = None, create_runtime=None,
     else:
         rt = build(args.exe)
     if sound_blaster is not None and not args.no_sound:
-        _configure_sound(rt.dos, sound_blaster, headless_clock=headless_clock)
+        _configure_sound(rt.dos, sound_blaster, deterministic=deterministic)
     if args.play_demo:
         return run_replay(rt, args.play_demo, boot_keys=boot_keys,
                           snapshot_dir=args.save_snapshot or None, png=args.png,

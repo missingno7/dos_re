@@ -14,10 +14,20 @@ frame proceeds normally.  Game-agnostic: the adapter supplies the address.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 from .lift.runtime32 import interp_one32
+
+
+def frame_digest(cpu) -> str:
+    """A short, game-agnostic fingerprint of the full VM state at a frame seam.
+
+    With the deterministic clock the entire flat memory is reproducible, so
+    hashing it detects ANY divergence between a recording and its replay.  Kept
+    short (8 bytes) — enough to catch drift, cheap to store per frame."""
+    return hashlib.sha1(cpu.mem.data).hexdigest()[:16]
 
 # A PM demo is a self-contained BUNDLE directory (not a lone file), exactly
 # like the real-mode player's demos: a start snapshot the replay boots from,
@@ -39,6 +49,7 @@ class PMInputDemo:
         self.total_frames = 0
         self.snapshot: str | None = None   # start-snapshot subdir name (None = cold start)
         self.metadata: dict = {}
+        self.digests: dict[int, str] = {}  # frame index -> frame_digest(cpu) at record time
 
     def add(self, frame: int, kind: str, payload) -> None:
         self.events.append([int(frame), kind, payload])
@@ -58,6 +69,7 @@ class PMInputDemo:
             "total_frames": self.total_frames,
             "metadata": self.metadata,
             "events": self.events,
+            "digests": {str(k): v for k, v in self.digests.items()},
         }
 
     def write_manifest(self, bundle_dir: str | Path, *, status: str) -> Path:
@@ -87,6 +99,7 @@ class PMInputDemo:
         o.total_frames = d.get("total_frames", 0)
         o.snapshot = d.get("snapshot")
         o.metadata = d.get("metadata", {})
+        o.digests = {int(k): v for k, v in d.get("digests", {}).items()}
         return o
 
     @classmethod

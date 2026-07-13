@@ -69,7 +69,7 @@ def test_configure_sound_preserves_restored_sb():
     sb = rt.dos.attach_sound_blaster(base=0x210, irq=7, dma=1)
     sb.dma_active = True
     sb.sample_rate = 5128
-    _configure_sound(rt.dos, (0x210, 7, 1), headless_clock=False)
+    _configure_sound(rt.dos, (0x210, 7, 1), deterministic=False)
     assert rt.dos.sound_blaster is sb           # same device, not rebuilt
     assert rt.dos.sound_blaster.dma_active is True
     assert rt.dos.sound_blaster.sample_rate == 5128
@@ -78,8 +78,28 @@ def test_configure_sound_preserves_restored_sb():
     # Fresh boot (no SB yet) still attaches one.
     rt2 = make_rt()
     assert rt2.dos.sound_blaster is None
-    _configure_sound(rt2.dos, (0x210, 7, 1), headless_clock=False)
+    _configure_sound(rt2.dos, (0x210, 7, 1), deterministic=False)
     assert rt2.dos.sound_blaster is not None
+
+
+def test_configure_sound_deterministic_keeps_instruction_clock():
+    """Demo-replay fidelity contract: the reproducible paths (record, replay,
+    headless) must keep the SB on the deterministic instruction-count clock,
+    NOT wall time — the SB IRQ's firing point steers the whole execution, so a
+    demo only replays faithfully if record and replay share that clock."""
+    import time
+    from dos_re.pm_player import _configure_sound
+    rt = make_rt()
+    sb = rt.dos.attach_sound_blaster(base=0x210, irq=7, dma=1)   # instruction-count clock
+    clk0 = sb.clock
+    assert clk0 is not None and clk0 is not time.monotonic
+    _configure_sound(rt.dos, (0x210, 7, 1), deterministic=True)
+    assert rt.dos.sound_blaster is sb
+    assert rt.dos.sound_blaster.clock is clk0                    # left untouched
+    # a fresh boot on the deterministic path also gets an instruction-count clock
+    rt2 = make_rt()
+    _configure_sound(rt2.dos, (0x210, 7, 1), deterministic=True)
+    assert rt2.dos.sound_blaster.clock not in (None, time.monotonic)
 
 
 def test_snapshot_preserves_mouse_range():
