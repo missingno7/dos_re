@@ -263,3 +263,35 @@ def test_bulk_string_equals_per_unit_loop(kw):
         except HaltExecution:
             pass
     assert _digest(fast_cpu, fast_mem, fast_vga) == _digest(slow_cpu, slow_mem, slow_vga)
+
+
+def test_render_numpy_matches_scalar():
+    """The numpy render fast path must be byte-identical to the scalar loop."""
+    import dos_re.dos4gw as m
+    from dos_re.dos4gw import DOS4GWHost, render_pm_frame
+    if m._np is None:
+        import pytest
+        pytest.skip("numpy not installed")
+    mem = FlatMemory(size=0xC0000)
+    host = DOS4GWHost(mem, ".")
+    for i in range(256):
+        host.dac[i * 3:i * 3 + 3] = bytes(((i * 7) & 0x3F, (i * 3) & 0x3F, i & 0x3F))
+    # Mode X planar content
+    host.vga.chain4 = False
+    for p in range(4):
+        host.vga.planes[p][:0x2000] = bytes((p * 40 + (j % 200)) & 0xFF for j in range(0x2000))
+    host.vga.crtc[0x01] = 0x4F
+    host.vga.crtc[0x12] = 0x8F
+    host.vga.crtc[0x09] = 0x41
+    host.vga.crtc[0x13] = 0x28
+    np_rgb, w, h = render_pm_frame(host)
+    np_mx = host.vga.render_mode_x(w, h)
+    saved = m._np
+    m._np = None
+    try:
+        sc_rgb, _, _ = render_pm_frame(host)
+        sc_mx = host.vga.render_mode_x(w, h)
+    finally:
+        m._np = saved
+    assert np_mx == sc_mx
+    assert np_rgb == sc_rgb

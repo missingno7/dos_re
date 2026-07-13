@@ -137,29 +137,53 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
         if rec["demo"] is not None and clock is not None:
             rec["demo"].add(clock.frame - rec["start"], "key", [make, name])
 
-    # DOS console reads (a boot screen's "press any key") block until a real
-    # key arrives: on an empty queue we idle-pump events until the next
-    # KEYDOWN character lands in dos.key_queue, then resume the CPU.
+    # Pacing.  With an adapter frame clock we run the game with DETERMINISTIC
+    # retrace (the vsync wait exits in ~2 reads instead of spinning thousands
+    # of emulated 3DAh reads per frame) and throttle to 70 logical frames/sec
+    # by wall-clock — so the CPU emulates one frame's real work per frame, not
+    # the busy-wait.  Without a frame clock, fall back to wall-clock retrace.
+    paced = clock is not None
+    if paced:
+        dos.time_source = None
+    period = 1 / 70.0
+    start = time.monotonic()
+    next_present = start
+    frame_budget = 4_000            # small chunks so we stop near a frame boundary
+
+    def advance():
+        """Run the game forward to the frame due by wall-clock (paced) or one
+        present's worth (unpaced)."""
+        nonlocal waiting_console, running
+        if waiting_console:
+            return
+        try:
+            if paced:
+                due = int((time.monotonic() - start) / period)
+                guard = 0
+                while clock.frame < due and guard < 600 and not cpu.halted:
+                    cpu.run(frame_budget)
+                    guard += 1
+            else:
+                cpu.run(20_000)
+        except DosInputExhausted:
+            waiting_console = True
+        except Exception as e:  # noqa: BLE001 — the fail-loud frontier
+            print(f"STOP at eip=0x{cpu.eip:X}: {type(e).__name__}: {e}")
+            running = False
+        if cpu.halted:
+            print(f"program exited (code {dos.exit_code})")
+            running = False
+
     waiting_console = False
-    next_present = time.monotonic()
     running = True
     while running:
-        if not waiting_console:
-            try:
-                cpu.run(20_000)
-            except DosInputExhausted:
-                waiting_console = True
-            except Exception as e:  # noqa: BLE001 — the fail-loud frontier
-                print(f"STOP at eip=0x{cpu.eip:X}: {type(e).__name__}: {e}")
-                running = False
-            if cpu.halted:
-                print(f"program exited (code {dos.exit_code})")
-                running = False
+        advance()
 
         now = time.monotonic()
         if now < next_present:
+            time.sleep(min(next_present - now, 0.005))
             continue
-        next_present = now + 1 / 70.0
+        next_present = max(next_present + period, now)
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 running = False

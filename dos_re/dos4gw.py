@@ -19,6 +19,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+try:                       # numpy is a first-class dep; scalar fallback for bare envs
+    import numpy as _np
+except ImportError:        # pragma: no cover
+    _np = None
+
 from .cpu386 import CPU386, EAX, EBX, ECX, EDX, ESI, EDI
 
 # Reported environment.
@@ -127,10 +132,22 @@ class VGASequencer:
 
     def render_mode_x(self, width: int = 320, height: int = 240) -> bytes:
         """Compose linear pixels from the planes at the current display start.
-        Row stride is CRTC offset (reg 13h) * 2 bytes per plane (default 80)."""
+
+        Row stride is CRTC offset (reg 13h) * 2 bytes per plane (default 80).
+        Vectorized with numpy when available (~30x — the viewer's per-frame
+        cost); the scalar loop is the fallback for bare environments."""
         stride = (self.crtc[0x13] or 40) * 2
-        out = bytearray(width * height)
         base = self.display_start
+        if _np is not None:
+            ncols = width // 4
+            # (H, ncols) plane byte-offsets, wrapped into the 64K plane.
+            off = (base + _np.arange(height, dtype=_np.int64)[:, None] * stride
+                   + _np.arange(ncols, dtype=_np.int64)[None, :]) & 0xFFFF
+            out = _np.empty((height, width), dtype=_np.uint8)
+            for p in range(4):
+                out[:, p::4] = _np.frombuffer(self.planes[p], dtype=_np.uint8)[off]
+            return out.tobytes()
+        out = bytearray(width * height)
         for y in range(height):
             row = base + y * stride
             for x in range(width):
@@ -153,6 +170,11 @@ def render_pm_frame(host: "DOS4GWHost", *, width: int = 320,
     else:
         width, height = vga.geometry()
         pixels = vga.render_mode_x(width, height)
+    if _np is not None:
+        # palette[c] = (r,g,b) with the DAC's 6-bit values scaled to 8-bit.
+        palette = (_np.frombuffer(bytes(host.dac), dtype=_np.uint8).reshape(256, 3) << 2)
+        idx = _np.frombuffer(pixels, dtype=_np.uint8)
+        return palette[idx].astype(_np.uint8).tobytes(), width, height
     dac = host.dac
     rgb = bytearray(width * height * 3)
     for i, c in enumerate(pixels):
