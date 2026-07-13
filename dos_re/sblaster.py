@@ -283,28 +283,38 @@ class SoundBlaster:
                 self._fire_irq()
             return
         ch = self.channels[self.dma]
-        # A DMA block always plays from the channel's BASE address — for
-        # single-cycle the driver reprograms it per block, and in auto-init
-        # mode (mode bit 4, which KE uses) the 8237 reloads base->cur each
-        # block.  Reading cur_addr instead walked PAST the buffer into silence
-        # after the first block (the "clicking instead of music" bug).
-        addr = ((ch.page << 16) | ch.base_addr) & 0xFFFFF
-        auto_init = bool(ch.mode & 0x10)
-        # Move the block over DMA and leave the 8237 channel in its
-        # post-transfer state (count at terminal 0xFFFF, TC status bit set) —
-        # SB drivers detect their DMA channel by observing exactly these
-        # effects.  cur_addr reloads to base under auto-init, else ends past
-        # the block.
+        # Read the block as a RING within the DMA buffer [base_addr,
+        # base_addr+base_count].  KE plays a 1280-byte auto-init buffer (mode
+        # bit 4) as two 640-sample halves, refilling each just-played half on
+        # its IRQ — so each block advances cur_addr by the DSP length and wraps
+        # at the buffer end.  (Reading cur_addr un-wrapped walked into silence;
+        # always reading base_addr replayed one half twice — the doubling.)
+        page = ch.page << 16
+        buf_size = max(1, ch.base_count + 1)
+        if not (ch.base_addr <= ch.cur_addr < ch.base_addr + buf_size):
+            ch.cur_addr = ch.base_addr            # resync a stale/out-of-range cursor
+        pos = ch.cur_addr - ch.base_addr
+
+        def ring(i):
+            return (page | (ch.base_addr + (pos + i) % buf_size)) & 0xFFFFFF
+
         if input_transfer:
-            # ADC with no source records silence level (~0x80); the bytes
-            # LAND IN MEMORY — KE's autodetect sentinels a buffer per
-            # candidate channel and checks which one the card overwrote.
+            # ADC with no source records silence (~0x80); the bytes LAND IN
+            # MEMORY — KE's autodetect sentinels a buffer per candidate channel
+            # and checks which one the card overwrote.
             if self.write_mem is not None:
                 for i in range(length):
-                    self.write_mem((addr + i) & 0xFFFFFF, 0x80)
+                    self.write_mem(ring(i), 0x80)
         elif not silence and self.read_mem is not None:
-            self.pcm_out.extend(self.read_mem((addr + i) & 0xFFFFFF) for i in range(length))
-        ch.cur_addr = ch.base_addr if auto_init else (ch.base_addr + length) & 0xFFFF
+            self.pcm_out.extend(self.read_mem(ring(i)) for i in range(length))
+        # Auto-init wraps the cursor within the buffer; single-cycle ends past
+        # the block (the driver reprograms the address next time).  Leave the
+        # 8237 at terminal count with the TC status bit set (drivers detect
+        # their channel by exactly these effects).
+        if ch.mode & 0x10:
+            ch.cur_addr = ch.base_addr + (pos + length) % buf_size
+        else:
+            ch.cur_addr = (ch.base_addr + length) & 0xFFFF
         ch.cur_count = 0xFFFF                     # terminal count reached
         self.dma_tc |= 1 << self.dma              # 8237 status TC bit
         self.log.append(("dma_start", {"len": length, "auto": auto, "rate": self.sample_rate,
