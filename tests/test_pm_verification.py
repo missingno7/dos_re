@@ -56,6 +56,25 @@ def correct_hook(cpu):
     cpu.eip = cpu.pop(4)                   # RET
 
 
+def test_snapshot_preserves_mouse_range():
+    """Regression: the INT 33h virtual range (AX=7/8) the game programs must
+    survive a snapshot round-trip.  Without it a resume reverts to the
+    unclamped default [0,639,0,199] and a range-clamped pointer (e.g. the
+    paddle) flies free."""
+    from dos_re.pm_snapshot import capture_pm_state, clone_pm_runtime
+    rt = make_rt()
+    rt.dos.mouse_range = [40, 280, 176, 176]      # a clamped gameplay range
+    state = capture_pm_state(rt)
+    assert state["dos"]["mouse_range"] == [40, 280, 176, 176]
+    clone = clone_pm_runtime(rt)
+    assert clone.dos.mouse_range == [40, 280, 176, 176]
+    # older snapshots that predate the field still load (driver default)
+    del state["dos"]["mouse_range"]
+    from dos_re.pm_snapshot import apply_pm_state
+    apply_pm_state(rt, state, bytes(rt.mem.data), b"".join(rt.dos.vga.planes))
+    assert rt.dos.mouse_range == [0, 639, 0, 199]
+
+
 def test_hook_dispatch_without_verifier():
     rt = make_rt()
     calls = []

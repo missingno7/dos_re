@@ -56,6 +56,9 @@ def capture_pm_state(rt) -> dict:
             "dac_write_index": dos.dac_write_index, "dac_rgb_phase": dos.dac_rgb_phase,
             "mouse": [getattr(dos, "mouse_x", 320), getattr(dos, "mouse_y", 100),
                       getattr(dos, "mouse_buttons", 0)],
+            # The INT 33h virtual range (AX=7/8) the game programmed — without
+            # it a resume reverts to the unclamped default and the paddle flies.
+            "mouse_range": list(getattr(dos, "mouse_range", [0, 639, 0, 199])),
             "timer_period_instructions": dos.timer_period_instructions,
             "timer_next": dos._timer_next,
             "files": {str(h): [f.name, f.tell(), f.mode]
@@ -121,6 +124,9 @@ def apply_pm_state(rt, state: dict, mem_bytes, planes_bytes) -> None:
     dos.dac_write_index = s["dac_write_index"]
     dos.dac_rgb_phase = s["dac_rgb_phase"]
     dos.mouse_x, dos.mouse_y, dos.mouse_buttons = s["mouse"]
+    # Restore the game-programmed INT 33h range (older snapshots lack it —
+    # fall back to the driver default so they still load).
+    dos.mouse_range = list(s.get("mouse_range", [0, 639, 0, 199]))
     dos.timer_period_instructions = s["timer_period_instructions"]
     dos._timer_next = s["timer_next"]
     dos._next_handle = s["next_handle"]
