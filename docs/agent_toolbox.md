@@ -371,6 +371,43 @@ state (boot constants), not a level-jump bootstrap. pre2 adapters:
 `scripts/probe_frontend_timeline.py` (ground-truth prober — run on ANY demo to see
 what the original does) + `scripts/verify_native_frontend.py` (the 4-gate proof).
 
+Front-end iteration cost (two OVERKILL-learned gotchas): (1) front-end probing has
+no gameplay snapshot to seed from, so every attempt re-pays the full cold boot
+(~10 min of raw interpretation) — run the boot ONCE and `write_snapshot` at a
+present-frame just before the screens you are probing; every later probe loads it
+instantly and drives forward. (2) Front ends often pace on RETRACE POLLING
+(`in al, 3DAh`), NOT the game's timer wait — a fast-forward helper keyed to the
+timer-wait address (or a wait-flag poke) will stall or no-op there; raw-step the
+cpu instead (the VM toggles the 3DA retrace bit, so the poll loops complete).
+
+## 12c. Prove the VM-less AUDIO driver (the resident sound module)
+
+A game's resident sound driver — a loaded module at its own segment, ticked from
+the timer ISR, writing OPL/SB registers through ports — is provable byte-exact
+INDEPENDENTLY of gameplay recovery, because its whole world is its own segment
+image: the game commands it by writing cells there (page/SFX requests), and its
+output is the register write stream. Two gates, both built on three trapped
+addresses (`dos_re.step_probe` — the tick entry, the register-write leaf, the
+game's frame boundary), captured per present-frame over a pure-VM demo replay:
+
+- **FORWARD gate** (reads the tempo + proves the music tick): seed the recovered
+  driver ONCE from the VM's segment image, run it forward at the captured
+  ticks-per-frame, diff writes per frame. It stays byte-exact across a steady
+  single-page music window and diverges exactly at the first game event (an
+  SFX/page request written into the driver's cells mid-frame — invisible to a
+  forward sim). That boundary is the music-isolation surface, not a bug; and the
+  captured tick count fixes the TEMPO as a measurement instead of an ear-tune.
+- **PER-TICK gate** (the strongest form — verifies the WHOLE demo, SFX and page
+  changes included): re-seed the recovered driver from the true segment image at
+  EVERY tick entry and diff that one tick's writes. Each tick is independently
+  seeded, so there is no forward drift and nothing is out of scope.
+
+A real driver bug shows up as a small mid-window mismatch (forward gate) or any
+per-tick mismatch; lock a short per-tick window into the suite as the regression
+gate. Validated on OVERKILL (`overkill/probes/verify_native_audio.py`): ~700
+ticks per demo across six levels/songs, zero divergence, through SFX bursts and
+page switches.
+
 ## 13. Measure progress (never estimate)
 
 ```bash
