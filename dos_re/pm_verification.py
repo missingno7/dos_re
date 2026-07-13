@@ -67,6 +67,16 @@ class PMHookVerifier:
         asm_cpu.hook_verifier = None
         asm_cpu.replacement_hooks.clear()
         asm_cpu.hook_names.clear()
+        # A replacement hook executes ATOMICALLY — the interpreter counts it as
+        # one instruction, so no hardware IRQ can be delivered in the middle of
+        # it.  The oracle re-runs the real instructions, which may cross the
+        # interpreter's periodic IRQ-poll boundary and deliver a pending IRQ
+        # mid-routine (its ISR then mutates memory the hook never touched),
+        # producing a spurious divergence.  Suppress async IRQ delivery on the
+        # oracle so it runs the routine atomically too — the IRQ is still
+        # delivered by the main loop at the next step boundary for both, exactly
+        # as on real hardware.  (Verifies computation, not interrupt phase.)
+        asm_cpu.pending_irq = None
 
         handler(cpu)
         if cpu.coverage_telemetry is not None:
