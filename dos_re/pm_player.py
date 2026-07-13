@@ -335,6 +335,13 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     # yet the demo records/replays input only at boundaries → the replay would
     # diverge.  Boundary-quantizing input makes recording match replay exactly.
     pending = {"keys": []}
+    # True while the frame clock isn't advancing (the game sits in its pause
+    # loop, which never hits the per-frame tick).  Keys pressed then can't wait
+    # for on_frame to flush the buffer, so they're delivered immediately and
+    # recorded at the paused frame — replay gets pause+unpause at one frame and
+    # collapses the pause to zero, staying in sync (a pause is a state-neutral
+    # spin, so nothing is lost).
+    stalled = [False]
 
     def on_frame(frame):
         if rec["demo"] is not None:
@@ -396,6 +403,7 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
         nonlocal waiting_console, running, last_time
         if waiting_console:
             return
+        any_done = False
         try:
             if paced:
                 now = time.monotonic()
@@ -416,6 +424,8 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                         frame_done = True
                     if not frame_done:
                         break                       # no frame yet (paused/stuck)
+                    any_done = True
+                stalled[0] = not any_done           # frame clock parked (paused)?
             else:
                 cpu.run(20_000)
         except DosInputExhausted:
@@ -534,12 +544,17 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                 if name in ("f10", "f11", "f12"):
                     continue          # viewer hotkeys — never game input (the
                                       # F11 release used to leak into the demo)
-                # Recording: buffer the key for the frame boundary; live play:
-                # deliver it now (more responsive when not recording).
-                if rec["demo"] is not None:
-                    pending["keys"].append((make, name))
-                else:
+                if rec["demo"] is None:
+                    send_key(dos, name, make)       # live play: deliver now
+                elif stalled[0]:
+                    # Paused: on_frame won't fire to flush the buffer, so deliver
+                    # now (unpauses the game) and record at the paused frame so
+                    # the replay collapses the pause to zero.
+                    f = max(0, clock.frame - 1 - rec["start"])
+                    rec["demo"].add(f, "key", [make, name])
                     send_key(dos, name, make)
+                else:
+                    pending["keys"].append((make, name))   # buffer for on_frame
                 if make and waiting_console:
                     ch = ev.unicode
                     if ch:
@@ -650,11 +665,20 @@ def run_replay(rt, demo_path, *, boot_keys=(), extra_frames: int = 30,
             if kind == "key":
                 send_key(dos, payload[1], payload[0])
             elif kind == "mouse":
-                dos.set_mouse_norm(payload[0], payload[1])
-                dos.mouse_buttons = payload[2]
+                last_mouse[0] = payload
+        # Re-apply the mouse EVERY frame, not just on change: set_mouse_norm
+        # re-maps the normalized position through the game's CURRENT INT 33h
+        # range, and the game narrows that range (e.g. to the playfield when a
+        # ball launches).  Applying only on change leaves a stale mouse_x/y
+        # mapped with the OLD range, so the paddle diverges the moment the range
+        # changes while the mouse is still — the recorder re-applies every frame.
+        if last_mouse[0] is not None:
+            m = last_mouse[0]
+            dos.set_mouse_norm(m[0], m[1], m[2])
         if frame >= end_frame:
             done["flag"] = True
 
+    last_mouse = [None]
     clock = FrameClock(rt.cpu, demo.frame_tick_addr, on_frame)
 
     def _finish():
