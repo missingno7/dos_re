@@ -102,7 +102,7 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                frame_tick_addr: int | None = None,
                record_demo: str | None = None) -> int:
     import pygame
-    from .pm_input_demo import PMInputDemo, FrameClock
+    from .pm_input_demo import PMInputDemo, FrameClock, FramePaced
 
     pygame.init()
     # A fixed 4:3 canvas: every VGA geometry this runtime produces (320x200
@@ -149,12 +149,13 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     MAX_CATCHUP = 2                 # frames advanced per present — bounded so a
                                     # slow game degrades smoothly (1-2 frames /
                                     # present) instead of bursting dozens at once
-    frame_budget = 4_000            # small chunks so we stop near a frame boundary
     last_time = time.monotonic()
 
     def advance():
-        """Advance the game by the frames due since the last present (paced),
-        capped at MAX_CATCHUP so it never catches up in one big burst."""
+        """Advance EXACTLY the frames due since the last present (paced),
+        capped at MAX_CATCHUP.  The frame clock breaks each run precisely at the
+        next frame boundary (FramePaced), so the game runs at its true rate
+        instead of overshooting a chunk past each frame."""
         nonlocal waiting_console, running, last_time
         if waiting_console:
             return
@@ -163,11 +164,14 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                 now = time.monotonic()
                 n = min(MAX_CATCHUP, max(1, round((now - last_time) / period)))
                 last_time = now
-                target = clock.frame + n
-                guard = 0
-                while clock.frame < target and guard < 200 and not cpu.halted:
-                    cpu.run(frame_budget)
-                    guard += 1
+                for _ in range(n):
+                    if cpu.halted:
+                        break
+                    clock.stop_at = clock.frame + 1
+                    try:
+                        cpu.run(4_000_000)          # runs until the next frame boundary
+                    except FramePaced:
+                        pass
             else:
                 cpu.run(20_000)
         except DosInputExhausted:
@@ -266,7 +270,7 @@ def run_replay(rt, demo_path, *, boot_keys=(), extra_frames: int = 30,
     Re-injects each frame's recorded input at the game's own frame boundary,
     then runs ``extra_frames`` past the demo's end.  Optionally saves a
     snapshot / PNG of the resulting state, or shows it in a window."""
-    from .pm_input_demo import PMInputDemo, FrameClock
+    from .pm_input_demo import PMInputDemo, FrameClock, FramePaced
 
     demo = PMInputDemo.load(demo_path)
     if demo.frame_tick_addr is None:

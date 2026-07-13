@@ -56,22 +56,35 @@ class PMInputDemo:
         return o
 
 
+class FramePaced(Exception):
+    """Raised by the FrameClock to stop ``cpu.run`` exactly at a frame boundary.
+
+    The tick that would enter frame ``stop_at`` raises this WITHOUT running the
+    entry instruction, so ``cpu.eip`` stays on the frame-tick address — the run
+    resumes into that frame on the next call.  Lets a viewer advance exactly
+    one logical frame per present (correct game speed) instead of overshooting."""
+
+
 class FrameClock:
     """Per-frame boundary counter installed at ``frame_tick_addr``.
 
     ``on_frame(frame_index)`` runs at the start of each frame, before the
     frame's own code — the record hook samples input there, the replay hook
-    injects it there."""
+    injects it there.  Set ``stop_at`` to have the clock break the run at that
+    frame boundary (exact-frame pacing)."""
 
     def __init__(self, cpu, addr: int, on_frame):
         self.cpu = cpu
         self.addr = addr
         self.on_frame = on_frame
         self.frame = 0
+        self.stop_at = None
         cpu.replacement_hooks[addr] = self._tick
         cpu.hook_names[addr] = "frame_clock"
 
     def _tick(self, cpu) -> None:
+        if self.stop_at is not None and self.frame >= self.stop_at:
+            raise FramePaced()            # break the run; eip stays on the tick address
         self.on_frame(self.frame)
         self.frame += 1
         interp_one32(cpu, self.addr)      # run the entry instruction; hook suppressed for it
