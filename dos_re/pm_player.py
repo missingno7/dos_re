@@ -534,6 +534,16 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
         pygame.transform.scale(frame, win.get_size(), win)
         pygame.display.flip()
         pcm.pump()
+    # Flush an in-progress recording on exit: closing the window (or ESC)
+    # instead of pressing F11-to-stop must still save the captured demo, not
+    # discard it — otherwise a full playthrough recorded live is lost and the
+    # on-disk manifest is stuck at the empty START write (0 frames).
+    if rec["demo"] is not None and clock is not None:
+        demo = rec["demo"]
+        demo.total_frames = clock.frame - rec["start"]
+        demo.write_manifest(rec["dir"], status="complete")
+        print(f"demo recording flushed on exit -> {rec['dir']} "
+              f"({demo.total_frames} frames, {len(demo.events)} events)")
     if hasattr(pcm, "close"):
         pcm.close()
     pygame.quit()
@@ -555,6 +565,17 @@ def run_replay(rt, demo_path, *, boot_keys=(), extra_frames: int = 30,
     if demo.frame_tick_addr is None:
         print("demo has no frame_tick_addr; cannot replay")
         return 1
+    if demo.status == "recording" or demo.total_frames == 0:
+        # A recording that was never F11-stopped (its manifest is stuck at the
+        # empty START write) has no input to replay — playback just sits on the
+        # start snapshot and looks frozen.  Say so instead of silently doing it.
+        print(f"WARNING: this demo is empty / never completed "
+              f"(status={demo.status!r}, {demo.total_frames} frames, "
+              f"{len(demo.events)} events) -- nothing to replay.  Re-record it: "
+              f"the recording is saved when you stop it (F11 again) or close "
+              f"the window; the empty manifest here means neither happened.")
+        if demo.total_frames == 0:
+            return 1
     diverged = {"frame": None}       # first frame whose digest disagrees, if any
     # A bundle with a start snapshot already holds the mid-game state, so the
     # title-screen boot keys apply only to a cold-start (snapshot-less) replay.

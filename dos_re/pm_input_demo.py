@@ -50,6 +50,7 @@ class PMInputDemo:
         self.snapshot: str | None = None   # start-snapshot subdir name (None = cold start)
         self.metadata: dict = {}
         self.digests: dict[int, str] = {}  # frame index -> frame_digest(cpu) at record time
+        self.status: str | None = None     # "complete" once F11-stopped; "recording" = never finished
 
     def add(self, frame: int, kind: str, payload) -> None:
         self.events.append([int(frame), kind, payload])
@@ -100,6 +101,7 @@ class PMInputDemo:
         o.snapshot = d.get("snapshot")
         o.metadata = d.get("metadata", {})
         o.digests = {int(k): v for k, v in d.get("digests", {}).items()}
+        o.status = d.get("status")
         return o
 
     @classmethod
