@@ -326,24 +326,38 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     # Demo recording (F11): a FrameClock keyed to the game's per-frame entry
     # tags input with the frame index, so the demo replays deterministically.
     mouse_norm = [0.5, 0.5]
+    mbtn = [0]                       # mouse-button mask (host copy)
     rec = {"demo": None, "start": 0, "last_mouse": None, "dir": None}
+    # While recording, input is BUFFERED and applied to the VM only at the frame
+    # boundary (on_frame) — never mid-frame.  On a slow interpreter one game
+    # frame spans several presents, so an async key/mouse event landing between
+    # them would change the VM mid-frame at a wall-clock-dependent instruction,
+    # yet the demo records/replays input only at boundaries → the replay would
+    # diverge.  Boundary-quantizing input makes recording match replay exactly.
+    pending = {"keys": []}
 
     def on_frame(frame):
         if rec["demo"] is not None:
             f = frame - rec["start"]
             from .pm_input_demo import frame_digest
-            rec["demo"].digests[f] = frame_digest(cpu)   # fingerprint each frame seam
-            sample = [round(mouse_norm[0], 4), round(mouse_norm[1], 4),
-                      getattr(dos, "mouse_buttons", 0)]
+            rec["demo"].digests[f] = frame_digest(cpu)   # seam BEFORE this frame's input
+            # Apply + record the input buffered since the previous boundary.
+            # Apply EXACTLY the value we record (the rounded sample), not the
+            # full-precision mouse_norm: the game maps the normalized mouse onto
+            # a pixel and is sensitive to <1e-4 (≈0.06 px) differences, so
+            # applying full precision while recording a rounded value makes the
+            # replay land on a different pixel and diverge (observed ~frame 22).
+            sample = [round(mouse_norm[0], 4), round(mouse_norm[1], 4), mbtn[0]]
+            dos.set_mouse_norm(sample[0], sample[1], sample[2])
             if sample != rec["last_mouse"]:
                 rec["demo"].add(f, "mouse", sample)
                 rec["last_mouse"] = sample
+            for make, name in pending["keys"]:
+                rec["demo"].add(f, "key", [make, name])
+                send_key(dos, name, make)
+            pending["keys"].clear()
 
     clock = FrameClock(cpu, frame_tick_addr, on_frame) if frame_tick_addr else None
-
-    def record_key(make, name):
-        if rec["demo"] is not None and clock is not None:
-            rec["demo"].add(clock.frame - rec["start"], "key", [make, name])
 
     # Pacing.  With an adapter frame clock we run the game with DETERMINISTIC
     # retrace (the vsync wait exits in ~2 reads instead of spinning thousands
@@ -516,8 +530,15 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                         rec["demo"] = None
                         dos.set_sound_clock(deterministic=False)  # back to live audio
                     continue
-                record_key(make, name)
-                send_key(dos, name, make)
+                if name in ("f10", "f11", "f12"):
+                    continue          # viewer hotkeys — never game input (the
+                                      # F11 release used to leak into the demo)
+                # Recording: buffer the key for the frame boundary; live play:
+                # deliver it now (more responsive when not recording).
+                if rec["demo"] is not None:
+                    pending["keys"].append((make, name))
+                else:
+                    send_key(dos, name, make)
                 if make and waiting_console:
                     ch = ev.unicode
                     if ch:
@@ -530,12 +551,14 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                 # INT 33h virtual range by the host.
                 mouse_norm[0] = mx / max(1, ww - 1)
                 mouse_norm[1] = my / max(1, wh - 1)
-                dos.set_mouse_norm(mouse_norm[0], mouse_norm[1])
+                if rec["demo"] is None:              # recording defers to on_frame
+                    dos.set_mouse_norm(mouse_norm[0], mouse_norm[1], mbtn[0])
             elif ev.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP):
                 down = ev.type == pygame.MOUSEBUTTONDOWN
                 bit = {1: 1, 3: 2}.get(ev.button, 0)
-                cur = getattr(dos, "mouse_buttons", 0)
-                dos.mouse_buttons = (cur | bit) if down else (cur & ~bit)
+                mbtn[0] = (mbtn[0] | bit) if down else (mbtn[0] & ~bit)
+                if rec["demo"] is None:              # recording defers to on_frame
+                    dos.mouse_buttons = mbtn[0]
 
         rgb, w, h = render_pm_frame(dos)
         frame = pygame.image.frombuffer(rgb, (w, h), "RGB").convert(win)
