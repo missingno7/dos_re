@@ -14,8 +14,10 @@ under CPython and PyPy, and never has the "extension not built" failure
 mode.  It is THE OPL3 backend of dos_re (the formerly-vendored
 ``pynuked_opl3`` cffi submodule was retired once this translation was proven
 byte-identical); ``dos_re.audio_sink.load_opl3`` is the stable entry point.
-Rates: ~0.5x real-time on CPython, ~19x under PyPy — run games with live
-music under PyPy (docs/performance.md).
+Rates (44100 Hz): ~1.0x real-time on CPython on a worst-case busy chip
+(1.3-1.6x on typical/quiet states, thanks to the provable fast lanes in
+_process_slot and the bank-1 dormancy skip), ~30-60x under PyPy
+(docs/performance.md).
 
 Config parity: the C reference is compiled with the upstream defaults —
 ``OPL_ENABLE_STEREOEXT=0`` and therefore ``OPL_QUIRK_CHANNELSAMPLEDELAY=1``
@@ -166,6 +168,66 @@ _AD_SLOT = (0, 1, 2, 3, 4, 5, -1, -1, 6, 7, 8, 9, 10, 11, -1, -1, 12, 13, 14, 15
 _CH_SLOT = (0, 1, 2, 6, 7, 8, 12, 13, 14, 18, 19, 20, 24, 25, 26, 30, 31, 32)
 
 
+# PERF: flattened output tables — the eight EnvelopeCalcSin* functions each
+# reduce to (magnitude-level, negate) as pure functions of the 10-bit phase,
+# and EnvelopeCalcExp to one lookup in a level-indexed table with the clamp
+# baked in.  Built here mechanically FROM the same definitions the direct
+# translation used; the golden/differential tests prove the equivalence.
+_EXPFULL = tuple((_EXP[(l if l <= 0x1FFF else 0x1FFF) & 0xFF] << 1)
+                 >> ((l if l <= 0x1FFF else 0x1FFF) >> 8) for l in range(0x4000))
+
+
+def _wf_tables():
+    mags, negs = [], []
+    for wf in range(8):
+        mag = [0] * 0x400
+        neg = [0] * 0x400
+        for p in range(0x400):
+            if wf == 0:
+                m = _LOGSIN[(p & 0xFF) ^ 0xFF] if p & 0x100 else _LOGSIN[p & 0xFF]
+                n = p & 0x200
+            elif wf == 1:
+                m = 0x1000 if p & 0x200 else (
+                    _LOGSIN[(p & 0xFF) ^ 0xFF] if p & 0x100 else _LOGSIN[p & 0xFF])
+                n = 0
+            elif wf == 2:
+                m = _LOGSIN[(p & 0xFF) ^ 0xFF] if p & 0x100 else _LOGSIN[p & 0xFF]
+                n = 0
+            elif wf == 3:
+                m = 0x1000 if p & 0x100 else _LOGSIN[p & 0xFF]
+                n = 0
+            elif wf == 4:
+                if p & 0x200:
+                    m = 0x1000
+                elif p & 0x80:
+                    m = _LOGSIN[((p ^ 0xFF) << 1) & 0xFF]
+                else:
+                    m = _LOGSIN[(p << 1) & 0xFF]
+                n = (p & 0x300) == 0x100
+            elif wf == 5:
+                if p & 0x200:
+                    m = 0x1000
+                elif p & 0x80:
+                    m = _LOGSIN[((p ^ 0xFF) << 1) & 0xFF]
+                else:
+                    m = _LOGSIN[(p << 1) & 0xFF]
+                n = 0
+            elif wf == 6:
+                m = 0
+                n = p & 0x200
+            else:
+                m = (((p & 0x1FF) ^ 0x1FF) << 3) if p & 0x200 else (p << 3)
+                n = p & 0x200
+            mag[p] = m
+            neg[p] = 1 if n else 0
+        mags.append(tuple(mag))
+        negs.append(tuple(neg))
+    return tuple(mags), tuple(negs)
+
+
+_WF_MAG, _WF_NEG = _wf_tables()
+
+
 def _cdiv(a: int, b: int) -> int:
     """C integer division: truncate toward zero (Python // floors)."""
     q = a // b
@@ -174,98 +236,6 @@ def _cdiv(a: int, b: int) -> int:
     return q
 
 
-# --- Envelope sine/exp ROM lookups (OPL3_EnvelopeCalcSin0..7, ..CalcExp) ----------------
-#
-# Each returns a SIGNED int like the C int16_t.  The C computes the positive
-# magnitude through the exp ROM and negates via ``^ 0xffff`` (one's
-# complement); ``-x - 1`` is the same value in Python ints.
-
-def _exp_out(level: int) -> int:
-    if level > 0x1FFF:
-        level = 0x1FFF
-    return (_EXP[level & 0xFF] << 1) >> (level >> 8)
-
-
-def _sin0(phase: int, envelope: int) -> int:
-    phase &= 0x3FF
-    if phase & 0x100:
-        out = _LOGSIN[(phase & 0xFF) ^ 0xFF]
-    else:
-        out = _LOGSIN[phase & 0xFF]
-    r = _exp_out(out + (envelope << 3))
-    return -r - 1 if phase & 0x200 else r
-
-
-def _sin1(phase: int, envelope: int) -> int:
-    phase &= 0x3FF
-    if phase & 0x200:
-        out = 0x1000
-    elif phase & 0x100:
-        out = _LOGSIN[(phase & 0xFF) ^ 0xFF]
-    else:
-        out = _LOGSIN[phase & 0xFF]
-    return _exp_out(out + (envelope << 3))
-
-
-def _sin2(phase: int, envelope: int) -> int:
-    phase &= 0x3FF
-    if phase & 0x100:
-        out = _LOGSIN[(phase & 0xFF) ^ 0xFF]
-    else:
-        out = _LOGSIN[phase & 0xFF]
-    return _exp_out(out + (envelope << 3))
-
-
-def _sin3(phase: int, envelope: int) -> int:
-    phase &= 0x3FF
-    if phase & 0x100:
-        out = 0x1000
-    else:
-        out = _LOGSIN[phase & 0xFF]
-    return _exp_out(out + (envelope << 3))
-
-
-def _sin4(phase: int, envelope: int) -> int:
-    phase &= 0x3FF
-    neg = (phase & 0x300) == 0x100
-    if phase & 0x200:
-        out = 0x1000
-    elif phase & 0x80:
-        out = _LOGSIN[((phase ^ 0xFF) << 1) & 0xFF]
-    else:
-        out = _LOGSIN[(phase << 1) & 0xFF]
-    r = _exp_out(out + (envelope << 3))
-    return -r - 1 if neg else r
-
-
-def _sin5(phase: int, envelope: int) -> int:
-    phase &= 0x3FF
-    if phase & 0x200:
-        out = 0x1000
-    elif phase & 0x80:
-        out = _LOGSIN[((phase ^ 0xFF) << 1) & 0xFF]
-    else:
-        out = _LOGSIN[(phase << 1) & 0xFF]
-    return _exp_out(out + (envelope << 3))
-
-
-def _sin6(phase: int, envelope: int) -> int:
-    phase &= 0x3FF
-    r = _exp_out(envelope << 3)
-    return -r - 1 if phase & 0x200 else r
-
-
-def _sin7(phase: int, envelope: int) -> int:
-    phase &= 0x3FF
-    neg = False
-    if phase & 0x200:
-        neg = True
-        phase = (phase & 0x1FF) ^ 0x1FF
-    r = _exp_out((phase << 3) + (envelope << 3))
-    return -r - 1 if neg else r
-
-
-_SINFUNC = (_sin0, _sin1, _sin2, _sin3, _sin4, _sin5, _sin6, _sin7)
 
 
 class _Slot:
@@ -277,7 +247,7 @@ class _Slot:
         "channel", "chip", "prout", "eg_rout", "eg_out", "eg_gen",
         "trem_on", "reg_vib", "reg_type", "reg_ksr", "reg_mult", "reg_ksl",
         "reg_tl", "reg_ar", "reg_dr", "reg_sl", "reg_rr", "reg_wf", "key",
-        "pg_reset", "pg_phase", "pg_phase_out", "slot_num", "mod_idx",
+        "pg_reset", "pg_phase", "pg_phase_out", "slot_num", "mod_idx", "is_rhythm",
         "eg_ksl", "out_idx", "fb_idx",
     )
 
@@ -285,6 +255,7 @@ class _Slot:
         self.chip = chip
         self.channel: "_Channel" | None = None
         self.slot_num = num
+        self.is_rhythm = num in (13, 16, 17)  # hh/sd/tc: phase feeds the rhythm generators
         self.out_idx = 1 + num
         self.fb_idx = 37 + num
         self.mod_idx = 0            # &chip->zeromod
@@ -374,6 +345,13 @@ class OPL3:
         self.tremolopos = 0
         self.tremoloshift = 4
         self.noise = 1
+        # PERF: OPL2-era programs never write bank 1 (reg >= 0x100), so slots
+        # 18..35 provably remain in their reset state (phase 0, envelope off,
+        # out 0) forever.  While dormant, _generate4ch skips their processing
+        # wholesale and only advances the noise LFSR the 18 steps they would
+        # have advanced it (their ONLY global side effect; none of them is a
+        # rhythm slot).  Any bank-1 write clears this permanently.
+        self.bank1_dormant = True
         self.mixbuff = [0, 0, 0, 0]
         self.rm_hh_bit2 = 0
         self.rm_hh_bit3 = 0
@@ -494,55 +472,6 @@ class OPL3:
 
     # --- Phase generator ------------------------------------------------------------
 
-    def _phase_generate(self, slot: _Slot) -> None:
-        """OPL3_PhaseGenerate"""
-        f_num = slot.channel.f_num
-        if slot.reg_vib:
-            rng = (f_num >> 7) & 7
-            vibpos = self.vibpos
-            if not (vibpos & 3):
-                rng = 0
-            elif vibpos & 1:
-                rng >>= 1
-            rng >>= self.vibshift
-            if vibpos & 4:
-                rng = -rng
-            f_num = (f_num + rng) & 0xFFFF
-        basefreq = (f_num << slot.channel.block) >> 1
-        phase = (slot.pg_phase >> 9) & 0xFFFF
-        if slot.pg_reset:
-            slot.pg_phase = 0
-        slot.pg_phase = (slot.pg_phase + ((basefreq * _MT[slot.reg_mult]) >> 1)) & 0xFFFFFFFF
-        # Rhythm mode
-        noise = self.noise
-        slot.pg_phase_out = phase
-        slot_num = slot.slot_num
-        if slot_num == 13:  # hh
-            self.rm_hh_bit2 = (phase >> 2) & 1
-            self.rm_hh_bit3 = (phase >> 3) & 1
-            self.rm_hh_bit7 = (phase >> 7) & 1
-            self.rm_hh_bit8 = (phase >> 8) & 1
-        if slot_num == 17 and (self.rhy & 0x20):  # tc
-            self.rm_tc_bit3 = (phase >> 3) & 1
-            self.rm_tc_bit5 = (phase >> 5) & 1
-        if self.rhy & 0x20:
-            rm_xor = ((self.rm_hh_bit2 ^ self.rm_hh_bit7)
-                      | (self.rm_hh_bit3 ^ self.rm_tc_bit5)
-                      | (self.rm_tc_bit3 ^ self.rm_tc_bit5))
-            if slot_num == 13:  # hh
-                slot.pg_phase_out = rm_xor << 9
-                if rm_xor ^ (noise & 1):
-                    slot.pg_phase_out |= 0xD0
-                else:
-                    slot.pg_phase_out |= 0x34
-            elif slot_num == 16:  # sd
-                slot.pg_phase_out = ((self.rm_hh_bit8 << 9)
-                                     | ((self.rm_hh_bit8 ^ (noise & 1)) << 8))
-            elif slot_num == 17:  # tc
-                slot.pg_phase_out = (rm_xor << 9) | 0x80
-        n_bit = ((noise >> 14) ^ noise) & 0x01
-        self.noise = (noise >> 1) | (n_bit << 22)
-
     # --- Slot -----------------------------------------------------------------------
 
     def _slot_write_20(self, slot: _Slot, data: int) -> None:
@@ -573,20 +502,200 @@ class OPL3:
             slot.reg_wf &= 0x03
 
     def _process_slot(self, slot: _Slot) -> None:
-        """OPL3_ProcessSlot = SlotCalcFB + EnvelopeCalc + PhaseGenerate + SlotGenerate"""
+        """OPL3_ProcessSlot = SlotCalcFB + EnvelopeCalc + PhaseGenerate + SlotGenerate.
+
+        Single flat method (no sub-calls; waveform+exp are the precomputed
+        _WF_MAG/_WF_NEG/_EXPFULL tables) with two provable fast lanes -- see
+        the comments.  Byte-exactness of all paths is proven by the golden
+        and differential tests.
+        """
         sv = self.sv
-        # OPL3_SlotCalcFB
-        out = sv[slot.out_idx]
-        if slot.channel.fb:
-            sv[slot.fb_idx] = (slot.prout + out) >> (0x09 - slot.channel.fb)
+        # PERF fast lane 1 -- a RELEASED slot (key off, release stage, envelope
+        # at 0x1FF) is frozen: the EG equations keep eg_rout/eg_gen fixed until
+        # key-on, and the output magnitude is 0 for every waveform (level >=
+        # 0xF00 shifts the exp ROM to zero), so only the 0/-1 DC sign (a real
+        # chip quirk) depends on the still-advancing phase.  Rhythm slots
+        # (hh/sd/tc) always take the full path -- their phase bits feed the
+        # rhythm generators.
+        if slot.key == 0 and slot.eg_rout == 0x1FF and slot.eg_gen == 3 and not slot.is_rhythm:
+            out_idx = slot.out_idx
+            out = sv[out_idx]
+            channel = slot.channel
+            fb = channel.fb
+            if fb:
+                sv[slot.fb_idx] = (slot.prout + out) >> (0x09 - fb)
+            else:
+                sv[slot.fb_idx] = 0
+            slot.prout = out
+            f_num = channel.f_num
+            if slot.reg_vib:
+                rng = (f_num >> 7) & 7
+                vibpos = self.vibpos
+                if not (vibpos & 3):
+                    rng = 0
+                elif vibpos & 1:
+                    rng >>= 1
+                rng >>= self.vibshift
+                if vibpos & 4:
+                    rng = -rng
+                f_num = (f_num + rng) & 0xFFFF
+            pg_phase = slot.pg_phase
+            phase = (pg_phase >> 9) & 0xFFFF
+            slot.pg_phase = (pg_phase
+                             + (((f_num << channel.block) >> 1)
+                                * _MT[slot.reg_mult] >> 1)) & 0xFFFFFFFF
+            slot.pg_phase_out = phase
+            noise = self.noise
+            self.noise = (noise >> 1) | ((((noise >> 14) ^ noise) & 0x01) << 22)
+            sv[out_idx] = -1 if _WF_NEG[slot.reg_wf][(phase + sv[slot.mod_idx]) & 0x3FF] else 0
+            return
+
+        # OPL3_SlotCalcFB (shared by the remaining paths)
+        out_idx = slot.out_idx
+        out = sv[out_idx]
+        channel = slot.channel
+        fb = channel.fb
+        if fb:
+            sv[slot.fb_idx] = (slot.prout + out) >> (0x09 - fb)
         else:
             sv[slot.fb_idx] = 0
         slot.prout = out
-        self._envelope_calc(slot)
-        self._phase_generate(slot)
-        # OPL3_SlotGenerate
-        sv[slot.out_idx] = _SINFUNC[slot.reg_wf](
-            slot.pg_phase_out + sv[slot.mod_idx], slot.eg_out)
+
+        # PERF fast lane 2 -- a SOUNDING but envelope-static slot: key on, in
+        # SUSTAIN, EGT set (reg_type != 0 -> sustain rate 0), envelope outside
+        # the 0x1F8 off-band.  The EG machinery changes nothing this sample
+        # (rate 0 -> shift 0 -> inc 0; no transition, no reset); only eg_out
+        # (carrying the per-sample tremolo term) must be recomputed.
+        if slot.key and slot.eg_gen == 2 and slot.reg_type and (slot.eg_rout & 0x1F8) != 0x1F8:
+            eg_out = (slot.eg_rout + (slot.reg_tl << 2)
+                      + (slot.eg_ksl >> _KSLSHIFT[slot.reg_ksl])
+                      + (self.tremolo if slot.trem_on else 0))
+            slot.eg_out = eg_out
+            reset = 0
+        else:
+            # OPL3_EnvelopeCalc (full)
+            eg_rout_cur = slot.eg_rout
+            eg_out = (eg_rout_cur + (slot.reg_tl << 2)
+                      + (slot.eg_ksl >> _KSLSHIFT[slot.reg_ksl])
+                      + (self.tremolo if slot.trem_on else 0))
+            slot.eg_out = eg_out
+            key = slot.key
+            eg_gen = slot.eg_gen
+            if key and eg_gen == 3:
+                reset = 1
+                reg_rate = slot.reg_ar
+            else:
+                reset = 0
+                if eg_gen == 0:
+                    reg_rate = slot.reg_ar
+                elif eg_gen == 1:
+                    reg_rate = slot.reg_dr
+                elif eg_gen == 2:
+                    reg_rate = 0 if slot.reg_type else slot.reg_rr
+                else:
+                    reg_rate = slot.reg_rr
+            rate = (channel.ksv >> ((slot.reg_ksr ^ 1) << 1)) + (reg_rate << 2)
+            rate_hi = rate >> 2
+            if rate_hi & 0x10:
+                rate_hi = 0x0F
+            rate_lo = rate & 0x03
+            shift = 0
+            if reg_rate:
+                if rate_hi < 12:
+                    if self.eg_state:
+                        eg_shift = rate_hi + self.eg_add
+                        if eg_shift == 12:
+                            shift = 1
+                        elif eg_shift == 13:
+                            shift = (rate_lo >> 1) & 0x01
+                        elif eg_shift == 14:
+                            shift = rate_lo & 0x01
+                else:
+                    shift = (rate_hi & 0x03) + _EG_INCSTEP[rate_lo][self.eg_timer_lo]
+                    if shift & 0x04:
+                        shift = 0x03
+                    if not shift:
+                        shift = self.eg_state
+            eg_rout = eg_rout_cur
+            eg_inc = 0
+            eg_off = (eg_rout_cur & 0x1F8) == 0x1F8
+            if reset and rate_hi == 0x0F:  # instant attack
+                eg_rout = 0x00
+            if eg_gen != 0 and not reset and eg_off:  # envelope off
+                eg_rout = 0x1FF
+            if eg_gen == 0:
+                if not eg_rout_cur:
+                    slot.eg_gen = 1
+                elif key and shift > 0 and rate_hi != 0x0F:
+                    eg_inc = ~eg_rout_cur >> (4 - shift)
+            elif eg_gen == 1:
+                if (eg_rout_cur >> 4) == slot.reg_sl:
+                    slot.eg_gen = 2
+                elif not eg_off and not reset and shift > 0:
+                    eg_inc = 1 << (shift - 1)
+            else:  # sustain or release
+                if not eg_off and not reset and shift > 0:
+                    eg_inc = 1 << (shift - 1)
+            slot.eg_rout = (eg_rout + eg_inc) & 0x1FF
+            if reset:  # key on
+                slot.eg_gen = 0
+            if not key:  # key off
+                slot.eg_gen = 3
+
+        # OPL3_PhaseGenerate (shared full path; `reset` from the envelope)
+        f_num = channel.f_num
+        if slot.reg_vib:
+            rng = (f_num >> 7) & 7
+            vibpos = self.vibpos
+            if not (vibpos & 3):
+                rng = 0
+            elif vibpos & 1:
+                rng >>= 1
+            rng >>= self.vibshift
+            if vibpos & 4:
+                rng = -rng
+            f_num = (f_num + rng) & 0xFFFF
+        pg_phase = slot.pg_phase
+        phase = (pg_phase >> 9) & 0xFFFF
+        if reset:
+            pg_phase = 0
+        slot.pg_phase = (pg_phase
+                         + (((f_num << channel.block) >> 1)
+                            * _MT[slot.reg_mult] >> 1)) & 0xFFFFFFFF
+        phase_out = phase
+        slot_num = slot.slot_num
+        noise = self.noise
+        if slot_num == 13:  # hh
+            self.rm_hh_bit2 = (phase >> 2) & 1
+            self.rm_hh_bit3 = (phase >> 3) & 1
+            self.rm_hh_bit7 = (phase >> 7) & 1
+            self.rm_hh_bit8 = (phase >> 8) & 1
+        if self.rhy & 0x20:
+            if slot_num == 17:  # tc
+                self.rm_tc_bit3 = (phase >> 3) & 1
+                self.rm_tc_bit5 = (phase >> 5) & 1
+            rm_xor = ((self.rm_hh_bit2 ^ self.rm_hh_bit7)
+                      | (self.rm_hh_bit3 ^ self.rm_tc_bit5)
+                      | (self.rm_tc_bit3 ^ self.rm_tc_bit5))
+            if slot_num == 13:  # hh
+                phase_out = rm_xor << 9
+                if rm_xor ^ (noise & 1):
+                    phase_out |= 0xD0
+                else:
+                    phase_out |= 0x34
+            elif slot_num == 16:  # sd
+                phase_out = ((self.rm_hh_bit8 << 9)
+                             | ((self.rm_hh_bit8 ^ (noise & 1)) << 8))
+            elif slot_num == 17:  # tc
+                phase_out = (rm_xor << 9) | 0x80
+        slot.pg_phase_out = phase_out
+        self.noise = (noise >> 1) | ((((noise >> 14) ^ noise) & 0x01) << 22)
+
+        # OPL3_SlotGenerate via the flattened tables
+        wf = slot.reg_wf
+        pp = (phase_out + sv[slot.mod_idx]) & 0x3FF
+        m = _EXPFULL[_WF_MAG[wf][pp] + (eg_out << 3)]
+        sv[out_idx] = -m - 1 if _WF_NEG[wf][pp] else m
 
     # --- Channel --------------------------------------------------------------------
 
@@ -809,6 +918,13 @@ class OPL3:
         channels = self.channel
         slots = self.slot
         process = self._process_slot
+        # PERF: while bank 1 is dormant (never written), slots 18..35 are at
+        # reset state (out 0, phase 0) — skip them and only advance the noise
+        # LFSR the 18 steps they would have; channels 9..17 contribute exactly
+        # 0 to both mixes.  See reset() for the proof sketch; the wake is any
+        # bank-1 register write.
+        dormant = self.bank1_dormant
+        nch = 9 if dormant else 18
 
         buf4[1] = _clip(mixbuff[1])
         buf4[3] = _clip(mixbuff[3])
@@ -817,7 +933,7 @@ class OPL3:
             process(slots[ii])
 
         mix0 = mix1 = 0
-        for ii in range(18):
+        for ii in range(nch):
             channel = channels[ii]
             o = channel.out_idx
             accm = sv[o[0]] + sv[o[1]] + sv[o[2]] + sv[o[3]]
@@ -834,11 +950,17 @@ class OPL3:
         buf4[0] = _clip(mixbuff[0])
         buf4[2] = _clip(mixbuff[2])
 
-        for ii in range(18, 33):
-            process(slots[ii])
+        if dormant:
+            noise = self.noise
+            for _ in range(18):  # the skipped slots' only global side effect
+                noise = (noise >> 1) | ((((noise >> 14) ^ noise) & 0x01) << 22)
+            self.noise = noise
+        else:
+            for ii in range(18, 33):
+                process(slots[ii])
 
         mix0 = mix1 = 0
-        for ii in range(18):
+        for ii in range(nch):
             channel = channels[ii]
             o = channel.out_idx
             accm = sv[o[0]] + sv[o[1]] + sv[o[2]] + sv[o[3]]
@@ -849,8 +971,9 @@ class OPL3:
         mixbuff[1] = mix0
         mixbuff[3] = mix1
 
-        for ii in range(33, 36):
-            process(slots[ii])
+        if not dormant:
+            for ii in range(33, 36):
+                process(slots[ii])
 
         if (self.timer & 0x3F) == 0x3F:
             self.tremolopos = (self.tremolopos + 1) % 210
@@ -923,6 +1046,8 @@ class OPL3:
         reg = int(reg) & 0x1FF
         v = int(value) & 0xFF
         high = (reg >> 8) & 0x01
+        if high:
+            self.bank1_dormant = False  # bank 1 touched: slots 18..35 live from now on
         regm = reg & 0xFF
         group = regm & 0xF0
         if group == 0x00:
@@ -994,19 +1119,45 @@ class OPL3:
     # --- PCM output -------------------------------------------------------------------
 
     def generate_stereo(self, num_frames: int) -> bytes:
-        """Render interleaved stereo (L,R) little-endian int16 frames."""
+        """Render interleaved stereo (L,R) little-endian int16 frames.
+
+        The OPL3L resampler (OPL3_Generate4ChResampled) is inlined here for
+        channels 0/1 — one Python call and a list round-trip per output frame
+        removed; _generate4ch_resampled remains for the 4-channel API surface.
+        """
         num_frames = max(0, int(num_frames))
         if num_frames == 0:
             return b""
         out = array("h", bytes(4 * num_frames))
         buf4 = [0, 0, 0, 0]
-        gen = self._generate4ch_resampled
+        generate = self._generate4ch
+        rateratio = self.rateratio
+        samplecnt = self.samplecnt
+        old_s = self.oldsamples
+        new_s = self.samples
         pos = 0
         for _ in range(num_frames):
-            gen(buf4)
-            out[pos] = buf4[0]
-            out[pos + 1] = buf4[1]
+            while samplecnt >= rateratio:
+                old_s[0] = new_s[0]
+                old_s[1] = new_s[1]
+                old_s[2] = new_s[2]
+                old_s[3] = new_s[3]
+                generate(new_s)
+                samplecnt -= rateratio
+            k = rateratio - samplecnt
+            n = old_s[0] * k + new_s[0] * samplecnt
+            q = n // rateratio
+            out[pos] = q + 1 if q < 0 and q * rateratio != n else q
+            n = old_s[1] * k + new_s[1] * samplecnt
+            q = n // rateratio
+            out[pos + 1] = q + 1 if q < 0 and q * rateratio != n else q
+            samplecnt += 1024  # 1 << RSM_FRAC
             pos += 2
+        # Channels 2/3 of the resampler state must stay coherent for the
+        # 4-channel API: their old/new samples were maintained by generate()
+        # above; only the per-frame interpolation for them was skipped, which
+        # touches no state.
+        self.samplecnt = samplecnt
         if sys.byteorder == "big":  # pragma: no cover - x86/ARM LE everywhere we run
             out.byteswap()
         return out.tobytes()

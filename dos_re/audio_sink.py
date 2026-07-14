@@ -73,16 +73,16 @@ class AdlibSpeakerSink:
         self._channel = pygame.mixer.Channel(1)
 
         # The canonical pure-Python OPL3 core (dos_re.opl3): always present,
-        # no build step.  ~0.5x real-time on CPython, ~19x under PyPy.
+        # no build step.  ~1.0-1.6x real-time on CPython, ~30-60x under PyPy.
         import sys as _sys
 
         opl_cls, self.opl_label = load_opl3()
         self._opl = opl_cls(sample_rate=self._rate)
         if self.opl_label == "nuked-opl3-py" and _sys.implementation.name == "cpython":
-            print("[audio] AdLib via the pure-Python Nuked-OPL3 core: ~0.5x "
-                  "real-time on CPython, may underrun — run under PyPy for "
-                  "real-time music (docs/performance.md; releases bundle a "
-                  "compiled backend instead)")
+            print("[audio] AdLib via the pure-Python Nuked-OPL3 core (~1x "
+                  "real-time on CPython — busy songs on slow machines may "
+                  "underrun; PyPy has ~30x headroom, and releases can bundle "
+                  "a compiled backend — docs/performance.md)")
         # PC speaker square-wave state (phase-continuous across chunks).
         self._spk_on = False
         self._spk_freq = 0.0

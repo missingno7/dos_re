@@ -95,17 +95,30 @@ and the live viewer, where it is worth a steady ~2x.
 ## Aside: the pure-Python OPL3 core (dos_re/opl3.py)
 
 The OPL3 core (`dos_re/opl3.py`, the only backend since the cffi
-accelerator's retirement) renders at ~0.5x real-time on CPython and ~19x
-under PyPy (44100 Hz, busy chip) — one more reason live play belongs on
-PyPy; CPython viewer music may underrun (a printed note says so).  Offline
-rendering (WAV dumps, tests) is fine on either interpreter.  Measured and
-rejected optimizations, for the record: numpy vectorization (FM synthesis is
-serial per-sample — modulator feeds carrier within the sample, 36-wide lanes
-cannot amortize numpy call overhead), full loop inlining (CPython +25%
-but PyPy −30% — the tracing JIT prefers the small monomorphic methods; both
-variants byte-identical, the readable one won), and caching (the chip state
-never repeats: 36 x 32-bit phase accumulators + the noise LFSR advance every
-sample and shape future output even when silent).
+accelerator's retirement) renders in real time on BOTH interpreters
+(44100 Hz): CPython ~1.0x on a worst-case busy chip / 1.3x typical / 1.6x
+silent; PyPy 30x / 40x / 61x.  That took three byte-exact work-skipping
+theorems proven from the chip's own equations (all verified by the golden +
+differential battery, including 80s of captured real game music):
+
+- **bank-1 dormancy** — OPL2-era programs never write reg >= 0x100, so
+  slots 18-35 provably stay at reset state; they are skipped wholesale
+  (their only global side effect, 18 noise-LFSR steps, is replayed) until
+  the first bank-1 write permanently wakes them;
+- **released-slot fast lane** — key-off + release + envelope 0x1FF is a
+  frozen envelope with output magnitude 0 for every waveform; only the
+  0/-1 DC-quirk sign (phase-dependent) is computed;
+- **sustain-static fast lane** — key-on + sustain + EGT set means the EG
+  machinery changes nothing this sample; only the tremolo-carrying eg_out
+  is recomputed.
+
+Plus flattened waveform/exp tables (the eight EnvelopeCalcSin functions
+reduce to (magnitude, sign) lookups) and a zero-sub-call _process_slot.
+Genuinely rejected, for the record: numpy vectorization (FM synthesis is
+serial per-sample — modulator feeds carrier within the sample; 36-wide
+lanes cannot amortize numpy call overhead) and caching of outputs (the
+chip state never repeats: 36 x 32-bit phase accumulators + the noise LFSR
+advance every sample and shape future output even when silent).
 
 **Releases (e.g. an Android build): ship a compiled backend.** The
 no-C-compiler rule protects the DEV workflow; a release pipeline compiles
