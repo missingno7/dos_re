@@ -21,17 +21,29 @@ from __future__ import annotations
 
 
 def load_opl3():
-    """Return ``(OPL3_class, backend_label)`` for the OPL3 core.
+    """Return ``(OPL3_class, backend_label)`` — the release seam for OPL3.
 
-    Kept as the stable entry point ports import (the label feeds status
-    lines).  Since the retirement of the ``pynuked_opl3`` cffi accelerator
-    there is exactly one backend: the canonical pure-Python translation in
-    ``dos_re.opl3`` (~0.5x real-time on CPython, ~19x under PyPy — run games
-    with music under PyPy; see docs/performance.md).
+    The canonical implementation is the pure-Python ``dos_re.opl3`` (label
+    ``nuked-opl3-py``): always present, no build step, the one the proofs
+    and the dev workflow use (~0.5x real-time on CPython, ~19x under PyPy —
+    play with music under PyPy; docs/performance.md).
+
+    RELEASES may bundle a compiled backend: if a ``pynuked_opl3`` package is
+    installed (pip, or e.g. a python-for-android recipe in an APK pipeline),
+    it is preferred (label ``nuked-opl3-c``) — byte-identical output, proven
+    by tests/test_opl3.py, at native speed (~1% of a CPU core).  The dev
+    repos do NOT vendor it (the submodule was retired); this probe only
+    fires when a distribution ships one.
     """
-    from dos_re.opl3 import OPL3 as _PyOPL3
+    try:
+        from pynuked_opl3 import OPL3 as _COPL3
 
-    return _PyOPL3, "nuked-opl3-py"
+        _COPL3()  # probe: the package imports even when its extension is unbuilt
+        return _COPL3, "nuked-opl3-c"
+    except Exception:  # noqa: BLE001 — no bundled backend: the canonical core
+        from dos_re.opl3 import OPL3 as _PyOPL3
+
+        return _PyOPL3, "nuked-opl3-py"
 
 
 class AdlibSpeakerSink:
@@ -66,10 +78,11 @@ class AdlibSpeakerSink:
 
         opl_cls, self.opl_label = load_opl3()
         self._opl = opl_cls(sample_rate=self._rate)
-        if _sys.implementation.name == "cpython":
+        if self.opl_label == "nuked-opl3-py" and _sys.implementation.name == "cpython":
             print("[audio] AdLib via the pure-Python Nuked-OPL3 core: ~0.5x "
                   "real-time on CPython, may underrun — run under PyPy for "
-                  "real-time music (docs/performance.md)")
+                  "real-time music (docs/performance.md; releases bundle a "
+                  "compiled backend instead)")
         # PC speaker square-wave state (phase-continuous across chunks).
         self._spk_on = False
         self._spk_freq = 0.0

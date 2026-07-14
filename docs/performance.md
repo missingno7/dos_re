@@ -101,9 +101,22 @@ PyPy; CPython viewer music may underrun (a printed note says so).  Offline
 rendering (WAV dumps, tests) is fine on either interpreter.  Measured and
 rejected optimizations, for the record: numpy vectorization (FM synthesis is
 serial per-sample — modulator feeds carrier within the sample, 36-wide lanes
-cannot amortize numpy call overhead) and full loop inlining (CPython +25%
+cannot amortize numpy call overhead), full loop inlining (CPython +25%
 but PyPy −30% — the tracing JIT prefers the small monomorphic methods; both
-variants byte-identical, the readable one won).
+variants byte-identical, the readable one won), and caching (the chip state
+never repeats: 36 x 32-bit phase accumulators + the noise LFSR advance every
+sample and shape future output even when silent).
+
+**Releases (e.g. an Android build): ship a compiled backend.** The
+no-C-compiler rule protects the DEV workflow; a release pipeline compiles
+once per platform.  ``dos_re.audio_sink.load_opl3()`` is the seam: it
+prefers an installed ``pynuked_opl3`` package (pip, or a python-for-android
+recipe building the ~1500-line C core in the APK pipeline — ~1% of an ARM
+core at native speed) and falls back to the canonical pure-Python core.
+Byte-identity between the two is proven by ``tests/test_opl3.py``
+(``test_differential_vs_compiled_backend_when_bundled`` runs wherever a
+bundled backend is importable — include it in release CI), so shipping the
+accelerator changes nothing except CPU load.
 
 ## 3. If you change the interpreter itself: the equivalence gate
 

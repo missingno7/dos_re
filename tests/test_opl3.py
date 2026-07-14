@@ -107,6 +107,23 @@ def test_pcm_matches_c_reference_goldens():
             f"(got {digest}, want {_GOLDEN[name]})")
 
 
+def test_differential_vs_compiled_backend_when_bundled():
+    """Releases may bundle the compiled pynuked_opl3 backend (see
+    dos_re.audio_sink.load_opl3); when one is importable, prove it is still
+    byte-identical to the canonical core over a fuzz stream the goldens do
+    not cover.  Skips in the dev repos (the vendored submodule was retired)."""
+    try:
+        from pynuked_opl3 import OPL3 as COPL3
+        COPL3(sample_rate=44100)
+    except Exception:
+        import pytest
+        pytest.skip("no compiled pynuked_opl3 backend installed (dev default)")
+    script = _fuzz_script(0xC0FFEE)
+    a = _run(COPL3(sample_rate=44100), script)
+    b = _run(OPL3(sample_rate=44100), script)
+    assert a == b
+
+
 def test_deterministic_and_resettable():
     script = _fuzz_script(7)
     first = _run(OPL3(sample_rate=22050), script)
