@@ -92,6 +92,17 @@ serial for everything else** — long single-process runs (verify sweeps,
 oracle runs, probes, headless replay), where the 13-17x dwarfs everything,
 and the live viewer, where it is worth a steady ~2x.
 
+## Aside: the pure-Python OPL3 core (dos_re/opl3.py)
+
+The canonical Nuked-OPL3 translation renders at ~0.5x real-time on CPython
+and ~19x under PyPy (44100 Hz, busy chip). Consequences: under PyPy the pure
+core is always enough, including live viewer music; on CPython, real-time
+playback wants the optional byte-identical cffi accelerator
+(`python -m pynuked_opl3._ffi_build`) — `dos_re.audio_sink.load_opl3()` picks the
+best available backend automatically. Offline rendering (WAV dumps, tests)
+is fine on either interpreter. Both backends are proven byte-identical by
+`tests/test_opl3.py`, so the choice never affects output.
+
 ## 3. If you change the interpreter itself: the equivalence gate
 
 Every optimization to cpu/memory hot paths must be proven byte-exact before
