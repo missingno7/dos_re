@@ -6,9 +6,9 @@ channel with a small jitter lead.  It never writes game state, so demos replay
 identically with audio on or off — it is safe to wire into any port's viewer.
 
 Part of the FRONTEND RING (see tools/lint.py): needs numpy + pygame.  The
-OPL3 backend always works: ``load_opl3`` prefers the optional ``pynuked_opl3``
-cffi accelerator and falls back to the canonical pure-Python core
-(``dos_re.opl3``) — both byte-identical (tests/test_opl3.py).
+OPL3 backend is the canonical pure-Python core ``dos_re.opl3`` (always
+present, no build step; byte-exact against the retired upstream C reference
+— tests/test_opl3.py).
 
 ``dos_re.player`` constructs this automatically for ``--audio adlib``; ports
 with a different audio architecture (e.g. digital Sound Blaster DMA games)
@@ -21,24 +21,17 @@ from __future__ import annotations
 
 
 def load_opl3():
-    """Return ``(OPL3_class, backend_label)`` — the best available OPL3 backend.
+    """Return ``(OPL3_class, backend_label)`` for the OPL3 core.
 
-    Prefers the optional ``pynuked_opl3`` cffi build (label ``nuked-opl3-c``),
-    byte-identical to the canonical core (proven by tests/test_opl3.py) and
-    needed for real-time playback on CPython (~0.5x real-time pure vs ~19x
-    under PyPy — docs/performance.md).  Falls back to the canonical
-    pure-Python core ``dos_re.opl3`` (label ``nuked-opl3-py``), which always
-    works.  The choice never changes the output bytes.
+    Kept as the stable entry point ports import (the label feeds status
+    lines).  Since the retirement of the ``pynuked_opl3`` cffi accelerator
+    there is exactly one backend: the canonical pure-Python translation in
+    ``dos_re.opl3`` (~0.5x real-time on CPython, ~19x under PyPy — run games
+    with music under PyPy; see docs/performance.md).
     """
-    try:
-        from pynuked_opl3 import OPL3 as _COPL3
+    from dos_re.opl3 import OPL3 as _PyOPL3
 
-        _COPL3()  # probe: the package imports even when the extension is unbuilt
-        return _COPL3, "nuked-opl3-c"
-    except Exception:  # noqa: BLE001 — accelerator absent/unbuilt: canonical core
-        from dos_re.opl3 import OPL3 as _PyOPL3
-
-        return _PyOPL3, "nuked-opl3-py"
+    return _PyOPL3, "nuked-opl3-py"
 
 
 class AdlibSpeakerSink:
@@ -67,18 +60,16 @@ class AdlibSpeakerSink:
             pygame.mixer.set_num_channels(2)
         self._channel = pygame.mixer.Channel(1)
 
-        # OPL3 backend: the canonical pure-Python core (dos_re.opl3) always
-        # works; load_opl3 prefers the optional byte-identical C accelerator
-        # for real-time CPython playback (see its docstring).
+        # The canonical pure-Python OPL3 core (dos_re.opl3): always present,
+        # no build step.  ~0.5x real-time on CPython, ~19x under PyPy.
         import sys as _sys
 
         opl_cls, self.opl_label = load_opl3()
         self._opl = opl_cls(sample_rate=self._rate)
-        if self.opl_label == "nuked-opl3-py" and _sys.implementation.name == "cpython":
-            print("[audio] AdLib via the pure-Python Nuked-OPL3 core (~0.5x "
-                  "real-time on CPython, may underrun). For real-time music "
-                  "run under PyPy, or build the byte-identical C accelerator "
-                  "once: python -m pynuked_opl3._ffi_build")
+        if _sys.implementation.name == "cpython":
+            print("[audio] AdLib via the pure-Python Nuked-OPL3 core: ~0.5x "
+                  "real-time on CPython, may underrun — run under PyPy for "
+                  "real-time music (docs/performance.md)")
         # PC speaker square-wave state (phase-continuous across chunks).
         self._spk_on = False
         self._spk_freq = 0.0

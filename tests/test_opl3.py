@@ -3,16 +3,18 @@
 Two proof layers:
 
 1. GOLDEN HASHES — sha1 of the PCM the compiled Nuked-OPL3 C reference
-   (pynuked_opl3, upstream v1.8, default config) produced for fixed register
+   (upstream Nuked-OPL3 v1.8 via cffi, default config) produced for fixed register
    scripts: silence, an OPL2 melodic note, full rhythm mode, the four OPL2
    waveforms with feedback sweeps, OPL3 new-mode 4-op/second-bank/stereo at
    44100 (exercising the OPL3L resampler), and three deterministic full
    register-space fuzz streams at three sample rates.  These run everywhere
    (CI included) with no C compiler.
 
-2. DIRECT DIFFERENTIAL — when the optional pynuked_opl3 cffi build is
-   importable, byte-compare both implementations over an additional fuzz
-   stream not covered by the goldens.
+2. (At introduction time, a DIRECT DIFFERENTIAL against the then-vendored
+   cffi build also passed over every scenario plus extra fuzz; the C
+   reference was retired from this repo afterwards — the goldens are its
+   frozen evidence, and https://github.com/missingno7/pynuked_opl3 remains
+   available if re-verification against upstream is ever wanted.)
 
 The Python module was additionally proven byte-identical to the C build over
 80 seconds of real captured SKYROADS AdLib music (3,670 register writes,
@@ -103,19 +105,6 @@ def test_pcm_matches_c_reference_goldens():
         assert digest == _GOLDEN[name], (
             f"{name}: PCM diverged from the Nuked-OPL3 C reference "
             f"(got {digest}, want {_GOLDEN[name]})")
-
-
-def test_differential_vs_c_build_when_available():
-    try:
-        from pynuked_opl3 import OPL3 as COPL3
-        COPL3(sample_rate=44100)
-    except Exception:
-        import pytest
-        pytest.skip("pynuked_opl3 C extension not built (optional accelerator)")
-    script = _fuzz_script(0xC0FFEE)
-    a = _run(COPL3(sample_rate=44100), script)
-    b = _run(OPL3(sample_rate=44100), script)
-    assert a == b
 
 
 def test_deterministic_and_resettable():

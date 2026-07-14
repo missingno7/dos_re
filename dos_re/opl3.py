@@ -6,15 +6,16 @@ emulator used by DOSBox-X and VGMPlay.  The translation mirrors the C source
 function-for-function (each method names its C original) and is proven
 BYTE-IDENTICAL to the compiled C reference over real game register streams,
 rhythm/4-op/waveform sweeps and randomized fuzz by ``tests/test_opl3.py``
-(direct differential where the ``pynuked_opl3`` cffi build is present, plus
-golden PCM hashes recorded from the C build so CI verifies without it).
+(golden PCM sha1 hashes recorded from the upstream cffi reference build
+before it was retired from this repo).
 
 Being stdlib-only pure Python, it needs no C compiler, works identically
-under CPython and PyPy, and never has the "extension not built" failure mode.
-The ``pynuked_opl3`` cffi package remains available as an optional
-accelerator with the exact same output; ``dos_re.audio_sink`` prefers it for
-real-time CPython playback and falls back to this module (see
-docs/performance.md for measured rates).
+under CPython and PyPy, and never has the "extension not built" failure
+mode.  It is THE OPL3 backend of dos_re (the formerly-vendored
+``pynuked_opl3`` cffi submodule was retired once this translation was proven
+byte-identical); ``dos_re.audio_sink.load_opl3`` is the stable entry point.
+Rates: ~0.5x real-time on CPython, ~19x under PyPy — run games with live
+music under PyPy (docs/performance.md).
 
 Config parity: the C reference is compiled with the upstream defaults —
 ``OPL_ENABLE_STEREOEXT=0`` and therefore ``OPL_QUIRK_CHANNELSAMPLEDELAY=1``
@@ -44,7 +45,7 @@ forums.submarine.org.uk (carbon14, opl3) — tremolo and phase generator;
 OPLx decapsulated (Matthew Gambrell, Olli Niemitalo) — OPL2 ROMs;
 siliconpr0n.org (John McMaster, digshadow) — YMF262 decaps and die shots.
 
-API (drop-in for ``pynuked_opl3.OPL3``)::
+API::
 
     from dos_re.opl3 import OPL3
 
@@ -337,7 +338,7 @@ class _Channel:
 
 
 class OPL3:
-    """One Nuked-OPL3 chip — same API as ``pynuked_opl3.OPL3``.
+    """One Nuked-OPL3 chip.
 
     After :meth:`reset` the chip is in OPL2 (YM3812) compatible mode; writing
     the OPL3 "new" bit (register ``0x105``) enables full OPL3 mode.

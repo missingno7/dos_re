@@ -123,7 +123,6 @@ python -m pytest tests -q                        # framework suite (no game asse
 
 ```text
 dos_re/       the framework package (VM + proof engines + lifter) — stdlib + numpy
-pynuked_opl3/   submodule: Nuked-OPL3 FM synthesis backend (optional, cffi)
 docs/         reference docs + the agent toolbox   → docs/README.md
 examples/     runnable demos (deletable; nothing imports them)
 tests/        framework tests (no game assets needed)
@@ -148,9 +147,9 @@ owned game to port.
 
 ## License
 
-MIT ([LICENSE](LICENSE)), except the vendored [`pynuked_opl3/`](pynuked_opl3/)
-submodule (Nuked-OPL3 emulator core + binding), which is LGPL-2.1-or-later —
-see [`pynuked_opl3/LICENSE`](pynuked_opl3/LICENSE).
+MIT ([LICENSE](LICENSE)), except `dos_re/opl3.py` — a pure-Python translation
+of [Nuked-OPL3](https://github.com/nukeykt/Nuked-OPL3) and therefore
+LGPL-2.1-or-later; self-contained and separable (see the file header).
 
 The framework's openness never extends to game IP: no game assets or
 executables are ever included here or in adapter repos; ports require a

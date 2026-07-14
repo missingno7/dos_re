@@ -27,7 +27,7 @@ jobs:
       - name: Undefined-name guard
         run: python tools/check_undefined_names.py
       - name: Doc links resolve
-        run: python tools/check_doc_links.py . --exclude pynuked_opl3
+        run: python tools/check_doc_links.py .
       - name: Test suite
         run: python -m pytest tests -q -n auto
       - name: End-to-end example (oracle -> hook -> verify -> snapshot)

@@ -21,8 +21,6 @@ dos_re/       the reusable, game-agnostic core: VM + verification engines.
               See template_dos_port's examples/adapter_skeleton/ and
               START_HERE.md step 2.
 
-pynuked_opl3/   submodule: optional OPL2/OPL3 FM-synthesis backend (cffi binding
-              to Nuked-OPL3).  Independent of dos_re and of any game.
 ```
 
 If a piece of code mentions a concrete address, video mode, or file format, it
@@ -97,17 +95,16 @@ from the source projects). Grouped by concern:
 | Module | What it is |
 |---|---|
 | `player.py` | The game-agnostic core of every port's `scripts/play.py`: the STANDARD unified CLI (viewer by default, `--headless` to disable; `--snapshot`/`--save-snapshot`; `--record-demo`/`--play-demo`/`--demo-continue`; the four hook-mode flags `--no-replacements`/`--safe-hooks`/`--verify-hooks`/`--trace-hooks`, failing loud where a port has no such tier; pacing + presentation knobs), the live pygame viewer loop with the standard hotkeys (F10 screenshot, F11 demo-record toggle, F12 snapshot), headless demo replay, gap-snapshot-on-crash, and the `GameFrontend` adapter class a port subclasses. numpy/pygame imports stay lazy — importing the module and headless replay need neither. Worked example: `template_dos_port/scripts/play.py`. |
-| `display.py` | GPU-accelerated (SDL2 streaming texture) window/present backend with a software fallback, aspect-correct letterboxing (DOS 4:3 `par`), overlays and fullscreen. Imported only when a window opens; together with `player.py` and `audio_sink.py` it forms the lint's declared FRONTEND_RING (the only package files allowed to use numpy/pygame/pynuked_opl3). |
+| `display.py` | GPU-accelerated (SDL2 streaming texture) window/present backend with a software fallback, aspect-correct letterboxing (DOS 4:3 `par`), overlays and fullscreen. Imported only when a window opens; together with `player.py` and `audio_sink.py` it forms the lint's declared FRONTEND_RING (the only package files allowed to use pygame). |
 | `overlay_menu.py` | The NATIVE product's in-game settings menu (POST-ENDGAME widget — see template_dos_port's `docs/post_endgame.md`): tabbed modal overlay, pygame-INJECTED (importing needs nothing), items-as-data closures over host settings, structural determinism firewall (the caller freezes the tick while open; nothing reaches game input). Callers follow the accuracy taxonomy: presentation tabs (read-only, parity-gated) / an **Experimental** tab quarantining anything accuracy-affecting / debug-gated cheats. |
 | `pm_player.py` | The PM (DOS/4GW) play runner: live viewer over `render_pm_frame`, set-1 KBC scancodes (E0 extended pairs), INT 33h mouse, wall-clock vsync pacing via `dos.time_source`, blocking console reads pump real keys, F10/F12, `--snapshot` resume, headless runs. `main()` is the CLI a port's `scripts/play.py` wraps; `tools/pm_view.py` is the zero-setup form. pygame stays lazy. |
 | `audio_sink.py` | `AdlibSpeakerSink`: observer-only viewer audio — the VM's AdLib register stream through Nuked-OPL3 plus the PC-speaker square wave, mixed into one pygame channel with a jitter lead. Never writes game state, so demos replay identically with audio on or off. Wired by `player.py`'s `--audio adlib`; promoted from ancient_port's viewer. |
-| `opl3.py` | The CANONICAL Yamaha OPL3 (YMF262) core: a literal pure-Python translation of Nuked-OPL3 v1.8 (LGPL-2.1-derived, see the file header and LICENSE), proven byte-identical to the compiled C reference over golden scripts, full register-space fuzz and 80s of captured real game music (`tests/test_opl3.py`). Stdlib-only — no C compiler, identical under CPython/PyPy. `dos_re.audio_sink.load_opl3()` returns the best backend: the optional `pynuked_opl3` cffi accelerator when built (needed for real-time playback on CPython, ~0.5x pure vs ~19x under PyPy), else this core. |
+| `opl3.py` | The Yamaha OPL3 (YMF262) core: a literal pure-Python translation of Nuked-OPL3 v1.8 (LGPL-2.1-derived, see the file header and LICENSE), proven byte-identical to the upstream cffi reference build over golden scripts, full register-space fuzz and 80s of captured real game music before that reference was retired from this repo (`tests/test_opl3.py` keeps the golden hashes). Stdlib-only — no C compiler, identical under CPython/PyPy (~0.5x real-time CPython / ~19x PyPy); `dos_re.audio_sink.load_opl3()` is the stable entry point. |
 
 ### Repo layout
 
 ```text
 dos_re/       the framework package (above)
-pynuked_opl3/   submodule: OPL2/OPL3 backend (optional, cffi)
 docs/         framework reference docs (start at docs/README.md)
 examples/     minimal_adapter/ (runnable end-to-end demo), tiny_frame_game/
               (full-stack demo) — the adapter_skeleton/ template now lives in
@@ -160,6 +157,5 @@ The `dos_re` core is stdlib + numpy — numpy is the one first-class third-party
 dependency (bulk pixel/array work in proof engines, renderers, digests; keep the
 interpreter's per-instruction scalar path numpy-free — AGENTS.md has the measured
 why). `tools/lint.py` enforces the boundary. Optional extras (`pyproject.toml`):
-`pygame` for interactive viewers, `cffi` to build the vendored `pynuked_opl3`
-backend, `pytest` for the test suite.
-`pynuked_opl3` must remain independent of `dos_re` and of any game.
+`pygame` for interactive viewers, `pytest` for the test suite.  OPL3 FM
+synthesis is built in (`dos_re/opl3.py`, stdlib-only — no build step).

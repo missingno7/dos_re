@@ -37,7 +37,7 @@ beats large intuitive rewrites.
   per-instruction path is *scalar* arithmetic, where numpy is slower than
   plain ints/bytearray on CPython and poisons the JIT under PyPy (which gives
   the core its biggest speedup, 13-17x — see docs/performance.md); keep that
-  path numpy-free. pygame/pynuked_opl3 remain optional extras confined to the
+  path numpy-free. pygame remains an optional extra confined to the
   FRONTEND RING (`player.py`/`display.py`/`audio_sink.py`/`overlay_menu.py`),
   and `import dos_re` must never pull them in. `tools/lint.py` enforces the
   boundary; run it before finishing any change.
@@ -91,7 +91,6 @@ dos_re/         the framework package — docs/architecture.md is the module map
   checkpoints.py frontier.py dosbox_savestate.py   ← the proof engines
   lift/                                            ← the automatic lifter
   player.py display.py audio_sink.py pm_player.py  ← the frontend ring (numpy/pygame allowed)
-pynuked_opl3/   submodule: third-party OPL backend; independent of dos_re
 docs/           reference docs; docs/README.md is the index, agent_toolbox.md the task index
 examples/       minimal_adapter (runnable), tiny_frame_game (full-stack demo)
 tests/          framework tests; game-free by construction — new behaviour lands with one

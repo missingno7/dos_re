@@ -94,14 +94,16 @@ and the live viewer, where it is worth a steady ~2x.
 
 ## Aside: the pure-Python OPL3 core (dos_re/opl3.py)
 
-The canonical Nuked-OPL3 translation renders at ~0.5x real-time on CPython
-and ~19x under PyPy (44100 Hz, busy chip). Consequences: under PyPy the pure
-core is always enough, including live viewer music; on CPython, real-time
-playback wants the optional byte-identical cffi accelerator
-(`python -m pynuked_opl3._ffi_build`) — `dos_re.audio_sink.load_opl3()` picks the
-best available backend automatically. Offline rendering (WAV dumps, tests)
-is fine on either interpreter. Both backends are proven byte-identical by
-`tests/test_opl3.py`, so the choice never affects output.
+The OPL3 core (`dos_re/opl3.py`, the only backend since the cffi
+accelerator's retirement) renders at ~0.5x real-time on CPython and ~19x
+under PyPy (44100 Hz, busy chip) — one more reason live play belongs on
+PyPy; CPython viewer music may underrun (a printed note says so).  Offline
+rendering (WAV dumps, tests) is fine on either interpreter.  Measured and
+rejected optimizations, for the record: numpy vectorization (FM synthesis is
+serial per-sample — modulator feeds carrier within the sample, 36-wide lanes
+cannot amortize numpy call overhead) and full loop inlining (CPython +25%
+but PyPy −30% — the tracing JIT prefers the small monomorphic methods; both
+variants byte-identical, the readable one won).
 
 ## 3. If you change the interpreter itself: the equivalence gate
 
