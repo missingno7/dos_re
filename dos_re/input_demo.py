@@ -17,7 +17,10 @@ from .interrupts import deliver_scancode
 from .runtime import Runtime
 from .snapshot import write_snapshot
 
-DEMO_VERSION = 1
+# v2 adds "mouse" events (normalized u/v position + Microsoft button mask,
+# applied via ``rt.dos.set_mouse_norm`` on replay).  v1 keyboard-only demos
+# load and replay unchanged -- the loader accepts 1..DEMO_VERSION.
+DEMO_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,11 @@ class InputDemoEvent:
     value: int | None = None
     scancode: int | None = None
     text: str = ""
+    # "mouse" events: window-normalized position (0.0..1.0) + button mask
+    # (bit0=left, bit1=right, bit2=middle), the exact set_mouse_norm arguments.
+    u: float | None = None
+    v: float | None = None
+    buttons: int | None = None
 
     @classmethod
     def from_json(cls, raw: dict) -> "InputDemoEvent":
@@ -38,21 +46,46 @@ class InputDemoEvent:
             value=None if raw.get("value") is None else int(raw["value"]) & 0xFFFF,
             scancode=None if raw.get("scancode") is None else int(raw["scancode"]) & 0xFF,
             text=str(raw.get("text", "")),
+            u=None if raw.get("u") is None else float(raw["u"]),
+            v=None if raw.get("v") is None else float(raw["v"]),
+            buttons=None if raw.get("buttons") is None else int(raw["buttons"]) & 0xFF,
         )
 
     def to_json(self) -> dict:
-        out: dict[str, int | str] = {"boundary": self.boundary, "seq": self.seq, "kind": self.kind}
+        out: dict[str, int | float | str] = {"boundary": self.boundary, "seq": self.seq, "kind": self.kind}
         if self.value is not None:
             out["value"] = self.value & 0xFFFF
         if self.scancode is not None:
             out["scancode"] = self.scancode & 0xFF
         if self.text:
             out["text"] = self.text
+        if self.u is not None:
+            out["u"] = self.u
+        if self.v is not None:
+            out["v"] = self.v
+        if self.buttons is not None:
+            out["buttons"] = self.buttons & 0xFF
         return out
 
 
+def mouse_sample(u: float, v: float, buttons: int) -> tuple[float, float, int]:
+    """Quantize a host mouse state to exactly what a demo stores.
+
+    u/v are clamped to 0.0..1.0 and rounded to 4 decimals; buttons is masked to
+    a byte.  The front-end must apply THIS rounded sample to the VM while
+    recording, never the full-precision host value: the game maps the
+    normalized mouse onto a pixel and is sensitive to <1e-4 differences, so
+    applying full precision while recording a rounded value makes the replay
+    land on a different pixel and diverge (the PM recorder learned this the
+    hard way — see pm_player).
+    """
+    u = 0.0 if u < 0 else (1.0 if u > 1 else u)
+    v = 0.0 if v < 0 else (1.0 if v > 1 else v)
+    return (round(u, 4), round(v, 4), int(buttons) & 0xFF)
+
+
 class InputDemoRecorder:
-    """Record a start snapshot plus VM-visible keyboard events.
+    """Record a start snapshot plus VM-visible keyboard and mouse events.
 
     ``name`` is only used for the output directory prefix.  ``metadata`` is
     copied verbatim into the manifest so a game front-end can record things
@@ -77,6 +110,7 @@ class InputDemoRecorder:
         self.start_boundary = 0
         self._seq = 0
         self._events: list[InputDemoEvent] = []
+        self._last_mouse: tuple[float, float, int] | None = None
         self._started_at = ""
         self._stopped_at = ""
 
@@ -101,6 +135,7 @@ class InputDemoRecorder:
         self.start_boundary = max(0, int(boundary))
         self._seq = 0
         self._events.clear()
+        self._last_mouse = None
         self._started_at = datetime.now().isoformat(timespec="seconds")
         self._stopped_at = ""
         if write_start_snapshot:
@@ -117,6 +152,28 @@ class InputDemoRecorder:
         if not self.active:
             return
         self._append(InputDemoEvent(boundary=self._relative_boundary(boundary), seq=self._seq, kind="scan", value=scancode & 0xFF))
+
+    def record_mouse(self, *, boundary: int, u: float, v: float, buttons: int) -> tuple[float, float, int]:
+        """Record one mouse sample (normalized position + button mask) at ``boundary``.
+
+        Returns the quantized sample the caller must apply to the VM (via
+        ``rt.dos.set_mouse_norm``) so the recording and its replay set the exact
+        same driver state.  Identical consecutive samples are deduped — call
+        this once per boundary and a still mouse adds no events.
+        """
+        sample = mouse_sample(u, v, buttons)
+        if not self.active or sample == self._last_mouse:
+            return sample
+        self._last_mouse = sample
+        self._append(InputDemoEvent(
+            boundary=self._relative_boundary(boundary),
+            seq=self._seq,
+            kind="mouse",
+            u=sample[0],
+            v=sample[1],
+            buttons=sample[2],
+        ))
+        return sample
 
     def record_dos_key(self, *, boundary: int, scancode: int, text: str, value: int) -> None:
         if not self.active:
@@ -174,6 +231,7 @@ class InputDemoPlayback:
         self.manifest = manifest
         self.events = sorted((InputDemoEvent.from_json(raw) for raw in manifest.get("events", [])), key=lambda e: (e.boundary, e.seq))
         self._index = 0
+        self._last_mouse: tuple[float, float, int] | None = None
 
     @classmethod
     def load(cls, path: str | Path) -> "InputDemoPlayback":
@@ -185,7 +243,8 @@ class InputDemoPlayback:
             manifest_path = p
             demo_dir = p.parent
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if int(manifest.get("version", 0)) != DEMO_VERSION:
+        version = int(manifest.get("version", 0))
+        if not 1 <= version <= DEMO_VERSION:
             raise ValueError(f"unsupported input demo version: {manifest.get('version')!r}")
         return cls(demo_dir=demo_dir, manifest=manifest)
 
@@ -221,14 +280,24 @@ class InputDemoPlayback:
         """
         base = max(0, int(boundary))
         out: list[InputDemoEvent] = []
-        for seq, event in enumerate(self.events[self._index:]):
+        if self._last_mouse is not None:
+            # Carry the mouse state that was current at the suffix point: the
+            # snapshot holds the mapped mouse_x/y, but the suffix replay must
+            # keep RE-APPLYING the normalized sample every boundary (range
+            # changes remap it), so seed it as a boundary-0 event.
+            u, v, buttons = self._last_mouse
+            out.append(InputDemoEvent(boundary=0, seq=0, kind="mouse", u=u, v=v, buttons=buttons))
+        for event in self.events[self._index:]:
             out.append(InputDemoEvent(
                 boundary=max(0, event.boundary - base),
-                seq=seq,
+                seq=len(out),
                 kind=event.kind,
                 value=event.value,
                 scancode=event.scancode,
                 text=event.text,
+                u=event.u,
+                v=event.v,
+                buttons=event.buttons,
             ))
         return out
 
@@ -288,6 +357,7 @@ class InputDemoPlayback:
 
     def reset(self) -> None:
         self._index = 0
+        self._last_mouse = None
 
     @property
     def exhausted(self) -> bool:
@@ -334,12 +404,31 @@ class InputDemoPlayback:
         applied = 0
         while self._index < len(self.events) and self.events[self._index].boundary <= boundary:
             event = self.events[self._index]
-            for rt in runtimes:
-                self._apply_event(rt, event, deliver=deliver)
+            if event.kind == "mouse":
+                if event.u is None or event.v is None or event.buttons is None:
+                    raise ValueError("mouse demo event missing u/v/buttons")
+                self._last_mouse = (event.u, event.v, event.buttons)
+            else:
+                for rt in runtimes:
+                    self._apply_event(rt, event, deliver=deliver)
             self._index += 1
             applied += 1
             if single:
                 break
+        # Re-apply the mouse EVERY call, not just when a mouse event is due:
+        # set_mouse_norm re-maps the normalized position through the game's
+        # CURRENT INT 33h range (AX=7/8), and a game may narrow that range while
+        # the mouse is still.  Applying only on change would leave mouse_x/y
+        # mapped with the OLD range and diverge from the recording, whose
+        # front-end re-applies the sample every boundary (the proven PM design;
+        # see pm_player's replay note).  Idempotent, so extra calls at the same
+        # boundary (single-event poll waits) are harmless.
+        if self._last_mouse is not None:
+            u, v, buttons = self._last_mouse
+            for rt in runtimes:
+                set_mouse = getattr(rt.dos, "set_mouse_norm", None)
+                if set_mouse is not None:
+                    set_mouse(u, v, buttons)
         return applied
 
     @staticmethod

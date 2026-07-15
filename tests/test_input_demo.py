@@ -4,13 +4,22 @@ import json
 from types import SimpleNamespace
 
 from dos_re.cpu import CPUState
-from dos_re.input_demo import InputDemoPlayback, dos_key_value
+from dos_re.input_demo import InputDemoPlayback, InputDemoRecorder, dos_key_value, mouse_sample
 
 
 class DummyRuntime:
     def __init__(self) -> None:
         self.dos = SimpleNamespace(key_queue=[])
         self.scans: list[int] = []
+
+
+class MouseRuntime(DummyRuntime):
+    """A runtime whose dos exposes set_mouse_norm, like the real DOSMachine."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.mouse_calls: list[tuple[float, float, int]] = []
+        self.dos.set_mouse_norm = lambda u, v, buttons: self.mouse_calls.append((u, v, buttons))
 
 
 def _deliver(rt: DummyRuntime, scancode: int) -> None:
@@ -255,3 +264,132 @@ def test_apply_single_spreads_same_boundary_events_across_calls(tmp_path):
     assert playback.apply_to_runtime(2, rt, deliver=_deliver, single=True) == 1
     assert rt.scans == [0xB9, 0x39]
     assert playback.apply_to_runtime(2, rt, deliver=_deliver, single=True) == 0
+
+
+def test_mouse_round_trip_mixed_key_and_mouse_events(tmp_path):
+    """Recorder saves scan + mouse events keyed to the same boundary counter;
+    playback loads them back and drives set_mouse_norm with the recorded
+    (quantized) values at the recorded boundaries."""
+    recorder = InputDemoRecorder(root=tmp_path, name="mouse", metadata={"video": "vga"})
+    demo_dir = recorder.start(SnapshotRuntime(), boundary=10, write_start_snapshot=False)
+
+    recorder.record_scan(boundary=10, scancode=0x39)
+    sample = recorder.record_mouse(boundary=11, u=0.123449, v=0.5, buttons=0)
+    assert sample == (0.1234, 0.5, 0)          # quantized sample the player must apply
+    # Identical consecutive states are deduped (a still mouse adds no events)...
+    assert recorder.record_mouse(boundary=12, u=0.123449, v=0.5, buttons=0) == sample
+    # ...and a button press at the same position is a new event.
+    recorder.record_mouse(boundary=13, u=0.123449, v=0.5, buttons=1)
+    recorder.stop(boundary=15)
+
+    manifest = json.loads((demo_dir / "input_demo.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == 2
+    assert manifest["events"] == [
+        {"boundary": 0, "seq": 0, "kind": "scan", "value": 0x39},
+        {"boundary": 1, "seq": 1, "kind": "mouse", "u": 0.1234, "v": 0.5, "buttons": 0},
+        {"boundary": 3, "seq": 2, "kind": "mouse", "u": 0.1234, "v": 0.5, "buttons": 1},
+    ]
+
+    playback = InputDemoPlayback.load(demo_dir)
+    rt = MouseRuntime()
+    assert playback.apply_to_runtime(0, rt, deliver=_deliver) == 1
+    assert rt.scans == [0x39]
+    assert rt.mouse_calls == []                # no mouse state recorded yet
+    assert playback.apply_to_runtime(1, rt, deliver=_deliver) == 1
+    assert rt.mouse_calls == [(0.1234, 0.5, 0)]
+    assert playback.apply_to_runtime(3, rt, deliver=_deliver) == 1
+    assert rt.mouse_calls[-1] == (0.1234, 0.5, 1)
+
+
+def test_mouse_state_is_reapplied_every_boundary_during_replay(tmp_path):
+    """Replay re-applies the last mouse sample on every apply call, not only
+    when a mouse event is due: set_mouse_norm maps through the game's CURRENT
+    INT 33h range, so a range change while the mouse is still must re-map
+    (mirrors the recording player, which applies the sample every frame)."""
+    demo = tmp_path / "demo"
+    demo.mkdir()
+    (demo / "input_demo.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "snapshot": "snapshot",
+                "events": [
+                    {"boundary": 1, "seq": 0, "kind": "mouse", "u": 0.25, "v": 0.75, "buttons": 2},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    playback = InputDemoPlayback.load(demo)
+    rt = MouseRuntime()
+
+    assert playback.apply_to_runtime(0, rt, deliver=_deliver) == 0
+    assert rt.mouse_calls == []                # nothing before the first sample
+    assert playback.apply_to_runtime(1, rt, deliver=_deliver) == 1
+    assert playback.apply_to_runtime(2, rt, deliver=_deliver) == 0
+    assert playback.apply_to_runtime(3, rt, deliver=_deliver) == 0
+    assert rt.mouse_calls == [(0.25, 0.75, 2)] * 3
+
+    playback.reset()
+    rt2 = MouseRuntime()
+    assert playback.apply_to_runtime(0, rt2, deliver=_deliver) == 0
+    assert rt2.mouse_calls == []               # reset clears the held mouse state
+
+
+def test_old_keyboard_only_v1_demo_still_loads_and_replays(tmp_path):
+    demo = tmp_path / "demo"
+    demo.mkdir()
+    (demo / "input_demo.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "snapshot": "snapshot",
+                "events": [
+                    {"boundary": 0, "seq": 0, "kind": "scan", "value": 0x4D},
+                    {"boundary": 2, "seq": 1, "kind": "dos_key", "value": 0x3920, "scancode": 0x39, "text": " "},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    playback = InputDemoPlayback.load(demo)
+    rt = DummyRuntime()                        # dos has no set_mouse_norm at all
+    assert playback.apply_to_runtime(0, rt, deliver=_deliver) == 1
+    assert playback.apply_to_runtime(2, rt, deliver=_deliver) == 1
+    assert rt.scans == [0x4D]
+    assert rt.dos.key_queue == [0x3920]
+
+
+def test_suffix_seeds_current_mouse_state_and_carries_mouse_fields(tmp_path):
+    demo = tmp_path / "demo"
+    demo.mkdir()
+    (demo / "input_demo.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "snapshot": "snapshot",
+                "events": [
+                    {"boundary": 1, "seq": 0, "kind": "mouse", "u": 0.1, "v": 0.2, "buttons": 1},
+                    {"boundary": 5, "seq": 1, "kind": "mouse", "u": 0.3, "v": 0.4, "buttons": 0},
+                    {"boundary": 6, "seq": 2, "kind": "scan", "value": 0x39},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    playback = InputDemoPlayback.load(demo)
+    playback.apply_to_runtime(2, MouseRuntime(), deliver=_deliver)
+
+    suffix = playback.remaining_events_from_cursor(boundary=2)
+    assert [event.to_json() for event in suffix] == [
+        # The mouse state current at the suffix point is seeded at boundary 0 so
+        # the suffix replay keeps re-applying it (range changes re-map it).
+        {"boundary": 0, "seq": 0, "kind": "mouse", "u": 0.1, "v": 0.2, "buttons": 1},
+        {"boundary": 3, "seq": 1, "kind": "mouse", "u": 0.3, "v": 0.4, "buttons": 0},
+        {"boundary": 4, "seq": 2, "kind": "scan", "value": 0x39},
+    ]
+
+
+def test_mouse_sample_quantizes_like_the_recorder():
+    assert mouse_sample(-0.5, 1.5, 0x1FF) == (0.0, 1.0, 0xFF)
+    assert mouse_sample(0.123449, 0.999949, 5) == (0.1234, 0.9999, 5)

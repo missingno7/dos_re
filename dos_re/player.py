@@ -30,8 +30,16 @@ usually ``create_runtime``/``load_snapshot_runtime`` (its own adapter boot),
 ``advance_frame`` (its pacing policy) and the pacing defaults.  The DEFAULT model is
 the simple deterministic one proven by skyroads_port: a fixed instruction budget per
 frame with N timer IRQs, so the frame index alone is the demo clock and record/replay
-are trivially deterministic.  A mature port (pre2_port) replaces ``advance_frame``
-with its own wall-clock/PIT model and keeps the CLI contract.
+are trivially deterministic — **within one hook mode**: a step-budget clock is
+mode-DEPENDENT (a hook is one step() however much ASM it replaces), so demos
+recorded under it only replay under the same installed-hook set (see
+docs/demos_and_snapshots.md, "the boundary-clock invariant").  For hook-mode-
+independent demos, override ``advance_frame`` with a GAME-PROGRESS clock — run
+until the game's own frame boundary (its present/page-flip, a boundary address
+crossing à la pm_input_demo's ``frame_tick_addr``, or a registered input-wait) —
+so the frame index counts game frames, not interpreter steps.  A mature port
+(pre2_port) replaces ``advance_frame`` with its own wall-clock/PIT model and
+keeps the CLI contract.
 
 Import discipline: this module is the FRONTEND RING (see tools/lint.py).  It keeps
 numpy/pygame imports lazy — importing ``dos_re.player`` (and running headless demo
@@ -49,7 +57,7 @@ from pathlib import Path
 from dos_re.cpu import HaltExecution, UnsupportedInstruction
 from dos_re.dos import ConsoleInputWouldBlock
 from dos_re.hooks import registry as hook_registry
-from dos_re.input_demo import InputDemoPlayback, InputDemoRecorder
+from dos_re.input_demo import InputDemoPlayback, InputDemoRecorder, mouse_sample
 from dos_re.interrupts import deliver_interrupt, deliver_scancode
 from dos_re.keyboard import KeyDispatcher
 from dos_re.runtime import create_runtime
@@ -59,18 +67,24 @@ WIDTH, HEIGHT = 320, 200
 PLANAR_ROW_BYTES = 40
 
 
-# --- default framebuffer decode (VGA mode 13h linear + EGA/VGA 16-colour planar) -----------------
+# --- default framebuffer decode (text modes + VGA mode 13h linear + EGA/VGA 16-colour planar) ----
 
 def decode_frame_default(rt):
     """Return an HxWx3 uint8 array of the current screen (numpy imported lazily).
 
     Game-agnostic and therefore approximate: no pel-pan/split-screen refinements —
-    it shows whatever the interpreted original draws.  Ports with fancier video
-    (CGA/Tandy/text) override ``GameFrontend.decode_frame``.
+    it shows whatever the interpreted original draws.  BIOS text modes (0-3, 7)
+    render through :mod:`dos_re.textmode` (so DOS-era text boot menus/setup
+    screens are visible out of the box); ports with fancier video (CGA/Tandy)
+    override ``GameFrontend.decode_frame``.
     """
     import numpy as np
 
     from dos_re.memory import EGA_APERTURE, EGA_PLANE_STRIDE
+    from dos_re.textmode import decode_text_frame, is_text_display
+
+    if is_text_display(rt.dos):
+        return decode_text_frame(rt)
 
     mem = rt.cpu.mem
     pal = list(getattr(rt.dos, "vga_palette", ()) or ())
@@ -535,6 +549,42 @@ def run_view(frontend: GameFrontend, rt, args,
         if rec is not None and rec.active:
             rec.record_scan(boundary=frame_box["n"], scancode=scancode)
 
+    # Live mouse -> INT 33h driver state (real-mode DOSMachine.set_mouse_norm).
+    # Only used by mouse-driven games; a no-op when the runtime has no such API.
+    _set_mouse = getattr(rt.dos, "set_mouse_norm", None)
+    mouse_btn = [0]  # Microsoft mask: bit0=left, bit1=right, bit2=middle
+    mouse_norm = [None]  # latest host (u, v); None until the mouse first moves/clicks
+
+    def feed_mouse(pos) -> None:
+        # display.get_size() works for both the GPU-window and plain-surface
+        # backends (pygame.display.get_surface() is None under the GPU path, so
+        # relying on it would silently drop every click).
+        if _set_mouse is None:
+            return
+        w, h = display.get_size()
+        u = pos[0] / max(1, w - 1)
+        v = pos[1] / max(1, h - 1)
+        mouse_norm[0] = (u, v)
+        if recorder["rec"] is None:
+            # Live: apply immediately.  Quantized exactly like a recording, so
+            # toggling recording on/off never changes where the pointer lands.
+            _set_mouse(*mouse_sample(u, v, mouse_btn[0]))
+        # While recording, application is deferred to the once-per-boundary
+        # sample below so the VM sees exactly the recorded state (host events
+        # only reach us between frames, so nothing is delayed by this).
+
+    def sample_mouse_for_demo() -> None:
+        # Once per frame while recording: record the deduped mouse sample keyed
+        # to the same boundary as scancodes, and apply THE SAMPLE (not the
+        # full-precision host value) to the VM.  Applied EVERY frame, changed or
+        # not, because set_mouse_norm re-maps through the game's current INT 33h
+        # range — replay mirrors this (the proven PM recorder/replay design).
+        rec = recorder["rec"]
+        if rec is None or not rec.active or _set_mouse is None or mouse_norm[0] is None:
+            return
+        u, v = mouse_norm[0]
+        _set_mouse(*rec.record_mouse(boundary=frame_box["n"], u=u, v=v, buttons=mouse_btn[0]))
+
     def screenshot() -> None:
         rgb = last_rgb[0]
         if rgb is None:
@@ -595,12 +645,23 @@ def run_view(frontend: GameFrontend, rt, args,
                     sc = scancodes.get(event.key)
                     if sc is not None:
                         dispatcher.post_up(sc)
+                elif event.type == pygame.MOUSEMOTION:
+                    feed_mouse(event.pos)
+                elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP):
+                    bit = {1: 0x01, 3: 0x02, 2: 0x04}.get(event.button)
+                    if bit is not None:
+                        if event.type == pygame.MOUSEBUTTONDOWN:
+                            mouse_btn[0] |= bit
+                        else:
+                            mouse_btn[0] &= ~bit
+                    feed_mouse(event.pos)
 
             if replaying:
                 playback.apply_to_runtime(frame_box["n"], rt,
                                           deliver=lambda r, sc: frontend.deliver_input(r, sc))
             else:
                 dispatcher.pump()
+                sample_mouse_for_demo()
 
             new_status, keep_running = _step_frame(frontend, rt, args, frame_box["n"])
             if new_status:
