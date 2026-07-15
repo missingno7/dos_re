@@ -195,7 +195,10 @@ class OPL3Fast:
             if not op.key:
                 op.key = 1
                 op.phase = 0.0
-                op.fb1 = op.fb2 = 0.0
+                if op.stage == 4:            # was fully off: no history to carry
+                    op.fb1 = op.fb2 = 0.0
+                # retrigger of a still-ringing voice keeps its feedback history
+                # (the real chip never clears it on key-on) -> no onset click
                 op.stage = 0 if op.ar else 4     # AR=0: never starts (real chip)
                 if op.ar >= 15 or self._rate_index(ch, op, op.ar) >= 60:
                     op.level = 0.0
