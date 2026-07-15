@@ -36,7 +36,19 @@ def load_opl3():
     The bit-exact pure-Python core was retired from the runtime (too slow at
     ~1x real-time) and now lives in ``graveyard/opl3_exact.py`` as the
     calibration/golden reference only — it is never selected here.
+
+    Override with ``DOSRE_OPL3_BACKEND=fast`` (or ``c``) to force a backend —
+    ``fast`` is the right choice for interactive/recording sessions (build-free
+    and faster; bit-exactness only matters for golden verification).
     """
+    import os
+    pref = os.environ.get("DOSRE_OPL3_BACKEND", "").strip().lower()
+    if pref not in ("c", "nuked", "nuked-opl3-c"):
+        # Default (no override) still prefers the compiled backend when built;
+        # "fast" forces the build-free approximate synth.
+        if pref == "fast":
+            from dos_re.opl3_fast import OPL3Fast
+            return OPL3Fast, "opl3-fast"
     try:
         from pynuked_opl3 import OPL3 as _COPL3
 
