@@ -148,7 +148,7 @@ owned game to port.
 ## License
 
 MIT ([LICENSE](LICENSE)), except the vendored [`pynuked_opl3/`](pynuked_opl3/)
-submodule and `dos_re/opl3.py` (a pure-Python translation of
+submodule and `graveyard/opl3_exact.py` (a pure-Python translation of
 [Nuked-OPL3](https://github.com/nukeykt/Nuked-OPL3)) — both
 LGPL-2.1-or-later; self-contained and separable (see LICENSE).
 

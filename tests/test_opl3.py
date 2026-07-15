@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 import random
 
-from dos_re.opl3 import OPL3, OPL_NATIVE_RATE
+from opl3_exact import OPL3, OPL_NATIVE_RATE
 
 _GOLDEN = {
     "silence": "0631457264ff7f8d5fb1edc2c0211992a67c73e6",

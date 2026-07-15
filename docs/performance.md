@@ -97,8 +97,8 @@ and the live viewer, where it is worth a steady ~2x.
 | Backend | What | Speed | When used |
 |---|---|---|---|
 | `pynuked_opl3` (submodule) | compiled Nuked-OPL3, bit-exact | native (~1% core) | whenever built (`python -m pynuked_opl3._ffi_build`); what releases bundle |
-| `dos_re/opl3_fast.py` | numpy APPROXIMATE synth, perceptually matched | ~50x RT real music / ~290x busy (CPython) | CPython without the compiled build — the everyday dev default |
-| `dos_re/opl3.py` | pure-Python bit-exact Nuked translation | ~1x CPython / 30-60x PyPy | PyPy without the compiled build; otherwise dormant (kept verified as the calibration/reference core) |
+| `dos_re/opl3_fast.py` | numpy APPROXIMATE synth, perceptually matched | ~50x RT CPython / ~43x PyPy | the default whenever the compiled build is absent (both interpreters) |
+| `graveyard/opl3_exact.py` | pure-Python bit-exact Nuked translation | ~1x CPython / ~24x PyPy | DORMANT — never selected at runtime; the calibration/golden reference only |
 
 opl3_fast's fidelity contract: exact pitch arithmetic, ADSR slopes/attack
 calibrated against the exact core, the chip's real stepped tremolo/vibrato

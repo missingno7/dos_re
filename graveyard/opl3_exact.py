@@ -9,15 +9,15 @@ rhythm/4-op/waveform sweeps and randomized fuzz by ``tests/test_opl3.py``
 (golden PCM sha1 hashes recorded from the upstream cffi reference build
 before it was retired from this repo).
 
-Being stdlib-only pure Python, it needs no C compiler, works identically
-under CPython and PyPy, and never has the "extension not built" failure
-mode.  It is THE OPL3 backend of dos_re (the formerly-vendored
-``pynuked_opl3`` cffi submodule was retired once this translation was proven
-byte-identical); ``dos_re.audio_sink.load_opl3`` is the stable entry point.
-Rates (44100 Hz): ~1.0x real-time on CPython on a worst-case busy chip
-(1.3-1.6x on typical/quiet states, thanks to the provable fast lanes in
-_process_slot and the bank-1 dormancy skip), ~30-60x under PyPy
-(docs/performance.md).
+DORMANT (2026-07): this bit-exact core is no longer the runtime backend and
+is no longer in the importable ``dos_re`` package — it lives in ``graveyard/``
+purely as the calibration/golden oracle for ``dos_re/opl3_fast.py`` (the numpy
+approximate synth that replaced it) and as a provenance record.  It is ~1.0x
+real-time on CPython on a busy chip — too slow for everyday playback, which is
+why opl3_fast (~50x, perceptually indistinguishable on real game music)
+became the default.  ``dos_re.audio_sink.load_opl3`` never selects this module;
+runtime OPL3 is two-way (compiled pynuked_opl3 when built, else opl3_fast).
+See graveyard/README.md.
 
 Config parity: the C reference is compiled with the upstream defaults —
 ``OPL_ENABLE_STEREOEXT=0`` and therefore ``OPL_QUIRK_CHANNELSAMPLEDELAY=1``

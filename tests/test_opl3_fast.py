@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from dos_re.opl3 import OPL3
+from opl3_exact import OPL3
 from dos_re.opl3_fast import OPL3Fast
 
 RATE = 44100

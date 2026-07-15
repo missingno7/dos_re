@@ -6,9 +6,9 @@ channel with a small jitter lead.  It never writes game state, so demos replay
 identically with audio on or off — it is safe to wire into any port's viewer.
 
 Part of the FRONTEND RING (see tools/lint.py): needs numpy + pygame.  The
-OPL3 backend is the canonical pure-Python core ``dos_re.opl3`` (always
-present, no build step; byte-exact against the retired upstream C reference
-— tests/test_opl3.py).
+OPL3 backend comes from ``load_opl3`` — the compiled pynuked_opl3 when built,
+else the numpy approximate ``dos_re.opl3_fast`` (the everyday default; the
+bit-exact core is dormant in graveyard/, never selected at runtime).
 
 ``dos_re.player`` constructs this automatically for ``--audio adlib``; ports
 with a different audio architecture (e.g. digital Sound Blaster DMA games)
@@ -19,22 +19,23 @@ the play-runner unification made it the second consumer.
 """
 from __future__ import annotations
 
-import sys
-
 
 def load_opl3():
-    """Return ``(OPL3_class, backend_label)`` — the per-interpreter OPL3 choice.
+    """Return ``(OPL3_class, backend_label)`` — the runtime OPL3 backend.
 
-    - ``nuked-opl3-c``  — the vendored pynuked_opl3 cffi build when compiled
-      (bit-exact, native speed); build once: python -m pynuked_opl3._ffi_build
-    - ``opl3-fast``     — on CPython otherwise: dos_re.opl3_fast, the numpy
-      APPROXIMATE synth (perceptually matched, ~50x real-time on game music;
-      calibration + A/B evidence in its module docstring / tests)
-    - ``nuked-opl3-py`` — on PyPy otherwise: dos_re.opl3, the bit-exact
-      pure-Python core (30-60x real-time there; numpy is slow under PyPy)
+    Two-way choice, same on every interpreter:
 
-    The exact cores remain the reference implementations; opl3_fast is the
-    everyday CPython playback backend.
+    - ``nuked-opl3-c`` — the vendored pynuked_opl3 cffi build when compiled
+      (bit-exact, native speed); build once: python -m pynuked_opl3._ffi_build.
+      This is what shipped releases bundle.
+    - ``opl3-fast``    — otherwise: dos_re.opl3_fast, the numpy APPROXIMATE
+      synth (~50x real-time on CPython, ~43x on PyPy; perceptually
+      indistinguishable from the exact chip on real game music in blind A/B —
+      calibration + evidence in its module docstring / tests).
+
+    The bit-exact pure-Python core was retired from the runtime (too slow at
+    ~1x real-time) and now lives in ``graveyard/opl3_exact.py`` as the
+    calibration/golden reference only — it is never selected here.
     """
     try:
         from pynuked_opl3 import OPL3 as _COPL3
@@ -43,13 +44,9 @@ def load_opl3():
         return _COPL3, "nuked-opl3-c"
     except Exception:  # noqa: BLE001 — no compiled backend
         pass
-    if sys.implementation.name == "cpython":
-        from dos_re.opl3_fast import OPL3Fast
+    from dos_re.opl3_fast import OPL3Fast
 
-        return OPL3Fast, "opl3-fast"
-    from dos_re.opl3 import OPL3 as _PyOPL3
-
-    return _PyOPL3, "nuked-opl3-py"
+    return OPL3Fast, "opl3-fast"
 
 
 class AdlibSpeakerSink:
@@ -78,8 +75,7 @@ class AdlibSpeakerSink:
             pygame.mixer.set_num_channels(2)
         self._channel = pygame.mixer.Channel(1)
 
-        # Backend per interpreter — see load_opl3 (compiled exact when built,
-        # opl3_fast on CPython, exact pure-Python on PyPy).
+        # OPL3 backend: compiled pynuked_opl3 when built, else opl3_fast (see load_opl3).
         opl_cls, self.opl_label = load_opl3()
         self._opl = opl_cls(sample_rate=self._rate)
         # PC speaker square-wave state (phase-continuous across chunks).
