@@ -31,6 +31,14 @@ mistakes and auto-bisection localizes them; AI resolves only the concrete
 gaps.  Per-function proofs are metadata (hybrid installs, diagnostics,
 regression), never a gate on graph assembly.
 
+> **Do not port the game.  Build the machine that ports the game.**
+> Every blocker must improve the toolchain, not create another manual patch.
+> (The Ten Principles: `docs/dos_re_2.0.md` §0.)  The staged pipeline is the
+> engineering strategy; the ultimate goal is direct — *original binary +
+> recovery facts → automated recovery tool → true native implementation* —
+> with intermediate stages as verification projections of one shared
+> recovery IR.
+
 **This is infrastructure for AI agents, not a library for end users.** The
 expected operator is an autonomous AI agent handed a porting repo (this
 framework plugged in as a submodule) plus a game's files. A human's role in

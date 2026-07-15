@@ -24,6 +24,50 @@ binary
 → clean source port
 ```
 
+This framework is **from AI, for AI**: the operator is an autonomous agent,
+and every rule below is written to keep that agent building the machine
+instead of hand-porting the game.
+
+---
+
+## 0. The Ten Principles
+
+> **Do not port the game.  Build the machine that ports the game.**
+> Every blocker must improve the toolchain, not create another manual patch.
+
+1. **Do not port the game.  Build the machine that ports the game.**
+2. **The original executable is the oracle.**  Generated code is correct only
+   when its observable behavior matches the original.
+3. **Deterministic tooling performs the transformation.  AI only removes
+   blockers.**  AI improves the decoder, IR, analyses, emitters, adapters,
+   verification tools, or explicit recovery facts.  It does not manually
+   rewrite hundreds of routines.
+4. **Every completed stage has a hard execution wall.**  VMless cannot
+   interpret instructions.  CPUless cannot access the CPU carrier.  True
+   native cannot access the historical DOS memory layout.
+5. **Unsupported behavior must fail loudly.**  No silent emulation, hidden
+   interpreter fallback, guessed semantics, or patches that merely make one
+   demo pass.
+6. **Generated code is disposable.**  Delete every generated artifact and
+   reproduce it from the original binary, configuration, recovery facts, and
+   the DOS_RE toolchain.
+7. **Game-specific knowledge must be explicit and minimal.**  Exceptional
+   facts belong in structured, evidence-backed declarations — not in opaque
+   edits to generated code.
+8. **Assemble early, compare end to end, and converge.**  Build the largest
+   supported execution graph, run it against the oracle, locate the first
+   divergence, improve the system, regenerate, repeat.
+9. **Recover effects and meaning, not the original machine forever.**  DOS
+   services, video, input, audio, files, and timing become reusable platform
+   adapters.  Registers, flags, offsets, and byte images are intermediate
+   representations — not the final architecture.
+10. **Every solved blocker must improve the future.**  A fix becomes a
+    reusable DOS_RE capability or a documented recovery fact.  Each recovered
+    game trains the recovery machine for the next one.
+
+*The scripts perform the transformations.  AI removes the obstacles.  The
+oracle decides what is correct.*
+
 ---
 
 ## 1. Canonical vocabulary: the five execution stages
@@ -76,11 +120,14 @@ remains.
 The VMless→CPUless transformation is driven by shared IR and deterministic
 analysis — register liveness, flag liveness, stack-effect analysis, call
 input/output inference, memory-access analysis, direct-call reconstruction,
-control-flow reconstruction — **never by parsing manually refactored Python**.
-The canonical pipeline:
+control-flow reconstruction — **never by parsing generated or manually
+refactored Python**.  The passes operate on the recovery IR; each emitted
+form is a projection of that IR:
 
 ```
-original ASM → machine IR → VMless literal emitter → de-carrier/dataflow passes → CPUless emitter
+original binary → shared recovery IR → analyses/transformations → selected emitter
+                                        (VMless literal | CPUless | DOS-layout-less
+                                         | oracle bridge | diagnostic/verification)
 ```
 
 Literal generated files are regeneratable compiler artifacts and must not be
@@ -141,6 +188,81 @@ Message wording: prefer *full VMless lifted graph*, *VMless lifted candidate*,
 *CPUless candidate*, *DOS-layout-less candidate*, *semantic native
 implementation* — never *full native runtime* / *native assembly* / *native
 hooks* for a merely-VMless artifact.
+
+### 1a. Hard execution walls, and the runner naming contract
+
+The stage names are not labels on effort — each completed stage is defined by
+an **enforced, mechanically checkable execution wall**:
+
+- **VMless wall**: the emitted output contains no instruction-interpretation
+  fallback on the declared corpus (zero ``interp_one`` call sites; the
+  interpreter survives only OUTSIDE the declared corpus as the enumerated,
+  fail-loud frontier — never silently inside it).
+- **CPUless wall**: the emitted output cannot access the CPU carrier — no
+  ``cpu.s`` registers, no flags, no emulated stack, no machine CALL/RET.
+- **Native wall**: the emitted output cannot access the historical DOS memory
+  model in normal gameplay.
+
+A milestone is not complete because working code exists; it is complete only
+when the stage regenerates automatically AND its wall is enforced by tooling
+(a grep-class static check on the emitted artifacts at minimum, a runtime
+audit where static checking cannot see it).
+
+The walls fix the runner names in every port:
+
+```
+play_vmless.py    output of the automated VMless pipeline
+                  (lift → link → install the graph; NOT a hand-assembled hook set)
+play_cpuless.py   output of the automated CPUless transformation
+                  (NOT a manually refactored copy of play_vmless.py)
+play_native.py    output of the automated DOS-layout dissolution pipeline,
+                  plus only optional oracle-verifiable semantic cleanup
+```
+
+A runner may not carry a name whose wall its artifacts do not satisfy.
+
+### 1b. The staged pipeline is a STRATEGY, not the required final architecture
+
+The sequence oracle → VMless → CPUless → DOS-layout-less exists to divide one
+extremely difficult transformation into small, measurable, independently
+verifiable detachments.  It is the current engineering plan — **not a mandate
+that the toolchain forever materialize every intermediate stage for every
+game**.
+
+The ultimate goal is direct:
+
+```
+original binary + recovery facts → automated recovery tool → true native implementation
+```
+
+where **true native** means: no instruction interpreter, no emulated CPU
+carrier, no dependency on the historical DOS memory layout, normal
+host-language control flow, native data structures, native platform
+interfaces — with oracle verification retained through the optional generated
+bridge.
+
+Consequences for how the system is built:
+
+- **Do not build the system around transforming arbitrary generated Python
+  from one stage into the next.**  Build around a shared recovery IR,
+  reusable analysis passes, and *selected emitters*; every stage artifact is
+  a projection of the same IR, and a sufficiently capable pipeline may go
+  ``assembly → IR → dataflow/structure recovery → true native`` without ever
+  writing a persistent VMless file.
+- Intermediate emissions (VMless, CPUless) remain available as **diagnostic
+  and verification projections** — checkpoints for bisection and proof — and
+  the toolchain may internally combine detachments when it can do so safely.
+- The hard walls (§1a) still define the meaning of whatever IS emitted; they
+  constrain artifacts, not the route taken to produce them.
+
+The final success criterion is NOT "we completed VMless, then CPUless, then
+native, each by hand."  It is:
+
+> **The automated toolchain can regenerate a true native implementation from
+> canonical inputs and verify it against the original oracle.**
+
+If the direct transformation becomes reliable, prefer it; keep the
+intermediate forms as projections of the same recovery IR.
 
 ---
 
@@ -419,7 +541,13 @@ A milestone is complete when — and only when:
   facts;
 - unsupported cases fail loudly;
 - the result is verified against the oracle;
+- the stage's hard execution wall (§1a) is enforced by tooling;
 - the same capability can be reused on later games.
+
+And the program-level success criterion above all of them (§1b): the
+automated toolchain can regenerate a **true native** implementation from
+canonical inputs and verify it against the original oracle — the staged path
+is the plan, direct emission is the goal.
 
 CPUless completion does NOT mean "the agent refactored all reached hooks by
 hand"; it means the CPUless analysis and emitter regenerate the required

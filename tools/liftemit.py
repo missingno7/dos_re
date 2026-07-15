@@ -14,9 +14,18 @@ Emission is byte-identical to ``liftverify``'s emit path (same signature
 recipe, ``coverage=True``, same ``--max-iterations`` default) so a module
 emitted here and one emitted during verification are the same file.
 
+The VMLESS WALL (docs/dos_re_2.0.md §1a) is checked here mechanically: after
+emission every module is scanned for ``interp_one`` call sites (instruction-
+interpretation fallback inside the declared corpus).  The count is always
+reported; ``--require-vmless-wall`` makes any nonzero count a hard failure —
+the flag a port's pipeline should pass once its corpus reaches zero, so a
+regression (a new opcode the emitter falls back on) fails the build instead
+of silently re-entering the interpreter.
+
 Usage:
     python tools/liftemit.py --exe GAME.EXE --snapshot DIR \
-        --entries-file entries.txt [--emit-dir lifted] [--max-iterations N]
+        --entries-file entries.txt [--emit-dir lifted] [--max-iterations N] \
+        [--require-vmless-wall]
 """
 from __future__ import annotations
 
@@ -72,6 +81,20 @@ def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations):
     return "ok", name
 
 
+def vmless_wall_report(emit_dir: Path):
+    """The VMless-wall static check: ``interp_one`` CALL SITES per module.
+
+    Counts real fallback invocations (``interp_one(``) — the import line and
+    prose mentions do not match.  Returns {module_name: count} for modules
+    with a nonzero count."""
+    offenders: dict[str, int] = {}
+    for path in sorted(emit_dir.glob("lifted_*.py")):
+        n = path.read_text(encoding="utf-8").count("interp_one(")
+        if n:
+            offenders[path.name] = n
+    return offenders
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--exe", required=True)
@@ -84,6 +107,10 @@ def main(argv=None) -> int:
     ap.add_argument("--max-iterations", type=int, default=None, metavar="N",
                     help="runaway-loop guard baked into each module "
                          "(default: emitter default, currently 20000)")
+    ap.add_argument("--require-vmless-wall", action="store_true",
+                    help="fail (exit 2) if any emitted module contains an "
+                         "interp_one fallback call site — the enforced VMless "
+                         "execution wall (docs/dos_re_2.0.md §1a)")
     args = ap.parse_args(argv)
 
     entries = []
@@ -110,6 +137,19 @@ def main(argv=None) -> int:
     print(f"\nemitted {counts['ok']}/{len(entries)} modules to {emit_dir} "
           f"(not-liftable={counts['not-liftable']}, "
           f"emit-unsupported={counts['emit-unsupported']})")
+
+    offenders = vmless_wall_report(emit_dir)
+    total_sites = sum(offenders.values())
+    if offenders:
+        print(f"VMless wall: {total_sites} interp_one fallback call site(s) "
+              f"in {len(offenders)} module(s):")
+        for name, n in sorted(offenders.items()):
+            print(f"  {name}: {n}")
+    else:
+        print("VMless wall: HOLDS (0 interp_one call sites in the corpus)")
+    if args.require_vmless_wall and offenders:
+        print("--require-vmless-wall: FAIL")
+        return 2
     return 0 if not skipped else 1
 
 

@@ -17,6 +17,9 @@ authority; "native" is banned as a bare term):**
 | **Platform adapter** | A reusable generic dos_re capability binding a recognized machine effect (file access, input, page flip, OPL write, timer wait) to a native interface (`platform.video.present(...)`). Oracle-compatible / faithful / enhanced / per-OS implementations behind one interface. |
 | **Recovery fact** | The smallest explicit, evidence-backed, versioned declaration of game-specific knowledge (jump table here, input-wait boundary there) fed into the generic pipeline — the alternative to hand-patching generated output. |
 | **Verification bridge** | Generated serializer reconstructing historical DOS machine state from the native object model so the oracle stays reachable after the CPU and memory model are gone. Depends on the native implementation, never vice versa; not shipped. |
+| **Hard execution wall** | The enforced, mechanically checkable property that defines a completed stage: VMless output cannot interpret instructions (zero `interp_one` sites on the declared corpus), CPUless output cannot access the CPU carrier, native output cannot access the DOS memory model. Fixes runner names: `play_vmless.py` / `play_cpuless.py` / `play_native.py` — a runner may not carry a name whose wall its artifacts do not satisfy. |
+| **Recovery IR** | The shared intermediate representation all analyses/transformations operate on; every stage artifact (VMless, CPUless, native, bridge, diagnostics) is an EMITTER PROJECTION of it. The system is never built around parsing generated Python from one stage into the next. |
+| **True native** | The ultimate target: no interpreter, no CPU carrier, no DOS-layout dependency, host-language control flow + data structures + platform adapters, oracle-verifiable via the optional bridge. The staged path (VMless → CPUless → DOS-layout-less) is the engineering strategy; direct binary→true-native emission is the goal. |
 
 | Term | Meaning |
 |---|---|
