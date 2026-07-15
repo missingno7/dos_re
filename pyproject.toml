@@ -43,6 +43,7 @@ adlib = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["dos_re*"]
+include = ["dos_re*", "pynuked_opl3*"]
 
 [tool.setuptools.package-data]
+"pynuked_opl3" = ["vendor/*.c", "vendor/*.h", "README.md", "LICENSE"]

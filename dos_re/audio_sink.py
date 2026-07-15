@@ -19,31 +19,37 @@ the play-runner unification made it the second consumer.
 """
 from __future__ import annotations
 
+import sys
+
 
 def load_opl3():
-    """Return ``(OPL3_class, backend_label)`` — the release seam for OPL3.
+    """Return ``(OPL3_class, backend_label)`` — the per-interpreter OPL3 choice.
 
-    The canonical implementation is the pure-Python ``dos_re.opl3`` (label
-    ``nuked-opl3-py``): always present, no build step, the one the proofs
-    and the dev workflow use (~0.5x real-time on CPython, ~19x under PyPy —
-    play with music under PyPy; docs/performance.md).
+    - ``nuked-opl3-c``  — the vendored pynuked_opl3 cffi build when compiled
+      (bit-exact, native speed); build once: python -m pynuked_opl3._ffi_build
+    - ``opl3-fast``     — on CPython otherwise: dos_re.opl3_fast, the numpy
+      APPROXIMATE synth (perceptually matched, ~50x real-time on game music;
+      calibration + A/B evidence in its module docstring / tests)
+    - ``nuked-opl3-py`` — on PyPy otherwise: dos_re.opl3, the bit-exact
+      pure-Python core (30-60x real-time there; numpy is slow under PyPy)
 
-    RELEASES may bundle a compiled backend: if a ``pynuked_opl3`` package is
-    installed (pip, or e.g. a python-for-android recipe in an APK pipeline),
-    it is preferred (label ``nuked-opl3-c``) — byte-identical output, proven
-    by tests/test_opl3.py, at native speed (~1% of a CPU core).  The dev
-    repos do NOT vendor it (the submodule was retired); this probe only
-    fires when a distribution ships one.
+    The exact cores remain the reference implementations; opl3_fast is the
+    everyday CPython playback backend.
     """
     try:
         from pynuked_opl3 import OPL3 as _COPL3
 
         _COPL3()  # probe: the package imports even when its extension is unbuilt
         return _COPL3, "nuked-opl3-c"
-    except Exception:  # noqa: BLE001 — no bundled backend: the canonical core
-        from dos_re.opl3 import OPL3 as _PyOPL3
+    except Exception:  # noqa: BLE001 — no compiled backend
+        pass
+    if sys.implementation.name == "cpython":
+        from dos_re.opl3_fast import OPL3Fast
 
-        return _PyOPL3, "nuked-opl3-py"
+        return OPL3Fast, "opl3-fast"
+    from dos_re.opl3 import OPL3 as _PyOPL3
+
+    return _PyOPL3, "nuked-opl3-py"
 
 
 class AdlibSpeakerSink:
@@ -72,17 +78,10 @@ class AdlibSpeakerSink:
             pygame.mixer.set_num_channels(2)
         self._channel = pygame.mixer.Channel(1)
 
-        # The canonical pure-Python OPL3 core (dos_re.opl3): always present,
-        # no build step.  ~1.0-1.6x real-time on CPython, ~30-60x under PyPy.
-        import sys as _sys
-
+        # Backend per interpreter — see load_opl3 (compiled exact when built,
+        # opl3_fast on CPython, exact pure-Python on PyPy).
         opl_cls, self.opl_label = load_opl3()
         self._opl = opl_cls(sample_rate=self._rate)
-        if self.opl_label == "nuked-opl3-py" and _sys.implementation.name == "cpython":
-            print("[audio] AdLib via the pure-Python Nuked-OPL3 core (~1x "
-                  "real-time on CPython — busy songs on slow machines may "
-                  "underrun; PyPy has ~30x headroom, and releases can bundle "
-                  "a compiled backend — docs/performance.md)")
         # PC speaker square-wave state (phase-continuous across chunks).
         self._spk_on = False
         self._spk_freq = 0.0

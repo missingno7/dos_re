@@ -92,44 +92,23 @@ serial for everything else** — long single-process runs (verify sweeps,
 oracle runs, probes, headless replay), where the 13-17x dwarfs everything,
 and the live viewer, where it is worth a steady ~2x.
 
-## Aside: the pure-Python OPL3 core (dos_re/opl3.py)
+## Aside: the OPL3 backends (audio_sink.load_opl3 picks one)
 
-The OPL3 core (`dos_re/opl3.py`, the only backend since the cffi
-accelerator's retirement) renders in real time on BOTH interpreters
-(44100 Hz): CPython ~1.0x on a worst-case busy chip / 1.3x typical / 1.6x
-silent; PyPy 30x / 40x / 61x.  That took three byte-exact work-skipping
-theorems proven from the chip's own equations (all verified by the golden +
-differential battery, including 80s of captured real game music):
+| Backend | What | Speed | When used |
+|---|---|---|---|
+| `pynuked_opl3` (submodule) | compiled Nuked-OPL3, bit-exact | native (~1% core) | whenever built (`python -m pynuked_opl3._ffi_build`); what releases bundle |
+| `dos_re/opl3_fast.py` | numpy APPROXIMATE synth, perceptually matched | ~50x RT real music / ~290x busy (CPython) | CPython without the compiled build — the everyday dev default |
+| `dos_re/opl3.py` | pure-Python bit-exact Nuked translation | ~1x CPython / 30-60x PyPy | PyPy without the compiled build; otherwise dormant (kept verified as the calibration/reference core) |
 
-- **bank-1 dormancy** — OPL2-era programs never write reg >= 0x100, so
-  slots 18-35 provably stay at reset state; they are skipped wholesale
-  (their only global side effect, 18 noise-LFSR steps, is replayed) until
-  the first bank-1 write permanently wakes them;
-- **released-slot fast lane** — key-off + release + envelope 0x1FF is a
-  frozen envelope with output magnitude 0 for every waveform; only the
-  0/-1 DC-quirk sign (phase-dependent) is computed;
-- **sustain-static fast lane** — key-on + sustain + EGT set means the EG
-  machinery changes nothing this sample; only the tremolo-carrying eg_out
-  is recomputed.
-
-Plus flattened waveform/exp tables (the eight EnvelopeCalcSin functions
-reduce to (magnitude, sign) lookups) and a zero-sub-call _process_slot.
-Genuinely rejected, for the record: numpy vectorization (FM synthesis is
-serial per-sample — modulator feeds carrier within the sample; 36-wide
-lanes cannot amortize numpy call overhead) and caching of outputs (the
-chip state never repeats: 36 x 32-bit phase accumulators + the noise LFSR
-advance every sample and shape future output even when silent).
-
-**Releases (e.g. an Android build): ship a compiled backend.** The
-no-C-compiler rule protects the DEV workflow; a release pipeline compiles
-once per platform.  ``dos_re.audio_sink.load_opl3()`` is the seam: it
-prefers an installed ``pynuked_opl3`` package (pip, or a python-for-android
-recipe building the ~1500-line C core in the APK pipeline — ~1% of an ARM
-core at native speed) and falls back to the canonical pure-Python core.
-Byte-identity between the two is proven by ``tests/test_opl3.py``
-(``test_differential_vs_compiled_backend_when_bundled`` runs wherever a
-bundled backend is importable — include it in release CI), so shipping the
-accelerator changes nothing except CPU load.
+opl3_fast's fidelity contract: exact pitch arithmetic, ADSR slopes/attack
+calibrated against the exact core, the chip's real stepped tremolo/vibrato
+patterns, the actual rhythm phase-bit recipe (hh/sd/tc combs), serial
+recurrence for chaotic high feedback (fb 6-7), drum output doubling — all
+tolerance-tested in tests/test_opl3_fast.py; A/B WAVs over 80 s of real
+SKYROADS music were part of its acceptance.  It is approximate: bit-level
+output differs (float sine vs ROM quantization, analytic envelopes, seeded
+noise instead of the LFSR).  Anything that needs sample-exactness uses the
+exact cores.
 
 ## 3. If you change the interpreter itself: the equivalence gate
 

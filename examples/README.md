@@ -5,7 +5,7 @@ The boundary contract:
 
 - **Nothing in `dos_re/` (or `tools/`) imports anything from `examples/`.**
   The dependency points one way only: examples import the framework.
-- **Not packaged.** `pyproject.toml` ships `dos_re*`;
+- **Not packaged.** `pyproject.toml` ships `dos_re*` and `pynuked_opl3*`;
   examples never end up in a wheel.
 - **Deletable.** Removing this whole directory breaks nothing: the
   example-driven tests (`tests/test_tiny_frame_game.py`,

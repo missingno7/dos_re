@@ -147,9 +147,10 @@ owned game to port.
 
 ## License
 
-MIT ([LICENSE](LICENSE)), except `dos_re/opl3.py` — a pure-Python translation
-of [Nuked-OPL3](https://github.com/nukeykt/Nuked-OPL3) and therefore
-LGPL-2.1-or-later; self-contained and separable (see the file header).
+MIT ([LICENSE](LICENSE)), except the vendored [`pynuked_opl3/`](pynuked_opl3/)
+submodule and `dos_re/opl3.py` (a pure-Python translation of
+[Nuked-OPL3](https://github.com/nukeykt/Nuked-OPL3)) — both
+LGPL-2.1-or-later; self-contained and separable (see LICENSE).
 
 The framework's openness never extends to game IP: no game assets or
 executables are ever included here or in adapter repos; ports require a
