@@ -109,7 +109,7 @@ def _vib_scale(pos: int, shift: int) -> float:
 class _Op:
     __slots__ = ("mult", "ksr", "egt", "vib", "trem", "ksl", "tl",
                  "ar", "dr", "sl", "rr", "wf",
-                 "stage", "level", "phase", "key")
+                 "stage", "level", "phase", "key", "fb1", "fb2")
 
     def __init__(self) -> None:
         self.mult = 0
@@ -128,6 +128,8 @@ class _Op:
         self.level = _SILENCE
         self.phase = 0.0        # turns
         self.key = 0
+        self.fb1 = 0.0          # serial-feedback history (fb 6-7), carried across blocks
+        self.fb2 = 0.0
 
 
 class _Ch:
@@ -193,6 +195,7 @@ class OPL3Fast:
             if not op.key:
                 op.key = 1
                 op.phase = 0.0
+                op.fb1 = op.fb2 = 0.0
                 op.stage = 0 if op.ar else 4     # AR=0: never starts (real chip)
                 if op.ar >= 15 or self._rate_index(ch, op, op.ar) >= 60:
                     op.level = 0.0
@@ -554,12 +557,16 @@ class OPL3Fast:
             m = w(op.wf, ph + g * m * gain)
             m = w(op.wf, ph + g * m * gain)
             return m * gain
-        # serial: out[t] = wave(ph[t] + g*(out[t-1] + out[t-2])) * gain[t]
+        # serial: out[t] = wave(ph[t] + g*(out[t-1] + out[t-2])) * gain[t].
+        # m1/m2 (the last two outputs) are carried on the operator across block
+        # and segment boundaries; resetting them each block caused an audible
+        # per-frame click on feedback voices (fb 6-7).
         import math
         g = _FB_TURNS[fb] * 0.5
         wf = op.wf
         out = np.empty(len(ph), dtype=np.float64)
-        m1 = m2 = 0.0
+        m1 = op.fb1
+        m2 = op.fb2
         two_pi = 2.0 * math.pi
         phl = ph.tolist()
         gl = gain.tolist()
@@ -589,6 +596,8 @@ class OPL3Fast:
             out[i] = v
             m2 = m1
             m1 = v
+        op.fb1 = m1
+        op.fb2 = m2
         return out
 
     # --- output -------------------------------------------------------------------------------
