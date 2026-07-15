@@ -20,8 +20,14 @@ from .decode import (CALL, CALL_FAR, CALL_IND, HLT, INT, IRET, JCC, JMP,
                      JMP_FAR, JMP_IND, RET, RETF, SEQ, UNSUPPORTED, Inst,
                      decode_one)
 
-#: kinds that terminate a path (function exits)
-EXIT_KINDS = (RET, RETF, IRET, JMP_FAR)
+#: kinds that terminate a path (function exits).  An indirect jump ends the
+#: region as a TAIL EXIT (the 32-bit pipeline's proven treatment): the emitted
+#: hook computes the runtime target, sets CS:IP, and hands control back to the
+#: VM — a dispatcher lifts as prologue + tail transfer, its cases stay
+#: interpreted (and re-enter any hook installed at them).  Observed need:
+#: Lemmings' sound-driver dispatcher (jmp rm16) and an ISR chaining to the
+#: previous vector (jmp far [old_vec]).
+EXIT_KINDS = (RET, RETF, IRET, JMP_FAR, JMP_IND)
 
 
 @dataclass
@@ -109,9 +115,6 @@ def scan_function(fetch: Callable[[int], int], entry: int, *,
             scan.refusals.append(Refusal(ip, "unsupported-opcode",
                                          f"{inst.mnemonic} bytes={inst.raw.hex()}"))
             continue
-        if kind == JMP_IND:
-            scan.refusals.append(Refusal(ip, "indirect-jump", inst.mnemonic))
-            continue
         if kind == HLT:
             scan.refusals.append(Refusal(ip, "hlt", ""))
             continue
@@ -141,10 +144,17 @@ def scan_function(fetch: Callable[[int], int], entry: int, *,
             work.append(inst.next_ip)
 
     lo, hi = scan.region
-    if budget_hit or (hi - lo) & 0xFFFF > max_bytes:
+    # Budget on DECODED bytes, not the lo..hi span: regions may legitimately
+    # be discontiguous (a small function tail-jumping to a shared far tail —
+    # Lemmings' per-frame 1010:3944, 39 insts across a 17KB span).  The
+    # runaway protection is the instruction budget + the decoder cross-check;
+    # span alone punished real functions for their layout.
+    decoded_bytes = sum(i.length for i in scan.insts.values())
+    if budget_hit or decoded_bytes > max_bytes:
         scan.refusals.append(Refusal(scan.entry, "region-budget",
-                                     f"insts={len(scan.insts)} span={lo:04X}..{hi:04X}"))
+                                     f"insts={len(scan.insts)} bytes={decoded_bytes} "
+                                     f"span={lo:04X}..{hi:04X}"))
     if not scan.exits and not scan.refusals:
         scan.refusals.append(Refusal(scan.entry, "no-exit",
-                                     "no ret/retf/iret/far-jmp reachable"))
+                                     "no ret/retf/iret/far-jmp/indirect-jmp reachable"))
     return scan

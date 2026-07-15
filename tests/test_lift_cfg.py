@@ -42,11 +42,27 @@ def test_int_is_liftable_and_recorded():
     assert [i.kind for i in scan.exits] == ["retf"]
 
 
-def test_indirect_jump_refuses():
+def test_indirect_jump_is_a_tail_exit():
+    # jmp bx ends the region as an exit (the 32-bit pipeline's treatment):
+    # the lifted hook computes the target, sets CS:IP, and hands back to the
+    # VM.  Observed need: Lemmings' sound-driver dispatcher / ISR chaining.
     code = bytes.fromhex("FFE3")          # jmp bx
     scan = scan_function(_fetch(code, 0x100), 0x100)
-    assert not scan.liftable
-    assert [r.reason for r in scan.refusals] == ["indirect-jump"]
+    assert scan.liftable
+    assert [i.kind for i in scan.exits] == ["jmp_ind"]
+
+
+def test_discontiguous_far_tail_is_not_a_budget_refusal():
+    # A small function whose body jumps to a far-away shared tail: the budget
+    # counts DECODED bytes, not the lo..hi span (Lemmings 1010:3944 — 39
+    # instructions across a 17KB span is a real, liftable function).
+    code = bytearray(b"\x90" * 0x5000)
+    code[0x0000:0x0003] = bytes.fromhex("E9FD3F")   # 0100: jmp 0x4100
+    code[0x4000:0x4002] = bytes.fromhex("40C3")     # 4100: inc ax; ret
+    scan = scan_function(_fetch(bytes(code), 0x100), 0x100)
+    assert scan.liftable, [r.reason for r in scan.refusals]
+    lo, hi = scan.region
+    assert (hi - lo) > 0x4000                        # genuinely discontiguous
 
 
 def test_x87_refuses_as_unsupported():

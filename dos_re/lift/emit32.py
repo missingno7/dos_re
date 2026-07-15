@@ -469,7 +469,9 @@ def emit_function32(scan: FunctionScan32, name: str, *, signature: bytes,
     A("    r, mem, sb = cpu.r, cpu.mem, cpu.sbase")
     if count_instructions:
         A("    cpu.instruction_count -= 1  # step() counts the hook as 1")
-    A("    bb = 0")
+    # Entry block, not index 0: leaders are address-sorted and a region can
+    # contain branch targets below the entry (see emit.py — same fix).
+    A(f"    bb = {bb_of[scan.entry]}")
     A("    for _guard in range(MAX_ITERATIONS):")
 
     ind = " " * 12

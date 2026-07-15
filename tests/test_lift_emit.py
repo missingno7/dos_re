@@ -456,3 +456,129 @@ def test_pascal_callee_ret_n_terminates_the_emulated_call():
     assert (hook.s.cs, hook.s.ip) == (CS, RET_IP)
     assert hook.s.ax == asm.s.ax == ((7 + 7 + 1) & 0xFFFF)
     assert hook.s.sp == asm.s.sp
+
+
+def test_entry_block_dispatches_first_even_when_not_the_lowest_leader():
+    """A region can contain a branch target BELOW the entry; block_leaders()
+    sorts by address, so the entry is not block 0.  The dispatch loop must
+    start at the ENTRY block — hardcoding 0 executed the lowest-address block
+    first (found by the Lemmings pilot's whole-program census)."""
+    base = 0x0100
+    code = bytes.fromhex(
+        "40"        # 0100: inc ax      backward target, below the entry
+        "C3"        # 0101: ret
+        "4B"        # 0102: dec bx      ENTRY
+        "75FB"      # 0103: jnz 0100
+        "C3")       # 0105: ret
+    fetch = lambda off: code[off - base] if 0 <= off - base < len(code) else 0x90
+    from dos_re.lift.cfg import scan_function as _scan_fn
+    scan = _scan_fn(fetch, 0x0102)
+    assert scan.liftable
+    assert scan.block_leaders()[0] != 0x0102     # the premise: entry isn't block 0
+    src = emit_function(scan, CS, "lifted", signature=code[2:])
+    ns: dict = {}
+    exec(compile(src, "<lifted>", "exec"), ns)   # noqa: S102
+    lifted = ns["lifted"]
+
+    for bx0 in (1, 2):
+        st = CPUState(ax=5, bx=bx0, cx=1, dx=0, sp=0x2000, cs=CS, ip=0x0102,
+                      ds=0x4000, es=0x4000, ss=0x3000, flags=0x0202)
+        asm = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}), entry=base)
+        hook = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}), entry=base)
+        _run_interpreted(asm)
+        lifted(hook)
+        assert (hook.s.ax, hook.s.bx) == (asm.s.ax, asm.s.bx), f"bx0={bx0}"
+        assert (hook.s.cs, hook.s.ip) == (CS, RET_IP)
+        assert (hook.s.flags & 0x0FD5) == (asm.s.flags & 0x0FD5)
+
+
+def test_indirect_jump_lifts_as_tail_transfer_register_and_table():
+    """jmp bx / jmp [table+bx]: the lifted hook must end at the runtime target
+    with all other state identical to the interpreter (tail-exit contract)."""
+    # 0100: mov bx, 0x0200 ; 0103: jmp bx
+    code_reg = bytes.fromhex("BB0002" "FFE3")
+    lifted, _scan, _src = _lift(code_reg)
+    st = CPUState(ax=1, bx=0, cx=1, dx=0, sp=0x2000, cs=CS, ip=ENTRY,
+                  ds=0x4000, es=0x4000, ss=0x3000, flags=0x0202)
+    asm = _make_cpu(code_reg, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
+    hook = _make_cpu(code_reg, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
+    for _ in range(2):
+        asm.step()
+    lifted(hook)
+    assert (hook.s.cs, hook.s.ip) == (asm.s.cs, asm.s.ip) == (CS, 0x0200)
+    assert hook.s.bx == asm.s.bx
+
+    # 0100: mov bx, 2 ; 0103: jmp [0x0010+bx]  (a 2-entry jump table in DS)
+    code_tbl = bytes.fromhex("BB0200" "FF67 10".replace(" ", ""))
+    table = (0x0111).to_bytes(2, "little") + (0x0222).to_bytes(2, "little")
+    lifted2, _scan2, _src2 = _lift(code_tbl)
+    st2 = CPUState(ax=0, bx=0, cx=1, dx=0, sp=0x2000, cs=CS, ip=ENTRY,
+                   ds=0x4000, es=0x4000, ss=0x3000, flags=0x0202)
+    asm2 = _make_cpu(code_tbl, CPUState(**{k: getattr(st2, k) for k in st2.__slots__}))
+    hook2 = _make_cpu(code_tbl, CPUState(**{k: getattr(st2, k) for k in st2.__slots__}))
+    asm2.mem.load(0x4000, 0x0010, table)
+    hook2.mem.load(0x4000, 0x0010, table)
+    for _ in range(2):
+        asm2.step()
+    lifted2(hook2)
+    assert (hook2.s.cs, hook2.s.ip) == (asm2.s.cs, asm2.s.ip) == (CS, 0x0222)
+
+
+def test_far_indirect_jump_lifts_as_tail_transfer():
+    """jmp far [mem] (ISR chain to the previous vector): sets CS and IP from
+    the far pointer and returns."""
+    # 0100: jmp far [0x0020]
+    code = bytes.fromhex("FF2E2000")
+    farptr = (0x0333).to_bytes(2, "little") + (0x5000).to_bytes(2, "little")
+    lifted, _scan, _src = _lift(code)
+    st = CPUState(ax=0, bx=0, cx=1, dx=0, sp=0x2000, cs=CS, ip=ENTRY,
+                  ds=0x4000, es=0x4000, ss=0x3000, flags=0x0202)
+    asm = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
+    hook = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
+    asm.mem.load(0x4000, 0x0020, farptr)
+    hook.mem.load(0x4000, 0x0020, farptr)
+    asm.step()
+    lifted(hook)
+    assert (hook.s.cs, hook.s.ip) == (asm.s.cs, asm.s.ip) == (0x5000, 0x0333)
+
+
+def test_linked_direct_call_replaces_emulate_call_and_stays_exact():
+    """The linker seam: a near CALL to a lifted callee emits a direct native
+    call (call_installed_hook_like_near_call) instead of emulate_call — no
+    interpreter in the call path, byte-exact against the interpreted original.
+    This is the de-VM step of the recovery pipeline, proven in miniature."""
+    # 0100: mov ax, 2 ; 0103: call 0x0110 ; 0106: add ax, 1 ; 0109: ret
+    # 0110: add ax, 5 ; 0113: ret                       (the callee)
+    code = bytes.fromhex("B80200" "E80A00" "050100" "C3"
+                         "909090909090"                   # padding to 0x0110
+                         "050500" "C3")
+    fetch = lambda off: code[(off - ENTRY) & 0xFFFF] if 0 <= (off - ENTRY) < len(code) else 0x90
+
+    from dos_re.lift.cfg import scan_function as _scan_fn
+    callee_scan = _scan_fn(fetch, 0x0110)
+    assert callee_scan.liftable
+    assert all(i.kind == "ret" for i in callee_scan.exits)   # near-linkable
+    callee_src = emit_function(callee_scan, CS, "lifted_callee",
+                               signature=code[0x10:0x14])
+    caller_scan = _scan_fn(fetch, ENTRY)
+    caller_src = emit_function(caller_scan, CS, "lifted_caller",
+                               signature=code[:6],
+                               link_map={0x0110: "lifted_callee"})
+    assert "emulate_call" not in caller_src.split("def lifted_caller")[1]
+    # Separate module namespaces (as on disk); the callee is injected the way
+    # the link tool's link_imports would import it.
+    ns_callee: dict = {}
+    exec(compile(callee_src, "<callee>", "exec"), ns_callee)   # noqa: S102
+    ns: dict = {"lifted_callee": ns_callee["lifted_callee"]}
+    exec(compile(caller_src, "<caller>", "exec"), ns)          # noqa: S102
+
+    st = CPUState(ax=0, bx=0, cx=1, dx=0, sp=0x2000, cs=CS, ip=ENTRY,
+                  ds=0x4000, es=0x4000, ss=0x3000, flags=0x0202)
+    asm = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
+    hook = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
+    _run_interpreted(asm)
+    ns["lifted_caller"](hook)
+    assert (hook.s.cs, hook.s.ip) == (CS, RET_IP)
+    assert hook.s.ax == asm.s.ax == 8            # 2 + 5 + 1
+    assert hook.s.sp == asm.s.sp
+    assert (hook.s.flags & 0x0FD5) == (asm.s.flags & 0x0FD5)

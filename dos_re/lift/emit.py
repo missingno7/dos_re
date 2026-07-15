@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 from .cfg import FunctionScan
 from .decode import (CALL, CALL_FAR, CALL_IND, INT, IRET, JCC, JMP, JMP_FAR,
-                     RET, RETF, SEQ, Inst)
+                     JMP_IND, RET, RETF, SEQ, Inst)
 
 REG16 = ("ax", "cx", "dx", "bx", "sp", "bp", "si", "di")
 REG8 = ("al", "cl", "dl", "bl", "ah", "ch", "dh", "bh")
@@ -393,19 +393,49 @@ def _terminator_lines(inst: Inst, cs: int, bb_of: dict[int, int], out: list[str]
         seg, off = inst.far_target
         out.append(f"{indent}s.cs, s.ip = 0x{seg:04X}, 0x{off:04X}")
         out.append(f"{indent}return")
+    elif kind == JMP_IND:
+        # Tail exit (the 32-bit pipeline's treatment): compute the runtime
+        # target, set CS:IP, hand control back to the VM.  A dispatcher lifts
+        # as prologue + tail transfer; the cases stay interpreted and any hook
+        # installed at them dispatches normally.
+        setup: list[str] = []
+        rm = _rm_operand(inst, 16, setup, "_o")
+        for ln in setup:
+            out.append(indent + ln)
+        if inst.reg == 5:                     # jmp far [mem]: offset then segment
+            out.append(f"{indent}s.ip = mem.rw({rm.seg_expr}, _o)")
+            out.append(f"{indent}s.cs = mem.rw({rm.seg_expr}, (_o + 2) & 0xFFFF)")
+        else:                                  # jmp near r/m16
+            out.append(f"{indent}s.ip = {rm.read()} & 0xFFFF")
+        out.append(f"{indent}return")
     else:
         raise EmitUnsupported(f"terminator {kind} at {inst.ip:04X}")
 
 
 def emit_function(scan: FunctionScan, cs: int, name: str, *,
                   signature: bytes, count_instructions: bool = False,
-                  coverage: bool = False, min_iterations: int | None = None) -> str:
+                  coverage: bool = False, min_iterations: int | None = None,
+                  link_map: dict[int, str] | None = None,
+                  link_imports: tuple[str, ...] = ()) -> str:
     """Return the source of a module defining the lifted hook ``name``.
 
     ``coverage`` adds a module-level ``BLOCKS_SEEN`` set that records which
     basic blocks actually executed, plus ``BLOCK_COUNT`` and ``coverage()`` —
     so a verify run can report *which paths* were exercised, not just that the
     hook passed (docs/lifting_design.md §7). It is inert otherwise.
+
+    ``link_map`` is THE LINKER SEAM (the recovery pipeline's de-VM step): a
+    ``{near_call_target_ip: python_callable_expr}`` map. A direct near CALL to
+    a mapped target emits ``call_installed_hook_like_near_call(cpu, key,
+    <callee>, ret_ip)`` instead of ``emulate_call`` — original CALL/RET stack
+    semantics, no interpreter in the path, and the child remains a
+    verifier-visible boundary in the hybrid (pitfall #5). Only near-RET-exit
+    callees are safe to link (the LINK TOOL enforces that precondition; tail
+    exits / retf / iret callees must stay ``emulate_call``). Incompatible with
+    ``count_instructions`` (the interpreter's per-step accounting is exactly
+    what a linked call no longer runs; tick demos re-record at the flip).
+    ``link_imports`` lines are appended to the module header verbatim (the
+    link tool supplies cross-module imports).
 
     ``min_iterations`` raises the runaway guard's floor above the default
     10,000 (the guard is still at least ``len(scan.insts) * 5_000`` either
@@ -450,7 +480,14 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     A("from __future__ import annotations")
     A("")
     A("from dos_re.cpu import AF, CF, DF, IF, OF, PF, SF, ZF")
+    if link_map and count_instructions:
+        raise EmitUnsupported("link_map is incompatible with count_instructions "
+                              "(linked calls bypass the interpreter's step accounting)")
     A("from dos_re.hooks import self_disable_if_patched")
+    if link_map:
+        A("from dos_re.hooks import call_installed_hook_like_near_call")
+        for ln in link_imports:
+            A(ln)
     A("from dos_re.lift.runtime import (LiftRuntimeError, emulate_call, emulate_far_call,")
     A("                                 emulate_int, interp_one)")
     A("")
@@ -478,7 +515,13 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     A("    s, mem = cpu.s, cpu.mem")
     if count_instructions:
         A("    cpu.instruction_count -= 1  # step() counts the hook as 1; count real instructions")
-    A("    bb = 0")
+    # Start at the ENTRY block, which is not necessarily block index 0:
+    # block_leaders() sorts by address, and a region can contain branch
+    # targets BELOW the entry (a backward jump above the function head).
+    # Hardcoding 0 executed the lowest-address block first — wrong code, at
+    # the wrong time, for that entry class (found by the Lemmings pilot's
+    # whole-program census; caught in-situ as guaranteed DIVERGED lifts).
+    A(f"    bb = {bb_of[scan.entry]}")
     A("    # A lifted function runs SYNCHRONOUSLY to completion — unlike the")
     A("    # interpreter, no external I/O/timing advances between its blocks. A")
     A("    # loop that waits on hardware state (retrace/timer polls) would spin")
@@ -512,8 +555,15 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
                     lines.append(f"interp_one(cpu, 0x{cs:04X}, 0x{inst.ip:04X})"
                                  f"  # (interpreter fallback)")
             elif inst.kind == CALL:
-                lines.append(f"emulate_call(cpu, 0x{cs:04X}, 0x{inst.target:04X}, "
-                             f"0x{inst.next_ip:04X})")
+                if link_map and inst.target in link_map:
+                    # LINKED: direct native call — CALL/RET stack semantics
+                    # preserved, verifier-visible child boundary, no VM.
+                    lines.append(f"call_installed_hook_like_near_call(cpu, "
+                                 f"(0x{cs:04X}, 0x{inst.target:04X}), "
+                                 f"{link_map[inst.target]}, 0x{inst.next_ip:04X})")
+                else:
+                    lines.append(f"emulate_call(cpu, 0x{cs:04X}, 0x{inst.target:04X}, "
+                                 f"0x{inst.next_ip:04X})")
                 native += 1
             elif inst.kind == CALL_FAR:
                 seg, off = inst.far_target

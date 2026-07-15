@@ -188,7 +188,7 @@ Non-negotiable properties:
 | **direct call** | `emulate_call(cpu, cs, ip)`: push return, run the *interpreter* until it returns (step-budgeted, fail-loud). Callee hooks dispatch automatically → free composition; lifting order never matters |
 | **indirect call** (`call bx`, `call [table]`) | same as direct — target resolves at runtime like the interpreter would; safe by construction |
 | `int n` | via BoundaryPolicy. DOS policy: `emulate_int` through the VM (dos.py services it — already the semantics being verified against) |
-| **indirect jmp** | **refuse at lift time** (v1). v2: recognise the bounded `cmp/jbe + jmp [table+reg*2]` dispatch pattern with static table bytes — Overkill's handler zoos will need this |
+| **indirect jmp** | ~~refuse at lift time (v1)~~ **since 2026-07-15: lifted as a TAIL EXIT** (parity with the 32-bit pipeline): the hook computes the runtime target, sets CS:IP, returns to the VM — a dispatcher lifts as prologue + tail transfer, its cases stay interpreted and re-enter any installed hook. First consumers: Lemmings' sound-driver dispatcher (`jmp rm16`) and an ISR chaining to the saved vector (`jmp far [old_vec]`). The same date, the region budget switched from lo..hi SPAN to DECODED BYTES (discontiguous far-tail functions are real — Lemmings `1010:3944`, 39 insts across 17KB). Full static jump-table recognition (native switch over table bytes) remains the LINK-stage item |
 | in/out, string ops, EGA aperture | through the same VM paths/helpers the interpreter uses (incl. `asm.py`'s guarded REP fast paths) |
 | unsupported opcode (x87, …) | refuse at lift time |
 
