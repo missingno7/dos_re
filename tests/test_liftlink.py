@@ -51,11 +51,25 @@ def _edge_fixture_code() -> bytes:
     return bytes(code)
 
 
-def test_edge_rule_passing_ret_callees_only():
+def test_edge_rule_structural_default_links_without_proof():
+    # DOS_RE 2.0 default: structural criterion only (liftable entry +
+    # all-near-ret exits) — proof status is irrelevant, exit shape still gates.
     scans = _scan_all(_edge_fixture_code(), [0x0100, 0x0110, 0x0120, 0x0130])
     statuses = {"1000:0110": "ORACLE_PASSING", "1000:0120": "ORACLE_PASSING",
                 "1000:0130": "NOT_REACHED"}
     edges, blocked = liftlink.compute_link_edges(scans, statuses)
+    assert ("1000:0100", "1000:0110") in edges
+    assert ("1000:0100", "1000:0130") in edges          # unproven: still linked
+    assert ("1000:0100", "1000:0120", "exit-shape") in blocked
+
+
+def test_edge_rule_proven_gate_requires_oracle_passing():
+    # The 1.x conservative gate (--proven-edges / structural=False).
+    scans = _scan_all(_edge_fixture_code(), [0x0100, 0x0110, 0x0120, 0x0130])
+    statuses = {"1000:0110": "ORACLE_PASSING", "1000:0120": "ORACLE_PASSING",
+                "1000:0130": "NOT_REACHED"}
+    edges, blocked = liftlink.compute_link_edges(scans, statuses,
+                                                 structural=False)
     assert edges == [("1000:0100", "1000:0110")]
     assert ("1000:0100", "1000:0120", "exit-shape") in blocked
     assert ("1000:0100", "1000:0130", "not-passing") in blocked

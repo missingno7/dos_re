@@ -1,5 +1,22 @@
 # Automatic literal lifting: ASM function → Python hook → oracle → refactor
 
+> **DOS_RE 2.0 supersession note (2026-07-17).**  This document designed the
+> lifter under the 1.x risk model: lift one function, prove it ORACLE_PASSING,
+> only then trust it.  Under DOS_RE 2.0 ([`dos_re_2.0.md`](dos_re_2.0.md), the
+> canonical architecture) that per-function gate applies ONLY to the hybrid
+> auto-install tier.  Graph assembly is different: the largest supported
+> **VMless lifted graph** is emitted (`tools/liftemit.py`), structurally linked
+> (`tools/liftlink.py`), installed whole (`lift.install.install_vmless_graph`),
+> and judged by END-TO-END oracle comparison with auto-bisection
+> (`tools/hook_bisect.py`) — per-function ORACLE_PASSING is metadata, not a
+> precondition.  Wherever this document says or implies "proven before
+> linked/installed", read it as describing the hybrid tier or as historical.
+> The M0–M4 roadmap in §10 is the 1.x lifter roadmap; the project-level
+> milestones are now M1–M6 in `dos_re_2.0.md` §6.  Terminology: what this doc
+> calls the eventual "native" artifact is, in 2.0 vocabulary, the **VMless
+> lifted runtime** — the CPU carrier and DOS memory model are removed by later
+> stages (CPUless emitter, DOS-layout dissolution), not by this lifter.
+
 > **Two ISA pipelines.** This document describes the design in its original
 > 16-bit terms; the 32-bit flat (DOS/4GW / CPU386) counterpart mirrors it
 > module for module — `decode32`/`cfg32`/`emit32`/`runtime32`, verified by
@@ -218,6 +235,12 @@ ORACLE_PASSING        in-situ verified: N calls, 0 divergence, M/K blocks covere
 INSTALLED             running as the default replacement (still guarded by entry signature)
 REFACTORED            the agent rewrote into real recovered Python; SAME tests green
 ```
+
+> **2.0 scope of this ladder:** these statuses gate the HYBRID auto-install
+> tier (`install_passing_lifts`) and serve diagnostics/regression.  They do
+> NOT gate structural linking or inclusion in the assembled VMless graph —
+> that is judged end-to-end (see the supersession note at the top and
+> `dos_re_2.0.md` §2).
 
 - Promotion LIFTED → ORACLE_PASSING is done by a driver
   (`tools/liftverify.py`) that replays chosen demos with the verifier

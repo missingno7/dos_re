@@ -17,12 +17,23 @@ view (which tool for which recovery step, with context) is
 | `pm_boot.py` | `python tools/pm_boot.py --exe assets/GAME.EXE --png frame.png` | The protected-mode bring-up loop: run an LE on the flat 386 runtime to the fail-loud frontier; stop reason + recent/hot EIPs + unmodeled ports + screen render (13h or Mode X). `--keys`/`--scancodes --at N` drive input. |
 | `pmlift.py` | `python tools/pmlift.py --exe GAME.EXE --auto-entries 300 --census` / `--verify --steps N` | The 32-bit liftgen+liftverify: census entries (static scan over decode32, `--auto-entries` sweeps direct call targets), emit literal Python hooks, install under the strict PM differential verifier, report ORACLE_PASSING / DIVERGED / NOT_REACHED per hook (samples cap retires proven hooks). |
 
-## Lift / verify
+## The 2.0 assembly pipeline (docs/dos_re_2.0.md)
+
+`codemap → liftemit → liftlink → install_vmless_graph (in the port's play_native) → end-to-end oracle → hook_bisect` — assemble the largest supported VMless graph early, judge it end-to-end, localize divergences automatically.
+
+| Tool | Command | When |
+|---|---|---|
+| `codemap.py` | `python tools/codemap.py …` | Observed-execution census: the entry list the whole pipeline consumes. |
+| `liftemit.py` | `python tools/liftemit.py --exe <exe> --snapshot <snap> --entries-file <txt> --emit-dir <game>/lifted` | Batch-emit the whole census to VMless lifted modules in one pass (byte-identical to liftverify's emit recipe). The bulk-emission step. |
+| `liftlink.py` | `python tools/liftlink.py --exe <exe> --snapshot <snap> --entries-file <txt> --emit-dir <game>/lifted` | Structural linking (default): near-CALL edges between lifted census entries with all-near-ret exits become direct Python calls. `--proven-edges` restores the 1.x ORACLE_PASSING gate (hybrid/debug only). |
+| `hook_bisect.py` | `python dos_re/tools/hook_bisect.py --driver <game>.bisect_driver:Driver --boundaries N` | When the assembled graph diverges from the oracle: binary-search the installed set to the smallest responsible function. Run from the port root. |
+
+## Lift / verify (per-function diagnostics + the hybrid tier)
 
 | Tool | Command | When |
 |---|---|---|
 | `liftgen.py` | `python tools/liftgen.py --exe <exe> --snapshot <snap> --entries-file <txt>` | Census: which function entries are mechanically liftable, and the refusal reason for the rest. `--emit` writes the literal hooks. |
-| `liftverify.py` | `python tools/liftverify.py --exe <exe> --snapshot <snap> --entry CS:IP --steps N --emit-dir <game>/lifted` | Lift + prove in situ: every call diffed against the ASM oracle; writes the `LIFTED → ORACLE_PASSING` proof ledger. Never hand-translate a first draft. |
+| `liftverify.py` | `python tools/liftverify.py --exe <exe> --snapshot <snap> --entry CS:IP --steps N --emit-dir <game>/lifted` | Lift + prove in situ: every call diffed against the ASM oracle; writes the `LIFTED → ORACLE_PASSING` proof ledger. Feeds the hybrid auto-install tier and per-function diagnostics — NOT a gate on VMless graph assembly. |
 | `gen_island_manifest.py` | `python tools/gen_island_manifest.py <pkg>… -o docs/recovered_islands.md` | Regenerate the recovered-island ledger from `@oracle_link` tags. Generated, never hand-edited. |
 | `tick_demo_info.py` | `python tools/tick_demo_info.py <demo.bin>` | Inspect an endgame tick-demo recording (ticks, key record, sidebands, seed) before trusting it — corpus census, stale-file diagnosis. |
 | `pm_verify_demo.py` | `python dos_re/tools/pm_verify_demo.py --exe <exe> --demo <bundle> --install pkg.mod:install_hooks [--focus 0xADDR]` | The PM recovery proof loop: replay an input-demo bundle with `PMHookVerifier` diffing every hooked call against the interpreted original. `--focus` = fast loop while recovering one routine; unfocused = the pre-commit full pass. Run from the port root. |

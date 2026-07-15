@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
-"""liftlink — batch linker: proven ``emulate_call`` edges become direct native calls.
+"""liftlink — batch linker: ``emulate_call`` edges become direct lifted-to-lifted calls.
 
-The de-VM pass of the automatic recovery pipeline (M-C).  ``emit_function``
-already knows how to emit a linked direct call (``link_map`` →
-``call_installed_hook_like_near_call``); this tool computes WHICH edges are
-safe and re-emits every caller that gains one.
+The VM-detachment linking pass of the DOS_RE 2.0 pipeline
+(docs/dos_re_2.0.md): after ``liftemit`` produces the VMless lifted corpus,
+this tool turns interpreter-mediated near CALLs between lifted functions into
+direct Python calls, producing the structurally linked VMless graph.
+``emit_function`` already knows how to emit a linked direct call (``link_map``
+→ ``call_installed_hook_like_near_call``); this tool computes WHICH edges
+qualify and re-emits every caller that gains one.
 
-Edge rule (the link precondition — enforced here, not by the emitter):
+Edge rule (STRUCTURAL — the 2.0 default):
 
     caller scan is liftable, the near-CALL target is itself a census entry in
-    the SAME segment (near calls guarantee that), the callee's proof status is
-    ORACLE_PASSING on at least one board, and EVERY callee exit is a near
-    ``ret`` — tail-exit / retf / iret callees stay ``emulate_call``.
+    the SAME segment (near calls guarantee that), and EVERY callee exit is a
+    near ``ret`` — tail-exit / retf / iret callees stay ``emulate_call``.
+
+Correctness of the linked graph is judged END-TO-END: full-state oracle
+comparison at tick boundaries over the assembled graph, with
+``tools/hook_bisect.py`` localizing any divergence to the responsible
+function.  Per-function ORACLE_PASSING is NOT a link precondition —
+``--proven-edges`` restores that 1.x conservative gate for the hybrid tier or
+for debugging, but it must not be the default posture (oracle-guided
+convergence, docs/dos_re_2.0.md §2).
 
 Everything is rescanned from the snapshot (``scan_function`` with the
 interpreter probe, exactly as liftverify does) — stale census artifacts are
@@ -105,8 +115,8 @@ def all_near_ret_exits(scan: FunctionScan) -> bool:
 
 
 def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
-                       statuses: dict[str, str], *, structural: bool = False):
-    """The linkable edge set from fresh scans + proof statuses.
+                       statuses: dict[str, str], *, structural: bool = True):
+    """The linkable edge set from fresh scans (+ proof statuses if gated).
 
     Returns ``(edges, blocked)``: ``edges`` is ``[("CS:IP", "CS:IP"), ...]``
     (caller, callee) and ``blocked`` is ``[(caller, callee, reason), ...]``
@@ -115,15 +125,15 @@ def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
 
     Two edge rules:
 
-    * default (conservative) — a callee qualifies only when it is a liftable
-      census entry, has all-near-``ret`` exits, AND is ORACLE_PASSING on some
-      board.  Safe standalone: a linked call can only reach proven code.
-    * ``structural=True`` (oracle-guided convergence, opt-in) — drop the
-      ORACLE_PASSING precondition; a callee qualifies on the STRUCTURAL
-      criterion alone (liftable entry, all-near-``ret`` exits).  Correctness is
-      then guaranteed not per-callee but by the END-TO-END oracle comparison
-      over the assembled graph, which localizes the first bad piece
-      (tools/hook_bisect.py).  Use only under that verification regime."""
+    * ``structural=True`` (DEFAULT — oracle-guided convergence): a callee
+      qualifies on the STRUCTURAL criterion alone (liftable census entry,
+      all-near-``ret`` exits).  Correctness is guaranteed not per-callee but
+      by END-TO-END oracle comparison over the assembled graph, which
+      localizes the first bad piece (tools/hook_bisect.py).
+    * ``structural=False`` (1.x conservative, ``--proven-edges``) — a callee
+      must additionally be ORACLE_PASSING on some board.  Safe standalone (a
+      linked call reaches only proven code); useful for the hybrid tier and
+      for debugging, but it is not the assembly posture."""
     edges: list[tuple[str, str]] = []
     blocked: list[tuple[str, str, str]] = []
     for (cs, ip), scan in sorted(scans.items()):
@@ -201,9 +211,11 @@ def main(argv=None) -> int:
     ap.add_argument("--game-root", default=None)
     ap.add_argument("--entries-file", required=True,
                     help="census entry list (tools/codemap.py output)")
-    ap.add_argument("--board", action="append", required=True, metavar="JSON",
-                    help="proof board / lift manifest JSON (repeatable; "
-                         "ORACLE_PASSING on any board qualifies a callee)")
+    ap.add_argument("--board", action="append", default=[], metavar="JSON",
+                    help="proof board / lift manifest JSON (repeatable). "
+                         "Optional under the structural default; required "
+                         "with --proven-edges, where ORACLE_PASSING on any "
+                         "board qualifies a callee.")
     ap.add_argument("--emit-dir", default="lifted",
                     help="where the current emitted modules live (signatures / "
                          "iteration budgets / before-counts are read from here)")
@@ -213,13 +225,17 @@ def main(argv=None) -> int:
     ap.add_argument("--json", default=None, metavar="REPORT",
                     help="write the machine-readable link report here")
     ap.add_argument("--structural-edges", action="store_true",
-                    help="link on the structural criterion alone (liftable "
-                         "entry + all-near-ret exits), dropping the "
-                         "ORACLE_PASSING precondition. Correctness then rests "
-                         "on the END-TO-END oracle over the assembled graph "
-                         "(oracle-guided convergence); use only under that "
-                         "regime, with hook_bisect for divergence localization.")
+                    help="(default since DOS_RE 2.0; flag kept for "
+                         "compatibility) link on the structural criterion "
+                         "alone: liftable entry + all-near-ret exits.")
+    ap.add_argument("--proven-edges", action="store_true",
+                    help="1.x conservative gate: additionally require the "
+                         "callee to be ORACLE_PASSING on some --board. For "
+                         "the hybrid tier / debugging only — graph assembly "
+                         "is judged end-to-end (docs/dos_re_2.0.md §2).")
     args = ap.parse_args(argv)
+    if args.proven_edges and not args.board:
+        ap.error("--proven-edges requires at least one --board")
 
     entries = []
     for line in Path(args.entries_file).read_text().splitlines():
@@ -243,7 +259,7 @@ def main(argv=None) -> int:
     # 2. The linkable edge set.
     statuses = load_statuses(args.board)
     edges, blocked = compute_link_edges(scans, statuses,
-                                        structural=args.structural_edges)
+                                        structural=not args.proven_edges)
 
     # A linked call needs its callee module ON DISK for the installer's
     # resolution pass — a proven callee that was never emitted cannot be
@@ -313,8 +329,11 @@ def main(argv=None) -> int:
           f"emulate_call sites in re-emitted callers: {total_before} -> {total_after}")
     if reasons:
         print("blocked edges: " + ", ".join(f"{r}={n}" for r, n in sorted(reasons.items())))
-    print("NOTE: re-emitted callers carry NEW bodies — re-verify them with "
-          "liftverify along a drive before trusting the linked set.")
+    print("NOTE: re-emitted callers carry NEW bodies — the linked graph is "
+          "judged END-TO-END (tick-boundary oracle comparison over the "
+          "assembled VMless graph; hook_bisect localizes any divergence). "
+          "liftverify along a drive remains available for per-function "
+          "diagnostics and the hybrid tier.")
 
     if args.json:
         report = {

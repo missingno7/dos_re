@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """liftemit — batch-emit every census entry to lifted Python, in one pass.
 
-The bulk-emission step of the automatic recovery pipeline: given the census
-entry list and a snapshot whose memory is the code-bytes authority, emit a
-lifted module per entry into ``--emit-dir``.  No verification and no driving —
-that is ``liftverify``'s job (per-slice) and, for the assembled graph, the
-END-TO-END oracle's.  Under oracle-guided convergence the whole census is
-emitted optimistically here, linked by ``liftlink --structural-edges``, then
-validated as a graph; ``liftemit`` is the deterministic "labor" that produces
-the candidate modules.
+The bulk-emission step of the DOS_RE 2.0 pipeline (docs/dos_re_2.0.md): given
+the census entry list and a snapshot whose memory is the code-bytes authority,
+emit a VMless lifted module per entry into ``--emit-dir``.  No verification
+and no driving — that is ``liftverify``'s job (per-slice diagnostics / hybrid
+tier) and, for the assembled graph, the END-TO-END oracle's.  Under
+oracle-guided convergence the whole census is emitted optimistically here,
+linked by ``liftlink`` (structural edges), then validated as a graph;
+``liftemit`` is the deterministic "labor" that produces the candidate modules.
 
 Emission is byte-identical to ``liftverify``'s emit path (same signature
 recipe, ``coverage=True``, same ``--max-iterations`` default) so a module

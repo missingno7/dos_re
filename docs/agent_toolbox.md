@@ -216,6 +216,14 @@ artifacts on mismatch).
 
 ## 10. Lift routines automatically (never hand-translate a first draft)
 
+> **The 2.0 default is WHOLE-GRAPH assembly, not per-slice proving**
+> ([`dos_re_2.0.md`](dos_re_2.0.md)): `tools/codemap.py` (census) →
+> `tools/liftemit.py` (batch-emit everything) → `tools/liftlink.py`
+> (structural linking) → `lift.install.install_vmless_graph` in the port's
+> `play_native` → end-to-end tick-boundary oracle → `tools/hook_bisect.py` on
+> divergence.  The per-slice `liftverify` loop below remains the tool for
+> per-function diagnostics and the hybrid auto-install tier.
+
 ```bash
 # Census: which entries are liftable, and why not (indirect jump / x87 / …)
 python tools/liftgen.py --exe assets/GAME.EXE --snapshot <snap> \

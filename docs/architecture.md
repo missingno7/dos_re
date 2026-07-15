@@ -78,10 +78,11 @@ from the source projects). Grouped by concern:
 | `dosbox_savestate.py` | Import a DOSBox-X save state (memory + registers) as an alternative evidence source. |
 | `testing.py` | Stdlib-only test discovery/runner (pytest fallback for constrained sandboxes). |
 
-### The lifter (M0: census)
+### The lifter (the VMless-stage pipeline — docs/dos_re_2.0.md)
 
 | Module | What it is |
 |---|---|
+| `lift/install.py` | The two install tiers: `install_vmless_graph` (2.0 assembly — install EVERY emitted module; correctness judged end-to-end by the tick-boundary oracle, divergences localized by `tools/hook_bisect.py`) and `install_passing_lifts` (the hybrid tier — only ORACLE_PASSING modules, fingerprinted for demo determinism). `resolve_links` binds liftlink's cross-module `LINKS` tables. `tools/liftemit.py` batch-emits the census; `tools/liftlink.py` structurally links it. |
 | `lift/decode.py` | Static 16-bit x86 decoder (lengths, control-flow class, branch targets) for the lifter — deliberately NOT a second semantic model; every non-transfer length is cross-checked against the interpreter (IP-delta probe) and disagreement refuses the function. OS-free (extractable for a future win16_re). |
 | `lift/cfg.py` | Function-region discovery from an entry offset: reachable instructions, basic-block leaders, exits (ret/retf/iret/far-jmp), call/INT dependencies, and the structured refusal taxonomy (indirect-jump, unsupported-opcode, no-exit, region-budget, decoder-mismatch). `tools/liftgen.py` is the census + `--emit` CLI. See docs/lifting_design.md. |
 | `lift/emit.py` | The emitter (M1): a `FunctionScan` → a self-contained Python module defining one literal hook — architectural state at every instruction boundary, a basic-block dispatch loop, per-line disassembly comments, the fail-loud SMC entry guard. Faithful by reuse: ALU/flags/shifts/string-ops call the interpreter's own helpers; unknown opcodes emit an exact single-instruction fallback. 95.4% native over 269 real overkill functions; the lifted `4537` passes its hand-hook's 300-case fuzz byte-exact. |

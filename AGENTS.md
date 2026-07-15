@@ -29,6 +29,19 @@ provenance of every part.
 Correctness beats speed. Traceability beats cleverness. Small verified progress
 beats large intuitive rewrites.
 
+- **The DOS_RE 2.0 automation principle is non-negotiable
+  ([`docs/dos_re_2.0.md`](docs/dos_re_2.0.md) §3): the scripts perform the
+  transformations; the AI removes the obstacles; the oracle decides
+  correctness.** Never manually port/rewrite generated functions in bulk.
+  When the pipeline is blocked, classify the blocker — generic capability gap
+  (fix the tooling here, with tests; every future game inherits it) or
+  game-specific recovery fact (record the smallest explicit, evidence-backed
+  declaration in the port and feed it to the pipeline) — then REGENERATE and
+  re-verify end-to-end. Generated output is disposable; hand-patching it is
+  not a fix. Use the canonical stage vocabulary (interpreted oracle → VMless
+  lifted → CPUless lifted → DOS-layout-less native → semantic clean port);
+  "native" is banned as a bare term.
+
 - **`dos_re/` must stay game-agnostic; numpy is first-class, pygame is
   viewer-only.** No game addresses, filenames, or formats in the core. numpy
   is a real dependency (`pyproject` `dependencies`) — use it anywhere it

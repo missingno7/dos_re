@@ -138,16 +138,19 @@ def install_passing_lifts(cpu, cs: int, emit_dir, manifest_paths, *,
     return installed
 
 
-def install_native_set(cpu, emit_dir, *, skip=()) -> dict[tuple[int, int], str]:
+def install_vmless_graph(cpu, emit_dir, *, skip=()) -> dict[tuple[int, int], str]:
     """Install EVERY emitted module in ``emit_dir`` as a replacement hook — the
-    native-assembly installer for oracle-guided convergence.
+    full-VMless-lifted-graph installer for oracle-guided convergence
+    (docs/dos_re_2.0.md; this is the stage-1 "VMless" assembly step, NOT yet
+    CPUless or DOS-layout-less).
 
-    Unlike ``install_passing_lifts`` (which gates on per-entry ORACLE_PASSING),
-    this installs the whole liftable corpus optimistically: correctness is not
-    proven per-entry but by the END-TO-END oracle over the assembled graph,
-    which localizes the first bad piece (tools/hook_bisect.py).  This is what a
-    ``play_native`` shell installs — the maximal native surface, with the
-    interpreter left only as the fail-loud backstop for anything not covered.
+    Unlike ``install_passing_lifts`` (the hybrid tier, which gates on
+    per-entry ORACLE_PASSING), this installs the whole liftable corpus
+    optimistically: correctness is not proven per-entry but by the END-TO-END
+    oracle over the assembled graph, which localizes the first bad piece
+    (tools/hook_bisect.py).  This is what a ``play_native`` shell installs —
+    the maximal VMless surface, with the interpreter left only as the
+    fail-loud backstop for anything not covered.
 
     Standalone-hook installation is exit-shape-agnostic (a retf/iret entry's
     lifted body reproduces its own far/interrupt return): the near-ret

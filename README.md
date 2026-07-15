@@ -1,13 +1,35 @@
 # dos_re — an oracle-driven DOS game recovery framework
 
-A reusable toolbox for turning an original DOS game (16-bit real mode or
-32-bit DOS/4GW protected mode) into a verified,
-native source port — one proven routine at a time. **It is a recovery
-laboratory, not an emulator**: the original executable runs as the *oracle*,
-individual routines are replaced with recovered source, and every replacement
-is verified against the original execution. The key idea is not "AI writes
-code" — it is *AI writes code inside a verification loop where the original
-game remains executable truth.*
+A reusable **recovery machine** for turning an original DOS game (16-bit real
+mode or 32-bit DOS/4GW protected mode) into a verified source port.  **It is a
+recovery laboratory, not an emulator**: the original executable runs as the
+*oracle*, deterministic tooling mechanically lifts, links, and assembles the
+program into staged native runtimes, and every stage is verified against the
+original execution.  The key idea is not "AI writes code" — it is
+*deterministic tooling does the labor, AI unblocks it where it is stuck, and
+the original game remains executable truth.*
+
+**DOS_RE 2.0** ([`docs/dos_re_2.0.md`](docs/dos_re_2.0.md) — the canonical
+architecture) is a staged pipeline of three mechanical detachments, each
+oracle-verified:
+
+```text
+binary → automatic CPU-less lifting → structurally linked VM-less graph
+→ automatically generated native shell → oracle-guided convergence → play_native
+→ automatic memory-structure recovery → generated verification bridge
+→ clean source port
+```
+
+```text
+interpreted oracle → VMless lifted runtime → CPUless lifted runtime
+→ DOS-layout-less native runtime → semantic clean source port
+```
+
+The largest supported graph is assembled mechanically and early; known-
+unsupported constructs fail loudly; the end-to-end oracle finds silent
+mistakes and auto-bisection localizes them; AI resolves only the concrete
+gaps.  Per-function proofs are metadata (hybrid installs, diagnostics,
+regression), never a gate on graph assembly.
 
 **This is infrastructure for AI agents, not a library for end users.** The
 expected operator is an autonomous AI agent handed a porting repo (this
@@ -115,6 +137,7 @@ python -m pytest tests -q                        # framework suite (no game asse
 | Audience | Read |
 |---|---|
 | A human wondering what this is | this README — you're done |
+| Anyone touching architecture, terminology, or the roadmap | [`docs/dos_re_2.0.md`](docs/dos_re_2.0.md) — the canonical staged-recovery pipeline, vocabulary, risk model, milestones |
 | The agent porting a game | `template_dos_port`'s `AGENTS.md`/`START_HERE.md` (the method), then [`docs/agent_toolbox.md`](docs/agent_toolbox.md) (task → tool → command here) |
 | The agent extending this framework | [`AGENTS.md`](AGENTS.md) (the rules), [`docs/architecture.md`](docs/architecture.md) (the module map) |
 | Mechanism reference | [`docs/README.md`](docs/README.md) (hooks/verification, demos/snapshots, state mirrors, hardware status, lifting, performance, glossary) |
