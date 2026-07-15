@@ -162,6 +162,21 @@ def test_inc_dec_push_pop_xchg_lea():
     _assert_equivalent(code, data_len=0x80)
 
 
+def test_les_lds_load_far_pointer_native():
+    # les/lds read a 16:16 pointer from memory into a reg + ES/DS.  Keep the
+    # loaded segment unused afterwards (ret immediately) so the poisoned seg
+    # from random data never drives a downstream access — the snapshot diff
+    # still proves reg + ES/DS were loaded byte-exact.
+    code = bytes.fromhex(
+        "BB1000"      # mov bx, 0x0010
+        "C407"        # les ax, [bx]      -> ax=word[0x10], es=word[0x12]
+        "C55F04"      # lds bx, [bx+4]    -> bx=word[0x14], ds=word[0x16]
+        "C3")
+    src = _assert_equivalent(code, data_len=0x80)
+    assert "# (interpreter fallback)" not in src
+    assert "s.es = _seg" in src and "s.ds = _seg" in src
+
+
 def test_shifts_rotates_and_misc():
     code = bytes.fromhex(
         "D1E0"    # shl ax, 1

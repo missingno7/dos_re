@@ -300,6 +300,18 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str]) -> bool:
         rm = _rm_operand(inst, 16, out, tmp)
         out.append(f"s.{REG16[inst.reg]} = {rm.off_var}")
         return True
+    if op in (0xC4, 0xC5):                    # les / lds — load far pointer
+        # Mirror CPU8086 op 0xC4/0xC5: read the 16:16 pointer at the r/m
+        # address, put the offset in the reg and the segment in ES (les) / DS
+        # (lds).  Reg-source form is illegal (no memory operand to point at).
+        if inst.mod == 3:
+            raise EmitUnsupported("les/lds requires memory source")
+        rm = _rm_operand(inst, 16, out, tmp)
+        out.append(f"_off = mem.rw({rm.seg_expr}, {rm.off_var})")
+        out.append(f"_seg = mem.rw({rm.seg_expr}, ({rm.off_var} + 2) & 0xFFFF)")
+        out.append(f"s.{REG16[inst.reg]} = _off")
+        out.append(f"s.{'es' if op == 0xC4 else 'ds'} = _seg")
+        return True
 
     # --- shifts / rotates: delegate the intricate part to cpu.shift ---------
     if op in (0xC0, 0xC1, 0xD0, 0xD1, 0xD2, 0xD3):

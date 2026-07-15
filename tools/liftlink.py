@@ -105,13 +105,25 @@ def all_near_ret_exits(scan: FunctionScan) -> bool:
 
 
 def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
-                       statuses: dict[str, str]):
+                       statuses: dict[str, str], *, structural: bool = False):
     """The linkable edge set from fresh scans + proof statuses.
 
     Returns ``(edges, blocked)``: ``edges`` is ``[("CS:IP", "CS:IP"), ...]``
     (caller, callee) and ``blocked`` is ``[(caller, callee, reason), ...]``
     for the report — every near-call edge between census entries is accounted
-    for, linked or not."""
+    for, linked or not.
+
+    Two edge rules:
+
+    * default (conservative) — a callee qualifies only when it is a liftable
+      census entry, has all-near-``ret`` exits, AND is ORACLE_PASSING on some
+      board.  Safe standalone: a linked call can only reach proven code.
+    * ``structural=True`` (oracle-guided convergence, opt-in) — drop the
+      ORACLE_PASSING precondition; a callee qualifies on the STRUCTURAL
+      criterion alone (liftable entry, all-near-``ret`` exits).  Correctness is
+      then guaranteed not per-callee but by the END-TO-END oracle comparison
+      over the assembled graph, which localizes the first bad piece
+      (tools/hook_bisect.py).  Use only under that verification regime."""
     edges: list[tuple[str, str]] = []
     blocked: list[tuple[str, str, str]] = []
     for (cs, ip), scan in sorted(scans.items()):
@@ -125,7 +137,7 @@ def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
                 blocked.append((caller_key, callee_key, "not-an-entry"))
             elif not callee.liftable:
                 blocked.append((caller_key, callee_key, "callee-not-liftable"))
-            elif statuses.get(callee_key) != PASSING:
+            elif not structural and statuses.get(callee_key) != PASSING:
                 blocked.append((caller_key, callee_key, "not-passing"))
             elif not all_near_ret_exits(callee):
                 blocked.append((caller_key, callee_key, "exit-shape"))
@@ -200,6 +212,13 @@ def main(argv=None) -> int:
                          "overwriting the unlinked callers in place)")
     ap.add_argument("--json", default=None, metavar="REPORT",
                     help="write the machine-readable link report here")
+    ap.add_argument("--structural-edges", action="store_true",
+                    help="link on the structural criterion alone (liftable "
+                         "entry + all-near-ret exits), dropping the "
+                         "ORACLE_PASSING precondition. Correctness then rests "
+                         "on the END-TO-END oracle over the assembled graph "
+                         "(oracle-guided convergence); use only under that "
+                         "regime, with hook_bisect for divergence localization.")
     args = ap.parse_args(argv)
 
     entries = []
@@ -223,7 +242,8 @@ def main(argv=None) -> int:
 
     # 2. The linkable edge set.
     statuses = load_statuses(args.board)
-    edges, blocked = compute_link_edges(scans, statuses)
+    edges, blocked = compute_link_edges(scans, statuses,
+                                        structural=args.structural_edges)
 
     # A linked call needs its callee module ON DISK for the installer's
     # resolution pass — a proven callee that was never emitted cannot be

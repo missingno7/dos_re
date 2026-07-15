@@ -138,6 +138,46 @@ def install_passing_lifts(cpu, cs: int, emit_dir, manifest_paths, *,
     return installed
 
 
+def install_native_set(cpu, emit_dir, *, skip=()) -> dict[tuple[int, int], str]:
+    """Install EVERY emitted module in ``emit_dir`` as a replacement hook — the
+    native-assembly installer for oracle-guided convergence.
+
+    Unlike ``install_passing_lifts`` (which gates on per-entry ORACLE_PASSING),
+    this installs the whole liftable corpus optimistically: correctness is not
+    proven per-entry but by the END-TO-END oracle over the assembled graph,
+    which localizes the first bad piece (tools/hook_bisect.py).  This is what a
+    ``play_native`` shell installs — the maximal native surface, with the
+    interpreter left only as the fail-loud backstop for anything not covered.
+
+    Standalone-hook installation is exit-shape-agnostic (a retf/iret entry's
+    lifted body reproduces its own far/interrupt return): the near-ret
+    restriction only applies to LINKED calls (``liftlink``), not to entries
+    reached by the interpreter and replaced whole.  ``skip`` = "CS:IP" strings
+    to exclude.  Two-pass (load, resolve LINKS, register); loud on a missing
+    linked callee.  Returns {(cs,ip): module_name} for the installed set."""
+    emit_dir = Path(emit_dir)
+    skip = set(skip)
+    installed: dict[tuple[int, int], str] = {}
+    for path in sorted(emit_dir.glob("lifted_*.py")):
+        stem = path.stem                       # lifted_1010_16a9
+        parts = stem.split("_")
+        if len(parts) != 3:
+            continue
+        cs, ip = int(parts[1], 16), int(parts[2], 16)
+        if f"{cs:04X}:{ip:04X}" in skip:
+            continue
+        installed[(cs, ip)] = path.name
+    loaded: dict[str, object] = {}
+    for key, module in sorted(installed.items()):
+        loaded[module[:-3]] = _load_module(emit_dir / module)
+    resolve_links(loaded, emit_dir)
+    for key, module in sorted(installed.items()):
+        name = module[:-3]
+        cpu.replacement_hooks[key] = getattr(loaded[name], name)
+        cpu.hook_names[key] = name
+    return installed
+
+
 def lift_fingerprint(installed: dict[tuple[int, int], str]) -> str:
     """A deterministic fingerprint of an installed lifted set.
 
