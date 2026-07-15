@@ -132,6 +132,15 @@ class AdlibSpeakerSink:
         if self._channels == 1:
             out = out[:, :1]
         self._buf = np.concatenate([self._buf, out])
+        # Bound latency: if the VM ran faster than real time (a heavy-then-fast
+        # burst, or a pacing mismatch) the producer can outrun the mixer and the
+        # backlog grows to seconds of delay.  Cap the queued audio at ~4 chunks
+        # (~one present-interval of lead + slack) by dropping the OLDEST samples
+        # — audio stays live at the cost of a tiny, one-off skip instead of an
+        # ever-growing delay.  Never trims below one chunk (avoids underrun).
+        _max_backlog = max(self._chunk * 4, self._lead + self._chunk)
+        if len(self._buf) > _max_backlog:
+            self._buf = self._buf[-_max_backlog:]
         if not self._started:
             if len(self._buf) >= self._lead:
                 self._channel.play(self._next_sound())
