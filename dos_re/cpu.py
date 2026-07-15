@@ -175,7 +175,15 @@ class CPU8086:
     s: CPUState = field(default_factory=CPUState)
     halted: bool = False
     trace: list[str] = field(default_factory=list)
-    trace_enabled: bool = True
+    # Tracing defaults OFF: the per-instruction trace list is appended once per
+    # executed instruction and is only drained by snapshot.run_until.  Any other
+    # run loop (the interactive viewer, headless demo replay, liftverify drives)
+    # that left it ON would grow `self.trace` without bound — ~1 formatted string
+    # per instruction, i.e. gigabytes within seconds of gameplay (found 2026-07-15,
+    # the Lemmings pilot's runaway-RAM investigation).  The paths that WANT a trace
+    # (run_until, the differential verifier, OK_TRACE_HOOK) enable it explicitly
+    # and consume it; the hot path must never pay for it.
+    trace_enabled: bool = False
     instruction_count: int = 0
     call_depth: int = 0
     interrupt_handler: Callable[["CPU8086", int], None] | None = None

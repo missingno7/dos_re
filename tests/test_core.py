@@ -742,3 +742,17 @@ def test_file_handles_reuse_lowest_free_slot(tmp_path):
     dos.interrupt(cpu, 0x21)
     h3 = _open("A.DAT")
     assert h3 == 5                     # handle 5 reused, not 7
+
+
+def test_trace_defaults_off_and_run_does_not_grow_trace():
+    """Tracing must default OFF: an undrained run loop with it ON grows
+    cpu.trace one string per instruction -> gigabytes (the pilot's runaway-RAM
+    bug). run() must leave trace empty by default."""
+    mem = Memory()
+    # tight self-loop: jmp $  (EB FE) -> many instructions, zero real work
+    mem.load(0x1000, 0, bytes.fromhex("EBFE"))
+    cpu = CPU8086(mem, CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
+    assert cpu.trace_enabled is False
+    cpu.run(5000)
+    assert cpu.trace == []            # nothing accumulated
+    assert cpu.instruction_count >= 5000
