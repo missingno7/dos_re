@@ -105,6 +105,11 @@ def main(argv=None) -> int:
                         "oracle, so a hot function would otherwise crawl). Per-hook, "
                         "so one hot function never starves the sample budget of the "
                         "others — that sample is what proves the hook.")
+    p.add_argument("--drive", metavar="MOD:FUNC", default=None,
+                   help="per-frame drive callback FUNC(rt, frame), called before "
+                        "each frame's timer IRQs — lets a game feed menu keys / "
+                        "mouse so verification runs along a real session instead "
+                        "of idling at one snapshot (requires --timer-irqs)")
     p.add_argument("--verify-timeout", type=float, default=8.0,
                    help="wall-clock seconds a single ASM-oracle re-run may take before "
                         "that verification is abandoned (a function that reaches deep "
@@ -210,9 +215,23 @@ def main(argv=None) -> int:
     status = "budget reached"
     steps_done = 0
     chunk = args.frame_steps if args.timer_irqs else 200_000
+    drive_fn = None
+    if args.drive:
+        import importlib
+        import os as _os
+        if _os.getcwd() not in sys.path:
+            sys.path.insert(0, _os.getcwd())
+        mod_name, _, fn_name = args.drive.partition(":")
+        if not fn_name:
+            p.error("--drive needs MOD:FUNC")
+        drive_fn = getattr(importlib.import_module(mod_name), fn_name)
+    frame = 0
     try:
         while steps_done < args.steps:
             try:
+                if drive_fn is not None:
+                    drive_fn(rt, frame)
+                frame += 1
                 if args.timer_irqs:
                     for _ in range(args.timer_irqs):
                         deliver_interrupt(rt, 0x08)
