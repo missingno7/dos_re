@@ -434,8 +434,11 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     exits / retf / iret callees must stay ``emulate_call``). Incompatible with
     ``count_instructions`` (the interpreter's per-step accounting is exactly
     what a linked call no longer runs; tick demos re-record at the flip).
-    ``link_imports`` lines are appended to the module header verbatim (the
-    link tool supplies cross-module imports).
+    ``link_imports`` lines are appended to the module header verbatim — the
+    link tool supplies its cross-module binding there (e.g. a module-level
+    ``LINKS = {"CS:IP": None}`` table that ``dos_re.lift.install.resolve_links``
+    fills at install time; emitted modules are loaded flat via
+    ``spec_from_file_location``, so relative imports are not available).
 
     ``min_iterations`` raises the runaway guard's floor above the default
     10,000 (the guard is still at least ``len(scan.insts) * 5_000`` either
@@ -486,10 +489,11 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     A("from dos_re.hooks import self_disable_if_patched")
     if link_map:
         A("from dos_re.hooks import call_installed_hook_like_near_call")
-        for ln in link_imports:
-            A(ln)
     A("from dos_re.lift.runtime import (LiftRuntimeError, emulate_call, emulate_far_call,")
     A("                                 emulate_int, interp_one)")
+    if link_map:
+        for ln in link_imports:
+            A(ln)
     A("")
     A(f"ENTRY = (0x{cs:04X}, 0x{scan.entry:04X})")
     A(f"SIGNATURE = bytes.fromhex({signature.hex()!r})")

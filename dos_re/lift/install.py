@@ -73,20 +73,68 @@ def planned_lifts(cs: int, manifest_paths, *, skip=()) -> dict[tuple[int, int], 
     return plan
 
 
+def resolve_links(loaded: dict[str, object], emit_dir) -> int:
+    """Second pass of the two-pass load: bind every module's ``LINKS`` table.
+
+    A LINKED module (``tools/liftlink.py`` — the batch de-VM pass) carries a
+    module-level ``LINKS = {"CS:IP": None}`` table, and each linked CALL site
+    evaluates ``LINKS["CS:IP"]`` at call time.  The late binding is what keeps
+    each emitted module loadable STANDALONE: modules live flat in one directory
+    and are loaded via ``spec_from_file_location`` (no package, so sibling
+    imports at module top level are impossible).  This pass fills the tables
+    with the callees' lifted functions, loading sibling modules from
+    ``emit_dir`` as needed — transitively, since a loaded callee may itself be
+    linked.  Loud on a missing callee module: a linked caller whose callee is
+    not on disk is a pipeline error, never something to skip silently.
+
+    ``loaded`` maps function/module stem name → loaded module and is extended
+    in place with every sibling this pass pulls in.  Returns the number of
+    link slots bound."""
+    emit_dir = Path(emit_dir)
+    pending = list(loaded.values())
+    resolved = 0
+    while pending:
+        mod = pending.pop()
+        links = getattr(mod, "LINKS", None)
+        if not links:
+            continue
+        for entry in sorted(links):
+            e_cs, e_ip = (int(x, 16) for x in entry.split(":"))
+            name = f"lifted_{e_cs:04x}_{e_ip:04x}"
+            callee = loaded.get(name)
+            if callee is None:
+                path = emit_dir / f"{name}.py"
+                if not path.is_file():
+                    raise FileNotFoundError(
+                        f"linked callee {entry} of {getattr(mod, '__name__', '?')}: "
+                        f"module {path} is missing")
+                callee = _load_module(path)
+                loaded[name] = callee
+                pending.append(callee)          # it may carry links of its own
+            links[entry] = getattr(callee, name)
+            resolved += 1
+    return resolved
+
+
 def install_passing_lifts(cpu, cs: int, emit_dir, manifest_paths, *,
                           skip=()) -> dict[tuple[int, int], str]:
     """Install every proven lifted routine in segment ``cs`` as a replacement.
 
-    Returns {(cs,ip): module_name} for the installed set.  Loud on a missing
-    module file — a manifest referencing a module that isn't there is a
-    pipeline error, not something to skip silently."""
+    Two-pass: load every planned module, then resolve cross-module ``LINKS``
+    tables (linked direct calls — see ``resolve_links``), then register the
+    hooks.  Returns {(cs,ip): module_name} for the installed set.  Loud on a
+    missing module file — a manifest referencing a module that isn't there is
+    a pipeline error, not something to skip silently."""
     emit_dir = Path(emit_dir)
     installed = planned_lifts(cs, manifest_paths, skip=skip)
+    loaded: dict[str, object] = {}
     for key, module in sorted(installed.items()):
-        mod = _load_module(emit_dir / module)
-        fn = getattr(mod, module[:-3])          # "lifted_1010_1550.py" → fn "lifted_1010_1550"
-        cpu.replacement_hooks[key] = fn
-        cpu.hook_names[key] = module[:-3]
+        loaded[module[:-3]] = _load_module(emit_dir / module)
+    resolve_links(loaded, emit_dir)
+    for key, module in sorted(installed.items()):
+        name = module[:-3]                      # "lifted_1010_1550.py" → fn "lifted_1010_1550"
+        cpu.replacement_hooks[key] = getattr(loaded[name], name)
+        cpu.hook_names[key] = name
     return installed
 
 
