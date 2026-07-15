@@ -196,8 +196,9 @@ def test_string_ops_native():
         "AE"        # scasb
         "C3")
     src = _assert_equivalent(code, data_len=0x200)
-    # cld itself falls back (flag op), but every string op is native.
+    # cld and every string op are native now.
     assert src.count("cpu.string_op(") == 8
+    assert "# (interpreter fallback)" not in src
 
 
 def test_rep_string_ops_native():
@@ -217,21 +218,98 @@ def test_string_op_with_segment_override():
     assert "cpu.string_op(0xAC, None, 'es')" in src
 
 
-def test_flag_ops_use_interpreter_fallback_and_stay_exact():
-    code = bytes.fromhex("F8" "F9" "FC" "FD" "F5" "C3")   # clc stc cld std cmc ret
+def test_flag_ops_native_and_exact():
+    # clc stc cld std cmc cli sti — all native now, no interpreter fallback.
+    code = bytes.fromhex("F8" "F9" "FC" "FD" "F5" "FA" "FB" "C3")
     src = _assert_equivalent(code)
-    assert "(interpreter fallback)" in src
+    assert "# (interpreter fallback)" not in src
+    assert "cpu.set_flag(CF" in src and "cpu.set_flag(DF" in src
+    assert "cpu.set_flag(IF" in src
 
 
-def test_mul_div_via_fallback():
+def test_in_out_native_route_through_ports():
+    # in al,60h ; out 61h,al ; in ax,dx ; out dx,ax ; in al,dx ; out 20h,al
+    code = bytes.fromhex("E460" "E661" "ED" "EF" "EC" "E620" "C3")
+    reads: list = []
+    writes: list = []
+
+    def reader(cpu, port, bits):
+        reads.append((port, bits))
+        return 0x5A5A
+
+    def writer(cpu, port, value, bits):
+        writes.append((port, value, bits))
+
+    lifted, _scan, src = _lift(code)
+    assert "# (interpreter fallback)" not in src
+    st = _rand_state(random.Random(0x104))
+    asm = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
+    hook = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
+    for c in (asm, hook):
+        c.port_reader = reader
+        c.port_writer = writer
+    _run_interpreted(asm)
+    a_reads, a_writes = list(reads), list(writes)
+    reads.clear(); writes.clear()
+    lifted(hook)
+    # Both paths hit the ports with identical arguments, and end byte-exact.
+    assert reads == a_reads
+    assert writes == a_writes
+    assert asm.s.snapshot() == hook.s.snapshot()
+    assert asm.mem.data == hook.mem.data
+
+
+def test_grp3_mul_div_neg_not_test_native():
     code = bytes.fromhex(
         "B90300"   # mov cx, 3
-        "F7E1"     # mul cx
-        "F7F1"     # div cx
+        "F7E1"     # mul cx        (16-bit unsigned)
+        "F7F1"     # div cx        (16-bit unsigned)
+        "F7E9"     # imul cx       (16-bit signed)
+        "F7F9"     # idiv cx       (16-bit signed)
+        "F6E1"     # mul cl        (8-bit unsigned)
+        "F6F1"     # div cl        (8-bit unsigned)
+        "F6E9"     # imul cl       (8-bit signed)
+        "F6F9"     # idiv cl       (8-bit signed)
         "F7D8"     # neg ax
         "F7D0"     # not ax
+        "F6D4"     # not ah
+        "F7C13412" # test cx, 0x1234
+        "F6C37F"   # test bl, 0x7F
         "C3")
-    _assert_equivalent(code)
+    src = _assert_equivalent(code)
+    assert "# (interpreter fallback)" not in src
+
+
+def test_grp3_memory_operands_native():
+    # r/m memory forms for neg/not/mul/imul/test at both widths and with a
+    # displacement (div/idiv on random memory would raise on a zero divisor —
+    # divide-by-zero is covered separately).
+    code = bytes.fromhex(
+        "BB0400"   # mov bx, 4
+        "F71F"     # neg  word [bx]
+        "F717"     # not  word [bx]
+        "F627"     # mul  byte [bx]
+        "F76F10"   # imul word [bx+0x10]
+        "F65710"   # not  byte [bx+0x10]
+        "F707FF00" # test word [bx], 0x00FF
+        "F6472034" # test byte [bx+0x20], 0x34
+        "C3")
+    src = _assert_equivalent(code, data_len=0x80, seed=0x9911)
+    assert "# (interpreter fallback)" not in src
+
+
+def test_grp3_divide_by_zero_raises_on_both_paths():
+    # mov cx, 0 ; div cx  -> ZeroDivisionError both interpreted and lifted.
+    for grp3 in ("F7F1", "F7F9", "F6F1", "F6F9"):   # div/idiv cx, div/idiv cl
+        code = bytes.fromhex("31C9" + grp3 + "C3")   # xor cx,cx ; <grp3> ; ret
+        lifted, _scan, _src = _lift(code)
+        st = _rand_state(random.Random(0x0))
+        asm = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
+        hook = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
+        with pytest.raises(ZeroDivisionError):
+            _run_interpreted(asm)
+        with pytest.raises(ZeroDivisionError):
+            lifted(hook)
 
 
 # --- control flow ---------------------------------------------------------------
@@ -398,7 +476,7 @@ def test_entry_fallback_does_not_recurse_into_its_own_hook():
     via `enter`, a fallback op).  interp_one suppresses the hook at exactly
     that CS:IP for its one step."""
     code = bytes.fromhex(
-        "F5"          # cmc                (fallback op at the ENTRY)
+        "27"          # daa                (fallback op at the ENTRY)
         "01D8"        # add ax, bx
         "C3")         # ret
     lifted, _scan, _src = _lift(code)

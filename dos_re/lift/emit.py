@@ -329,8 +329,115 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str]) -> bool:
     if op == 0x9D:
         out.append("s.flags = cpu.pop() | 0x0002")
         return True
+    # --- flag ops: mirror cpu.set_flag exactly (sets bit1, masks to 0x0FFF) --
     if op in (0xF5, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD):
-        return False                          # flag ops: rare; fallback keeps IF/DF exact
+        if op == 0xF5:                        # cmc
+            out.append("cpu.set_flag(CF, not cpu.get_flag(CF))")
+        else:
+            flag, val = {
+                0xF8: ("CF", "False"), 0xF9: ("CF", "True"),   # clc / stc
+                0xFA: ("IF", "False"), 0xFB: ("IF", "True"),   # cli / sti
+                0xFC: ("DF", "False"), 0xFD: ("DF", "True"),   # cld / std
+            }[op]
+            out.append(f"cpu.set_flag({flag}, {val})")
+        return True
+
+    # --- IN/OUT: route through cpu.port_reader/port_writer, same as execute_opcode
+    if op in (0xE4, 0xE5, 0xEC, 0xED):        # in al/ax, imm8 / dx
+        port = f"0x{inst.imm:02X}" if op in (0xE4, 0xE5) else "s.dx"
+        bits = 8 if op in (0xE4, 0xEC) else 16
+        out.append(f"_val = cpu.port_reader(cpu, ({port}) & 0xFFFF, {bits}) "
+                   "if cpu.port_reader else 0")
+        if bits == 8:
+            out.append("cpu.set_reg8(0, _val)")
+        else:
+            out.append("s.ax = _val & 0xFFFF")
+        return True
+    if op in (0xE6, 0xE7, 0xEE, 0xEF):        # out imm8 / dx, al/ax
+        port = f"0x{inst.imm:02X}" if op in (0xE6, 0xE7) else "s.dx"
+        bits = 8 if op in (0xE6, 0xEE) else 16
+        out.append("_val = cpu.get_reg8(0)" if bits == 8 else "_val = s.ax")
+        out.append("if cpu.port_writer:")
+        out.append(f"    cpu.port_writer(cpu, ({port}) & 0xFFFF, _val, {bits})")
+        return True
+
+    # --- Group 3 unary (F6/F7): test/not/neg/mul/imul/div/idiv ---------------
+    # Mirror cpu.py's Group-3 block exactly; call cpu's own helpers/flag setters
+    # and reproduce its divide-by-zero and quotient-overflow raises.
+    if op in (0xF6, 0xF7) and inst.reg != 1:  # reg==1 is undefined -> fallback
+        bits = 8 if op == 0xF6 else 16
+        mask = 0xFFFF if bits == 16 else 0xFF
+        reg = inst.reg
+        rm = _rm_operand(inst, bits, out, tmp)
+        out.append(f"_v = {rm.read()}")
+        if reg == 0:                          # test
+            out.append(f"cpu.set_logic_flags(_v & 0x{inst.imm:X}, {bits})")
+        elif reg == 2:                        # not
+            out.extend(rm.write(f"(~_v) & 0x{mask:X}"))
+        elif reg == 3:                        # neg
+            out.append(f"cpu.set_sub_flags(0, _v, -_v, {bits})")
+            out.extend(rm.write(f"(-_v) & 0x{mask:X}"))
+        elif reg == 4:                        # mul (unsigned)
+            if bits == 8:
+                out.append("_result = (s.ax & 0x00FF) * (_v & 0xFF)")
+                out.append("s.ax = _result & 0xFFFF")
+                out.append("_carry = (_result >> 8) != 0")
+            else:
+                out.append("_result = (s.ax & 0xFFFF) * (_v & 0xFFFF)")
+                out.append("s.ax = _result & 0xFFFF")
+                out.append("s.dx = (_result >> 16) & 0xFFFF")
+                out.append("_carry = s.dx != 0")
+            out.append("cpu.set_flag(CF, _carry)")
+            out.append("cpu.set_flag(OF, _carry)")
+        elif reg == 5:                        # imul (signed)
+            if bits == 8:
+                out.append("_result = cpu.sign8(s.ax & 0xFF) * cpu.sign8(_v & 0xFF)")
+                out.append("s.ax = _result & 0xFFFF")
+                out.append("_carry = not (-128 <= _result <= 127)")
+            else:
+                out.append("_result = cpu.sign16(s.ax) * cpu.sign16(_v)")
+                out.append("s.ax = _result & 0xFFFF")
+                out.append("s.dx = (_result >> 16) & 0xFFFF")
+                out.append("_carry = not (-32768 <= _result <= 32767)")
+            out.append("cpu.set_flag(CF, _carry)")
+            out.append("cpu.set_flag(OF, _carry)")
+        elif reg == 6:                        # div (unsigned)
+            out.append("if _v == 0:")
+            out.append("    raise ZeroDivisionError('div by zero')")
+            if bits == 8:
+                out.append("_q, _r = divmod(s.ax & 0xFFFF, _v & 0xFF)")
+                out.append("if _q > 0xFF:")
+                out.append("    raise OverflowError('8-bit div quotient overflow')")
+                out.append("s.ax = ((_r & 0xFF) << 8) | (_q & 0xFF)")
+            else:
+                out.append("_q, _r = divmod(((s.dx & 0xFFFF) << 16) | (s.ax & 0xFFFF), _v & 0xFFFF)")
+                out.append("if _q > 0xFFFF:")
+                out.append("    raise OverflowError('16-bit div quotient overflow')")
+                out.append("s.ax = _q & 0xFFFF")
+                out.append("s.dx = _r & 0xFFFF")
+        else:                                 # reg == 7: idiv (signed)
+            out.append("if _v == 0:")
+            out.append("    raise ZeroDivisionError('idiv by zero')")
+            if bits == 8:
+                out.append("_dividend = cpu.sign16(s.ax)")
+                out.append("_divisor = cpu.sign8(_v & 0xFF)")
+                out.append("_q = int(_dividend / _divisor)")
+                out.append("_r = _dividend - _q * _divisor")
+                out.append("if _q < -128 or _q > 127:")
+                out.append("    raise OverflowError('8-bit idiv quotient overflow')")
+                out.append("s.ax = ((_r & 0xFF) << 8) | (_q & 0xFF)")
+            else:
+                out.append("_dividend = ((s.dx & 0xFFFF) << 16) | (s.ax & 0xFFFF)")
+                out.append("if _dividend & 0x80000000:")
+                out.append("    _dividend -= 0x100000000")
+                out.append("_divisor = cpu.sign16(_v & 0xFFFF)")
+                out.append("_q = int(_dividend / _divisor)")
+                out.append("_r = _dividend - _q * _divisor")
+                out.append("if _q < -32768 or _q > 32767:")
+                out.append("    raise OverflowError('16-bit idiv quotient overflow')")
+                out.append("s.ax = _q & 0xFFFF")
+                out.append("s.dx = _r & 0xFFFF")
+        return True
     if op == 0xD7:                            # xlat
         seg = f"s.{inst.seg_override or 'ds'}"
         out.append(f"cpu.set_reg8(0, mem.rb({seg}, (s.bx + (s.ax & 0xFF)) & 0xFFFF))")
