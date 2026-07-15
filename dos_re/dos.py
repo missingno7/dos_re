@@ -5,7 +5,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Callable
 
-from .cpu import CPU8086, HaltExecution, UnsupportedInstruction, CF, ZF
+from .cpu import CPU8086, HaltExecution, UnsupportedInstruction, CF, ZF, IF, TF
 from .memory import EGA_APERTURE, EGA_PLANE_STRIDE, EGA_PLANE_WINDOW
 
 
@@ -200,6 +200,14 @@ class DOSMachine:
     kbd_ctrl: bool = False
     kbd_alt: bool = False
     kbd_caps: bool = False
+    # Microsoft mouse (INT 33h) state.  A front-end feeds it via set_mouse_norm;
+    # left at rest on the headless/deterministic path.  mouse_range is the
+    # program's own virtual coordinate box (set via AX=7/8), so the pointer stays
+    # proportional whatever box the game picks (VGA Lemmings uses 0..319 x 0..199).
+    mouse_x: int = 160
+    mouse_y: int = 100
+    mouse_buttons: int = 0
+    mouse_range: list = field(default_factory=lambda: [0, 639, 0, 199])
     # Unmodeled-I/O policy (docs/hardware_support.md): reads from ports the model
     # does not know return 0 — the proven default both source games ran under.
     # Every such read is recorded here (capped) so probes are auditable, and the
@@ -436,16 +444,25 @@ class DOSMachine:
         # Reading the input-status register resets the attribute-controller flip-flop to
         # index mode (the real hardware behaviour PRE2 relies on before writing the pel pan).
         self._attr_flipflop = False
-        # VGA input status register 1. The named bit reflects vertical retrace.
+        # VGA input status register 1. The passed bit reflects vertical retrace.
         # With a time source it advances at the display refresh rate (so the
         # program's own vsync waits run at real speed); otherwise it toggles per
         # read so busy-wait loops still make progress in deterministic runs.
+        self.vga_status_reads += 1
+        # Bit 0 = Display Enable ("not displaying": set during any blank interval).
+        # On hardware it flips every scan line, far faster than vertical retrace.
+        # Per-scan-line timing loops poll it (VGA Lemmings waits on it 60x to time
+        # a delay before loading the level palette); without it toggling, that
+        # loop never exits and the game hangs on a black screen.  Toggle it every
+        # read so those loops make progress, independent of the retrace phase.
+        display_enable = 0x01 if (self.vga_status_reads & 1) else 0x00
         ts = self.time_source
         if ts is None:
-            self.vga_status_reads += 1
-            return retrace_bit if (self.vga_status_reads & 1) else 0x00
-        phase = (ts() * self.display_refresh_hz()) % 1.0
-        return retrace_bit if phase >= (1.0 - self.vga_retrace_active_fraction) else 0x00
+            retrace = retrace_bit if (self.vga_status_reads & 1) else 0x00
+        else:
+            phase = (ts() * self.display_refresh_hz()) % 1.0
+            retrace = retrace_bit if phase >= (1.0 - self.vga_retrace_active_fraction) else 0x00
+        return retrace | display_enable
 
     def port_read(self, cpu: CPU8086, port: int, bits: int) -> int:
         sb = self.sound_blaster
@@ -698,7 +715,13 @@ class DOSMachine:
         """Apply one Graphics Controller register write to the memory model."""
         index &= 0xFF
         data &= 0xFF
-        if index == 0x02:        # Color Compare
+        if index == 0x00:        # Set/Reset (per-plane constant colour for write mode 0)
+            mem.ega_set_reset = data & 0x0F
+        elif index == 0x01:      # Enable Set/Reset (per-plane: use Set/Reset vs CPU data)
+            mem.ega_enable_set_reset = data & 0x0F
+        elif index == 0x08:      # Bit Mask (per-bit: ALU result vs preserved latch bit)
+            mem.ega_bit_mask = data & 0xFF
+        elif index == 0x02:      # Color Compare
             mem.ega_color_compare = data & 0x0F
         elif index == 0x03:      # Data Rotate / Function Select
             mem.ega_data_rotate = data & 0x07
@@ -835,6 +858,22 @@ class DOSMachine:
         if num == 0x67:
             self.int67(cpu)
             return
+        # Not a framework-emulated BIOS/DOS service.  If the program installed
+        # its OWN handler in the IVT — e.g. a game sound driver on the user
+        # vectors INT 60h/61h (VGA Lemmings does exactly this) — dispatch to it
+        # exactly as an `int` instruction does on hardware, and let it run to its
+        # iret.  Only a genuinely unset vector (0000:0000) is a real gap worth
+        # failing loud on.
+        off = cpu.mem.rw(0, (num * 4) & 0xFFFFF)
+        seg = cpu.mem.rw(0, (num * 4 + 2) & 0xFFFFF)
+        if seg or off:
+            cpu.push(cpu.s.flags)
+            cpu.push(cpu.s.cs & 0xFFFF)
+            cpu.push(cpu.s.ip & 0xFFFF)
+            cpu.set_flag(IF, False)
+            cpu.set_flag(TF, False)
+            cpu.s.cs, cpu.s.ip = seg & 0xFFFF, off & 0xFFFF
+            return
         raise UnsupportedInstruction(f"Unhandled interrupt INT {num:02X}h at {cpu.s.cs:04X}:{cpu.s.ip:04X}")
 
     def _alloc_handle(self) -> int:
@@ -920,6 +959,41 @@ class DOSMachine:
             cpu.s.ax = (cpu.s.ax & 0xFF00) | 2
             return
         if ah == 0x1A:  # set DTA
+            return
+        if ah == 0x1B:  # get allocation info for the default drive
+            # Returns AL=sectors per cluster, CX=bytes per sector, DX=total
+            # clusters, and DS:BX -> the drive's media descriptor byte.  Games
+            # call it as a lightweight "is there a disk / what media" probe; the
+            # only value observed being consumed is the media byte at DS:BX
+            # (VGA Lemmings reads [BX] and stores it, ignoring AL/CX/DX).  We
+            # publish the media byte into a fixed low-memory scratch cell the
+            # loader never allocates (linear 0500h, the DOS data area) so the
+            # returned pointer is always valid and deterministic.
+            scratch_seg, scratch_off = 0x0050, 0x0000
+            cpu.mem.wb(scratch_seg, scratch_off, 0xF8)  # F8h = fixed disk
+            cpu.s.ax = (cpu.s.ax & 0xFF00) | 0x04       # sectors per cluster
+            cpu.s.cx = 512                              # bytes per sector
+            cpu.s.dx = 0x8000                           # total clusters
+            cpu.s.ds = scratch_seg
+            cpu.s.bx = scratch_off
+            cpu.set_flag(CF, False)
+            return
+        if ah == 0x43:  # get/set file attributes
+            # AL=00h get: CF=0 with CX=attributes if the file exists, else
+            # CF=1/AX=2 (file not found).  AL=01h set: accept and report
+            # success (RE runs never mutate the user's game directory).  VGA
+            # Lemmings uses AL=00h purely as an existence probe (e.g. adlib.dat
+            # to decide whether Adlib sound is available), branching on CF.
+            if al == 0x00:
+                name = self.read_asciiz(cpu, cpu.s.ds, cpu.s.dx)
+                if self.resolve_game_path(name).is_file():
+                    cpu.s.cx = 0x20                     # archive bit set (normal file)
+                    cpu.set_flag(CF, False)
+                else:
+                    cpu.s.ax = 2
+                    cpu.set_flag(CF, True)
+            else:
+                cpu.set_flag(CF, False)
             return
         if ah == 0x3C:  # create/truncate file
             name = self.read_asciiz(cpu, cpu.s.ds, cpu.s.dx)
@@ -1383,6 +1457,14 @@ class DOSMachine:
             cpu.s.dx = self.ticks & 0xFFFF
             cpu.s.ax &= 0xFF00
             return
+        if ah == 0x01:  # Set system time-of-day counter (CX:DX -> tick count).
+            # Games write the counter back to (re)base their timing — VGA
+            # Lemmings sets it when leaving a level.  Subsequent AH=00h reads
+            # continue from the written value (same self.ticks the getter
+            # serves), and a real BIOS also clears the midnight-rollover flag
+            # (AL on the next read; this model never sets it anyway).
+            self.ticks = ((cpu.s.cx & 0xFFFF) << 16) | (cpu.s.dx & 0xFFFF)
+            return
         if ah == 0x02:  # Get real-time clock time (BCD CH=h CL=m DH=s DL=daylight flag).
             now = datetime.now()
             cpu.s.cx = (self._bcd(now.hour) << 8) | self._bcd(now.minute)
@@ -1424,13 +1506,55 @@ class DOSMachine:
             return
         raise UnsupportedInstruction(f"Unhandled BIOS INT 15h AH={ah:02X}h")
 
+    def set_mouse_norm(self, u: float, v: float, buttons: int | None = None) -> None:
+        """Update the mouse from window-relative coordinates (0.0..1.0), mapped
+        onto the program's own virtual range (AX=7/8) so the pointer is
+        proportional whatever coordinate box the game chose.  A front-end (or a
+        probe) calls this; left untouched, the mouse stays at rest."""
+        r = self.mouse_range
+        u = 0.0 if u < 0 else (1.0 if u > 1 else u)
+        v = 0.0 if v < 0 else (1.0 if v > 1 else v)
+        self.mouse_x = r[0] + int(u * (r[1] - r[0]))
+        self.mouse_y = r[2] + int(v * (r[3] - r[2]))
+        if buttons is not None:
+            self.mouse_buttons = buttons
+
     def int33(self, cpu: CPU8086) -> None:
-        # Mouse API. Report absent but don't crash.
-        ax = cpu.s.ax
-        if ax == 0x0000:
-            cpu.s.ax = 0
-            cpu.s.bx = 0
+        # Minimal Microsoft mouse driver.  State is fed by the front-end via
+        # set_mouse_norm; services are grown as games issue them.  Reporting the
+        # mouse PRESENT (AX=0 -> AX=FFFF) is what makes a mouse-driven game (VGA
+        # Lemmings) enable pointer control at all — the previous stub reported it
+        # absent, so the game gave up after its one reset/detect call.
+        ax = cpu.s.ax & 0xFFFF
+        if ax == 0x0000:                         # reset/detect -> AX=FFFF, BX=#buttons
+            cpu.s.ax = 0xFFFF
+            cpu.s.bx = 2
+            self.mouse_x, self.mouse_y, self.mouse_buttons = 160, 100, 0
+            self.mouse_range = [0, 639, 0, 199]  # driver reset restores full ranges
             return
+        if ax in (0x0001, 0x0002):               # show / hide cursor (game draws its own)
+            return
+        if ax == 0x0003:                         # get position + buttons (range-clamped)
+            r = self.mouse_range
+            cpu.s.bx = self.mouse_buttons & 0xFFFF
+            cpu.s.cx = max(r[0], min(r[1], self.mouse_x)) & 0xFFFF
+            cpu.s.dx = max(r[2], min(r[3], self.mouse_y)) & 0xFFFF
+            return
+        if ax == 0x0004:                         # set position (CX, DX)
+            self.mouse_x = cpu.s.cx & 0xFFFF
+            self.mouse_y = cpu.s.dx & 0xFFFF
+            return
+        if ax == 0x0007:                         # set horizontal range (CX..DX)
+            self.mouse_range[0], self.mouse_range[1] = cpu.s.cx & 0xFFFF, cpu.s.dx & 0xFFFF
+            return
+        if ax == 0x0008:                         # set vertical range (CX..DX)
+            self.mouse_range[2], self.mouse_range[3] = cpu.s.cx & 0xFFFF, cpu.s.dx & 0xFFFF
+            return
+        if ax == 0x000B:                         # read motion counters -> CX/DX deltas
+            cpu.s.cx = 0
+            cpu.s.dx = 0
+            return
+        # Unimplemented subfunction: no-op (grow when a game proves it needs it).
         return
 
     def int67(self, cpu: CPU8086) -> None:

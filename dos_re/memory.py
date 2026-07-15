@@ -87,6 +87,22 @@ class Memory:
         # CPU data corrupts colours and leaves old sprites/backgrounds behind.
         self.ega_write_mode = 0
         self.ega_latches = [0, 0, 0, 0]
+        # Graphics Controller write-mode-0 colour path (indices 00h/01h/08h).
+        # Set/Reset (GC 00h) holds a per-plane constant colour bit; Enable
+        # Set/Reset (GC 01h) selects, per plane, whether the plane's source byte
+        # is that constant (bit set) or the rotated CPU data (bit clear).  The
+        # Bit Mask (GC 08h) selects, per bit position, whether the result comes
+        # from the write ALU (mask bit 1) or is preserved from the latch (mask
+        # bit 0) -- this is how per-pixel drawing edits some pixels in a byte and
+        # leaves the neighbours.  VGA Lemmings draws its whole 16-colour menu and
+        # gameplay this way (28k+ bit-mask writes per menu frame); without these,
+        # write mode 0 writes the CPU byte to every plane identically and every
+        # colour collapses to black/white.  Defaults (enable=0, mask=0xFF) make
+        # the path reduce EXACTLY to the previous behaviour, so games that never
+        # touch these registers are unaffected.
+        self.ega_set_reset = 0
+        self.ega_enable_set_reset = 0
+        self.ega_bit_mask = 0xFF
         # Graphics Controller read path.  Read mode 0 returns the plane selected
         # by Read Map Select (GC 04h).  Read mode 1 (GC 05h bit 3) returns a
         # per-pixel "colour compare" bitmask: bit set where the pixel equals
@@ -380,19 +396,32 @@ class Memory:
         if rot:
             v = ((v >> rot) | ((v << (8 - rot)) & 0xFF)) & 0xFF
         op = self.ega_logical_op & 0x03
+        esr = self.ega_enable_set_reset & 0x0F
+        sr = self.ega_set_reset & 0x0F
+        bitmask = self.ega_bit_mask & 0xFF
         for plane in range(4):
             if not (m & (1 << plane)):
                 continue
             addr = base + EGA_PLANE_STRIDE * plane
             latch = self.ega_latches[plane] & 0xFF
-            if op == 0:
-                out = v
-            elif op == 1:
-                out = v & latch
-            elif op == 2:
-                out = v | latch
+            # Per-plane source byte: the Set/Reset constant (expanded to all 8
+            # bits) where Enable Set/Reset selects it, else the rotated CPU data.
+            if esr & (1 << plane):
+                src = 0xFF if (sr >> plane) & 1 else 0x00
             else:
-                out = v ^ latch
+                src = v
+            # Write ALU (data-rotate/function-select) against the latch.
+            if op == 0:
+                aluout = src
+            elif op == 1:
+                aluout = src & latch
+            elif op == 2:
+                aluout = src | latch
+            else:
+                aluout = src ^ latch
+            # Bit Mask: masked bits come from the ALU result, the rest are
+            # preserved from the latch (the read-modify-write pixel primitive).
+            out = (aluout & bitmask) | (latch & ~bitmask)
             d[addr] = out & 0xFF
 
     def load(self, seg: int, off: int, payload: bytes) -> None:

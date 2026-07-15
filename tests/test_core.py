@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from dos_re.cpu import CPU8086, CPUState
+import pytest
+
+from dos_re.cpu import CPU8086, CPUState, UnsupportedInstruction
 from dos_re.dos import DOSMachine
 from dos_re.memory import Memory
 
@@ -221,6 +223,134 @@ def test_ega_write_mode_1_respects_map_mask():
 
 
 
+def test_int33_mouse_driver_reports_present_and_tracks_position():
+    """INT 33h must report the mouse PRESENT on reset (AX=0 -> AX=FFFF) and
+    return the front-end-fed position/buttons via AX=0003, mapped through the
+    program's own coordinate range (AX=7/8).  A mouse-driven game (VGA Lemmings)
+    only enables pointer control when detection succeeds."""
+    from dos_re.cpu import CPU8086, CPUState
+    cpu = CPU8086(Memory(), CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
+    dos = DOSMachine(root=Path('.'))
+
+    cpu.s.ax = 0x0000
+    dos.int33(cpu)
+    assert cpu.s.ax == 0xFFFF and cpu.s.bx == 2       # present, 2 buttons
+
+    # Game narrows its coordinate box, then the front-end feeds a centred mouse.
+    cpu.s.ax, cpu.s.cx, cpu.s.dx = 0x0007, 8, 328; dos.int33(cpu)   # horiz range
+    cpu.s.ax, cpu.s.cx, cpu.s.dx = 0x0008, 8, 200; dos.int33(cpu)   # vert range
+    dos.set_mouse_norm(0.5, 0.5, buttons=0x01)
+
+    cpu.s.ax = 0x0003
+    dos.int33(cpu)
+    assert cpu.s.bx == 0x01                            # left button held
+    assert 8 <= cpu.s.cx <= 328 and cpu.s.cx == 8 + int(0.5 * (328 - 8))
+    assert 8 <= cpu.s.dx <= 200 and cpu.s.dx == 8 + int(0.5 * (200 - 8))
+
+
+def test_unhandled_int_dispatches_to_installed_ivt_handler():
+    """A soft interrupt the framework does not emulate, but for which the program
+    installed its own IVT handler (VGA Lemmings' sound driver on INT 60h/61h),
+    must dispatch to that handler like a real `int` — push flags/cs/ip, clear
+    IF, jump to the vector — not fail loud."""
+    from dos_re.cpu import CPU8086, CPUState, IF
+    mem = Memory()
+    # Install a handler for INT 60h at 3000:0100 via the IVT.
+    mem.ww(0, 0x60 * 4, 0x0100)
+    mem.ww(0, 0x60 * 4 + 2, 0x3000)
+    cpu = CPU8086(mem, CPUState(cs=0x1000, ip=0x0050, ss=0x2000, sp=0xFFFE, flags=0x0202))
+    dos = DOSMachine(root=Path('.'))
+    dos.interrupt(cpu, 0x60)
+    # Jumped to the handler, with the return frame pushed and IF cleared.
+    assert (cpu.s.cs, cpu.s.ip) == (0x3000, 0x0100)
+    assert not cpu.get_flag(IF)
+    assert cpu.s.sp == 0xFFF8  # flags + cs + ip pushed (3 words)
+    assert mem.rw(0x2000, 0xFFF8) == 0x0050  # return ip (top of stack)
+    assert mem.rw(0x2000, 0xFFFA) == 0x1000  # return cs
+    assert mem.rw(0x2000, 0xFFFC) == 0x0202  # saved flags
+
+
+def test_unhandled_int_with_null_vector_still_fails_loud():
+    from dos_re.cpu import CPU8086, CPUState
+    cpu = CPU8086(Memory(), CPUState(cs=0x1000, ip=0x0050, ss=0x2000, sp=0xFFFE))
+    dos = DOSMachine(root=Path('.'))
+    with pytest.raises(UnsupportedInstruction):
+        dos.interrupt(cpu, 0x63)  # vector 0000:0000 -> genuinely unhandled
+
+
+def test_vga_status_display_enable_bit0_toggles_so_scanline_loops_progress():
+    """The 0x3DA input-status register must toggle bit 0 (Display Enable), not
+    only the vertical-retrace bit.  VGA Lemmings times a delay by polling bit 0
+    for ~60 scan lines before loading the level palette; if bit 0 never sets, the
+    game hangs on a black screen.  A finite poll must observe bit 0 both set and
+    clear (so wait-for-set and wait-for-clear both terminate)."""
+    from dos_re.cpu import CPU8086, CPUState
+    cpu = CPU8086(Memory(), CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
+    dos = DOSMachine(root=Path('.'))
+    reads = [dos.port_read(cpu, 0x03DA, 8) for _ in range(8)]
+    assert any(r & 0x01 for r in reads), "display-enable bit 0 never set -> scanline loop hangs"
+    assert any(not (r & 0x01) for r in reads), "display-enable bit 0 never clear"
+    # The vertical-retrace bit (3) still toggles too (PRE2's vsync waits).
+    assert any(r & 0x08 for r in reads) and any(not (r & 0x08) for r in reads)
+
+
+def test_ega_set_reset_writes_per_plane_colour_through_bit_mask():
+    """Write mode 0 with Enable Set/Reset: each enabled plane's source byte is
+    the Set/Reset constant (expanded), and the Bit Mask selects which bits take
+    the write vs stay latched.  This is how VGA Lemmings draws its 16-colour
+    graphics; without it a colour write lands identically in every plane."""
+    from dos_re.memory import EGA_APERTURE, EGA_PLANE_STRIDE
+
+    mem = Memory()
+    cpu = CPU8086(mem, CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
+    dos = DOSMachine(root=Path('.'))
+    dos.video_mode = 0x10
+    off = 0x1000
+
+    dos.port_write(cpu, 0x03C4, 0x0F02, 16)          # map mask: all planes writable
+    # Background = colour 15 in every pixel (all planes 0xFF), then read to latch it.
+    for plane in range(4):
+        mem.data[EGA_APERTURE + EGA_PLANE_STRIDE * plane + off] = 0xFF
+    assert mem.rb(0xA000, off) == 0xFF               # loads latches = [FF,FF,FF,FF]
+
+    dos.port_write(cpu, 0x03CE, 0x0F01, 16)          # enable set/reset: all planes
+    dos.port_write(cpu, 0x03CE, 0x0500, 16)          # set/reset = colour 5 (planes 0,2)
+    dos.port_write(cpu, 0x03CE, 0xF008, 16)          # bit mask = 0xF0 (top 4 pixels only)
+    mem.wb(0xA000, off, 0x00)                         # CPU data ignored under set/reset
+
+    # Top nibble takes colour 5 (planes 0,2 set); bottom nibble stays colour 15.
+    assert mem.data[EGA_APERTURE + EGA_PLANE_STRIDE * 0 + off] == 0xFF  # (F0 sr) | (0F latch)
+    assert mem.data[EGA_APERTURE + EGA_PLANE_STRIDE * 1 + off] == 0x0F  # (00 sr) | (0F latch)
+    assert mem.data[EGA_APERTURE + EGA_PLANE_STRIDE * 2 + off] == 0xFF
+    assert mem.data[EGA_APERTURE + EGA_PLANE_STRIDE * 3 + off] == 0x0F
+
+
+def test_ega_bit_mask_preserves_latched_bits_on_cpu_data_write():
+    """With Enable Set/Reset off, the source is the CPU byte, but the Bit Mask
+    still preserves the unmasked bits from the latch (the read-modify-write
+    pixel primitive)."""
+    from dos_re.memory import EGA_APERTURE, EGA_PLANE_STRIDE
+
+    mem = Memory()
+    cpu = CPU8086(mem, CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
+    dos = DOSMachine(root=Path('.'))
+    dos.video_mode = 0x10
+    off = 0x1000
+
+    dos.port_write(cpu, 0x03C4, 0x0102, 16)          # map mask: plane 0 only
+    mem.data[EGA_APERTURE + off] = 0xAA              # latch background pattern
+    assert mem.rb(0xA000, off) == 0xAA               # load latches
+
+    dos.port_write(cpu, 0x03CE, 0x0008, 16)          # bit mask = 0x00 -> keep all latch bits
+    mem.wb(0xA000, off, 0xFF)
+    assert mem.data[EGA_APERTURE + off] == 0xAA      # fully preserved
+
+    dos.port_write(cpu, 0x03CE, 0x0F08, 16)          # bit mask = 0x0F -> low nibble from CPU
+    mem.rb(0xA000, off)                              # reload latch (0xAA)
+    mem.wb(0xA000, off, 0xFF)
+    assert mem.data[EGA_APERTURE + off] == 0xAF      # high nibble latched, low nibble = CPU
+
+
 def test_cmpsw_compares_ds_si_with_es_di_and_advances():
     mem = Memory()
     mem.ww(0x1000, 0x0100, 0x1234)
@@ -232,6 +362,21 @@ def test_cmpsw_compares_ds_si_with_es_di_and_advances():
     assert cpu.s.si == 0x0102
     assert cpu.s.di == 0x0202
     assert cpu.get_flag(0x0040)
+
+def test_int1a_set_ticks_rebases_subsequent_reads():
+    # AH=01h sets the BIOS time-of-day counter from CX:DX; AH=00h reads must
+    # continue from it (VGA Lemmings writes the counter when leaving a level).
+    cpu = CPU8086(Memory(), CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
+    dos = DOSMachine(root=Path('.'))
+    cpu.s.ax = 0x0100
+    cpu.s.cx = 0x0012
+    cpu.s.dx = 0x3456
+    dos.interrupt(cpu, 0x1A)
+    cpu.s.ax = 0x0000
+    dos.interrupt(cpu, 0x1A)          # AH=00h read (the getter pre-increments)
+    ticks = ((cpu.s.cx & 0xFFFF) << 16) | (cpu.s.dx & 0xFFFF)
+    assert ticks == 0x00123457
+
 
 def test_dos_version_returns_al_major_ah_minor():
     from dos_re.cpu import CF

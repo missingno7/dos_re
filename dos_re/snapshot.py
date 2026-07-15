@@ -95,6 +95,9 @@ def write_snapshot(rt: Runtime, out_dir: str | Path, *, status: str, steps: int,
             "ega_data_rotate": getattr(rt.program.memory, "ega_data_rotate", 0),
             "ega_logical_op": getattr(rt.program.memory, "ega_logical_op", 0),
             "ega_write_mode": getattr(rt.program.memory, "ega_write_mode", 0),
+            "ega_set_reset": getattr(rt.program.memory, "ega_set_reset", 0),
+            "ega_enable_set_reset": getattr(rt.program.memory, "ega_enable_set_reset", 0),
+            "ega_bit_mask": getattr(rt.program.memory, "ega_bit_mask", 0xFF),
             "ega_latches": list(getattr(rt.program.memory, "ega_latches", [0, 0, 0, 0])),
             "ega_display_start": rt.program.memory.ega_display_start,
             "next_alloc_segment": rt.dos.next_alloc_segment,
@@ -104,6 +107,12 @@ def write_snapshot(rt: Runtime, out_dir: str | Path, *, status: str, steps: int,
                 str(handle): {"path": str(f.path), "pos": f.pos, "size": len(f.data)}
                 for handle, f in rt.dos.files.items()
             },
+            # Console input state IS machine state: a demo recorded across a
+            # console-read boot (Lemmings' machine-type menu) replays from its
+            # start snapshot and blocks forever if the queued keys vanish.
+            "key_queue": list(getattr(rt.dos, "key_queue", ())),
+            "pending_console_scancode": getattr(rt.dos, "pending_console_scancode", None),
+            "console_input_fallback": getattr(rt.dos, "console_input_fallback", None),
             "stdout_tail": "".join(rt.dos.stdout)[-4096:],
             "port_log_tail": rt.dos.port_log[-128:],
         },
@@ -175,8 +184,15 @@ def load_snapshot(exe_path: str | Path, snapshot_dir: str | Path, *, game_root: 
     rt.program.memory.ega_data_rotate = dos_meta.get("ega_data_rotate", rt.program.memory.ega_data_rotate)
     rt.program.memory.ega_logical_op = dos_meta.get("ega_logical_op", rt.program.memory.ega_logical_op)
     rt.program.memory.ega_write_mode = dos_meta.get("ega_write_mode", rt.program.memory.ega_write_mode)
+    rt.program.memory.ega_set_reset = dos_meta.get("ega_set_reset", rt.program.memory.ega_set_reset)
+    rt.program.memory.ega_enable_set_reset = dos_meta.get("ega_enable_set_reset", rt.program.memory.ega_enable_set_reset)
+    rt.program.memory.ega_bit_mask = dos_meta.get("ega_bit_mask", rt.program.memory.ega_bit_mask)
     rt.program.memory.ega_latches = list(dos_meta.get("ega_latches", rt.program.memory.ega_latches))
     rt.program.memory.ega_display_start = dos_meta.get("ega_display_start", rt.program.memory.ega_display_start)
+    if "key_queue" in dos_meta:
+        rt.dos.key_queue = [int(k) for k in dos_meta["key_queue"]]
+        rt.dos.pending_console_scancode = dos_meta.get("pending_console_scancode")
+        rt.dos.console_input_fallback = dos_meta.get("console_input_fallback")
     rt.dos.next_alloc_segment = dos_meta.get("next_alloc_segment", rt.dos.next_alloc_segment)
     rt.dos.allocation_limit_segment = dos_meta.get("allocation_limit_segment", rt.dos.allocation_limit_segment)
     rt.dos.allocations = {int(seg, 16): int(size) for seg, size in dos_meta.get("allocations", {}).items()}
