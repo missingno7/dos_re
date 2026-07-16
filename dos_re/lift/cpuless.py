@@ -351,13 +351,13 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
                            mem_read=True, mem_write=True, int_effect=n)
         if n == 0x20:
             return Effects(refusal="program-terminate")
-        if n in (0x60, 0x61):
-            # a GAME-INSTALLED vector (tier 12): dispatched as a CALL INTO
-            # GAME CODE through the runtime IVT -- the interrupt frame
-            # (flags/cs/ip) is written literally, the recovered handler
-            # (IRET contract) composes, and the frame pop restores flags
-            # from the possibly-handler-modified stacked word.  Conservative
-            # full-bundle dataflow; frame push/pop is symmetric.
+        if n in (3, 0x60, 0x61):
+            # a GAME-INSTALLED (or debug-trap) vector (tier 12): dispatched
+            # as a CALL INTO GAME CODE through the runtime IVT -- the
+            # interrupt frame (flags/cs/ip) is written literally, the
+            # recovered handler (IRET contract) composes, and the frame pop
+            # restores flags from the possibly-handler-modified stacked
+            # word.  Conservative full-bundle dataflow; frame symmetric.
             allr = frozenset(W16) | frozenset({"ds", "es", "ss"})
             return Effects(reads=allr, writes=allr - frozenset({"ss"}),
                            mem_read=True, mem_write=True, stack_delta=0)

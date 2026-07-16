@@ -559,6 +559,22 @@ def _translate(inst, lines, flag_written):
         lines.append("sp = (sp + 2) & 0xFFFF")
         lines.extend(_rm_write_lines(inst, True, "_t"))
         return
+    # pushf / popf (tier 12: the FLAGS word as literal stack data) ------------
+    if op == 0x9C:                                        # pushf
+        fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
+                        for f in ("cf", "pf", "af", "zf", "sf", "of",
+                                  "df", "intf"))
+        lines.append(f"_pfw = (_flags_in & ~_fmask) | (({fw}) & _fmask)")
+        lines.append("sp = (sp - 2) & 0xFFFF")
+        lines.append("mem.ww(ss, sp, _pfw)")
+        return
+    if op == 0x9D:                                        # popf
+        lines.append("_pfw = mem.rw(ss, sp) | 0x0002")
+        lines.append("sp = (sp + 2) & 0xFFFF")
+        for fname, fbit in _FLAG_BITS.items():
+            lines.append(f"{fname} = (_pfw & 0x{fbit:X}) != 0")
+        flags("cf", "pf", "af", "zf", "sf", "of", "df", "intf")
+        return
     # xchg ---------------------------------------------------------------------
     if 0x91 <= op <= 0x97:                                # xchg ax, r16
         r = _reg16(op & 7)
@@ -788,8 +804,6 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
             continue    # the RET ABI (incl. a uniform ret N / the iret
                         # frame) is the adapter's job; the depth checker
                         # gates the rest
-        if i.op in (0x9C, 0x9D):
-            raise Refusal("flags-as-stack-data (pushf/popf)")
         if e.stack_delta is None:
             raise Refusal("unresolved-stack-effect")
         if e.writes & frozenset({"cs", "ss"}):
@@ -813,9 +827,10 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
                                                 alt_entries)
     needs_plat = _func_needs_plat(scan, callees, far_callees)
     # the full FLAGS word becomes a hidden compat input when a game-INT
-    # frame is pushed here (its untracked bits ride the caller word) or a
-    # composed callee needs it -- transitive, like _df (tier 12).
-    flags_livein = any(_is_game_int(i) for i in scan.insts.values()) \
+    # frame or pushf writes it here (untracked bits ride the caller word)
+    # or a composed callee needs it -- transitive, like _df (tier 12).
+    flags_livein = any(_is_game_int(i) or i.op == 0x9C
+                       for i in scan.insts.values()) \
         or any(i.kind == CALL and i.target in callees
                and callees[i.target].flags_livein
                for i in scan.insts.values()) \
@@ -854,6 +869,7 @@ def _is_stack_family(i) -> bool:
     op = i.op
     return (0x50 <= op <= 0x5F
             or op in (0x06, 0x0E, 0x16, 0x1E)      # push seg
+            or op in (0x9C, 0x9D)                  # pushf/popf (tier 12)
             or op in (0x07, 0x17, 0x1F)            # pop seg (pop ss refuses
                                                     # earlier via ss-mutation)
             or op in (0x68, 0x6A)
@@ -874,8 +890,9 @@ def _is_dyn(i) -> bool:
 def _is_game_int(i) -> bool:
     """A game-vectored INT (tier 12): dispatched through the runtime IVT to
     a recovered IRET-contract handler -- a call into game code, never a
-    platform effect."""
-    return i.kind == INT and i.int_no in (0x60, 0x61)
+    platform effect.  int3 (a debug trap in dead paths) rides the same
+    mechanism: its runtime vector is the promoted BIOS dummy-IRET stub."""
+    return i.kind == INT and i.int_no in (3, 0x60, 0x61)
 
 
 def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
@@ -1105,6 +1122,8 @@ _ALL_FLAGS = frozenset({"cf", "pf", "af", "zf", "sf", "of", "df", "intf"})
 def _flags_defined_by(i) -> frozenset:
     op = i.op
     if i.kind == INT:
+        return _ALL_FLAGS
+    if op == 0x9D:              # popf: the whole word from stack data
         return _ALL_FLAGS
     if op == 0xF8 or op == 0xF9:
         return frozenset({"cf"})
