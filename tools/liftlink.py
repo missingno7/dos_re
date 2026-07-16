@@ -211,17 +211,26 @@ def links_table_line(target_keys) -> str:
 
 def relink_source(scan: FunctionScan, cs: int, target_ips, *,
                   far_targets=(), signature: bytes,
-                  min_iterations: int | None = None) -> str:
+                  min_iterations: int | None = None,
+                  drop_dead_flags: bool = False,
+                  boundary_heads: frozenset = frozenset()) -> str:
     """Re-emit a caller with the given near (and far) call targets linked."""
     name = f"lifted_{cs:04x}_{scan.entry:04x}"
     targets = sorted(set(target_ips))
     fars = sorted(set(far_targets))
     link_map = {t: f'LINKS["{cs:04X}:{t:04X}"]' for t in targets}
     far_link_map = {(fs, fo): f'LINKS["{fs:04X}:{fo:04X}"]' for fs, fo in fars}
+    dead = frozenset()
+    if drop_dead_flags:
+        from dos_re.lift.analyze import dead_flag_sites
+        dead = frozenset(dead_flag_sites(scan))
     keys = [f"{cs:04X}:{t:04X}" for t in targets] +            [f"{fs:04X}:{fo:04X}" for fs, fo in fars]
     return emit_function(
         scan, cs, name, signature=signature, coverage=False,
-        count_instructions=True,
+        count_instructions=True, dead_flag_ips=dead,
+        boundary_heads=frozenset(hip for hcs, hip in boundary_heads
+                                 if hcs == cs),
+        resume_calls=bool(boundary_heads),
         min_iterations=min_iterations, link_map=link_map,
         far_link_map=far_link_map,
         link_imports=(links_table_line(keys),))
@@ -290,6 +299,12 @@ def main(argv=None) -> int:
                          "callee to be ORACLE_PASSING on some --board. For "
                          "the hybrid tier / debugging only — graph assembly "
                          "is judged end-to-end (docs/dos_re_2.0.md §2).")
+    ap.add_argument("--boundary-heads", default=None, metavar="@FILE",
+                    help="boundary-head addresses (one CS:IP per line); must "
+                         "match the liftemit setting for a consistent corpus")
+    ap.add_argument("--drop-dead-flags", action="store_true",
+                    help="de-carrier pass 1 in re-emitted callers (must match "
+                         "the liftemit setting for a consistent corpus)")
     ap.add_argument("--exclude-callees", action="append", default=[],
                     metavar="CS:IP|@FILE",
                     help="block edges INTO these entries (repeatable; @FILE = "
@@ -335,6 +350,16 @@ def main(argv=None) -> int:
                 probe=_probe(rt, cs))
 
     # 2. The linkable edge set.
+    heads: frozenset = frozenset()
+    if args.boundary_heads:
+        hpath = Path(args.boundary_heads.lstrip("@"))
+        pairs = []
+        for line in hpath.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                pairs.append(parse_addr(line))
+        heads = frozenset(pairs)
+
     exclude: set[str] = set()
     for item in args.exclude_callees:
         if item.startswith("@"):
@@ -407,7 +432,9 @@ def main(argv=None) -> int:
         far_targets = far_by_caller.get(caller_key, ())
         try:
             src = relink_source(scan, cs, target_ips, far_targets=far_targets,
-                                signature=sig, min_iterations=min_iters)
+                                signature=sig, min_iterations=min_iters,
+                                drop_dead_flags=args.drop_dead_flags,
+                                boundary_heads=heads)
         except EmitUnsupported as exc:
             print(f"skip     {caller_key}: emit-unsupported ({exc})")
             for callee_key in by_caller.get(caller_key, ()):

@@ -66,7 +66,8 @@ def _probe(rt, cs):
 
 
 def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations,
-               coverage: bool = False):
+               coverage: bool = False, drop_dead_flags: bool = False,
+               boundary_heads: frozenset = frozenset()):
     """Emit one entry.  Returns ("ok"|"not-liftable"|"emit-unsupported", detail)."""
     name = f"lifted_{cs:04x}_{ip:04x}"
     scan = scan_function(lambda off: mem.rb(cs, off & 0xFFFF), ip, probe=_probe(rt, cs))
@@ -76,9 +77,17 @@ def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations,
                      if i.kind != "seq" and i.ip >= ip), default=(ip + 8) & 0xFFFF)
     sig = bytes(mem.rb(cs, (ip + k) & 0xFFFF)
                 for k in range(max(4, min(16, (block_end - ip) & 0xFFFF))))
+    dead = frozenset()
+    if drop_dead_flags:
+        from dos_re.lift.analyze import dead_flag_sites
+        dead = frozenset(dead_flag_sites(scan))
     try:
         src = emit_function(scan, cs, name, signature=sig, coverage=coverage,
-                            count_instructions=True,
+                            count_instructions=True, dead_flag_ips=dead,
+                            boundary_heads=frozenset(
+                                hip for hcs, hip in boundary_heads
+                                if hcs == cs),
+                            resume_calls=bool(boundary_heads),
                             min_iterations=max_iterations)
     except EmitUnsupported as exc:
         return "emit-unsupported", str(exc)
@@ -87,7 +96,8 @@ def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations,
 
 
 def emit_entry_from_ir(fn_rec: dict, emit_dir: Path, max_iterations,
-                       coverage: bool = False):
+                       coverage: bool = False, drop_dead_flags: bool = False,
+                       boundary_heads: frozenset = frozenset()):
     """Emit one entry FROM THE RECOVERY IR (docs/recovery_ir.md §3).
 
     The record is re-elaborated by the shared consumer (``dos_re.lift.ir``):
@@ -105,9 +115,18 @@ def emit_entry_from_ir(fn_rec: dict, emit_dir: Path, max_iterations,
         scan = scan_from_ir_record(fn_rec)
     except ValueError as exc:
         return "emit-unsupported", str(exc)
+    dead = frozenset()
+    if drop_dead_flags:
+        from dos_re.lift.analyze import dead_flag_sites
+        dead = frozenset(dead_flag_sites(scan))
     try:
         src = emit_function(scan, cs, name, signature=record_signature(fn_rec),
                             coverage=coverage, count_instructions=True,
+                            dead_flag_ips=dead,
+                            boundary_heads=frozenset(
+                                hip for hcs, hip in boundary_heads
+                                if hcs == cs),
+                            resume_calls=bool(boundary_heads),
                             min_iterations=max_iterations)
     except EmitUnsupported as exc:
         return "emit-unsupported", str(exc)
@@ -150,6 +169,16 @@ def main(argv=None) -> int:
                     help="emit with per-block coverage instrumentation "
                          "(liftverify-identical modules); default OFF for "
                          "the production corpus")
+    ap.add_argument("--boundary-heads", default=None, metavar="@FILE",
+                    help="boundary-head addresses (one CS:IP per line): each "
+                         "gets an emitted observer event + a RESUME entry, so "
+                         "the port's clock parks and resumes in host code "
+                         "(the VMless wall's boundary instrumentation)")
+    ap.add_argument("--drop-dead-flags", action="store_true",
+                    help="de-carrier pass 1: elide flag writes proven "
+                         "unobservable by analyze.dead_flag_sites "
+                         "(seam-conservative liveness). Judged end-to-end "
+                         "like every transformation.")
     ap.add_argument("--require-vmless-wall", action="store_true",
                     help="fail (exit 2) if any emitted module contains an "
                          "interp_one fallback call site — the enforced VMless "
@@ -161,6 +190,16 @@ def main(argv=None) -> int:
     emit_dir = Path(args.emit_dir)
     emit_dir.mkdir(parents=True, exist_ok=True)
 
+    heads: frozenset = frozenset()
+    if args.boundary_heads:
+        hpath = Path(args.boundary_heads.lstrip("@"))
+        pairs = []
+        for line in hpath.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                pairs.append(parse_addr(line))
+        heads = frozenset(pairs)
+
     counts = {"ok": 0, "not-liftable": 0, "emit-unsupported": 0}
     skipped: list[tuple[str, str, str]] = []
     if args.from_ir:
@@ -169,9 +208,11 @@ def main(argv=None) -> int:
         recs = doc["functions"]
         n_total = len(recs)
         for entry in sorted(recs):
-            status, detail = emit_entry_from_ir(recs[entry], emit_dir,
-                                                args.max_iterations,
-                                                coverage=args.coverage)
+            status, detail = emit_entry_from_ir(
+                recs[entry], emit_dir, args.max_iterations,
+                coverage=args.coverage,
+                drop_dead_flags=args.drop_dead_flags,
+                boundary_heads=heads)
             counts[status] += 1
             if status != "ok":
                 skipped.append((entry, status, detail))
@@ -189,7 +230,9 @@ def main(argv=None) -> int:
         for cs, ip in entries:
             status, detail = emit_entry(mem, rt, cs, ip, emit_dir,
                                         args.max_iterations,
-                                        coverage=args.coverage)
+                                        coverage=args.coverage,
+                                        drop_dead_flags=args.drop_dead_flags,
+                                        boundary_heads=heads)
             counts[status] += 1
             if status != "ok":
                 skipped.append((f"{cs:04X}:{ip:04X}", status, detail))

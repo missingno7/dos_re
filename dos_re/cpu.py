@@ -191,6 +191,22 @@ class CPU8086:
     port_writer: Callable[["CPU8086", int, int, int], None] | None = None
     replacement_hooks: dict[tuple[int, int], Callable[["CPU8086"], None]] = field(default_factory=dict)
     hook_names: dict[tuple[int, int], str] = field(default_factory=dict)
+    #: boundary observer for lifted code (lift/emit ``boundary_heads``): the
+    #: emitted event call ``cpu.boundary_hook(cpu, cs, next_ip)`` fires after
+    #: each observed head instruction; the port's clock arms it to count
+    #: passes and park exactly (re-pointing CS:IP at the RESUME entry before
+    #: raising).  None = no observation cost.
+    boundary_hook: Callable[["CPU8086", int, int], None] | None = None
+    #: THE VMLESS WALL POISON (docs/dos_re_2.0.md §1a): when True, any step
+    #: that would fetch/decode/execute an original instruction (i.e. no
+    #: replacement hook at CS:IP) raises immediately — interpretation is
+    #: IMPOSSIBLE, not merely unused.  Armed by wall-gated runners on the
+    #: candidate; never on the oracle.
+    interp_forbidden: bool = False
+    #: diagnostic: when a set, ``interp_forbidden`` RECORDS uncovered
+    #: (cs,ip) here and interprets instead of raising — one run enumerates
+    #: the whole interpreted frontier (the census-closure work list).
+    interp_frontier: set | None = None
     hook_verifier: Callable[["CPU8086", tuple[int, int], Callable[["CPU8086"], None], str], None] | None = None
     hook_verifier_passthrough: set[tuple[int, int]] = field(default_factory=set)
     # Optional live-side replacements used only while a differential hook
@@ -574,6 +590,22 @@ class CPU8086:
             if self.trace_enabled:
                 self.trace.append(f"{start_cs:04X}:{start_ip:04X}  HOOK {name:<23} {before} -> {self.s.snapshot()}")
             return
+
+        if self.interp_forbidden:
+            frontier = self.interp_frontier
+            if frontier is not None:
+                # DIAGNOSTIC collect mode: record the uncovered address and
+                # interpret it (no raise), so a single run enumerates the
+                # whole interpreted frontier instead of stopping at the first.
+                frontier.add((start_cs, start_ip))
+            else:
+                raise RuntimeError(
+                    f"VMLESS WALL VIOLATION: attempted to interpret an original "
+                    f"instruction at {start_cs:04X}:{start_ip:04X} — no lifted "
+                    f"hook covers this address.  The candidate must never "
+                    f"fetch/decode/execute x86; register a resume entry, lift "
+                    f"the code, or record the recovery fact that explains this "
+                    f"address (docs/dos_re_2.0.md §1a).")
 
         seg_override: str | None = None
         rep: int | None = None

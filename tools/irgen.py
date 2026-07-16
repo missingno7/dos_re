@@ -78,7 +78,8 @@ def _effect_tag(inst) -> str | None:
 
 
 def _function_record(scan: FunctionScan, cs: int, ip: int, mem,
-                     keep_interpreted: set[str]) -> dict:
+                     keep_interpreted: set[str],
+                     boundary_heads: frozenset = frozenset()) -> dict:
     entry_key = f"{cs:04X}:{ip:04X}"
     blocks = []
     leaders = scan.block_leaders() if scan.liftable else []
@@ -102,6 +103,11 @@ def _function_record(scan: FunctionScan, cs: int, ip: int, mem,
             tag = _effect_tag(inst)
             if tag:
                 rec["platform_effect"] = tag
+            if (cs, inst.ip) in boundary_heads:
+                # BoundaryEffect (docs/recovery_ir.md): the emitter generates
+                # a host-side boundary event here and a ResumePoint at the
+                # successor; the runtime parks/resumes in lifted host code.
+                rec["boundary_effect"] = True
             insts.append(rec)
             if inst.kind != "seq" and inst.kind not in ("call", "call_far",
                                                         "call_ind", "int"):
@@ -141,6 +147,11 @@ def main(argv=None) -> int:
     ap.add_argument("--keep-interpreted", default=None, metavar="@FILE",
                     help="the port's keep-interpreted list (one CS:IP per "
                          "line) — tagged env_wait in the IR")
+    ap.add_argument("--boundary-heads", default=None, metavar="@FILE",
+                    help="boundary/wait head addresses (one CS:IP per line) "
+                         "— marked as BoundaryEffect sites in the IR; the "
+                         "emitter generates host-side events + ResumePoints "
+                         "from them")
     ap.add_argument("--out", default="recovery_ir.json")
     args = ap.parse_args(argv)
 
@@ -158,6 +169,16 @@ def main(argv=None) -> int:
             if line:
                 keep.add(line.upper())
 
+    heads: frozenset = frozenset()
+    if args.boundary_heads:
+        hpath = Path(args.boundary_heads.lstrip("@"))
+        pairs = []
+        for line in hpath.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                pairs.append(parse_addr(line))
+        heads = frozenset(pairs)
+
     rt = load_snapshot(args.exe, args.snapshot, game_root=args.game_root)
     rt.cpu.trace_enabled = False
     mem = rt.cpu.mem
@@ -167,7 +188,7 @@ def main(argv=None) -> int:
     for cs, ip in entries:
         scan = scan_function(lambda off, cs=cs: mem.rb(cs, off & 0xFFFF), ip,
                              probe=_probe(rt, cs))
-        rec = _function_record(scan, cs, ip, mem, keep)
+        rec = _function_record(scan, cs, ip, mem, keep, boundary_heads=heads)
         functions[rec["entry"]] = rec
         if not scan.liftable:
             for r in scan.refusals:
@@ -195,7 +216,10 @@ def main(argv=None) -> int:
             "entries": len(entries),
         },
         "functions": functions,
-        "facts_applied": {"keep_interpreted": sorted(keep)},
+        "facts_applied": {
+            "keep_interpreted": sorted(keep),
+            "boundary_heads": sorted("%04X:%04X" % k for k in heads),
+        },
         "unsupported": unsupported,
     }
     out = Path(args.out)

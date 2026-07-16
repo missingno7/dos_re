@@ -105,40 +105,58 @@ def _rm_operand(inst: Inst, bits: int, out: list[str], tmp: str) -> Operand:
 
 
 def _alu_lines(group: int, bits: int, a: str, b: str, dst: Operand | None,
-               out: list[str]) -> None:
-    """Mirror ``CPU8086.alu`` for a compile-time-constant group."""
+               out: list[str], *, emit_flags: bool = True) -> None:
+    """Mirror ``CPU8086.alu`` for a compile-time-constant group.
+
+    ``emit_flags=False`` is the de-carrier's dead-flag elision
+    (analyze.dead_flag_sites proved nothing can observe this site's flags
+    before a guaranteed overwrite): the result computation is kept, the flag
+    call is dropped.  A CMP with dead flags is a complete no-op."""
     mask = 0xFFFF if bits == 16 else 0xFF
+    if group == 7 and not emit_flags:        # cmp, flags dead: no-op
+        out.append("pass  # cmp (flags dead)")
+        return
     out.append(f"_a = {a}")
     out.append(f"_b = {b}")
     if group in (0, 2):                      # add / adc
         if group == 2:
             out.append("_c = 1 if s.flags & CF else 0")
             out.append("_r = _a + _b + _c")
-            out.append(f"cpu.set_add_flags(_a, _b, _r, {bits}, _c)")
+            if emit_flags:
+                out.append(f"cpu.set_add_flags(_a, _b, _r, {bits}, _c)")
         else:
             out.append("_r = _a + _b")
-            out.append(f"cpu.set_add_flags(_a, _b, _r, {bits})")
+            if emit_flags:
+                out.append(f"cpu.set_add_flags(_a, _b, _r, {bits})")
     elif group in (3, 5, 7):                 # sbb / sub / cmp
         if group == 3:
             out.append("_c = 1 if s.flags & CF else 0")
             out.append("_r = _a - _b - _c")
-            out.append(f"cpu.set_sub_flags(_a, _b, _r, {bits}, _c)")
+            if emit_flags:
+                out.append(f"cpu.set_sub_flags(_a, _b, _r, {bits}, _c)")
         else:
             out.append("_r = _a - _b")
-            out.append(f"cpu.set_sub_flags(_a, _b, _r, {bits})")
+            if emit_flags:
+                out.append(f"cpu.set_sub_flags(_a, _b, _r, {bits})")
     else:                                    # or / and / xor
         opsym = {1: "|", 4: "&", 6: "^"}[group]
         out.append(f"_r = _a {opsym} _b")
-        out.append(f"cpu.set_logic_flags(_r, {bits})")
+        if emit_flags:
+            out.append(f"cpu.set_logic_flags(_r, {bits})")
     if group != 7 and dst is not None:       # cmp writes nothing
         out.extend(dst.write(f"_r & 0x{mask:X}"))
 
 
-def _emit_instruction(inst: Inst, cs: int, out: list[str]) -> bool:
+def _emit_instruction(inst: Inst, cs: int, out: list[str], *,
+                      drop_flags: bool = False) -> bool:
     """Append the native Python for ``inst``. Return False to request the
-    interpreter fallback (never for a control transfer)."""
+    interpreter fallback (never for a control transfer).  ``drop_flags``
+    (from analyze.dead_flag_sites) elides the flag-write line at sites whose
+    flags are provably unobservable — only for the instruction families that
+    emit flags as a separable line (ALU, TEST, INC/DEC)."""
     op = inst.op
     tmp = "_o"
+    ef = not drop_flags
 
     # --- ALU r/m,reg and reg,r/m -------------------------------------------
     if op < 0x40 and (op & 0x04) == 0 and (op & 0x07) in (0, 1, 2, 3):
@@ -149,9 +167,10 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str]) -> bool:
         regv = f"s.{REG16[inst.reg]}" if bits == 16 else f"cpu.get_reg8({inst.reg})"
         reg_dst = Operand(True, bits, "", reg_idx=inst.reg)
         if to_reg:
-            _alu_lines(group, bits, regv, rm.read(), reg_dst, out)
+            _alu_lines(group, bits, regv, rm.read(), reg_dst, out,
+                       emit_flags=ef)
         else:
-            _alu_lines(group, bits, rm.read(), regv, rm, out)
+            _alu_lines(group, bits, rm.read(), regv, rm, out, emit_flags=ef)
         return True
 
     # --- ALU acc,imm --------------------------------------------------------
@@ -159,7 +178,8 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str]) -> bool:
         group = (op >> 3) & 7
         bits = 8 if (op & 1) == 0 else 16
         acc = Operand(True, bits, "", reg_idx=0)
-        _alu_lines(group, bits, acc.read(), f"0x{inst.imm:X}", acc, out)
+        _alu_lines(group, bits, acc.read(), f"0x{inst.imm:X}", acc, out,
+                   emit_flags=ef)
         return True
 
     # --- ALU r/m,imm (80/81/83) --------------------------------------------
@@ -172,7 +192,8 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str]) -> bool:
             imm &= 0xFFFF
         else:
             imm = inst.imm
-        _alu_lines(group, bits, rm.read(), f"0x{imm:X}", rm, out)
+        _alu_lines(group, bits, rm.read(), f"0x{imm:X}", rm, out,
+                   emit_flags=ef)
         return True
 
     # --- MOV ---------------------------------------------------------------
@@ -217,12 +238,18 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str]) -> bool:
 
     # --- TEST --------------------------------------------------------------
     if op in (0x84, 0x85):
+        if drop_flags:
+            out.append("pass  # test (flags dead)")
+            return True
         bits = 8 if op == 0x84 else 16
         rm = _rm_operand(inst, bits, out, tmp)
         regv = f"s.{REG16[inst.reg]}" if bits == 16 else f"cpu.get_reg8({inst.reg})"
         out.append(f"cpu.set_logic_flags({rm.read()} & {regv}, {bits})")
         return True
     if op in (0xA8, 0xA9):
+        if drop_flags:
+            out.append("pass  # test (flags dead)")
+            return True
         bits = 8 if op == 0xA8 else 16
         acc = Operand(True, bits, "", reg_idx=0)
         out.append(f"cpu.set_logic_flags({acc.read()} & 0x{inst.imm:X}, {bits})")
@@ -232,6 +259,9 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str]) -> bool:
     if 0x40 <= op <= 0x4F:
         dec = op >= 0x48
         r = REG16[op & 7]
+        if drop_flags:
+            out.append(f"s.{r} = (s.{r} {'-' if dec else '+'} 1) & 0xFFFF")
+            return True
         out.append(f"_old = s.{r}")
         out.append(f"_r = (_old {'-' if dec else '+'} 1) & 0xFFFF")
         out.append(f"cpu.set_incdec_flags(_old, _r, 16, dec={dec})")
@@ -244,7 +274,8 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str]) -> bool:
         rm = _rm_operand(inst, bits, out, tmp)
         out.append(f"_old = {rm.read()}")
         out.append(f"_r = (_old {'-' if dec else '+'} 1) & 0x{mask:X}")
-        out.append(f"cpu.set_incdec_flags(_old, _r, {bits}, dec={dec})")
+        if not drop_flags:
+            out.append(f"cpu.set_incdec_flags(_old, _r, {bits}, dec={dec})")
         out.extend(rm.write("_r"))
         return True
 
@@ -536,6 +567,9 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
                   coverage: bool = False, min_iterations: int | None = None,
                   link_map: dict[int, str] | None = None,
                   far_link_map: dict[tuple[int, int], str] | None = None,
+                  dead_flag_ips: frozenset = frozenset(),
+                  boundary_heads: frozenset = frozenset(),
+                  resume_calls: bool = False,
                   link_imports: tuple[str, ...] = ()) -> str:
     """Return the source of a module defining the lifted hook ``name``.
 
@@ -585,6 +619,46 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     already cross-checks every instruction length against live execution.
     """
     leaders = scan.block_leaders()
+    # BOUNDARY OBSERVERS (docs/dos_re_2.0.md §1a — the VMless wall): each
+    # ``boundary_heads`` ip gets an emitted event call after its instruction,
+    # and the instruction AFTER the head becomes a RESUME ENTRY — a block
+    # leader exported in RESUME_ENTRIES so the installer can register a
+    # re-entry hook there.  A boundary park raised by the runtime hook then
+    # resumes INSIDE the lifted body: boundary observation without a single
+    # interpreted instruction (boundary-shadowing dissolved).
+    heads = frozenset(h for h in boundary_heads if h in scan.insts)
+    resume_points: set[int] = set()
+    if heads or resume_calls:
+        forced = set(leaders)
+        for h in sorted(heads):
+            hi = scan.insts[h]
+            if hi.kind not in (SEQ, CALL, CALL_FAR, CALL_IND, INT):
+                raise EmitUnsupported(
+                    f"boundary head {cs:04X}:{h:04X} is a control transfer "
+                    f"({hi.kind}); register the head at a sequential "
+                    f"instruction of the wait loop instead")
+            nip = hi.next_ip
+            if nip not in scan.insts:
+                raise EmitUnsupported(
+                    f"boundary head {cs:04X}:{h:04X} has no in-region "
+                    f"successor — a park there could not resume in host code")
+            forced.add(h)
+            forced.add(nip)
+            resume_points.add(nip)
+        # THE UNWIND RE-ENTRY RULE: a boundary park unwinds the WHOLE lifted
+        # Python call chain but resumes only the innermost function; every
+        # OUTER frame later resumes through its guest return address — the
+        # instruction after its call site.  Those continuations must
+        # therefore be RESUME entries in EVERY function whose frame can be
+        # abandoned (``resume_calls`` — set pipeline-wide whenever boundary
+        # observation is on), or the abandoned callers would continue
+        # INTERPRETED (a wall violation and a pass-count asymmetry).
+        if resume_calls or heads:
+            for inst in scan.insts.values():
+                if inst.kind in (CALL, CALL_FAR, CALL_IND, INT)                         and inst.next_ip in scan.insts:
+                    forced.add(inst.next_ip)
+                    resume_points.add(inst.next_ip)
+        leaders = sorted(forced)
     bb_of = {ip: i for i, ip in enumerate(leaders)}
     leader_set = set(leaders)
 
@@ -633,6 +707,14 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     A(f"SIGNATURE = bytes.fromhex({signature.hex()!r})")
     A(f"MAX_ITERATIONS = {max(min_iterations or 10_000, len(scan.insts) * 5_000)}  "
       "# runaway guard: fail loud, never hang")
+    if resume_points:
+        entries_txt = ", ".join(
+            f'"{cs:04X}:{rp:04X}": {bb_of[rp]}'
+            for rp in sorted(resume_points))
+        A("#: boundary-park resume entries (head successors + every call-site")
+        A("#: continuation — the unwind re-entry rule): address -> dispatch")
+        A("#: block index; the installer registers re-entry hooks at each.")
+        A(f"RESUME_ENTRIES = {{{entries_txt}}}")
     if coverage:
         A("")
         A(f"BLOCK_COUNT = {len(leaders)}")
@@ -644,7 +726,8 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
         A("    return len(BLOCKS_SEEN), BLOCK_COUNT")
     A("")
     A("")
-    A(f"def {name}(cpu):")
+    entry_bb = bb_of[scan.entry]
+    A(f"def {name}(cpu, bb={entry_bb}):")
     A(f'    """Lifted replacement for {cs:04X}:{scan.entry:04X}."""')
     A(f"    # Fail loud if the entry bytes no longer match what was lifted")
     A(f"    # (self-modifying code / overlay swap): raises rather than running a")
@@ -660,7 +743,6 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     # Hardcoding 0 executed the lowest-address block first — wrong code, at
     # the wrong time, for that entry class (found by the Lemmings pilot's
     # whole-program census; caught in-situ as guaranteed DIVERGED lifts).
-    A(f"    bb = {bb_of[scan.entry]}")
     A("    # A lifted function runs SYNCHRONOUSLY to completion — unlike the")
     A("    # interpreter, no external I/O/timing advances between its blocks. A")
     A("    # loop that waits on hardware state (retrace/timer polls) would spin")
@@ -697,7 +779,9 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
             if inst.kind == SEQ:
                 body_lines: list[str] = []
                 try:
-                    ok = _emit_instruction(inst, cs, body_lines)
+                    ok = _emit_instruction(
+                        inst, cs, body_lines,
+                        drop_flags=inst.ip in dead_flag_ips)
                 except EmitUnsupported as exc:
                     raise EmitUnsupported(f"{cs:04X}:{inst.ip:04X}: {exc}") from None
                 if ok:
@@ -752,6 +836,14 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
                 term = inst
                 pending[0] += 1
                 break
+            if inst.ip in heads:
+                # Boundary observer: count is flushed BEFORE the event so a
+                # park (the hook raises) never loses executed instructions;
+                # the hook re-points CS:IP at the resume entry when it parks.
+                _flush()
+                lines.append("if cpu.boundary_hook is not None:")
+                lines.append(f"    cpu.boundary_hook(cpu, 0x{cs:04X}, "
+                             f"0x{inst.next_ip:04X})")
 
         _flush()
         for ln in lines:
