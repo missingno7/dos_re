@@ -164,10 +164,15 @@ def push_cs_idiom_at_all_sites(scan: FunctionScan, target: int) -> bool:
 
 
 def compute_far_link_edges(scans: dict[tuple[int, int], FunctionScan],
-                           *, exclude: frozenset[str] = frozenset()):
+                           *, exclude: frozenset[str] = frozenset(),
+                           computed_return_far: frozenset[str] = frozenset()):
     """The far-linkable edge set: direct far CALLs between census entries whose
     callee exits are all ``retf``.  Structural rule only (the 2.0 posture);
-    same exclusion semantics as near edges."""
+    same exclusion semantics as near edges.
+
+    ``computed_return_far`` — port-declared COMPUTED-RETURN facts (see
+    ``compute_link_edges``): callees proven to end every path at the caller's
+    far return address despite a non-``retf`` exit encoding."""
     edges: list[tuple[str, str]] = []
     blocked: list[tuple[str, str, str]] = []
     for (cs, ip), scan in sorted(scans.items()):
@@ -183,7 +188,8 @@ def compute_far_link_edges(scans: dict[tuple[int, int], FunctionScan],
                 blocked.append((caller_key, callee_key, "not-an-entry"))
             elif not callee.liftable:
                 blocked.append((caller_key, callee_key, "callee-not-liftable"))
-            elif not all_far_ret_exits(callee):
+            elif not (all_far_ret_exits(callee)
+                      or callee_key in computed_return_far):
                 blocked.append((caller_key, callee_key, "exit-shape"))
             else:
                 edges.append((caller_key, callee_key))
@@ -192,8 +198,25 @@ def compute_far_link_edges(scans: dict[tuple[int, int], FunctionScan],
 
 def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
                        statuses: dict[str, str], *, structural: bool = True,
-                       exclude: frozenset[str] = frozenset()):
+                       exclude: frozenset[str] = frozenset(),
+                       computed_return_near: frozenset[str] = frozenset(),
+                       computed_return_far: frozenset[str] = frozenset()):
     """The linkable edge set from fresh scans (+ proof statuses if gated).
+
+    ``computed_return_near`` / ``computed_return_far`` are port-declared
+    COMPUTED-RETURN recovery facts ("CS:IP" strings): callees whose every exit
+    path transfers control to the caller's return address through a computed
+    jump instead of an encoded ``ret``/``retf`` — MSC's stack-probe family
+    (``__aNchkstk`` pops the near return into a register, moves SP to the
+    newly allocated frame top, then ``jmp bx``; ``__aFchkstk``/``__setargv``
+    do the far equivalent through a saved pointer).  Such a callee is
+    behaviorally a returning callee, but ``emulate_call``'s termination
+    heuristic can NEVER recognize it (the callee's whole job is to leave SP
+    BELOW the call point), so the edge must be LINKED to be executable at all
+    — the lifted callee body reproduces the exact frame/SP trajectory and the
+    linked helper simply continues at the very continuation the computed jump
+    targets.  A near fact links like an all-near-ret callee; a far fact like
+    an all-retf callee (push-cs idiom sites or direct far calls).
 
     Returns ``(edges, blocked)``: ``edges`` is ``[("CS:IP", "CS:IP"), ...]``
     (caller, callee) and ``blocked`` is ``[(caller, callee, reason), ...]``
@@ -238,9 +261,9 @@ def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
                 blocked.append((caller_key, callee_key, "callee-not-liftable"))
             elif not structural and statuses.get(callee_key) != PASSING:
                 blocked.append((caller_key, callee_key, "not-passing"))
-            elif all_near_ret_exits(callee):
+            elif all_near_ret_exits(callee) or callee_key in computed_return_near:
                 edges.append((caller_key, callee_key))
-            elif all_far_ret_exits(callee) \
+            elif (all_far_ret_exits(callee) or callee_key in computed_return_far) \
                     and push_cs_idiom_at_all_sites(scan, target):
                 # The push-cs idiom (push cs; call near -> retf callee): a
                 # linkable NEAR edge with the ordinary near-link emission.
@@ -255,7 +278,7 @@ def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
                 # helper would break the one-line-per-instruction emit
                 # invariant and its virtual-time accounting for no gain).
                 edges.append((caller_key, callee_key))
-            elif all_far_ret_exits(callee):
+            elif all_far_ret_exits(callee) or callee_key in computed_return_far:
                 blocked.append((caller_key, callee_key,
                                 "retf-callee-no-push-cs-idiom"))
             else:
@@ -384,6 +407,22 @@ def main(argv=None) -> int:
                          "functions, env-wait recovery facts -- because a "
                          "linked edge would bypass the install skip and run "
                          "the excluded lifted body anyway.")
+    ap.add_argument("--computed-return-near", action="append", default=[],
+                    metavar="CS:IP|@FILE",
+                    help="COMPUTED-RETURN recovery facts, near shape "
+                         "(repeatable; @FILE = one CS:IP per line, # "
+                         "comments): callees proven to end every path at the "
+                         "caller's near return address via a computed jump "
+                         "with a deliberately adjusted SP (MSC __aNchkstk). "
+                         "Linked like all-near-ret callees -- emulate_call's "
+                         "SP-unwind heuristic can never terminate on them.")
+    ap.add_argument("--computed-return-far", action="append", default=[],
+                    metavar="CS:IP|@FILE",
+                    help="COMPUTED-RETURN recovery facts, far shape: callees "
+                         "proven to end every path at the caller's FAR return "
+                         "address via a computed far jump (MSC __aFchkstk / "
+                         "__setargv).  Linked like all-retf callees (push-cs "
+                         "idiom near sites, or direct far calls).")
     args = ap.parse_args(argv)
     if args.proven_edges and not args.board:
         ap.error("--proven-edges requires at least one --board")
@@ -438,20 +477,28 @@ def main(argv=None) -> int:
     heads = _read_pairs(args.boundary_heads)
     dispatch = _read_pairs(args.dispatch_entries)
 
-    exclude: set[str] = set()
-    for item in args.exclude_callees:
-        if item.startswith("@"):
-            for line in Path(item[1:]).read_text().splitlines():
-                line = line.split("#", 1)[0].strip()
-                if line:
-                    exclude.add(line.upper())
-        else:
-            exclude.add(item.strip().upper())
+    def _read_keys(items) -> frozenset[str]:
+        keys: set[str] = set()
+        for item in items:
+            if item.startswith("@"):
+                for line in Path(item[1:]).read_text().splitlines():
+                    line = line.split("#", 1)[0].strip()
+                    if line:
+                        keys.add(line.upper())
+            else:
+                keys.add(item.strip().upper())
+        return frozenset(keys)
+
+    exclude = _read_keys(args.exclude_callees)
+    computed_near = _read_keys(args.computed_return_near)
+    computed_far = _read_keys(args.computed_return_far)
 
     statuses = load_statuses(args.board)
     edges, blocked = compute_link_edges(scans, statuses,
                                         structural=not args.proven_edges,
-                                        exclude=frozenset(exclude))
+                                        exclude=exclude,
+                                        computed_return_near=computed_near,
+                                        computed_return_far=computed_far)
 
     # A linked call needs its callee module ON DISK for the installer's
     # resolution pass — a proven callee that was never emitted cannot be
@@ -467,8 +514,8 @@ def main(argv=None) -> int:
     edges = kept
 
     # 2b. FAR edges (structural rule; same on-disk requirement).
-    far_edges, far_blocked = compute_far_link_edges(scans,
-                                                    exclude=frozenset(exclude))
+    far_edges, far_blocked = compute_far_link_edges(
+        scans, exclude=exclude, computed_return_far=computed_far)
     blocked.extend(far_blocked)
     far_kept: list[tuple[str, str]] = []
     for caller_key, callee_key in far_edges:
