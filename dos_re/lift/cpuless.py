@@ -96,6 +96,12 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
             (W if wide_write else R).add(r)
             if also_read_rm:
                 R.add(r)
+            if wide_write and not wide:
+                # an 8-bit register WRITE preserves the other half of the
+                # word register -- a READ at word granularity (the ABI works
+                # in words; without this the preserved half's entry value
+                # would silently leak past the inferred contract).
+                R.add(r)
         else:
             if inst.mod == 0 and inst.rm == 6:
                 pass                      # direct address: no base/index reads
@@ -184,6 +190,8 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         return Effects(frozenset(R), frozenset(W), mr, mw, sd)
     if op in (0x8A, 0x8B):               # mov r, r/m
         W.add(_r8(inst.reg) if op == 0x8A else W16[inst.reg])
+        if op == 0x8A:
+            R.add(_r8(inst.reg))         # 8-bit write preserves the other half
         modrm_rm(wide_write=False)
         return Effects(frozenset(R), frozenset(W), mr, mw, sd)
     if op == 0x8C:                       # mov r/m, sreg
@@ -200,7 +208,8 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
             R.update(_EA_REGS[inst.rm])
         return Effects(frozenset(R), frozenset(W), False, False, sd)
     if 0xB0 <= op <= 0xB7:               # mov r8, imm
-        W.add(_r8(op & 7))
+        # writes one byte half; the preserved half is a word-granular read
+        W.add(_r8(op & 7)); R.add(_r8(op & 7))
         return Effects(frozenset(R), frozenset(W), mr, mw, sd)
     if 0xB8 <= op <= 0xBF:               # mov r16, imm
         W.add(W16[op & 7])
