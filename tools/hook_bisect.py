@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """hook_bisect — localize the first incorrect lifted/linked function by oracle.
 
-The safety net of oracle-guided convergence (docs: the native-recovery pilot).
-The pipeline integrates optimistically — lift+link the reachable graph without
+The safety net of oracle-guided convergence (docs/dos_re_2.0.md §2).  The
+pipeline integrates optimistically — lift+link the reachable graph without
 per-function proof — and relies on END-TO-END oracle comparison to expose the
-first incorrect transformation.  When the assembled hybrid (or native graph)
-diverges from the pure interpreter, this tool binary-searches the installed
+first incorrect transformation.  When an assembled candidate (the VMless
+lifted graph today; CPUless and DOS-layout-less candidates at later stages)
+diverges from the interpreted oracle, this tool binary-searches the installed
 replacement set to name the SMALLEST responsible subset, so AI is invoked only
 for that concrete gap instead of re-proving everything.
 

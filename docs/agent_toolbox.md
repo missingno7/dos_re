@@ -3,7 +3,7 @@
 **Audience: the AI agent using `dos_re` to recover a game.** This is the
 operational index: for each recurring task, the tool that does it mechanically,
 the command, and what to do when it fails. The porting *method* (phases, loop
-protocol, checklists) lives in `template_dos_port`; the mechanism deep-dives
+protocol, checklists) lives in [`getting_started.md`](getting_started.md); the mechanism deep-dives
 live in the other docs here. This page is the routing layer between them.
 
 ## The division of labor (who does what)
@@ -215,6 +215,14 @@ capture phase. Whole-frame equivalence: `dos_re.frame_verify.run_frame_verifier`
 artifacts on mismatch).
 
 ## 10. Lift routines automatically (never hand-translate a first draft)
+
+> **The 2.0 default is WHOLE-GRAPH assembly, not per-slice proving**
+> ([`dos_re_2.0.md`](dos_re_2.0.md)): `tools/codemap.py` (census) →
+> `tools/liftemit.py` (batch-emit everything) → `tools/liftlink.py`
+> (structural linking) → `lift.install.install_vmless_graph` in the port's
+> `play_native` → end-to-end tick-boundary oracle → `tools/hook_bisect.py` on
+> divergence.  The per-slice `liftverify` loop below remains the tool for
+> per-function diagnostics and the hybrid auto-install tier.
 
 ```bash
 # Census: which entries are liftable, and why not (indirect jump / x87 / …)

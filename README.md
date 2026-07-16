@@ -1,13 +1,49 @@
 # dos_re — an oracle-driven DOS game recovery framework
 
-A reusable toolbox for turning an original DOS game (16-bit real mode or
-32-bit DOS/4GW protected mode) into a verified,
-native source port — one proven routine at a time. **It is a recovery
-laboratory, not an emulator**: the original executable runs as the *oracle*,
-individual routines are replaced with recovered source, and every replacement
-is verified against the original execution. The key idea is not "AI writes
-code" — it is *AI writes code inside a verification loop where the original
-game remains executable truth.*
+A reusable **recovery machine** for turning an original DOS game (16-bit real
+mode or 32-bit DOS/4GW protected mode) into a verified source port.  **It is a
+recovery laboratory, not an emulator**: the original executable runs as the
+*oracle*, deterministic tooling mechanically lifts, links, and assembles the
+program into staged native runtimes, and every stage is verified against the
+original execution.  The key idea is not "AI writes code" — it is
+*deterministic tooling does the labor, AI unblocks it where it is stuck, and
+the original game remains executable truth.*
+
+**DOS_RE 2.0** ([`docs/dos_re_2.0.md`](docs/dos_re_2.0.md) — the canonical
+architecture) is a staged pipeline of three mechanical detachments, each
+oracle-verified:
+
+```text
+binary → automatic CPU-less lifting → structurally linked VM-less graph
+→ automatically generated native shell → oracle-guided convergence → play_native
+→ automatic memory-structure recovery → generated verification bridge
+→ clean source port
+```
+
+```text
+interpreted oracle → VMless lifted runtime → CPUless lifted runtime
+→ DOS-layout-less native runtime → semantic clean source port
+```
+
+**Proven through M2 on the Lemmings pilot** (`lemmings_port`): strict VMless
+(zero interpreted instructions, interpreter poisoned) AND EXE-independent (a
+generated data-only boot image; the original binary is build-time input only),
+demo-verified byte-exact against the interpreted oracle.  Current milestone:
+M3 -- CPUless via the automated de-carrier process over the recovery IR.
+
+The largest supported graph is assembled mechanically and early; known-
+unsupported constructs fail loudly; the end-to-end oracle finds silent
+mistakes and auto-bisection localizes them; AI resolves only the concrete
+gaps.  Per-function proofs are metadata (hybrid installs, diagnostics,
+regression), never a gate on graph assembly.
+
+> **Do not port the game.  Build the machine that ports the game.**
+> Every blocker must improve the toolchain, not create another manual patch.
+> (The Ten Principles: `docs/dos_re_2.0.md` §0.)  The staged pipeline is the
+> engineering strategy; the ultimate goal is direct — *original binary +
+> recovery facts → automated recovery tool → true native implementation* —
+> with intermediate stages as verification projections of one shared
+> recovery IR.
 
 **This is infrastructure for AI agents, not a library for end users.** The
 expected operator is an autonomous AI agent handed a porting repo (this
@@ -93,10 +129,13 @@ original EXE ──▶ dos_re VM (the oracle) ──▶ traces / snapshots / dem
 ## Where the work happens
 
 Game-specific work does **not** happen in this repo, and does not happen by a
-person driving these APIs by hand. It happens in a **porting repo** —
-[`template_dos_port`](https://github.com/missingno7/template_dos_port) is the
-starting point — where an AI agent follows the documented method with this
-framework wired in as the `dos_re/` submodule. The hard boundary, enforced by
+person driving these APIs by hand. It happens in a **port repo** — scaffolded
+by `python tools/new_project.py` and walked through in
+[`docs/getting_started.md`](docs/getting_started.md); the Lemmings pilot
+(`lemmings_port`) is the canonical reference implementation — with this
+framework wired in as the `dos_re/` submodule. (The old DOS_RE 1.0 starter,
+`template_dos_port`, is retired; see
+[`docs/migration_1.0_to_2.0.md`](docs/migration_1.0_to_2.0.md).) The hard boundary, enforced by
 lint: `dos_re/` never learns any game's addresses, filenames, or formats;
 everything game-specific lives in the port's adapter package.
 
@@ -115,7 +154,8 @@ python -m pytest tests -q                        # framework suite (no game asse
 | Audience | Read |
 |---|---|
 | A human wondering what this is | this README — you're done |
-| The agent porting a game | `template_dos_port`'s `AGENTS.md`/`START_HERE.md` (the method), then [`docs/agent_toolbox.md`](docs/agent_toolbox.md) (task → tool → command here) |
+| Anyone touching architecture, terminology, or the roadmap | [`docs/dos_re_2.0.md`](docs/dos_re_2.0.md) — the canonical staged-recovery pipeline, vocabulary, risk model, milestones |
+| The agent porting a game | [`docs/getting_started.md`](docs/getting_started.md) (the workflow), then [`docs/agent_toolbox.md`](docs/agent_toolbox.md) (task → tool → command here); `lemmings_port` is the worked reference |
 | The agent extending this framework | [`AGENTS.md`](AGENTS.md) (the rules), [`docs/architecture.md`](docs/architecture.md) (the module map) |
 | Mechanism reference | [`docs/README.md`](docs/README.md) (hooks/verification, demos/snapshots, state mirrors, hardware status, lifting, performance, glossary) |
 
@@ -138,7 +178,9 @@ Headless workloads run unchanged — and much faster — under PyPy.
 ## Provenance & honesty
 
 Extracted from `pre2_port` (primary) and `overkill_port` (earlier pilot);
-`template_dos_port`'s `MIGRATION.md` records exactly what came from where.
+the retired 1.0 starter's `MIGRATION.md` (archived in `template_dos_port`)
+records exactly what came from where.  The 2.0 pipeline was proven on the
+Lemmings pilot (`lemmings_port` — strict VMless + EXE-independent, M2).
 [`docs/hardware_support.md`](docs/hardware_support.md) is the honest status of
 the hardware models — including what is *not* modeled.
 
@@ -147,7 +189,7 @@ owned game to port.
 
 ## License
 
-MIT ([LICENSE](LICENSE)), except the vendored [`pynuked_opl3/`](pynuked_opl3/)
+MIT ([LICENSE](LICENSE)), except the OPTIONAL external `pynuked_opl3`
 submodule and `graveyard/opl3_exact.py` (a pure-Python translation of
 [Nuked-OPL3](https://github.com/nukeykt/Nuked-OPL3)) — both
 LGPL-2.1-or-later; self-contained and separable (see LICENSE).

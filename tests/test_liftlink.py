@@ -51,11 +51,25 @@ def _edge_fixture_code() -> bytes:
     return bytes(code)
 
 
-def test_edge_rule_passing_ret_callees_only():
+def test_edge_rule_structural_default_links_without_proof():
+    # DOS_RE 2.0 default: structural criterion only (liftable entry +
+    # all-near-ret exits) — proof status is irrelevant, exit shape still gates.
     scans = _scan_all(_edge_fixture_code(), [0x0100, 0x0110, 0x0120, 0x0130])
     statuses = {"1000:0110": "ORACLE_PASSING", "1000:0120": "ORACLE_PASSING",
                 "1000:0130": "NOT_REACHED"}
     edges, blocked = liftlink.compute_link_edges(scans, statuses)
+    assert ("1000:0100", "1000:0110") in edges
+    assert ("1000:0100", "1000:0130") in edges          # unproven: still linked
+    assert ("1000:0100", "1000:0120", "exit-shape") in blocked
+
+
+def test_edge_rule_proven_gate_requires_oracle_passing():
+    # The 1.x conservative gate (--proven-edges / structural=False).
+    scans = _scan_all(_edge_fixture_code(), [0x0100, 0x0110, 0x0120, 0x0130])
+    statuses = {"1000:0110": "ORACLE_PASSING", "1000:0120": "ORACLE_PASSING",
+                "1000:0130": "NOT_REACHED"}
+    edges, blocked = liftlink.compute_link_edges(scans, statuses,
+                                                 structural=False)
     assert edges == [("1000:0100", "1000:0110")]
     assert ("1000:0100", "1000:0120", "exit-shape") in blocked
     assert ("1000:0100", "1000:0130", "not-passing") in blocked
@@ -210,3 +224,61 @@ def test_resolve_links_missing_callee_fails_loud(tmp_path):
     loaded = {"lifted_1000_0100": _load_module(tmp_path / "lifted_1000_0100.py")}
     with pytest.raises(FileNotFoundError, match="1000:0999"):
         resolve_links(loaded, tmp_path)
+
+
+def test_far_linked_caller_and_retf_callee_run_exact(tmp_path):
+    """The FAR mirror of the linked e2e: caller far-calls a retf callee; the
+    linked module set installs through the real installer and runs byte-exact
+    (state + virtual time) against the interpreted original."""
+    # 0100: mov ax,2 ; call far 1000:0110 ; add ax,1 ; ret     (caller)
+    # 0110: add ax,5 ; retf                                    (callee)
+    code = bytes.fromhex("B80200" "9A10010010" "050100" "C3"
+                         "9090909090"                # pad to 0x0110
+                         "050500" "CB")
+    scans = _scan_all(code, [0x0100, 0x0110])
+    assert liftlink.all_far_ret_exits(scans[(CS, 0x0110)])
+    assert not liftlink.all_near_ret_exits(scans[(CS, 0x0110)])
+
+    # Far edge set: structural rule finds exactly the one edge.
+    edges, blocked = liftlink.compute_far_link_edges(scans)
+    assert edges == [("1000:0100", "1000:0110")]
+
+    callee_src = emit_function(scans[(CS, 0x0110)], CS, "lifted_1000_0110",
+                               signature=code[0x10:0x14],
+                               count_instructions=True)
+    caller_src = liftlink.relink_source(scans[(CS, 0x0100)], CS, [],
+                                        far_targets=[(CS, 0x0110)],
+                                        signature=code[:6])
+    assert "call_installed_hook_like_far_call" in caller_src
+    assert "emulate_far_call" not in caller_src.split("def lifted_1000_0100")[1]
+    assert 'LINKS["1000:0110"]' in caller_src
+    (tmp_path / "lifted_1000_0110.py").write_text(callee_src, encoding="utf-8")
+    (tmp_path / "lifted_1000_0100.py").write_text(caller_src, encoding="utf-8")
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "1000:0100": {"entry": "1000:0100", "module": "lifted_1000_0100.py",
+                      "status": "ORACLE_PASSING"},
+        "1000:0110": {"entry": "1000:0110", "module": "lifted_1000_0110.py",
+                      "status": "ORACLE_PASSING"},
+    }))
+
+    asm = _make_cpu(code, _state())
+    for _ in range(100):
+        if (asm.s.cs, asm.s.ip) == (CS, RET_IP):
+            break
+        asm.step()
+    assert (asm.s.cs, asm.s.ip) == (CS, RET_IP)
+
+    hyb = _make_cpu(code, _state())
+    installed = install_passing_lifts(hyb, CS, tmp_path, [manifest])
+    assert set(installed) == {(CS, 0x0100), (CS, 0x0110)}
+    hyb.step()
+
+    assert (hyb.s.cs, hyb.s.ip) == (CS, RET_IP)
+    assert hyb.s.ax == asm.s.ax == 8                   # 2 + 5 + 1
+    assert hyb.s.sp == asm.s.sp                        # far frame fully popped
+    assert (hyb.s.flags & 0x0FD5) == (asm.s.flags & 0x0FD5)
+    assert hyb.mem.data == asm.mem.data
+    # Virtual time: identical clock (owns_time counted lift, both functions).
+    assert hyb.instruction_count == asm.instruction_count

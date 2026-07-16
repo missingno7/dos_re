@@ -15,10 +15,10 @@ dos_re/       the reusable, game-agnostic core: VM + verification engines.
 
 <your game>/  the per-game adapter you create at your porting repo's root,
               next to its dos_re/ submodule (the expected workflow — see
-              template_dos_port, which wires this framework in that way):
+              a port repo, which wires this framework in that way):
               hooks, continuation metadata, frame boundaries, input-wait
               registry, asset codecs, recovered logic, state views.
-              See template_dos_port's examples/adapter_skeleton/ and
+              See the Lemmings pilot (lemmings_port) and
               START_HERE.md step 2.
 
 ```
@@ -78,14 +78,15 @@ from the source projects). Grouped by concern:
 | `dosbox_savestate.py` | Import a DOSBox-X save state (memory + registers) as an alternative evidence source. |
 | `testing.py` | Stdlib-only test discovery/runner (pytest fallback for constrained sandboxes). |
 
-### The lifter (M0: census)
+### The lifter (the VMless-stage pipeline — docs/dos_re_2.0.md)
 
 | Module | What it is |
 |---|---|
+| `lift/install.py` | The two install tiers: `install_vmless_graph` (2.0 assembly — install EVERY emitted module; correctness judged end-to-end by the tick-boundary oracle, divergences localized by `tools/hook_bisect.py`) and `install_passing_lifts` (the hybrid tier — only ORACLE_PASSING modules, fingerprinted for demo determinism). `resolve_links` binds liftlink's cross-module `LINKS` tables. `tools/liftemit.py` batch-emits the census; `tools/liftlink.py` structurally links it. |
 | `lift/decode.py` | Static 16-bit x86 decoder (lengths, control-flow class, branch targets) for the lifter — deliberately NOT a second semantic model; every non-transfer length is cross-checked against the interpreter (IP-delta probe) and disagreement refuses the function. OS-free (extractable for a future win16_re). |
 | `lift/cfg.py` | Function-region discovery from an entry offset: reachable instructions, basic-block leaders, exits (ret/retf/iret/far-jmp), call/INT dependencies, and the structured refusal taxonomy (indirect-jump, unsupported-opcode, no-exit, region-budget, decoder-mismatch). `tools/liftgen.py` is the census + `--emit` CLI. See docs/lifting_design.md. |
 | `lift/emit.py` | The emitter (M1): a `FunctionScan` → a self-contained Python module defining one literal hook — architectural state at every instruction boundary, a basic-block dispatch loop, per-line disassembly comments, the fail-loud SMC entry guard. Faithful by reuse: ALU/flags/shifts/string-ops call the interpreter's own helpers; unknown opcodes emit an exact single-instruction fallback. 95.4% native over 269 real overkill functions; the lifted `4537` passes its hand-hook's 300-case fuzz byte-exact. |
-| `lift/runtime.py` | Support imported by generated hooks: `emulate_call`/`emulate_far_call`/`emulate_int` run callees and ISRs through the VM (hooks compose; lifting order is irrelevant), and `interp_one` executes one instruction through the interpreter for the emitter's fallback tier. |
+| `lift/runtime.py` | Support imported by generated hooks: `emulate_call`/`emulate_far_call`/`emulate_int` run callees and ISRs through the VM (hooks compose; lifting order is irrelevant), and `interp_one` executes one instruction through the interpreter for the emitter's fallback tier. 2.0 WALL NOTE: on a strict-VMless corpus the emitter emits ZERO `interp_one` sites (`liftemit --require-vmless-wall`) and the runner poisons interpretation outright (`cpu.interp_forbidden`) -- the fail-loud frontier lives OUTSIDE the corpus, never inside it (docs/dos_re_2.0.md section 1a). |
 | `lift/decode32.py` + `lift/cfg32.py` | The 32-bit (flat CPU386) decoder + function scan: default-32 sizes, 0x66/0x67, ModRM+SIB, the 0F map; x87 classifies SEQ (the emitter falls back per line instead of refusing the function). Lengths cross-check against `CPU386`'s fetch stream. |
 | `lift/emit32.py` + `lift/runtime32.py` | The 32-bit emitter (same faithful/total/refactorable contract over the CPU386 model: `_flags_*`/`_shift`/`_string` reuse, segment-base-aware flat addressing) and its delegation primitives (`emulate_call32`/`emulate_int32`/`interp_one32`, `check_signature`). `tools/pmlift.py` is census+emit+in-situ-verify in one CLI. |
 | `lift/manifest.py` | The lifter's own proof ledger (`LiftManifest`/`LiftRecord`, JSON-backed): per-function status on the `LIFTED → ORACLE_PASSING → INSTALLED → REFACTORED` ladder, with call/verify/coverage counts. Deliberately disjoint from `islands.STATUSES` — lifted ≠ recovered (the metrics-honesty rule). `tools/liftverify.py` is the in-situ verify driver that installs lifted hooks with the strict auto-continuation verifier, runs the VM, diffs each call against the ASM oracle, and writes this ledger. |
@@ -94,22 +95,21 @@ from the source projects). Grouped by concern:
 
 | Module | What it is |
 |---|---|
-| `player.py` | The game-agnostic core of every port's `scripts/play.py`: the STANDARD unified CLI (viewer by default, `--headless` to disable; `--snapshot`/`--save-snapshot`; `--record-demo`/`--play-demo`/`--demo-continue`; the four hook-mode flags `--no-replacements`/`--safe-hooks`/`--verify-hooks`/`--trace-hooks`, failing loud where a port has no such tier; pacing + presentation knobs), the live pygame viewer loop with the standard hotkeys (F10 screenshot, F11 demo-record toggle, F12 snapshot), headless demo replay, gap-snapshot-on-crash, and the `GameFrontend` adapter class a port subclasses. numpy/pygame imports stay lazy — importing the module and headless replay need neither. Worked example: `template_dos_port/scripts/play.py`. |
+| `player.py` | The game-agnostic core of every port's `scripts/play.py`: the STANDARD unified CLI (viewer by default, `--headless` to disable; `--snapshot`/`--save-snapshot`; `--record-demo`/`--play-demo`/`--demo-continue`; the four hook-mode flags `--no-replacements`/`--safe-hooks`/`--verify-hooks`/`--trace-hooks`, failing loud where a port has no such tier; pacing + presentation knobs), the live pygame viewer loop with the standard hotkeys (F10 screenshot, F11 demo-record toggle, F12 snapshot), headless demo replay, gap-snapshot-on-crash, and the `GameFrontend` adapter class a port subclasses. numpy/pygame imports stay lazy — importing the module and headless replay need neither. Worked example: the Lemmings pilot's runners (`lemmings_port/scripts/`). |
 | `display.py` | GPU-accelerated (SDL2 streaming texture) window/present backend with a software fallback, aspect-correct letterboxing (DOS 4:3 `par`), overlays and fullscreen. Imported only when a window opens; together with `player.py` and `audio_sink.py` it forms the lint's declared FRONTEND_RING (the only package files allowed to use pygame). |
-| `overlay_menu.py` | The NATIVE product's in-game settings menu (POST-ENDGAME widget — see template_dos_port's `docs/post_endgame.md`): tabbed modal overlay, pygame-INJECTED (importing needs nothing), items-as-data closures over host settings, structural determinism firewall (the caller freezes the tick while open; nothing reaches game input). Callers follow the accuracy taxonomy: presentation tabs (read-only, parity-gated) / an **Experimental** tab quarantining anything accuracy-affecting / debug-gated cheats. |
+| `overlay_menu.py` | The NATIVE product's in-game settings menu (POST-ENDGAME widget — see [`post_endgame.md`](post_endgame.md)): tabbed modal overlay, pygame-INJECTED (importing needs nothing), items-as-data closures over host settings, structural determinism firewall (the caller freezes the tick while open; nothing reaches game input). Callers follow the accuracy taxonomy: presentation tabs (read-only, parity-gated) / an **Experimental** tab quarantining anything accuracy-affecting / debug-gated cheats. |
 | `pm_player.py` | The PM (DOS/4GW) play runner: live viewer over `render_pm_frame`, set-1 KBC scancodes (E0 extended pairs), INT 33h mouse, wall-clock vsync pacing via `dos.time_source`, blocking console reads pump real keys, F10/F12, `--snapshot` resume, headless runs. `main()` is the CLI a port's `scripts/play.py` wraps; `tools/pm_view.py` is the zero-setup form. pygame stays lazy. |
 | `audio_sink.py` | `AdlibSpeakerSink`: observer-only viewer audio — the VM's AdLib register stream through Nuked-OPL3 plus the PC-speaker square wave, mixed into one pygame channel with a jitter lead. Never writes game state, so demos replay identically with audio on or off. Wired by `player.py`'s `--audio adlib`; promoted from ancient_port's viewer. |
-| `opl3_fast.py` | The CPython playback backend: a fast APPROXIMATE OPL3 (numpy block renderer, ~50x real-time on real game music, ~290x busy synthetic). Perceptually matched against the exact core — exact pitch math, calibrated ADSR, real stepped LFO patterns, the chip's actual rhythm phase-bit recipe, serial high-feedback recurrence — verified by `tests/test_opl3_fast.py` tolerance checks and an 80s real-music A/B. `dos_re.audio_sink.load_opl3()` is two-way: compiled pynuked_opl3 when built (bit-exact, native — what releases bundle), else `opl3_fast`. The bit-exact pure-Python core was retired from the runtime (too slow at ~1x real-time) and now lives, dormant, in `graveyard/opl3_exact.py` — the calibration/golden reference for `opl3_fast`, never imported by the package or selected at runtime. |
+| `opl3_fast.py` | The CPython playback backend: a fast APPROXIMATE OPL3 (numpy block renderer, ~50x real-time on real game music, ~290x busy synthetic). Perceptually matched against the exact core — exact pitch math, calibrated ADSR, real stepped LFO patterns, the chip's actual rhythm phase-bit recipe, serial high-feedback recurrence — verified by `tests/test_opl3_fast.py` tolerance checks and an 80s real-music A/B. `dos_re.audio_sink.load_opl3()` defaults to `opl3_fast`; the EXTERNAL `pynuked_opl3` package (not a dos_re submodule) is an opt-in bit-exact upgrade via `DOSRE_OPL3_BACKEND=nuked`. The bit-exact pure-Python core was retired from the runtime (too slow at ~1x real-time) and now lives, dormant, in `graveyard/opl3_exact.py` — the calibration/golden reference for `opl3_fast`, never imported by the package or selected at runtime. |
 
 ### Repo layout
 
 ```text
-pynuked_opl3/   submodule: compiled Nuked-OPL3 (optional; bit-exact, native speed)
 dos_re/       the framework package (above)
 docs/         framework reference docs (start at docs/README.md)
 examples/     minimal_adapter/ (runnable end-to-end demo), tiny_frame_game/
-              (full-stack demo) — the adapter_skeleton/ template now lives in
-              template_dos_port
+              (full-stack demo) — new ports scaffold via tools/new_project.py
+              (the retired 1.0 adapter_skeleton template is gone)
 tests/        framework test suite (no game assets needed)
 tools/        lint, test runner, cleaner, linear disassembler, hotspot profiler,
               hook-composition audit, pure-layer VM-leak audit, undefined-name
@@ -134,6 +134,12 @@ must fail loud with a precise gap report, turning the gap into the next task
 instead of hiding it. An unrecovered path is never silently faked and never
 silently falls back to ASM.
 
+**2.0 stage runners are stricter still** (docs/dos_re_2.0.md section 1a): a
+strict-VMless runner does not merely avoid interpretation -- it makes it
+IMPOSSIBLE (`cpu.interp_forbidden` raises on any uncovered address), and the
+EXE-independent runner boots from a generated data-only image with the
+original binary physically absent (section 1a').
+
 ## Layering inside a game adapter
 
 High = closest to ASM, low = closest to pure source. Dependencies point down
@@ -149,7 +155,7 @@ only; the pure layer never imports the VM.
 | **pure** | portable, VM-free game logic and data records | pure only |
 
 See [`state_mirrors.md`](state_mirrors.md) for the bridge/view seam and
-template_dos_port's `docs/methodology.md` for the naming/altitude discipline that
+the retired 1.0 starter's methodology docs (historical) for the naming/altitude discipline that
 keeps each layer honest.
 
 ## Third-party code and dependencies
@@ -160,4 +166,4 @@ interpreter's per-instruction scalar path numpy-free — AGENTS.md has the measu
 why). `tools/lint.py` enforces the boundary. Optional extras (`pyproject.toml`):
 `pygame` for interactive viewers, `pytest` for the test suite.  OPL3 FM
 synthesis is built in (`dos_re/opl3_fast.py`, numpy — the default when the
-compiled pynuked_opl3 is not built).
+optional external pynuked_opl3 is not installed).

@@ -7,13 +7,12 @@ from .cpu import CPU8086, CPUState
 from .dos import DOSMachine
 from .memory import LoadedProgram, load_mz_program
 from .hooks import registry
-
-
-@dataclass
-class Runtime:
-    program: LoadedProgram
-    cpu: CPU8086
-    dos: DOSMachine
+# The Runtime shell + the EXE-FREE image constructor live in runtime_core so the
+# strict-VMless import graph can reach them without reaching this module's
+# load_mz_program loader edge (dos_re_2.0 §"The EXE-independence wall").
+from .runtime_core import (Runtime, create_runtime_from_image, BIOS_INT9_ENTRY,
+                           _BIOS_IRET_STUB, _BIOS_INT9_LINEAR,
+                           _init_bios_environment)
 
 
 @dataclass
@@ -115,40 +114,6 @@ def create_runtime(
     cpu.hook_names[BIOS_INT9_ENTRY] = "bios_int9_keyboard"
     registry.install(cpu)
     return Runtime(program, cpu, dos)
-
-
-# A real BIOS leaves the machine in a known state before a program runs: the
-# hardware-IRQ interrupt vectors point at an IRET stub, and the BIOS data area
-# holds the video config.  Programs rely on both (e.g. chaining the previous IRQ
-# vector, or reading the CRTC base port at 0040:0063).  None of this is
-# program-specific — it is the power-on environment any DOS binary expects.
-_BIOS_IRET_STUB = 0xFFF53  # F000:FF53, the conventional BIOS dummy IRET
-# Dedicated power-on INT 09h (IRQ1) entry.  IVT[9] points here so a game that
-# saves and chains to "the previous keyboard ISR" reaches the native BIOS
-# keyboard handler installed at this address (create_runtime).  F000:E987 is the
-# classic IBM BIOS INT 9 entry point.
-BIOS_INT9_ENTRY = (0xF000, 0xE987)
-_BIOS_INT9_LINEAR = 0xFE987
-
-
-def _init_bios_environment(memory) -> None:
-    data = memory.data
-    data[_BIOS_IRET_STUB] = 0xCF  # IRET (written directly; F000 is ROM-protected via wb/ww)
-    data[_BIOS_INT9_LINEAR] = 0xCF  # IRET fallback if executed without the native handler
-    seg, off = 0xF000, 0xFF53
-    for vec in (*range(0x08, 0x10), *range(0x70, 0x78)):  # IRQ0-7 (INT 08-0F), IRQ8-15 (INT 70-77)
-        base = vec * 4
-        if data[base:base + 4] == b"\x00\x00\x00\x00":
-            if vec == 0x09:  # keyboard IRQ1 -> the native BIOS keyboard handler
-                kb_seg, kb_off = BIOS_INT9_ENTRY
-                data[base], data[base + 1] = kb_off & 0xFF, (kb_off >> 8) & 0xFF
-                data[base + 2], data[base + 3] = kb_seg & 0xFF, (kb_seg >> 8) & 0xFF
-                continue
-            data[base], data[base + 1] = off & 0xFF, (off >> 8) & 0xFF
-            data[base + 2], data[base + 3] = seg & 0xFF, (seg >> 8) & 0xFF
-    # BIOS data area: CRTC base port (color) — read by retrace-wait code via
-    # flat 0463h.  Kept minimal; the game manages the rest of its video state.
-    data[0x463], data[0x464] = 0xD4, 0x03   # 0040:0063 = 03D4h
 
 
 def enable_sound_blaster(rt: Runtime, *, base: int = 0x220, irq: int = 7, dma: int = 1,

@@ -4,8 +4,10 @@ These instructions apply to the whole repository. `dos_re` is an internal,
 agent-facing toolkit — the mechanical/oracle/lifting toolbox that AI agents
 use to build verified DOS source ports. Two roles arrive here:
 
-- **Using the toolbox to port a game** → your method and workspace live in
-  `template_dos_port` (its `AGENTS.md`/`START_HERE.md`); the task → tool →
+- **Using the toolbox to port a game** → the workflow is
+  [`docs/getting_started.md`](docs/getting_started.md) (canonical architecture:
+  [`docs/dos_re_2.0.md`](docs/dos_re_2.0.md); worked reference: the Lemmings
+  pilot, `lemmings_port`); the task → tool →
   command index for THIS repo's machinery is
   [`docs/agent_toolbox.md`](docs/agent_toolbox.md). You touch `dos_re/` only
   under the extension rules below — and when your game needs behaviour the VM
@@ -21,13 +23,26 @@ real-mode (8086) VM and a flat protected-mode (386 / DOS4GW-LE) VM,
 differential hook verification, frame comparison, deterministic
 demos/snapshots, and the automatic lifter (16- and 32-bit pipelines). Extracted from two real recovery
 projects — Prehistorik 2 (primary; the method's completed VM-less proof) and
-Overkill (the earlier pilot); `template_dos_port`'s `MIGRATION.md` records the
-provenance of every part.
+Overkill (the earlier pilot); the retired 1.0 starter's `MIGRATION.md`
+(archived in `template_dos_port`) records the provenance of every part.
 
 ## Working principles
 
 Correctness beats speed. Traceability beats cleverness. Small verified progress
 beats large intuitive rewrites.
+
+- **The DOS_RE 2.0 automation principle is non-negotiable
+  ([`docs/dos_re_2.0.md`](docs/dos_re_2.0.md) §3): the scripts perform the
+  transformations; the AI removes the obstacles; the oracle decides
+  correctness.** Never manually port/rewrite generated functions in bulk.
+  When the pipeline is blocked, classify the blocker — generic capability gap
+  (fix the tooling here, with tests; every future game inherits it) or
+  game-specific recovery fact (record the smallest explicit, evidence-backed
+  declaration in the port and feed it to the pipeline) — then REGENERATE and
+  re-verify end-to-end. Generated output is disposable; hand-patching it is
+  not a fix. Use the canonical stage vocabulary (interpreted oracle → VMless
+  lifted → CPUless lifted → DOS-layout-less native → semantic clean port);
+  "native" is banned as a bare term.
 
 - **`dos_re/` must stay game-agnostic; numpy is first-class, pygame is
   viewer-only.** No game addresses, filenames, or formats in the core. numpy

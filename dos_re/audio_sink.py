@@ -6,7 +6,7 @@ channel with a small jitter lead.  It never writes game state, so demos replay
 identically with audio on or off — it is safe to wire into any port's viewer.
 
 Part of the FRONTEND RING (see tools/lint.py): needs numpy + pygame.  The
-OPL3 backend comes from ``load_opl3`` — the compiled pynuked_opl3 when built,
+OPL3 backend comes from ``load_opl3`` — opl3_fast by default (opt-in external pynuked_opl3),
 else the numpy approximate ``dos_re.opl3_fast`` (the everyday default; the
 bit-exact core is dormant in graveyard/, never selected at runtime).
 
@@ -23,39 +23,34 @@ from __future__ import annotations
 def load_opl3():
     """Return ``(OPL3_class, backend_label)`` — the runtime OPL3 backend.
 
-    Two-way choice, same on every interpreter:
+    The DEFAULT (and only bundled) backend is ``opl3-fast`` —
+    ``dos_re.opl3_fast``, the numpy APPROXIMATE synth (~50x real-time on
+    CPython; perceptually indistinguishable from the exact chip on real game
+    music in blind A/B — calibration + evidence in its module docstring /
+    tests).  It is build-free and dependency-free beyond numpy.
 
-    - ``nuked-opl3-c`` — the vendored pynuked_opl3 cffi build when compiled
-      (bit-exact, native speed); build once: python -m pynuked_opl3._ffi_build.
-      This is what shipped releases bundle.
-    - ``opl3-fast``    — otherwise: dos_re.opl3_fast, the numpy APPROXIMATE
-      synth (~50x real-time on CPython, ~43x on PyPy; perceptually
-      indistinguishable from the exact chip on real game music in blind A/B —
-      calibration + evidence in its module docstring / tests).
+    Projects that want a bit-exact OPL3 can OPT IN to the external
+    ``pynuked_opl3`` package (https://github.com/missingno7/pynuked_opl3 — a
+    cffi build of Nuked-OPL3; build once with ``python -m
+    pynuked_opl3._ffi_build``) and select it with
+    ``DOSRE_OPL3_BACKEND=nuked``.  It is NOT a dos_re submodule and dos_re
+    never requires it; when requested but not importable/built, this falls
+    back to ``opl3-fast``.
 
     The bit-exact pure-Python core was retired from the runtime (too slow at
     ~1x real-time) and now lives in ``graveyard/opl3_exact.py`` as the
     calibration/golden reference only — it is never selected here.
-
-    Override with ``DOSRE_OPL3_BACKEND=fast`` (or ``c``) to force a backend —
-    ``fast`` is the right choice for interactive/recording sessions (build-free
-    and faster; bit-exactness only matters for golden verification).
     """
     import os
     pref = os.environ.get("DOSRE_OPL3_BACKEND", "").strip().lower()
-    if pref not in ("c", "nuked", "nuked-opl3-c"):
-        # Default (no override) still prefers the compiled backend when built;
-        # "fast" forces the build-free approximate synth.
-        if pref == "fast":
-            from dos_re.opl3_fast import OPL3Fast
-            return OPL3Fast, "opl3-fast"
-    try:
-        from pynuked_opl3 import OPL3 as _COPL3
+    if pref in ("c", "nuked", "nuked-opl3-c"):
+        try:
+            from pynuked_opl3 import OPL3 as _COPL3
 
-        _COPL3()  # probe: the package imports even when its extension is unbuilt
-        return _COPL3, "nuked-opl3-c"
-    except Exception:  # noqa: BLE001 — no compiled backend
-        pass
+            _COPL3()  # probe: the package imports even when its extension is unbuilt
+            return _COPL3, "nuked-opl3-c"
+        except Exception:  # noqa: BLE001 — optional accuracy package absent/unbuilt
+            pass
     from dos_re.opl3_fast import OPL3Fast
 
     return OPL3Fast, "opl3-fast"
@@ -87,7 +82,7 @@ class AdlibSpeakerSink:
             pygame.mixer.set_num_channels(2)
         self._channel = pygame.mixer.Channel(1)
 
-        # OPL3 backend: compiled pynuked_opl3 when built, else opl3_fast (see load_opl3).
+        # OPL3 backend: opl3_fast by default; external pynuked_opl3 by opt-in (see load_opl3).
         opl_cls, self.opl_label = load_opl3()
         self._opl = opl_cls(sample_rate=self._rate)
         # PC speaker square-wave state (phase-continuous across chunks).

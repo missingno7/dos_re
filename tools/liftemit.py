@@ -1,22 +1,34 @@
 #!/usr/bin/env python3
 """liftemit — batch-emit every census entry to lifted Python, in one pass.
 
-The bulk-emission step of the automatic recovery pipeline: given the census
-entry list and a snapshot whose memory is the code-bytes authority, emit a
-lifted module per entry into ``--emit-dir``.  No verification and no driving —
-that is ``liftverify``'s job (per-slice) and, for the assembled graph, the
-END-TO-END oracle's.  Under oracle-guided convergence the whole census is
-emitted optimistically here, linked by ``liftlink --structural-edges``, then
-validated as a graph; ``liftemit`` is the deterministic "labor" that produces
-the candidate modules.
+The bulk-emission step of the DOS_RE 2.0 pipeline (docs/dos_re_2.0.md): given
+the census entry list and a snapshot whose memory is the code-bytes authority,
+emit a VMless lifted module per entry into ``--emit-dir``.  No verification
+and no driving — that is ``liftverify``'s job (per-slice diagnostics / hybrid
+tier) and, for the assembled graph, the END-TO-END oracle's.  Under
+oracle-guided convergence the whole census is emitted optimistically here,
+linked by ``liftlink`` (structural edges), then validated as a graph;
+``liftemit`` is the deterministic "labor" that produces the candidate modules.
 
-Emission is byte-identical to ``liftverify``'s emit path (same signature
-recipe, ``coverage=True``, same ``--max-iterations`` default) so a module
-emitted here and one emitted during verification are the same file.
+Emission uses ``liftverify``'s exact signature recipe and iteration default,
+but coverage instrumentation (per-block BLOCKS_SEEN bookkeeping) is OFF by
+default: this tool emits the PRODUCTION corpus the assembled graph installs,
+and per-call/per-block instrumentation is verification-tier overhead (it made
+the Lemmings fade paths measurably slower).  Pass ``--coverage`` to emit
+byte-identically to liftverify's modules when a proof pass will reuse them.
+
+The VMLESS WALL (docs/dos_re_2.0.md §1a) is checked here mechanically: after
+emission every module is scanned for ``interp_one`` call sites (instruction-
+interpretation fallback inside the declared corpus).  The count is always
+reported; ``--require-vmless-wall`` makes any nonzero count a hard failure —
+the flag a port's pipeline should pass once its corpus reaches zero, so a
+regression (a new opcode the emitter falls back on) fails the build instead
+of silently re-entering the interpreter.
 
 Usage:
     python tools/liftemit.py --exe GAME.EXE --snapshot DIR \
-        --entries-file entries.txt [--emit-dir lifted] [--max-iterations N]
+        --entries-file entries.txt [--emit-dir lifted] [--max-iterations N] \
+        [--require-vmless-wall]
 """
 from __future__ import annotations
 
@@ -53,7 +65,10 @@ def _probe(rt, cs):
     return probe
 
 
-def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations):
+def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations,
+               coverage: bool = False, drop_dead_flags: bool = False,
+               boundary_heads: frozenset = frozenset(),
+               dispatch_entries: frozenset = frozenset()):
     """Emit one entry.  Returns ("ok"|"not-liftable"|"emit-unsupported", detail)."""
     name = f"lifted_{cs:04x}_{ip:04x}"
     scan = scan_function(lambda off: mem.rb(cs, off & 0xFFFF), ip, probe=_probe(rt, cs))
@@ -63,8 +78,20 @@ def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations):
                      if i.kind != "seq" and i.ip >= ip), default=(ip + 8) & 0xFFFF)
     sig = bytes(mem.rb(cs, (ip + k) & 0xFFFF)
                 for k in range(max(4, min(16, (block_end - ip) & 0xFFFF))))
+    dead = frozenset()
+    if drop_dead_flags:
+        from dos_re.lift.analyze import dead_flag_sites
+        dead = frozenset(dead_flag_sites(scan))
     try:
-        src = emit_function(scan, cs, name, signature=sig, coverage=True,
+        src = emit_function(scan, cs, name, signature=sig, coverage=coverage,
+                            count_instructions=True, dead_flag_ips=dead,
+                            boundary_heads=frozenset(
+                                hip for hcs, hip in boundary_heads
+                                if hcs == cs),
+                            dispatch_entries=frozenset(
+                                dip for dcs, dip in dispatch_entries
+                                if dcs == cs),
+                            resume_calls=bool(boundary_heads or dispatch_entries),
                             min_iterations=max_iterations)
     except EmitUnsupported as exc:
         return "emit-unsupported", str(exc)
@@ -72,44 +99,179 @@ def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations):
     return "ok", name
 
 
+def emit_entry_from_ir(fn_rec: dict, emit_dir: Path, max_iterations,
+                       coverage: bool = False, drop_dead_flags: bool = False,
+                       boundary_heads: frozenset = frozenset(),
+                       dispatch_entries: frozenset = frozenset()):
+    """Emit one entry FROM THE RECOVERY IR (docs/recovery_ir.md §3).
+
+    The record is re-elaborated by the shared consumer (``dos_re.lift.ir``):
+    the ONE decoder/scanner runs over the IR's pinned bytes — no second
+    decode path, and byte-identical output to the scan-path emit when the IR
+    captured the same code bytes."""
+    from dos_re.lift.ir import record_signature, scan_from_ir_record
+    entry = fn_rec["entry"]
+    cs, ip = parse_addr(entry)
+    name = f"lifted_{cs:04x}_{ip:04x}"
+    if not fn_rec.get("liftable"):
+        reasons = ",".join(sorted({r["reason"] for r in fn_rec.get("refusals", ())}))
+        return "not-liftable", reasons
+    try:
+        scan = scan_from_ir_record(fn_rec)
+    except ValueError as exc:
+        return "emit-unsupported", str(exc)
+    dead = frozenset()
+    if drop_dead_flags:
+        from dos_re.lift.analyze import dead_flag_sites
+        dead = frozenset(dead_flag_sites(scan))
+    try:
+        src = emit_function(scan, cs, name, signature=record_signature(fn_rec),
+                            coverage=coverage, count_instructions=True,
+                            dead_flag_ips=dead,
+                            boundary_heads=frozenset(
+                                hip for hcs, hip in boundary_heads
+                                if hcs == cs),
+                            dispatch_entries=frozenset(
+                                dip for dcs, dip in dispatch_entries
+                                if dcs == cs),
+                            resume_calls=bool(boundary_heads or dispatch_entries),
+                            min_iterations=max_iterations)
+    except EmitUnsupported as exc:
+        return "emit-unsupported", str(exc)
+    (emit_dir / f"{name}.py").write_text(src, encoding="utf-8")
+    return "ok", name
+
+
+def vmless_wall_report(emit_dir: Path):
+    """The VMless-wall static check: ``interp_one`` CALL SITES per module.
+
+    Counts real fallback invocations (``interp_one(``) — the import line and
+    prose mentions do not match.  Returns {module_name: count} for modules
+    with a nonzero count."""
+    offenders: dict[str, int] = {}
+    for path in sorted(emit_dir.glob("lifted_*.py")):
+        n = path.read_text(encoding="utf-8").count("interp_one(")
+        if n:
+            offenders[path.name] = n
+    return offenders
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--exe", required=True)
-    ap.add_argument("--snapshot", required=True,
+    ap.add_argument("--exe")
+    ap.add_argument("--snapshot",
                     help="snapshot whose memory is the code-bytes authority")
     ap.add_argument("--game-root", default=None)
-    ap.add_argument("--entries-file", required=True,
+    ap.add_argument("--entries-file",
                     help="census entry list (tools/codemap.py output)")
+    ap.add_argument("--from-ir", default=None, metavar="recovery_ir.json",
+                    help="emit from the RECOVERY IR instead of exe+snapshot+"
+                         "entries (docs/recovery_ir.md): the IR document is "
+                         "the single input; byte-identical output when the "
+                         "IR captured the same code bytes")
     ap.add_argument("--emit-dir", default="lifted")
     ap.add_argument("--max-iterations", type=int, default=None, metavar="N",
                     help="runaway-loop guard baked into each module "
                          "(default: emitter default, currently 20000)")
+    ap.add_argument("--coverage", action="store_true",
+                    help="emit with per-block coverage instrumentation "
+                         "(liftverify-identical modules); default OFF for "
+                         "the production corpus")
+    ap.add_argument("--boundary-heads", default=None, metavar="@FILE",
+                    help="boundary-head addresses (one CS:IP per line): each "
+                         "gets an emitted observer event + a RESUME entry, so "
+                         "the port's clock parks and resumes in host code "
+                         "(the VMless wall's boundary instrumentation)")
+    ap.add_argument("--dispatch-entries", default=None, metavar="@FILE",
+                    help="dynamic dispatch-entry addresses (one CS:IP per "
+                         "line): interior addresses reached by indirect "
+                         "control flow.  Each is forced as a block leader and "
+                         "exported so the installer registers a re-entry hook "
+                         "into the CONTAINING function -- sharing its "
+                         "recovered blocks, not cloning them into a module.")
+    ap.add_argument("--drop-dead-flags", action="store_true",
+                    help="de-carrier pass 1: elide flag writes proven "
+                         "unobservable by analyze.dead_flag_sites "
+                         "(seam-conservative liveness). Judged end-to-end "
+                         "like every transformation.")
+    ap.add_argument("--require-vmless-wall", action="store_true",
+                    help="fail (exit 2) if any emitted module contains an "
+                         "interp_one fallback call site -- the enforced VMless "
+                         "execution wall (docs/dos_re_2.0.md section 1a)")
     args = ap.parse_args(argv)
-
-    entries = []
-    for line in Path(args.entries_file).read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            entries.append(parse_addr(line))
+    if not args.from_ir and not (args.exe and args.snapshot and args.entries_file):
+        ap.error("either --from-ir IR.json or --exe + --snapshot + --entries-file")
 
     emit_dir = Path(args.emit_dir)
     emit_dir.mkdir(parents=True, exist_ok=True)
-    rt = load_snapshot(args.exe, args.snapshot, game_root=args.game_root)
-    rt.cpu.trace_enabled = False
-    mem = rt.cpu.mem
+
+    def _read_pairs(argval):
+        if not argval:
+            return frozenset()
+        out = []
+        for line in Path(argval.lstrip("@")).read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                out.append(parse_addr(line))
+        return frozenset(out)
+    heads = _read_pairs(args.boundary_heads)
+    dispatch = _read_pairs(args.dispatch_entries)
 
     counts = {"ok": 0, "not-liftable": 0, "emit-unsupported": 0}
     skipped: list[tuple[str, str, str]] = []
-    for cs, ip in entries:
-        status, detail = emit_entry(mem, rt, cs, ip, emit_dir, args.max_iterations)
-        counts[status] += 1
-        if status != "ok":
-            skipped.append((f"{cs:04X}:{ip:04X}", status, detail))
-            print(f"skip     {cs:04X}:{ip:04X}: {status} ({detail})")
+    if args.from_ir:
+        import json
+        doc = json.loads(Path(args.from_ir).read_text(encoding="utf-8"))
+        recs = doc["functions"]
+        n_total = len(recs)
+        for entry in sorted(recs):
+            status, detail = emit_entry_from_ir(
+                recs[entry], emit_dir, args.max_iterations,
+                coverage=args.coverage,
+                drop_dead_flags=args.drop_dead_flags,
+                boundary_heads=heads, dispatch_entries=dispatch)
+            counts[status] += 1
+            if status != "ok":
+                skipped.append((entry, status, detail))
+                print(f"skip     {entry}: {status} ({detail})")
+    else:
+        entries = []
+        for line in Path(args.entries_file).read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                entries.append(parse_addr(line))
+        n_total = len(entries)
+        rt = load_snapshot(args.exe, args.snapshot, game_root=args.game_root)
+        rt.cpu.trace_enabled = False
+        mem = rt.cpu.mem
+        for cs, ip in entries:
+            status, detail = emit_entry(mem, rt, cs, ip, emit_dir,
+                                        args.max_iterations,
+                                        coverage=args.coverage,
+                                        drop_dead_flags=args.drop_dead_flags,
+                                        boundary_heads=heads,
+                                        dispatch_entries=dispatch)
+            counts[status] += 1
+            if status != "ok":
+                skipped.append((f"{cs:04X}:{ip:04X}", status, detail))
+                print(f"skip     {cs:04X}:{ip:04X}: {status} ({detail})")
 
-    print(f"\nemitted {counts['ok']}/{len(entries)} modules to {emit_dir} "
+    print(f"\nemitted {counts['ok']}/{n_total} modules to {emit_dir} "
           f"(not-liftable={counts['not-liftable']}, "
           f"emit-unsupported={counts['emit-unsupported']})")
+
+    offenders = vmless_wall_report(emit_dir)
+    total_sites = sum(offenders.values())
+    if offenders:
+        print(f"VMless wall: {total_sites} interp_one fallback call site(s) "
+              f"in {len(offenders)} module(s):")
+        for name, n in sorted(offenders.items()):
+            print(f"  {name}: {n}")
+    else:
+        print("VMless wall: HOLDS (0 interp_one call sites in the corpus)")
+    if args.require_vmless_wall and offenders:
+        print("--require-vmless-wall: FAIL")
+        return 2
     return 0 if not skipped else 1
 
 

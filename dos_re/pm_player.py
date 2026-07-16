@@ -684,7 +684,7 @@ def run_replay(rt, demo_path, *, boot_keys=(), extra_frames: int = 30,
     def _finish():
         if demo.digests and not check_digests:
             print(f"demo replayed (v{demo.version} digests are memory-only and "
-                  f"predate the full-state fingerprint — self-verification "
+                  f"predate the full-state fingerprint -- self-verification "
                   f"skipped; re-record to self-verify)")
         elif demo.digests:
             if diverged["frame"] is None:

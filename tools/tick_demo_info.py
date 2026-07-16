@@ -26,7 +26,7 @@ def describe(path: str) -> int:
     try:
         demo = TickDemo.load(path)
     except Exception as e:  # noqa: BLE001 — a bad file is the finding
-        print(f"{path}: NOT LOADABLE — {type(e).__name__}: {e}")
+        print(f"{path}: NOT LOADABLE -- {type(e).__name__}: {e}")
         return 1
     klen = len(demo.keys[0]) if demo.keys else 0
     print(f"{path}:")
@@ -41,7 +41,7 @@ def describe(path: str) -> int:
     else:
         print("  sideband    : (none)")
     if demo.digests:
-        print(f"  digests     : {len(demo.digests)} (first {demo.digests[0][:12]}…, last {demo.digests[-1][:12]}…)")
+        print(f"  digests     : {len(demo.digests)} (first {demo.digests[0][:12]}..., last {demo.digests[-1][:12]}...)")
     return 0
 
 

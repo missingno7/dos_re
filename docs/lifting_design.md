@@ -1,5 +1,22 @@
 # Automatic literal lifting: ASM function → Python hook → oracle → refactor
 
+> **DOS_RE 2.0 supersession note (2026-07-17).**  This document designed the
+> lifter under the 1.x risk model: lift one function, prove it ORACLE_PASSING,
+> only then trust it.  Under DOS_RE 2.0 ([`dos_re_2.0.md`](dos_re_2.0.md), the
+> canonical architecture) that per-function gate applies ONLY to the hybrid
+> auto-install tier.  Graph assembly is different: the largest supported
+> **VMless lifted graph** is emitted (`tools/liftemit.py`), structurally linked
+> (`tools/liftlink.py`), installed whole (`lift.install.install_vmless_graph`),
+> and judged by END-TO-END oracle comparison with auto-bisection
+> (`tools/hook_bisect.py`) — per-function ORACLE_PASSING is metadata, not a
+> precondition.  Wherever this document says or implies "proven before
+> linked/installed", read it as describing the hybrid tier or as historical.
+> The M0–M4 roadmap in §10 is the 1.x lifter roadmap; the project-level
+> milestones are now M1–M6 in `dos_re_2.0.md` §6.  Terminology: what this doc
+> calls the eventual "native" artifact is, in 2.0 vocabulary, the **VMless
+> lifted runtime** — the CPU carrier and DOS memory model are removed by later
+> stages (CPUless emitter, DOS-layout dissolution), not by this lifter.
+
 > **Two ISA pipelines.** This document describes the design in its original
 > 16-bit terms; the 32-bit flat (DOS/4GW / CPU386) counterpart mirrors it
 > module for module — `decode32`/`cfg32`/`emit32`/`runtime32`, verified by
@@ -14,7 +31,7 @@
 > original; a passing lift is then refactored into clean recovered source
 > with the same oracle. Proven end to end: skyroads_port's first island (its
 > master timer ISR) was recovered this way. The lifter is the optional
-> accelerator a porting agent reaches for (wired into `template_dos_port`'s
+> accelerator a porting agent reaches for (wired into the port workflow's
 > checklist + cookbook, and adopted as an overkill_port workflow invariant).
 
 ## 0. The idea, in this ecosystem's terms
@@ -219,6 +236,12 @@ INSTALLED             running as the default replacement (still guarded by entry
 REFACTORED            the agent rewrote into real recovered Python; SAME tests green
 ```
 
+> **2.0 scope of this ladder:** these statuses gate the HYBRID auto-install
+> tier (`install_passing_lifts`) and serve diagnostics/regression.  They do
+> NOT gate structural linking or inclusion in the assembled VMless graph —
+> that is judged end-to-end (see the supersession note at the top and
+> `dos_re_2.0.md` §2).
+
 - Promotion LIFTED → ORACLE_PASSING is done by a driver
   (`tools/liftverify.py`) that replays chosen demos with the verifier
   attached and writes results into the island manifest — the same evidence
@@ -293,7 +316,7 @@ translation at scale).
   port, zero hooks, hot LZS/frame candidates already profiled).
 - **M3 — the refactor loop, proven end-to-end.** Take 2–3 ORACLE_PASSING
   lifted islands, have the AI refactor them to clean Python with tests
-  unchanged, land as REFACTORED. Update `template_dos_port` methodology docs
+  unchanged, land as REFACTORED. Update the framework method docs
   + prompts. This is the milestone that proves the *actual* thesis.
 - **M4+ — widen.** Jump tables; runtime-bail partial lifts; block-local
   register caching if profiling justifies; structurizer pass (source-to-
@@ -434,7 +457,7 @@ round-trips as readable JSON. `tests/test_lift_manifest.py` adds ledger
 round-trip, the disjoint-status invariant, and accumulating block-coverage
 tests; the lift suite is now 77 cases.
 
-Discoverability: `template_dos_port` now teaches the tool — a new "Automatic
+Discoverability: the getting-started workflow now teaches the tool — a new "Automatic
 lifting" cookbook entry (problem-indexed) and an "optional accelerator" block
 in the porting checklist's lifting-loop step, both stressing that a lift is
 recovered *only after* an AI refactors it and tags `@oracle_link` (M3).

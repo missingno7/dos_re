@@ -21,10 +21,9 @@ What's here:
 | [`minimal_adapter/`](minimal_adapter/example.py) | 5-minute demo of the hook → verify → snapshot loop on a straight-line program. |
 | [`tiny_frame_game/`](tiny_frame_game/README.md) | The whole lifecycle on a synthetic frame-loop game (oracle boot, cold-start demos, both verification oracles, state mirror). Doubles as the repo's full-stack integration test. |
 
-The adapter template you copy to start a real game port (`adapter_skeleton/`)
-lives in the `template_dos_port` repo now, not here — this repo (`dos_re`) is the
-framework only, meant to be consumed as a git submodule from `template_dos_port`
-(or any other adapter repo). When you start a real port, your adapter package
-lives **at the porting repo's root, next to its `dos_re/` submodule** (e.g.
-`mygame/`). See `template_dos_port`'s `START_HERE.md` step 2 for the conventions
-that come with it (tests, lint roots, asset-skip).
+To start a real game port, do NOT copy files from here: scaffold a port repo
+with `python tools/new_project.py --game mygame --output ../mygame_port`
+(docs/getting_started.md) — this repo (`dos_re`) is the framework only,
+consumed as a git submodule.  Your adapter package lives **at the port repo's
+root, next to its `dos_re/` submodule** (e.g. `mygame/`); the Lemmings pilot
+(`lemmings_port`) is the worked reference.

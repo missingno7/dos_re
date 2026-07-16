@@ -25,9 +25,10 @@ SOFTWARE.
 Exceptions (third-party-derived components; the MIT license above applies to
 everything else in this repository):
 
-1. The vendored pynuked_opl3/ package (the Nuked-OPL3 emulator core and its
+1. The OPTIONAL external pynuked_opl3 package (the Nuked-OPL3 emulator core and its
    Python binding) is licensed under LGPL-2.1-or-later — see
-   pynuked_opl3/LICENSE. It is an optional, self-contained accelerator.
+   its own LICENSE (LGPL-2.1-or-later). It is an optional, external accuracy
+   upgrade (https://github.com/missingno7/pynuked_opl3), no longer bundled.
 
 2. dos_re/opl3.py — the exact pure-Python OPL3 core — is a literal Python
    translation of Nuked-OPL3 v1.8 (Copyright (C) 2013-2020 Nuke.YKT,

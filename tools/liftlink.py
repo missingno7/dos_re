@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
-"""liftlink — batch linker: proven ``emulate_call`` edges become direct native calls.
+"""liftlink — batch linker: ``emulate_call`` edges become direct lifted-to-lifted calls.
 
-The de-VM pass of the automatic recovery pipeline (M-C).  ``emit_function``
-already knows how to emit a linked direct call (``link_map`` →
-``call_installed_hook_like_near_call``); this tool computes WHICH edges are
-safe and re-emits every caller that gains one.
+The VM-detachment linking pass of the DOS_RE 2.0 pipeline
+(docs/dos_re_2.0.md): after ``liftemit`` produces the VMless lifted corpus,
+this tool turns interpreter-mediated near CALLs between lifted functions into
+direct Python calls, producing the structurally linked VMless graph.
+``emit_function`` already knows how to emit a linked direct call (``link_map``
+→ ``call_installed_hook_like_near_call``); this tool computes WHICH edges
+qualify and re-emits every caller that gains one.
 
-Edge rule (the link precondition — enforced here, not by the emitter):
+Edge rule (STRUCTURAL — the 2.0 default):
 
     caller scan is liftable, the near-CALL target is itself a census entry in
-    the SAME segment (near calls guarantee that), the callee's proof status is
-    ORACLE_PASSING on at least one board, and EVERY callee exit is a near
-    ``ret`` — tail-exit / retf / iret callees stay ``emulate_call``.
+    the SAME segment (near calls guarantee that), and EVERY callee exit is a
+    near ``ret`` — tail-exit / retf / iret callees stay ``emulate_call``.
+
+Correctness of the linked graph is judged END-TO-END: full-state oracle
+comparison at tick boundaries over the assembled graph, with
+``tools/hook_bisect.py`` localizing any divergence to the responsible
+function.  Per-function ORACLE_PASSING is NOT a link precondition —
+``--proven-edges`` restores that 1.x conservative gate for the hybrid tier or
+for debugging, but it must not be the default posture (oracle-guided
+convergence, docs/dos_re_2.0.md §2).
 
 Everything is rescanned from the snapshot (``scan_function`` with the
 interpreter probe, exactly as liftverify does) — stale census artifacts are
@@ -104,9 +114,43 @@ def all_near_ret_exits(scan: FunctionScan) -> bool:
     return bool(scan.exits) and all(i.kind == "ret" for i in scan.exits)
 
 
+def all_far_ret_exits(scan: FunctionScan) -> bool:
+    """True when every exit is ``retf`` — the far-linkable callee shape
+    (``call_installed_hook_like_far_call`` pushes CS:IP; only retf pops both)."""
+    return bool(scan.exits) and all(i.kind == "retf" for i in scan.exits)
+
+
+def compute_far_link_edges(scans: dict[tuple[int, int], FunctionScan],
+                           *, exclude: frozenset[str] = frozenset()):
+    """The far-linkable edge set: direct far CALLs between census entries whose
+    callee exits are all ``retf``.  Structural rule only (the 2.0 posture);
+    same exclusion semantics as near edges."""
+    edges: list[tuple[str, str]] = []
+    blocked: list[tuple[str, str, str]] = []
+    for (cs, ip), scan in sorted(scans.items()):
+        if not scan.liftable:
+            continue
+        caller_key = f"{cs:04X}:{ip:04X}"
+        for seg, off in sorted(scan.calls_far):
+            callee_key = f"{seg:04X}:{off:04X}"
+            callee = scans.get((seg, off))
+            if callee_key in exclude:
+                blocked.append((caller_key, callee_key, "excluded-callee"))
+            elif callee is None:
+                blocked.append((caller_key, callee_key, "not-an-entry"))
+            elif not callee.liftable:
+                blocked.append((caller_key, callee_key, "callee-not-liftable"))
+            elif not all_far_ret_exits(callee):
+                blocked.append((caller_key, callee_key, "exit-shape"))
+            else:
+                edges.append((caller_key, callee_key))
+    return edges, blocked
+
+
 def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
-                       statuses: dict[str, str], *, structural: bool = False):
-    """The linkable edge set from fresh scans + proof statuses.
+                       statuses: dict[str, str], *, structural: bool = True,
+                       exclude: frozenset[str] = frozenset()):
+    """The linkable edge set from fresh scans (+ proof statuses if gated).
 
     Returns ``(edges, blocked)``: ``edges`` is ``[("CS:IP", "CS:IP"), ...]``
     (caller, callee) and ``blocked`` is ``[(caller, callee, reason), ...]``
@@ -115,15 +159,25 @@ def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
 
     Two edge rules:
 
-    * default (conservative) — a callee qualifies only when it is a liftable
-      census entry, has all-near-``ret`` exits, AND is ORACLE_PASSING on some
-      board.  Safe standalone: a linked call can only reach proven code.
-    * ``structural=True`` (oracle-guided convergence, opt-in) — drop the
-      ORACLE_PASSING precondition; a callee qualifies on the STRUCTURAL
-      criterion alone (liftable entry, all-near-``ret`` exits).  Correctness is
-      then guaranteed not per-callee but by the END-TO-END oracle comparison
-      over the assembled graph, which localizes the first bad piece
-      (tools/hook_bisect.py).  Use only under that verification regime."""
+    * ``structural=True`` (DEFAULT — oracle-guided convergence): a callee
+      qualifies on the STRUCTURAL criterion alone (liftable census entry,
+      all-near-``ret`` exits).  Correctness is guaranteed not per-callee but
+      by END-TO-END oracle comparison over the assembled graph, which
+      localizes the first bad piece (tools/hook_bisect.py).
+    * ``structural=False`` (1.x conservative, ``--proven-edges``) — a callee
+      must additionally be ORACLE_PASSING on some board.  Safe standalone (a
+      linked call reaches only proven code); useful for the hybrid tier and
+      for debugging, but it is not the assembly posture.
+
+    ``exclude`` ("CS:IP" strings) blocks edges INTO entries the port keeps
+    interpreted (boundary-shadowing functions, env-wait recovery facts).  This
+    matters because a linked call binds the callee's lifted body DIRECTLY
+    (``LINKS`` default in ``call_installed_hook_like_near_call``), bypassing
+    the installation skip entirely — an excluded callee reached through a
+    linked edge would run lifted anyway, skipping its boundary sentinels and
+    pacing waits (the Lemmings fade-crawl failure).  Blocking the edge makes
+    callers ``emulate_call`` the excluded callee, so the interpreter's
+    sentinel hooks, wait pacing, and IRQ machinery all apply."""
     edges: list[tuple[str, str]] = []
     blocked: list[tuple[str, str, str]] = []
     for (cs, ip), scan in sorted(scans.items()):
@@ -131,9 +185,11 @@ def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
             continue
         caller_key = f"{cs:04X}:{ip:04X}"
         for target in sorted(scan.calls_near):
-            callee_key = f"{cs:04X}:{target:04X}"   # near call ⇒ same segment
+            callee_key = f"{cs:04X}:{target:04X}"   # near call => same segment
             callee = scans.get((cs, target))
-            if callee is None:
+            if callee_key in exclude:
+                blocked.append((caller_key, callee_key, "excluded-callee"))
+            elif callee is None:
                 blocked.append((caller_key, callee_key, "not-an-entry"))
             elif not callee.liftable:
                 blocked.append((caller_key, callee_key, "callee-not-liftable"))
@@ -154,15 +210,33 @@ def links_table_line(target_keys) -> str:
 
 
 def relink_source(scan: FunctionScan, cs: int, target_ips, *,
-                  signature: bytes, min_iterations: int | None = None) -> str:
-    """Re-emit a caller with the given near-call targets linked."""
+                  far_targets=(), signature: bytes,
+                  min_iterations: int | None = None,
+                  drop_dead_flags: bool = False,
+                  boundary_heads: frozenset = frozenset(),
+                  dispatch_entries: frozenset = frozenset()) -> str:
+    """Re-emit a caller with the given near (and far) call targets linked."""
     name = f"lifted_{cs:04x}_{scan.entry:04x}"
     targets = sorted(set(target_ips))
+    fars = sorted(set(far_targets))
     link_map = {t: f'LINKS["{cs:04X}:{t:04X}"]' for t in targets}
+    far_link_map = {(fs, fo): f'LINKS["{fs:04X}:{fo:04X}"]' for fs, fo in fars}
+    dead = frozenset()
+    if drop_dead_flags:
+        from dos_re.lift.analyze import dead_flag_sites
+        dead = frozenset(dead_flag_sites(scan))
+    keys = [f"{cs:04X}:{t:04X}" for t in targets] +            [f"{fs:04X}:{fo:04X}" for fs, fo in fars]
     return emit_function(
-        scan, cs, name, signature=signature, coverage=True,
+        scan, cs, name, signature=signature, coverage=False,
+        count_instructions=True, dead_flag_ips=dead,
+        boundary_heads=frozenset(hip for hcs, hip in boundary_heads
+                                 if hcs == cs),
+        dispatch_entries=frozenset(dip for dcs, dip in dispatch_entries
+                                   if dcs == cs),
+        resume_calls=bool(boundary_heads or dispatch_entries),
         min_iterations=min_iterations, link_map=link_map,
-        link_imports=(links_table_line(f"{cs:04X}:{t:04X}" for t in targets),))
+        far_link_map=far_link_map,
+        link_imports=(links_table_line(keys),))
 
 
 def count_emulate_calls(src: str) -> int:
@@ -195,15 +269,22 @@ def _fresh_signature(mem, cs: int, ip: int, scan: FunctionScan) -> bytes:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--exe", required=True)
-    ap.add_argument("--snapshot", required=True,
+    ap.add_argument("--exe")
+    ap.add_argument("--snapshot",
                     help="snapshot whose memory is the code-bytes authority")
     ap.add_argument("--game-root", default=None)
-    ap.add_argument("--entries-file", required=True,
+    ap.add_argument("--entries-file",
                     help="census entry list (tools/codemap.py output)")
-    ap.add_argument("--board", action="append", required=True, metavar="JSON",
-                    help="proof board / lift manifest JSON (repeatable; "
-                         "ORACLE_PASSING on any board qualifies a callee)")
+    ap.add_argument("--from-ir", default=None, metavar="recovery_ir.json",
+                    help="take code identity from the RECOVERY IR instead of "
+                         "exe+snapshot+entries (docs/recovery_ir.md): scans "
+                         "are re-elaborated from the IR's pinned bytes by the "
+                         "one decoder; no snapshot rescans")
+    ap.add_argument("--board", action="append", default=[], metavar="JSON",
+                    help="proof board / lift manifest JSON (repeatable). "
+                         "Optional under the structural default; required "
+                         "with --proven-edges, where ORACLE_PASSING on any "
+                         "board qualifies a callee.")
     ap.add_argument("--emit-dir", default="lifted",
                     help="where the current emitted modules live (signatures / "
                          "iteration budgets / before-counts are read from here)")
@@ -213,37 +294,94 @@ def main(argv=None) -> int:
     ap.add_argument("--json", default=None, metavar="REPORT",
                     help="write the machine-readable link report here")
     ap.add_argument("--structural-edges", action="store_true",
-                    help="link on the structural criterion alone (liftable "
-                         "entry + all-near-ret exits), dropping the "
-                         "ORACLE_PASSING precondition. Correctness then rests "
-                         "on the END-TO-END oracle over the assembled graph "
-                         "(oracle-guided convergence); use only under that "
-                         "regime, with hook_bisect for divergence localization.")
+                    help="(default since DOS_RE 2.0; flag kept for "
+                         "compatibility) link on the structural criterion "
+                         "alone: liftable entry + all-near-ret exits.")
+    ap.add_argument("--proven-edges", action="store_true",
+                    help="1.x conservative gate: additionally require the "
+                         "callee to be ORACLE_PASSING on some --board. For "
+                         "the hybrid tier / debugging only -- graph assembly "
+                         "is judged end-to-end (docs/dos_re_2.0.md section 2).")
+    ap.add_argument("--boundary-heads", default=None, metavar="@FILE",
+                    help="boundary-head addresses (one CS:IP per line); must "
+                         "match the liftemit setting for a consistent corpus")
+    ap.add_argument("--dispatch-entries", default=None, metavar="@FILE",
+                    help="dynamic dispatch-entry addresses; must match the "
+                         "liftemit setting for a consistent corpus")
+    ap.add_argument("--drop-dead-flags", action="store_true",
+                    help="de-carrier pass 1 in re-emitted callers (must match "
+                         "the liftemit setting for a consistent corpus)")
+    ap.add_argument("--exclude-callees", action="append", default=[],
+                    metavar="CS:IP|@FILE",
+                    help="block edges INTO these entries (repeatable; @FILE = "
+                         "one CS:IP per line, # comments). Use for entries "
+                         "the port keeps interpreted -- boundary-shadowing "
+                         "functions, env-wait recovery facts -- because a "
+                         "linked edge would bypass the install skip and run "
+                         "the excluded lifted body anyway.")
     args = ap.parse_args(argv)
+    if args.proven_edges and not args.board:
+        ap.error("--proven-edges requires at least one --board")
+    if not args.from_ir and not (args.exe and args.snapshot and args.entries_file):
+        ap.error("either --from-ir IR.json or --exe + --snapshot + --entries-file")
 
-    entries = []
-    for line in Path(args.entries_file).read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            entries.append(parse_addr(line))
     emit_dir = Path(args.emit_dir)
     out_dir = Path(args.out_dir) if args.out_dir else emit_dir
 
-    rt = load_snapshot(args.exe, args.snapshot, game_root=args.game_root)
-    rt.cpu.trace_enabled = False
-    mem = rt.cpu.mem
-
-    # 1. Fresh scans from the snapshot — code identity is never taken from a
-    #    stale census file.
+    # 1. Code identity: EITHER fresh scans from the snapshot, OR the recovery
+    #    IR re-elaborated by the one decoder (never a stale census file).
     scans: dict[tuple[int, int], FunctionScan] = {}
-    for cs, ip in entries:
-        scans[(cs, ip)] = scan_function(
-            lambda off, cs=cs: mem.rb(cs, off & 0xFFFF), ip, probe=_probe(rt, cs))
+    ir_sigs: dict[tuple[int, int], bytes] = {}
+    if args.from_ir:
+        from dos_re.lift.ir import (load_recovery_ir, record_signature,
+                                    scan_from_ir_record)
+        doc = load_recovery_ir(args.from_ir)
+        for entry, rec in sorted(doc["functions"].items()):
+            cs, ip = parse_addr(entry)
+            if rec.get("liftable"):
+                scans[(cs, ip)] = scan_from_ir_record(rec)
+                ir_sigs[(cs, ip)] = record_signature(rec)
+    else:
+        entries = []
+        for line in Path(args.entries_file).read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                entries.append(parse_addr(line))
+        rt = load_snapshot(args.exe, args.snapshot, game_root=args.game_root)
+        rt.cpu.trace_enabled = False
+        mem = rt.cpu.mem
+        for cs, ip in entries:
+            scans[(cs, ip)] = scan_function(
+                lambda off, cs=cs: mem.rb(cs, off & 0xFFFF), ip,
+                probe=_probe(rt, cs))
 
     # 2. The linkable edge set.
+    def _read_pairs(argval):
+        if not argval:
+            return frozenset()
+        out = []
+        for line in Path(argval.lstrip("@")).read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                out.append(parse_addr(line))
+        return frozenset(out)
+    heads = _read_pairs(args.boundary_heads)
+    dispatch = _read_pairs(args.dispatch_entries)
+
+    exclude: set[str] = set()
+    for item in args.exclude_callees:
+        if item.startswith("@"):
+            for line in Path(item[1:]).read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    exclude.add(line.upper())
+        else:
+            exclude.add(item.strip().upper())
+
     statuses = load_statuses(args.board)
     edges, blocked = compute_link_edges(scans, statuses,
-                                        structural=args.structural_edges)
+                                        structural=not args.proven_edges,
+                                        exclude=frozenset(exclude))
 
     # A linked call needs its callee module ON DISK for the installer's
     # resolution pass — a proven callee that was never emitted cannot be
@@ -258,15 +396,33 @@ def main(argv=None) -> int:
             print(f"drop     {caller_key} -> {callee_key}: callee module not in {emit_dir}")
     edges = kept
 
+    # 2b. FAR edges (structural rule; same on-disk requirement).
+    far_edges, far_blocked = compute_far_link_edges(scans,
+                                                    exclude=frozenset(exclude))
+    blocked.extend(far_blocked)
+    far_kept: list[tuple[str, str]] = []
+    for caller_key, callee_key in far_edges:
+        e_cs, e_ip = parse_addr(callee_key)
+        if (emit_dir / f"lifted_{e_cs:04x}_{e_ip:04x}.py").is_file():
+            far_kept.append((caller_key, callee_key))
+        else:
+            blocked.append((caller_key, callee_key, "callee-module-missing"))
+            print(f"drop far {caller_key} -> {callee_key}: callee module not in {emit_dir}")
+    far_edges = far_kept
+
     # 3. Re-emit every caller that gains at least one linked edge.
     by_caller: dict[str, list[str]] = {}
     for caller_key, callee_key in edges:
         by_caller.setdefault(caller_key, []).append(callee_key)
+    far_by_caller: dict[str, list[tuple[int, int]]] = {}
+    for caller_key, callee_key in far_edges:
+        far_by_caller.setdefault(caller_key, []).append(parse_addr(callee_key))
+    all_callers = sorted(set(by_caller) | set(far_by_caller))
 
     out_dir.mkdir(parents=True, exist_ok=True)
     callers_report: dict[str, dict] = {}
     total_before = total_after = 0
-    for caller_key in sorted(by_caller):
+    for caller_key in all_callers:
         cs, ip = parse_addr(caller_key)
         scan = scans[(cs, ip)]
         name = f"lifted_{cs:04x}_{ip:04x}"
@@ -277,51 +433,70 @@ def main(argv=None) -> int:
         else:
             sig, min_iters = None, None
         if sig is None:
+            sig = ir_sigs.get((cs, ip))
+        if sig is None:
             sig = _fresh_signature(mem, cs, ip, scan)
-        target_ips = [parse_addr(k)[1] for k in by_caller[caller_key]]
+        target_ips = [parse_addr(k)[1] for k in by_caller.get(caller_key, ())]
+        far_targets = far_by_caller.get(caller_key, ())
         try:
-            src = relink_source(scan, cs, target_ips,
-                                signature=sig, min_iterations=min_iters)
+            src = relink_source(scan, cs, target_ips, far_targets=far_targets,
+                                signature=sig, min_iterations=min_iters,
+                                drop_dead_flags=args.drop_dead_flags,
+                                boundary_heads=heads, dispatch_entries=dispatch)
         except EmitUnsupported as exc:
             print(f"skip     {caller_key}: emit-unsupported ({exc})")
-            for callee_key in by_caller[caller_key]:
+            for callee_key in by_caller.get(caller_key, ()):
                 blocked.append((caller_key, callee_key, "emit-unsupported"))
                 edges.remove((caller_key, callee_key))
+            for fs, fo in far_by_caller.get(caller_key, ()):
+                ck = f"{fs:04X}:{fo:04X}"
+                blocked.append((caller_key, ck, "emit-unsupported"))
+                far_edges.remove((caller_key, ck))
             continue
         before = count_emulate_calls(old_src) if old_src is not None \
             else count_emulate_calls(emit_function(scan, cs, name,
-                                                   signature=sig, coverage=True,
+                                                   signature=sig, coverage=False,
+                                                   count_instructions=True,
                                                    min_iterations=min_iters))
         after = count_emulate_calls(src)
         (out_dir / f"{name}.py").write_text(src, encoding="utf-8")
         total_before += before
         total_after += after
+        n_near = len(by_caller.get(caller_key, ()))
+        n_far = len(far_by_caller.get(caller_key, ()))
         callers_report[caller_key] = {
             "module": f"{name}.py",
-            "linked": sorted(by_caller[caller_key]),
+            "linked": sorted(by_caller.get(caller_key, ())),
+            "linked_far": sorted(f"{fs:04X}:{fo:04X}"
+                                 for fs, fo in far_by_caller.get(caller_key, ())),
             "emulate_call_before": before,
             "emulate_call_after": after,
         }
-        print(f"linked   {caller_key}: {len(by_caller[caller_key])} edge(s), "
+        print(f"linked   {caller_key}: {n_near} near + {n_far} far edge(s), "
               f"emulate_call {before} -> {after}")
 
     # 4. Report.
     reasons: dict[str, int] = {}
     for _, _, reason in blocked:
         reasons[reason] = reasons.get(reason, 0) + 1
-    print(f"\n{len(edges)} edges linked into {len(callers_report)} callers; "
+    print(f"\n{len(edges)} near + {len(far_edges)} far edges linked into "
+          f"{len(callers_report)} callers; "
           f"emulate_call sites in re-emitted callers: {total_before} -> {total_after}")
     if reasons:
         print("blocked edges: " + ", ".join(f"{r}={n}" for r, n in sorted(reasons.items())))
-    print("NOTE: re-emitted callers carry NEW bodies — re-verify them with "
-          "liftverify along a drive before trusting the linked set.")
+    print("NOTE: re-emitted callers carry NEW bodies -- the linked graph is "
+          "judged END-TO-END (tick-boundary oracle comparison over the "
+          "assembled VMless graph; hook_bisect localizes any divergence). "
+          "liftverify along a drive remains available for per-function "
+          "diagnostics and the hybrid tier.")
 
     if args.json:
         report = {
             "snapshot": str(args.snapshot),
             "boards": list(args.board),
-            "entries": len(entries),
+            "entries": len(scans),
             "edges": [list(e) for e in edges],
+            "far_edges": [list(e) for e in far_edges],
             "blocked": [list(b) for b in blocked],
             "callers": callers_report,
             "totals": {

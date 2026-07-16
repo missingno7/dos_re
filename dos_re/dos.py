@@ -537,7 +537,7 @@ class DOSMachine:
         if self.strict_ports:
             raise UnmodeledPortRead(
                 f"read from unmodeled port {port:04X}h ({bits}-bit) at "
-                f"{cpu.s.cs:04X}:{cpu.s.ip:04X} — model the observed behaviour "
+                f"{cpu.s.cs:04X}:{cpu.s.ip:04X} -- model the observed behaviour "
                 f"(see docs/hardware_support.md) or run without strict_ports"
             )
         return 0

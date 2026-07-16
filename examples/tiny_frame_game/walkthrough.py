@@ -20,7 +20,7 @@ Run from the repo root:
     python examples/tiny_frame_game/walkthrough.py
 
 No game assets, no dependencies. Read game.py for the synthetic program; read
-template_dos_port's docs/lifecycle.md for how these stages map onto a real port.
+the retired 1.0 starter's lifecycle docs (historical) for how these stages map onto a real port.
 """
 from __future__ import annotations
 
