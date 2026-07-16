@@ -366,6 +366,29 @@ def test_forward_jmp_and_diamond():
     _assert_equivalent(code)
 
 
+def test_enter_leave_native():
+    # The MSC Win16 prologue/epilogue pair (80186+): enter alloc,0 makes the
+    # frame, leave tears it down.  Flat (nesting==0) form is native; the
+    # emitted body must carry no interpreter fallback.
+    code = bytes.fromhex(
+        "C8120000"    # enter 0x12, 0
+        "894606"      # mov [bp+6], ax   (exercise the new frame)
+        "C9"          # leave
+        "C3")
+    src = _assert_equivalent(code, data_len=0)
+    assert "# (interpreter fallback)" not in src
+    assert "s.bp = s.sp & 0xFFFF" in src and "s.sp = s.bp" in src
+
+
+def test_enter_zero_alloc_and_nested_fallback():
+    # alloc==0 emits no SP adjust; a nested frame (nesting>0) is the rare
+    # form compilers do not emit -- it stays a loud interpreter fallback.
+    src = _assert_equivalent(bytes.fromhex("C8000000" "C9" "C3"))
+    assert "# (interpreter fallback)" not in src
+    src = _assert_equivalent(bytes.fromhex("C8040002" "C9" "C3"))
+    assert "# (interpreter fallback)" in src
+
+
 def test_ret_imm_pops_arguments():
     code = bytes.fromhex("50" "58" "C20200")   # push ax; pop ax; ret 2
     lifted, _s, _src = _lift(code)

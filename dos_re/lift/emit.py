@@ -358,6 +358,25 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str], *,
         out.extend(rm.write("_r"))
         return True
 
+    # --- ENTER / LEAVE (80186+; every MSC Win16 prologue/epilogue) -----------
+    if op == 0xC8:
+        # Mirror CPU8086 op 0xC8.  imm is 3 bytes (alloc16 + nesting8), which
+        # the decoder leaves in raw; the flat nesting==0 form is the only one
+        # compilers emit — the nested form falls back to the interpreter.
+        alloc = inst.raw[-3] | (inst.raw[-2] << 8)
+        nesting = inst.raw[-1] & 0x1F
+        if nesting:
+            return False                      # rare nested frame: interp_one
+        out.append("cpu.push(s.bp & 0xFFFF)")
+        out.append("s.bp = s.sp & 0xFFFF")
+        if alloc:
+            out.append(f"s.sp = (s.sp - 0x{alloc:X}) & 0xFFFF")
+        return True
+    if op == 0xC9:                            # leave: SP=BP, pop BP
+        out.append("s.sp = s.bp")
+        out.append("s.bp = cpu.pop()")
+        return True
+
     # --- misc simple -------------------------------------------------------
     if op == 0x98:
         out.append("_al = s.ax & 0x00FF")
