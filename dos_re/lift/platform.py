@@ -219,8 +219,10 @@ class CPUlessPlatformRuntime:
         if dos is not None:
             self.dos = dos                 # reuse a prepared device model
         else:
+            from pathlib import Path
             from dos_re.dos import DOSMachine
-            self.dos = DOSMachine(game_root)
+            self.dos = DOSMachine(Path(game_root))   # root must be a Path
+                                                     # (file services join it)
 
     # -- the plat contract ------------------------------------------------
 
@@ -247,6 +249,7 @@ class CPUlessPlatformRuntime:
                 f"by the CPUless runtime: {e}") from e
 
     def intr(self, num: int, regs: dict, cost: int) -> dict:
+        from dos_re.x86 import HaltExecution
         if not hasattr(self, "_int_carrier"):
             self._int_carrier = _IntCarrier(self.mem)
         try:
@@ -254,6 +257,8 @@ class CPUlessPlatformRuntime:
                             self._entry + cost, regs.get("_flags", 0))
         except UnsupportedPlatformEffect:
             raise
+        except HaltExecution:
+            raise               # the program ended (int 21/4C): a real exit
         except Exception as e:  # noqa: BLE001 -- unset vector / unmodelled INT
             raise UnsupportedPlatformEffect(
                 f"INT {num & 0xFF:02X} not implemented by the CPUless runtime "

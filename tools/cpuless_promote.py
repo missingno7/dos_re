@@ -382,7 +382,11 @@ def main(argv=None) -> int:
         for key in promoted:
             kcs, kip = (int(x, 16) for x in key.split(":"))
             c = contracts_by_cs[kcs][kip]
-            if c.ret_kind == "iret" and c.sp_delta == 0 and not c.ret_pop:
+            if c.ret_kind == "iret":
+                # every IRET-contract function is vector-dispatchable: the
+                # invoking site pops the frame at the MERGED runtime sp, so
+                # even an sp-varying ISR (mid-ISR alt entries make the
+                # static delta an artifact) is exact.
                 handlers[key] = (f"{args.import_base}.{c.name}", c.name,
                                  None, tuple(c.inputs), c.needs_plat,
                                  c.df_livein, c.flags_livein)
