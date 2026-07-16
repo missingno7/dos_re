@@ -50,6 +50,7 @@ class Effects:
     stack_delta: int | None = 0        # bytes; None = data-dependent/unknown
     refusal: str | None = None         # non-None: not analyzable yet (why)
     port_io: bool = False              # a port in/out platform effect (needs plat)
+    int_effect: int | None = None      # an INT n platform effect (needs plat)
 
 
 def _r8(n: int) -> str:
@@ -318,7 +319,17 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
     if inst.kind in (CALL_FAR, CALL_IND, JMP_IND):
         return Effects(refusal="indirect-or-far-transfer")
     if inst.kind == INT:
-        return Effects(refusal="int-platform-effect")
+        n = inst.int_no
+        PLATFORM_INT = {0x21, 0x10, 0x11, 0x12, 0x15, 0x16, 0x1A, 0x2F, 0x33, 0x67}
+        _INT_REGS = frozenset({"ax", "bx", "cx", "dx", "si", "di", "bp", "ds", "es"})
+        if n in PLATFORM_INT:
+            # a DOS/BIOS service: reads + may clobber the whole reg bundle,
+            # touches memory (buffers), and sets flags -- all explicit.
+            return Effects(reads=_INT_REGS, writes=_INT_REGS,
+                           mem_read=True, mem_write=True, int_effect=n)
+        if n == 0x20:
+            return Effects(refusal="program-terminate")
+        return Effects(refusal="vectored-int-call")   # game-installed (60/61)
     if inst.kind == HLT:
         return Effects(refusal="hlt")
     # port I/O -> a platform effect (tier 6): real dataflow + the port_io flag.

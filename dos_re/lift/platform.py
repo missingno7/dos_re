@@ -10,6 +10,7 @@ THE CONTRACT (duck-typed -- a recovered module names only these methods):
 
     plat.inp(port, width, cost) -> int          # port read  (width 1 or 2)
     plat.outp(port, value, width, cost) -> None  # port write
+    plat.intr(num, regs, cost) -> regs           # INT: explicit reg bundle in/out
 
 ``cost`` is GENERATED EXECUTION METADATA: the recovered graph's own absolute
 instruction offset at the effect (``_base + _cost + in_block_offset``).  It is
@@ -67,6 +68,26 @@ class VMlessPlatformAdapter:
             bits = 16 if width == 2 else 8
             cpu.port_writer(cpu, port & 0xFFFF, value & (0xFFFF if width == 2 else 0xFF), bits)
 
+    def intr(self, num: int, regs: dict, cost: int) -> dict:
+        # Verification binding: apply the recovered body's reg bundle onto the
+        # VM, run the real INT handler (the interpreted oracle's own service),
+        # read the bundle back.  memory effects hit the shared VM memory.
+        cpu = self.cpu
+        saved = {r: getattr(cpu.s, r) for r in INT_REGS}
+        saved_flags = cpu.s.flags
+        cpu.instruction_count = self.entry + cost
+        for r in INT_REGS:
+            setattr(cpu.s, r, regs.get(r, 0) & 0xFFFF)
+        cpu.s.flags = regs.get("_flags", cpu.s.flags)
+        cpu.interrupt_handler(cpu, num & 0xFF)
+        out = {r: getattr(cpu.s, r) & 0xFFFF for r in INT_REGS}
+        out["flags"] = cpu.s.flags & 0xFFFF
+        out["halted"] = bool(getattr(cpu, "halted", False))
+        for r in INT_REGS:                 # restore VM regs (recovered owns them)
+            setattr(cpu.s, r, saved[r])
+        cpu.s.flags = saved_flags
+        return out
+
 
 def make_cpu_platform(cpu):
     """VMless verification factory: a :class:`VMlessPlatformAdapter` bound to
@@ -98,6 +119,55 @@ class _ClockCarrier:
 class UnsupportedPlatformEffect(RuntimeError):
     """A reached platform effect the CPUless runtime does not implement.  Fail
     loud with a witness; never fall back to interpretation."""
+
+
+#: registers an INT service reads/writes as an explicit bundle (no sp/ss/cs:
+#: the framework's native INT handlers model the SERVICE, not the int/iret
+#: stack mechanism, and touch only the general + buffer-segment registers).
+INT_REGS = ("ax", "bx", "cx", "dx", "si", "di", "bp", "ds", "es")
+
+
+class _IntCarrier:
+    """A register + memory carrier the pure DOS service handlers manipulate.
+    It executes NOTHING -- not a CPU carrier, just the explicit INT reg bundle
+    (dos_re_2.0 section 4: DOS services are platform adapters).  ``set_flag``
+    and ``halted`` are the only handler hooks beyond ``s``/``mem``."""
+
+    class _Regs:
+        __slots__ = INT_REGS + ("sp", "ss", "cs", "ip", "flags")
+
+        def __init__(self):
+            for r in self.__slots__:
+                setattr(self, r, 0)
+
+        def snapshot(self):
+            return {r: getattr(self, r) for r in self.__slots__}
+
+    def __init__(self, mem):
+        self.mem = mem
+        self.s = _IntCarrier._Regs()
+        self.halted = False
+        self.instruction_count = 0
+
+    def set_flag(self, flag: int, value) -> None:
+        self.s.flags = (self.s.flags | flag) if value else (self.s.flags & ~flag)
+
+
+def _run_int(dos, carrier, num, regs, cost, flags_in):
+    """Apply the reg bundle, run the DOS service, return the updated bundle +
+    flags.  Shared by both backends (identical service semantics; only the
+    carrier/clock ownership differs)."""
+    carrier.instruction_count = cost
+    s = carrier.s
+    for r in INT_REGS:
+        setattr(s, r, regs.get(r, 0) & 0xFFFF)
+    s.flags = flags_in
+    carrier.halted = False
+    dos.interrupt(carrier, num & 0xFF)
+    out = {r: getattr(s, r) & 0xFFFF for r in INT_REGS}
+    out["flags"] = s.flags & 0xFFFF
+    out["halted"] = carrier.halted
+    return out
 
 
 class CPUlessPlatformRuntime:
@@ -144,6 +214,19 @@ class CPUlessPlatformRuntime:
             raise UnsupportedPlatformEffect(
                 f"port write {port & 0xFFFF:04X} (width {width}) not implemented "
                 f"by the CPUless runtime: {e}") from e
+
+    def intr(self, num: int, regs: dict, cost: int) -> dict:
+        if not hasattr(self, "_int_carrier"):
+            self._int_carrier = _IntCarrier(self.mem)
+        try:
+            return _run_int(self.dos, self._int_carrier, num, regs,
+                            self._entry + cost, regs.get("_flags", 0))
+        except UnsupportedPlatformEffect:
+            raise
+        except Exception as e:  # noqa: BLE001 -- unset vector / unmodelled INT
+            raise UnsupportedPlatformEffect(
+                f"INT {num & 0xFF:02X} not implemented by the CPUless runtime "
+                f"(unset vector or game-installed handler): {e}") from e
 
     # -- recovered-root invocation ---------------------------------------
 

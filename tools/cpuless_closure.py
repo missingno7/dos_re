@@ -43,12 +43,13 @@ def walk_closure(ir: dict, roots: list[str], promoted: set[str],
         if key in reached:
             continue
         reached.add(key)
-        if key not in promoted:
-            frontier[key] = refusals.get(key, "not-promoted")
-            continue                       # cannot follow calls past a gap
         rec = ir["functions"].get(key)
+        if key not in promoted:
+            # a frontier node -- record WHY, but still follow its statically
+            # known near-call targets so the WHOLE reachable graph (and the
+            # real frontier depth) is measured, not just the first gap.
+            frontier[key] = refusals.get(key, "not-in-ir" if not rec else "not-promoted")
         if not rec:
-            frontier[key] = "not-in-ir"
             continue
         cs = int(key.split(":")[0], 16)
         for blk in rec["blocks"]:

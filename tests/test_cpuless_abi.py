@@ -52,10 +52,17 @@ def test_bp_frame_ea_defaults_to_ss():
     assert {"bp", "ss"} <= set(e.reads) and "ds" not in e.reads
 
 
-def test_int_and_indirect_refuse_with_capability_names():
+def test_int_effect_and_vectored_int_and_indirect():
+    # A native DOS/BIOS INT is a PLATFORM EFFECT (explicit reg bundle), not a
+    # refusal (tier 8).
     e = register_effects(Inst(ip=0, length=2, kind="int", mnemonic="int",
                               raw=b"\xcd\x21", op=0xCD, int_no=0x21))
-    assert e.refusal == "int-platform-effect"
+    assert e.refusal is None and e.int_effect == 0x21
+    assert {"ax", "bx", "cx", "dx", "ds", "es"} <= set(e.reads) <= set(e.writes | e.reads)
+    # A game-installed vector (INT 61h sound driver) is a vectored call, refuse.
+    ev = register_effects(Inst(ip=0, length=2, kind="int", mnemonic="int",
+                               raw=b"\xcd\x61", op=0xCD, int_no=0x61))
+    assert ev.refusal == "vectored-int-call"
     e2 = register_effects(Inst(ip=0, length=2, kind="jmp_ind", mnemonic="jmp",
                                raw=b"\xff\xe0", op=0xFF, modrm=0xE0))
     assert e2.refusal == "indirect-or-far-transfer"

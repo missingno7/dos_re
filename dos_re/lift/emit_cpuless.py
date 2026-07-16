@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .decode import CALL, JCC, JMP, RET, SEQ
+from .decode import CALL, INT, JCC, JMP, RET, SEQ
 from .cpuless import abi_scan, register_effects, W16, SEGS
 
 # x86 FLAGS bits (mirrors dos_re.cpu constants; literal here because the
@@ -57,6 +57,7 @@ _JCC_READS = {
     0x7E: {"zf", "sf", "of"}, 0x7F: {"zf", "sf", "of"},
 }
 _ALU = ("add", "or", "adc", "sbb", "and", "sub", "xor", "cmp")
+_INT_REGS = ("ax", "bx", "cx", "dx", "si", "di", "bp", "ds", "es")
 FDF, FIF = 0x0400, 0x0200
 _FLAG_BITS = {"cf": FCF, "pf": FPF, "af": FAF, "zf": FZF, "sf": FSF,
               "of": FOF, "df": FDF, "intf": FIF}
@@ -644,7 +645,8 @@ def _func_needs_plat(scan, callees) -> bool:
     interrupts) directly, or composes a call to a callee that needs it."""
     from .cpuless import register_effects
     for i in scan.insts.values():
-        if register_effects(i).port_io:
+        e = register_effects(i)
+        if e.port_io or e.int_effect is not None:
             return True
         if (i.kind == CALL and i.target in (callees or {})
                 and callees[i.target].needs_plat):
@@ -768,8 +770,13 @@ def _check_flag_liveins(scan, callees=None) -> frozenset:
 _STRING_OPS = (0xA4, 0xA5, 0xAA, 0xAB, 0xAC, 0xAD)
 
 
+_ALL_FLAGS = frozenset({"cf", "pf", "af", "zf", "sf", "of", "df", "intf"})
+
+
 def _flags_defined_by(i) -> frozenset:
     op = i.op
+    if i.kind == INT:
+        return _ALL_FLAGS
     if op == 0xF8 or op == 0xF9:
         return frozenset({"cf"})
     if op in (0xFC, 0xFD):
@@ -950,6 +957,32 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
                     blk.append("continue")
                     terminated = True
                     break
+                continue
+            if i.kind == INT:
+                off = count - 1
+                cost = "_base + _cost" if off == 0 else f"_base + _cost + {off}"
+                fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
+                                for f in ("cf", "pf", "af", "zf", "sf", "of",
+                                          "df", "intf"))
+                _regd = ", ".join("'%s': %s" % (r, r) for r in _INT_REGS)
+                blk.append("_ib = {%s, '_flags': (%s)}" % (_regd, fw))
+                blk.append(f"_ir = plat.intr(0x{i.int_no:02X}, _ib, {cost})")
+                for r in _INT_REGS:
+                    blk.append(f"{r} = _ir['{r}']")
+                blk.append("_if = _ir['flags']")
+                for fname, fbit in (("cf", 0x01), ("pf", 0x04), ("af", 0x10),
+                                    ("zf", 0x40), ("sf", 0x80), ("of", 0x800),
+                                    ("intf", 0x200), ("df", 0x400)):
+                    blk.append(f"{fname} = (_if & 0x{fbit:X}) != 0")
+                blk.append(f"_fmask |= 0x{0x0001|0x0004|0x0010|0x0040|0x0080|0x0800|0x0200|0x0400:X}")
+                nxt = i.next_ip
+                if nxt in bb_of and nxt != ip:
+                    blk.append(f"_cost += {count}")
+                    blk.append(f"bb = {bb_of[nxt]}")
+                    blk.append("continue")
+                    terminated = True
+                    break
+                ip = nxt
                 continue
             if i.op in (0xE4, 0xE5, 0xE6, 0xE7, 0xEC, 0xED, 0xEE, 0xEF):
                 width = 2 if (i.op & 1) else 1
