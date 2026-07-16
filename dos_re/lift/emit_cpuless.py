@@ -47,6 +47,7 @@ _JCC_EXPR = {
 }
 #: flags each jcc condition READS (for the flag-live-in refusal check).
 _JCC_READS = {
+    0xE0: {"zf"}, 0xE1: {"zf"}, 0xE2: set(), 0xE3: set(),
     0x70: {"of"}, 0x71: {"of"}, 0x72: {"cf"}, 0x73: {"cf"},
     0x74: {"zf"}, 0x75: {"zf"}, 0x76: {"cf", "zf"}, 0x77: {"cf", "zf"},
     0x78: {"sf"}, 0x79: {"sf"}, 0x7A: {"pf"}, 0x7B: {"pf"},
@@ -278,6 +279,12 @@ def _translate(inst, lines, flag_written):
         lines.extend(_rm_write_lines(inst, wide, "_t"))
         flags("pf", "af", "zf", "sf", "of")
         return
+    if op in (0xF6, 0xF7) and inst.reg == 0:              # test r/m, imm
+        a = _rm_read(inst, wide)
+        lines.append(f"_t = ({a}) & 0x{(inst.imm or 0):X}")
+        _flags_arith(lines, "logic", wide, a, "0", "_t")
+        flags("cf", "pf", "zf", "sf", "of")
+        return
     if op in (0xF6, 0xF7) and inst.reg == 3:              # neg r/m
         lines.append(f"_a = {_rm_read(inst, wide)}")
         lines.append("_t = -_a")
@@ -294,6 +301,52 @@ def _translate(inst, lines, flag_written):
         return
     if op == 0x99:                                        # cwd
         lines.append("dx = 0xFFFF if ax & 0x8000 else 0")
+        return
+    # stack ops (tier 2) -----------------------------------------------------
+    # LITERAL SS:SP memory traffic: the pushed bytes are observable state (the
+    # boundary differential hashes full memory, and stack residue below SP
+    # persists after return), so push/pop write/read the real guest stack.
+    # ``sp`` is a plain integer local -- an address base, never data (the gate
+    # refuses sp-as-data); balance is verified statically, so sp never appears
+    # in the outputs and the adapter's RET ABI is unchanged.
+    if 0x50 <= op <= 0x57:                                # push r16
+        lines.append("sp = (sp - 2) & 0xFFFF")
+        lines.append(f"mem.ww(ss, sp, {_reg16(op & 7)})")
+        return
+    if 0x58 <= op <= 0x5F:                                # pop r16
+        lines.append(f"{_reg16(op & 7)} = mem.rw(ss, sp)")
+        lines.append("sp = (sp + 2) & 0xFFFF")
+        return
+    if op in (0x06, 0x0E, 0x16, 0x1E):                    # push seg
+        lines.append("sp = (sp - 2) & 0xFFFF")
+        lines.append(f"mem.ww(ss, sp, {SEGS[(op >> 3) & 3]})")
+        return
+    if op in (0x07, 0x1F):                                # pop es / pop ds
+        lines.append(f"{SEGS[(op >> 3) & 3]} = mem.rw(ss, sp)")
+        lines.append("sp = (sp + 2) & 0xFFFF")
+        return
+    if op == 0x8E and (inst.reg & 3) in (0, 3):           # mov es/ds, r/m
+        lines.append(f"{SEGS[inst.reg & 3]} = {_rm_read(inst, True)}")
+        return
+    if op == 0x8C:                                        # mov r/m, sreg
+        lines.extend(_rm_write_lines(inst, True, SEGS[inst.reg & 3]))
+        return
+    if op in (0x68, 0x6A):                                # push imm (186)
+        imm = (inst.imm or 0) & 0xFFFF
+        if op == 0x6A and imm & 0x80:                     # imm8 sign-extends
+            imm |= 0xFF00
+        lines.append("sp = (sp - 2) & 0xFFFF")
+        lines.append(f"mem.ww(ss, sp, 0x{imm & 0xFFFF:X})")
+        return
+    if op == 0xFF and inst.reg == 6:                      # push r/m16
+        lines.append(f"_t = {_rm_read(inst, True)}")
+        lines.append("sp = (sp - 2) & 0xFFFF")
+        lines.append("mem.ww(ss, sp, _t)")
+        return
+    if op == 0x8F and inst.reg == 0:                      # pop r/m16
+        lines.append("_t = mem.rw(ss, sp)")
+        lines.append("sp = (sp + 2) & 0xFFFF")
+        lines.extend(_rm_write_lines(inst, True, "_t"))
         return
     raise Refusal(f"emitter-unsupported-op-{op:02X}"
                   + (f"-grp{inst.reg}" if inst.modrm is not None else ""))
@@ -351,12 +404,15 @@ def check_promotable(scan, *, excluded_addrs=frozenset()) -> "tuple":
             if i.imm or 0:
                 raise Refusal("ret-n-stack-args (needs stack-arg ABI)")
             continue                       # the RET ABI is the adapter's job
-        if e.stack_delta != 0 or e.stack_delta is None:
-            raise Refusal("stack-traffic (unsupported in first subset)")
-        if e.writes & frozenset(SEGS):
-            raise Refusal("segment-register-mutation")
-        if "sp" in (e.reads | e.writes):
+        if i.op in (0x9C, 0x9D):
+            raise Refusal("flags-as-stack-data (pushf/popf)")
+        if e.stack_delta is None:
+            raise Refusal("unresolved-stack-effect")
+        if e.writes & frozenset({"cs", "ss"}):
+            raise Refusal("cs-or-ss-mutation")
+        if "sp" in (e.reads | e.writes) and not _is_stack_family(i):
             raise Refusal("sp-as-data")
+    _check_stack_depths(scan)
     if any(i.ip in excluded_addrs for i in scan.insts.values()):
         raise Refusal("boundary-or-dispatch-address")
     # flag live-in at entry: a jcc may not read a flag no in-function
@@ -364,6 +420,54 @@ def check_promotable(scan, *, excluded_addrs=frozenset()) -> "tuple":
     # contract would need caller flags).
     _check_flag_liveins(scan)
     return abi
+
+
+def _is_stack_family(i) -> bool:
+    """Instructions whose sp use IS the stack discipline (allowed), as opposed
+    to sp used as general data (refused)."""
+    op = i.op
+    return (0x50 <= op <= 0x5F or op in (0x06, 0x0E, 0x16, 0x1E, 0x68, 0x6A)
+            or (op == 0xFF and i.reg == 6) or (op == 0x8F and i.reg == 0)
+            or i.kind == RET)
+
+
+def _check_stack_depths(scan) -> None:
+    """Static stack-discipline verification (tier 2): every address has ONE
+    net push depth (bytes) from entry, consistent at every join; RET happens
+    at depth 0 (balanced -- so sp never appears in the outputs and the
+    adapter's RET ABI is unchanged); the depth never goes negative (a pop
+    below the entry depth would read the caller's frame -- the return
+    address -- which is machine-ABI data, not game state)."""
+    depth: dict[int, int] = {scan.entry: 0}
+    work = [scan.entry]
+    while work:
+        ip = work.pop()
+        i = scan.insts[ip]
+        e = register_effects(i)
+        d = depth[ip]
+        if i.kind == RET:
+            if d != 0:
+                raise Refusal("unbalanced-stack-at-ret")
+            continue
+        after = d - (e.stack_delta or 0)
+        if after < 0:
+            raise Refusal("stack-underflow (reads caller frame)")
+        succs = []
+        if i.kind in (SEQ,):
+            succs = [i.next_ip]
+        elif i.kind == JCC:
+            succs = [i.next_ip, i.target]
+        elif i.kind == JMP:
+            succs = [i.target]
+        for s in succs:
+            if s is None or s not in scan.insts:
+                continue
+            if s in depth:
+                if depth[s] != after:
+                    raise Refusal("inconsistent-stack-depth-at-join")
+            else:
+                depth[s] = after
+                work.append(s)
 
 
 def _check_flag_liveins(scan) -> None:
@@ -414,14 +518,27 @@ def _flags_defined_by(i) -> frozenset:
 
 # --------------------------------------------------------------------------
 
+def _contract_inputs(scan, abi) -> list[str]:
+    """The recovered function's input list.  ``sp`` joins only when the body
+    has real stack traffic (then it is an address base for the literal SS:SP
+    memory ops; balance keeps it out of the outputs).  Otherwise the RET-ABI
+    sp read stays the adapter's business."""
+    needs_sp = any(_is_stack_family(i) and i.kind != RET
+                   for i in scan.insts.values())
+    inputs = sorted(abi.inputs - {"sp"})
+    if needs_sp:
+        inputs = sorted(set(inputs) | {"sp"})
+    return inputs
+
+
 def emit_recovered(scan, abi, key: str) -> str:
     """Generate the recovered module source for one promotable function."""
     cs = int(key.split(":")[0], 16)
     name = f"func_{key.replace(':', '_').lower()}"
     leaders = scan.block_leaders()
     bb_of = {ip: n for n, ip in enumerate(leaders)}
-    inputs = sorted(abi.inputs - {"sp"})       # sp/ret ABI is the adapter's
-    outputs = sorted((abi.outputs - {"sp"}) & frozenset(W16))
+    inputs = _contract_inputs(scan, abi)
+    outputs = sorted((abi.outputs - {"sp"}) & (frozenset(W16) | frozenset({"ds", "es"})))
 
     L: list[str] = []
     A = L.append
@@ -478,7 +595,16 @@ def emit_recovered(scan, abi, key: str) -> str:
                 if flag_written:
                     bits = " | ".join(f"0x{_FLAG_BITS[f]:X}" for f in sorted(flag_written))
                     blk.append(f"_fmask |= {bits}")
-                blk.append(f"if {_JCC_EXPR[i.op]}:")
+                if i.op in (0xE0, 0xE1, 0xE2):    # loopnz/loopz/loop: dec cx, NO flags
+                    blk.append("cx = (cx - 1) & 0xFFFF")
+                    cond = {0xE0: "cx != 0 and not zf",
+                            0xE1: "cx != 0 and zf",
+                            0xE2: "cx != 0"}[i.op]
+                elif i.op == 0xE3:                # jcxz
+                    cond = "cx == 0"
+                else:
+                    cond = _JCC_EXPR[i.op]
+                blk.append(f"if {cond}:")
                 blk.append(f"    bb = {bb_of[i.target]}")
                 blk.append("    continue")
                 blk.append(f"bb = {bb_of[i.next_ip]}")
@@ -521,8 +647,8 @@ def emit_adapter(scan, abi, key: str, *, signature: bytes,
     entry = scan.entry
     name = f"lifted_{key.replace(':', '_').lower()}"
     rec = f"func_{key.replace(':', '_').lower()}"
-    inputs = sorted(abi.inputs - {"sp"})
-    outputs = sorted((abi.outputs - {"sp"}) & frozenset(W16))
+    inputs = _contract_inputs(scan, abi)
+    outputs = sorted((abi.outputs - {"sp"}) & (frozenset(W16) | frozenset({"ds", "es"})))
 
     L: list[str] = []
     A = L.append

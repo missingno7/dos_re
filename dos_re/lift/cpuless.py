@@ -219,6 +219,8 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         return Effects(frozenset(R), frozenset(W), mr, mw, sd)
     if op in (0xA0, 0xA1):               # mov acc, moffs
         W.add("ax"); R.add(_ea_segment())
+        if op == 0xA0:
+            R.add("ax")                   # AL write preserves AH (word read)
         return Effects(frozenset(R), frozenset(W), True, mw, sd)
     if op in (0xA2, 0xA3):               # mov moffs, acc
         R.update({"ax", _ea_segment()})
