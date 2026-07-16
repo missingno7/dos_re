@@ -10,9 +10,12 @@ oracle-guided convergence the whole census is emitted optimistically here,
 linked by ``liftlink`` (structural edges), then validated as a graph;
 ``liftemit`` is the deterministic "labor" that produces the candidate modules.
 
-Emission is byte-identical to ``liftverify``'s emit path (same signature
-recipe, ``coverage=True``, same ``--max-iterations`` default) so a module
-emitted here and one emitted during verification are the same file.
+Emission uses ``liftverify``'s exact signature recipe and iteration default,
+but coverage instrumentation (per-block BLOCKS_SEEN bookkeeping) is OFF by
+default: this tool emits the PRODUCTION corpus the assembled graph installs,
+and per-call/per-block instrumentation is verification-tier overhead (it made
+the Lemmings fade paths measurably slower).  Pass ``--coverage`` to emit
+byte-identically to liftverify's modules when a proof pass will reuse them.
 
 The VMLESS WALL (docs/dos_re_2.0.md §1a) is checked here mechanically: after
 emission every module is scanned for ``interp_one`` call sites (instruction-
@@ -62,7 +65,8 @@ def _probe(rt, cs):
     return probe
 
 
-def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations):
+def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations,
+               coverage: bool = False):
     """Emit one entry.  Returns ("ok"|"not-liftable"|"emit-unsupported", detail)."""
     name = f"lifted_{cs:04x}_{ip:04x}"
     scan = scan_function(lambda off: mem.rb(cs, off & 0xFFFF), ip, probe=_probe(rt, cs))
@@ -73,7 +77,8 @@ def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations):
     sig = bytes(mem.rb(cs, (ip + k) & 0xFFFF)
                 for k in range(max(4, min(16, (block_end - ip) & 0xFFFF))))
     try:
-        src = emit_function(scan, cs, name, signature=sig, coverage=True,
+        src = emit_function(scan, cs, name, signature=sig, coverage=coverage,
+                            count_instructions=True,
                             min_iterations=max_iterations)
     except EmitUnsupported as exc:
         return "emit-unsupported", str(exc)
@@ -107,6 +112,10 @@ def main(argv=None) -> int:
     ap.add_argument("--max-iterations", type=int, default=None, metavar="N",
                     help="runaway-loop guard baked into each module "
                          "(default: emitter default, currently 20000)")
+    ap.add_argument("--coverage", action="store_true",
+                    help="emit with per-block coverage instrumentation "
+                         "(liftverify-identical modules); default OFF for "
+                         "the production corpus")
     ap.add_argument("--require-vmless-wall", action="store_true",
                     help="fail (exit 2) if any emitted module contains an "
                          "interp_one fallback call site — the enforced VMless "
@@ -128,7 +137,8 @@ def main(argv=None) -> int:
     counts = {"ok": 0, "not-liftable": 0, "emit-unsupported": 0}
     skipped: list[tuple[str, str, str]] = []
     for cs, ip in entries:
-        status, detail = emit_entry(mem, rt, cs, ip, emit_dir, args.max_iterations)
+        status, detail = emit_entry(mem, rt, cs, ip, emit_dir, args.max_iterations,
+                                    coverage=args.coverage)
         counts[status] += 1
         if status != "ok":
             skipped.append((f"{cs:04X}:{ip:04X}", status, detail))

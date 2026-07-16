@@ -550,9 +550,20 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     semantics, no interpreter in the path, and the child remains a
     verifier-visible boundary in the hybrid (pitfall #5). Only near-RET-exit
     callees are safe to link (the LINK TOOL enforces that precondition; tail
-    exits / retf / iret callees must stay ``emulate_call``). Incompatible with
-    ``count_instructions`` (the interpreter's per-step accounting is exactly
-    what a linked call no longer runs; tick demos re-record at the flip).
+    exits / retf / iret callees must stay ``emulate_call``).
+
+    ``count_instructions`` is VIRTUAL-TIME PRESERVATION: each block advances
+    ``cpu.instruction_count`` by exactly the original instructions it
+    replaces (transfer instructions count 1; callees/ISRs/fallbacks count
+    themselves through the interpreter), and the module marks its function
+    ``owns_time = True`` so ``step()`` skips its own +1 for the dispatch.
+    With it, instruction count — and everything the machine models derive
+    from it (PIT reads, any time-keyed observable) — is IDENTICAL between
+    the interpreted oracle and the lifted graph.  It composes with
+    ``link_map`` when the whole corpus is emitted counting (a linked callee
+    accounts for itself); a MIXED corpus (counting callers linking
+    non-counting callees) would under-count, which is why the assembly
+    pipeline turns it on for every module or none.
     ``link_imports`` lines are appended to the module header verbatim — the
     link tool supplies its cross-module binding there (e.g. a module-level
     ``LINKS = {"CS:IP": None}`` table that ``dos_re.lift.install.resolve_links``
@@ -602,9 +613,6 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     A("from __future__ import annotations")
     A("")
     A("from dos_re.cpu import AF, CF, DF, IF, OF, PF, SF, ZF")
-    if link_map and count_instructions:
-        raise EmitUnsupported("link_map is incompatible with count_instructions "
-                              "(linked calls bypass the interpreter's step accounting)")
     A("from dos_re.hooks import self_disable_if_patched")
     if link_map:
         A("from dos_re.hooks import call_installed_hook_like_near_call")
@@ -636,8 +644,9 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     A(f"    # replacement for code that is no longer there.")
     A(f"    self_disable_if_patched(cpu, 0x{scan.entry:04X}, SIGNATURE, {name!r})")
     A("    s, mem = cpu.s, cpu.mem")
-    if count_instructions:
-        A("    cpu.instruction_count -= 1  # step() counts the hook as 1; count real instructions")
+    # count_instructions needs no entry compensation: the function is marked
+    # owns_time, so step() skips its dispatch +1 (and a LINKED call never had
+    # one) — the per-block adds are the complete, exact account.
     # Start at the ENTRY block, which is not necessarily block index 0:
     # block_leaders() sorts by address, and a region can contain branch
     # targets BELOW the entry (a backward jump above the function head).
@@ -658,10 +667,23 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
         lines: list[str] = []
         if coverage:
             lines.append(f"BLOCKS_SEEN.add({bi})")
-        # Instructions executed natively (i.e. NOT re-entered through step(),
-        # which does its own accounting). Calls/INTs count 1 for the transfer
-        # instruction itself; their callees are counted by the VM.
-        native = 0
+        # Virtual time: instructions executed natively (i.e. NOT re-entered
+        # through step(), which does its own accounting).  Calls/INTs count 1
+        # for the transfer instruction itself; their callees are counted by
+        # the VM or by their own counted module.  The pending count is FLUSHED
+        # BEFORE every call-family line: a callee (or an emulated interpreter
+        # stretch under it) may unwind out of this function at a boundary park
+        # (tick_clock._BoundaryReached), and everything already executed —
+        # including the transfer instruction whose stack effect the helper
+        # performs up front — must be on the clock by then, exactly as the
+        # interpreted oracle would have counted it.
+        pending = [0]
+
+        def _flush() -> None:
+            if count_instructions and pending[0]:
+                lines.append(f"cpu.instruction_count += {pending[0]}")
+                pending[0] = 0
+
         term: Inst | None = None
         for inst in body:
             lines.append(f"# {cs:04X}:{inst.ip:04X}  {inst.raw.hex():<12} {inst.mnemonic}")
@@ -673,11 +695,13 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
                     raise EmitUnsupported(f"{cs:04X}:{inst.ip:04X}: {exc}") from None
                 if ok:
                     lines.extend(body_lines)
-                    native += 1
+                    pending[0] += 1
                 else:
                     lines.append(f"interp_one(cpu, 0x{cs:04X}, 0x{inst.ip:04X})"
                                  f"  # (interpreter fallback)")
             elif inst.kind == CALL:
+                pending[0] += 1
+                _flush()
                 if link_map and inst.target in link_map:
                     # LINKED: direct native call — CALL/RET stack semantics
                     # preserved, verifier-visible child boundary, no VM.
@@ -687,14 +711,16 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
                 else:
                     lines.append(f"emulate_call(cpu, 0x{cs:04X}, 0x{inst.target:04X}, "
                                  f"0x{inst.next_ip:04X})")
-                native += 1
             elif inst.kind == CALL_FAR:
                 seg, off = inst.far_target
+                pending[0] += 1
+                _flush()
                 lines.append(f"emulate_far_call(cpu, 0x{seg:04X}, 0x{off:04X}, "
                              f"0x{cs:04X}, 0x{inst.next_ip:04X})")
-                native += 1
             elif inst.kind == CALL_IND:
                 rm = _rm_operand(inst, 16, lines, "_o")
+                pending[0] += 1
+                _flush()
                 if inst.reg == 3:             # call far [mem]
                     lines.append(f"_off = mem.rw({rm.seg_expr}, _o)")
                     lines.append(f"_seg = mem.rw({rm.seg_expr}, (_o + 2) & 0xFFFF)")
@@ -703,18 +729,17 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
                 else:                          # call near r/m16
                     lines.append(f"emulate_call(cpu, 0x{cs:04X}, {rm.read()}, "
                                  f"0x{inst.next_ip:04X})")
-                native += 1
             elif inst.kind == INT:
+                pending[0] += 1
+                _flush()
                 lines.append(f"emulate_int(cpu, 0x{inst.int_no:02X}, 0x{cs:04X}, "
                              f"0x{inst.next_ip:04X})")
-                native += 1
             else:
                 term = inst
-                native += 1
+                pending[0] += 1
                 break
 
-        if count_instructions and native:
-            lines.append(f"cpu.instruction_count += {native}")
+        _flush()
         for ln in lines:
             A(ind + ln)
 
@@ -733,5 +758,11 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     A(f"    raise LiftRuntimeError(")
     A(f"        {name!r} + ' exceeded MAX_ITERATIONS (unbounded internal loop -- "
       f"likely an environment wait; hook it by hand)')")
+    if count_instructions:
+        A("")
+        A("")
+        A("# Virtual-time preservation: this function accounts its own")
+        A("# instruction_count per block, so step() must not add its dispatch +1.")
+        A(f"{name}.owns_time = True")
     A("")
     return "\n".join(L) + "\n"

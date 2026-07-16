@@ -564,7 +564,13 @@ class CPU8086:
                 finally:
                     if self.coverage_telemetry is not None:
                         self.coverage_telemetry.record_hook_unverified(hook_key, name)
-            self.instruction_count += 1
+            # Virtual-time preservation (lift/emit count_instructions): a hook
+            # that accounts its own instruction_count per block declares
+            # owns_time — adding the dispatch +1 on top would overcount by one
+            # per call vs the interpreted oracle, skewing every time-derived
+            # observable (PIT reads first among them).
+            if not getattr(handler, "owns_time", False):
+                self.instruction_count += 1
             if self.trace_enabled:
                 self.trace.append(f"{start_cs:04X}:{start_ip:04X}  HOOK {name:<23} {before} -> {self.s.snapshot()}")
             return

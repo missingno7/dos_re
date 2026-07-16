@@ -115,7 +115,8 @@ def all_near_ret_exits(scan: FunctionScan) -> bool:
 
 
 def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
-                       statuses: dict[str, str], *, structural: bool = True):
+                       statuses: dict[str, str], *, structural: bool = True,
+                       exclude: frozenset[str] = frozenset()):
     """The linkable edge set from fresh scans (+ proof statuses if gated).
 
     Returns ``(edges, blocked)``: ``edges`` is ``[("CS:IP", "CS:IP"), ...]``
@@ -133,7 +134,17 @@ def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
     * ``structural=False`` (1.x conservative, ``--proven-edges``) — a callee
       must additionally be ORACLE_PASSING on some board.  Safe standalone (a
       linked call reaches only proven code); useful for the hybrid tier and
-      for debugging, but it is not the assembly posture."""
+      for debugging, but it is not the assembly posture.
+
+    ``exclude`` ("CS:IP" strings) blocks edges INTO entries the port keeps
+    interpreted (boundary-shadowing functions, env-wait recovery facts).  This
+    matters because a linked call binds the callee's lifted body DIRECTLY
+    (``LINKS`` default in ``call_installed_hook_like_near_call``), bypassing
+    the installation skip entirely — an excluded callee reached through a
+    linked edge would run lifted anyway, skipping its boundary sentinels and
+    pacing waits (the Lemmings fade-crawl failure).  Blocking the edge makes
+    callers ``emulate_call`` the excluded callee, so the interpreter's
+    sentinel hooks, wait pacing, and IRQ machinery all apply."""
     edges: list[tuple[str, str]] = []
     blocked: list[tuple[str, str, str]] = []
     for (cs, ip), scan in sorted(scans.items()):
@@ -143,7 +154,9 @@ def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
         for target in sorted(scan.calls_near):
             callee_key = f"{cs:04X}:{target:04X}"   # near call ⇒ same segment
             callee = scans.get((cs, target))
-            if callee is None:
+            if callee_key in exclude:
+                blocked.append((caller_key, callee_key, "excluded-callee"))
+            elif callee is None:
                 blocked.append((caller_key, callee_key, "not-an-entry"))
             elif not callee.liftable:
                 blocked.append((caller_key, callee_key, "callee-not-liftable"))
@@ -170,7 +183,8 @@ def relink_source(scan: FunctionScan, cs: int, target_ips, *,
     targets = sorted(set(target_ips))
     link_map = {t: f'LINKS["{cs:04X}:{t:04X}"]' for t in targets}
     return emit_function(
-        scan, cs, name, signature=signature, coverage=True,
+        scan, cs, name, signature=signature, coverage=False,
+        count_instructions=True,
         min_iterations=min_iterations, link_map=link_map,
         link_imports=(links_table_line(f"{cs:04X}:{t:04X}" for t in targets),))
 
@@ -233,6 +247,14 @@ def main(argv=None) -> int:
                          "callee to be ORACLE_PASSING on some --board. For "
                          "the hybrid tier / debugging only — graph assembly "
                          "is judged end-to-end (docs/dos_re_2.0.md §2).")
+    ap.add_argument("--exclude-callees", action="append", default=[],
+                    metavar="CS:IP|@FILE",
+                    help="block edges INTO these entries (repeatable; @FILE = "
+                         "one CS:IP per line, # comments). Use for entries "
+                         "the port keeps interpreted — boundary-shadowing "
+                         "functions, env-wait recovery facts — because a "
+                         "linked edge would bypass the install skip and run "
+                         "the excluded lifted body anyway.")
     args = ap.parse_args(argv)
     if args.proven_edges and not args.board:
         ap.error("--proven-edges requires at least one --board")
@@ -257,9 +279,20 @@ def main(argv=None) -> int:
             lambda off, cs=cs: mem.rb(cs, off & 0xFFFF), ip, probe=_probe(rt, cs))
 
     # 2. The linkable edge set.
+    exclude: set[str] = set()
+    for item in args.exclude_callees:
+        if item.startswith("@"):
+            for line in Path(item[1:]).read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    exclude.add(line.upper())
+        else:
+            exclude.add(item.strip().upper())
+
     statuses = load_statuses(args.board)
     edges, blocked = compute_link_edges(scans, statuses,
-                                        structural=not args.proven_edges)
+                                        structural=not args.proven_edges,
+                                        exclude=frozenset(exclude))
 
     # A linked call needs its callee module ON DISK for the installer's
     # resolution pass — a proven callee that was never emitted cannot be
@@ -306,7 +339,8 @@ def main(argv=None) -> int:
             continue
         before = count_emulate_calls(old_src) if old_src is not None \
             else count_emulate_calls(emit_function(scan, cs, name,
-                                                   signature=sig, coverage=True,
+                                                   signature=sig, coverage=False,
+                                                   count_instructions=True,
                                                    min_iterations=min_iters))
         after = count_emulate_calls(src)
         (out_dir / f"{name}.py").write_text(src, encoding="utf-8")
