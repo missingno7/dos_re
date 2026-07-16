@@ -28,26 +28,10 @@ _SEG_OVERRIDE = {0x26: "es", 0x2E: "cs", 0x36: "ss", 0x3E: "ds"}
 JCC_NAMES = ["jo", "jno", "jb", "jnb", "jz", "jnz", "jbe", "ja", "js", "jns", "jp", "jnp", "jl", "jge", "jle", "jg"]
 _ALU_NAMES = ("add", "or", "adc", "sbb", "and", "sub", "xor", "cmp")
 
-CF = 0x0001
-PF = 0x0004
-AF = 0x0010
-ZF = 0x0040
-SF = 0x0080
-TF = 0x0100
-IF = 0x0200
-DF = 0x0400
-OF = 0x0800
-
-# Even-parity lookup for the low byte (PF set when the number of 1 bits is even).
-_PARITY = [bin(i).count("1") % 2 == 0 for i in range(256)]
-
-
-class UnsupportedInstruction(NotImplementedError):
-    pass
-
-
-class HaltExecution(Exception):
-    pass
+# x86 FLAGS bits + control exceptions live in the shared leaf module so the
+# device model (dos_re.dos) need not import the interpreter (dos_re.x86).
+from .x86 import (CF, PF, AF, ZF, SF, TF, IF, DF, OF, PARITY as _PARITY,  # noqa: F401
+                  UnsupportedInstruction, HaltExecution)
 
 
 @dataclass(slots=True)

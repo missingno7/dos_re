@@ -5,7 +5,10 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Callable
 
-from .cpu import CPU8086, HaltExecution, UnsupportedInstruction, CF, ZF, IF, TF
+from typing import TYPE_CHECKING
+from .x86 import HaltExecution, UnsupportedInstruction, CF, ZF, IF, TF
+if TYPE_CHECKING:                       # type hints only -- not a runtime import
+    from .cpu import CPU8086
 from .memory import EGA_APERTURE, EGA_PLANE_STRIDE, EGA_PLANE_WINDOW
 
 

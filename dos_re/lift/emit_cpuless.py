@@ -855,9 +855,10 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
     A("_PARITY = tuple((1 - bin(v).count('1') % 2) == 1 for v in range(256))")
     A("")
     A("")
-    args = ", ".join(f"{r}=0" for r in inputs)
+    argl = (["_base=0"] if needs_plat else []) + [f"{r}=0" for r in inputs]
+    args = ", ".join(argl)
     _p = "mem, plat" if needs_plat else "mem"
-    A(f"def {name}({_p}, *, {args}):" if inputs else f"def {name}({_p}):")
+    A(f"def {name}({_p}, *, {args}):" if args else f"def {name}({_p}):")
     body: list[str] = []
     B = body.append
     B("_cost = 0")
@@ -920,6 +921,10 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
                 blk.append(f"mem.ww(ss, sp, 0x{i.next_ip:04X})")
                 kw = ", ".join(f"{r}={r}" for r in c.inputs)
                 _pass = "mem, plat" if c.needs_plat else "mem"
+                if c.needs_plat:
+                    _boff = count - 1
+                    _b = "_base + _cost" if _boff == 0 else f"_base + _cost + {_boff}"
+                    kw = (f"_base={_b}" + (", " + kw if kw else ""))
                 blk.append(f"_o, _c = {c.name}({_pass}{', ' + kw if kw else ''})")
                 for r in c.outputs:
                     blk.append(f"{r} = _o['{r}']")
@@ -951,7 +956,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
                 # instruction_count the interpreter would hold at this port
                 # access: entry + prior-in-block instructions (count-1).
                 off = count - 1
-                cost = "_cost" if off == 0 else f"_cost + {off}"
+                cost = "_base + _cost" if off == 0 else f"_base + _cost + {off}"
                 if i.op in (0xE4, 0xE5):          # in acc, imm8
                     port = f"0x{(i.imm or 0) & 0xFF:X}"
                     read = True
