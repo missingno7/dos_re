@@ -3,8 +3,20 @@
 **Status: the canonical architecture (owner-ratified, 2026-07-17).  This
 document supersedes any older doc language that gates native-graph assembly on
 per-function proof.  The Lemmings pilot (`lemmings_port`) is the reference
-implementation: M2 (strict VMless + EXE-independent) is ACCEPTED and merged;
-the current milestone is M3 (CPUless via the automated de-carrier process).**
+implementation: M2 (strict VMless + EXE-independent) and M3 (CPUless via the
+automated de-carrier process) are both ACCEPTED and merged.  The next
+milestone is M4 (DOS-layout dissolution).**
+
+> **M3 CPUless — ACCEPTED (2026-07-16).**  The whole reachable graph from the
+> game root is CPUless: recovered functions compute over `(mem, plat, *regs)`
+> with no CPU carrier, no interpreter, no lifted graph.  `play_cpuless` runs
+> the game standalone from the data-only boot image, and
+> `scripts/acceptance_cpuless.py` proves it BYTE-EXACT against the interpreted
+> oracle over the whole demo (regs + flags + poison-masked memory at every
+> boundary).  The generic machinery that made this automatic is catalogued in
+> §CPUless machinery below; everything game-specific stayed in `lemmings_port`
+> as recovery facts (entries, dispatch/boundary/vector facts, the recovered
+> corpus).
 
 DOS_RE 2.0 is an explicit architecture reset, not an extension of the
 conservative hook workflow.  1.x recovered games one proven routine at a time;
@@ -637,8 +649,10 @@ the next major mechanical stage after the VMless graph converges.
 - **M2 — Full VMless graph.**  The required reachable graph executes through
   lifted functions with no instruction-interpreter fallback on the declared
   corpus.
-- **M3 — CPUless graph.**  The CPU carrier is removed from the required
-  reachable graph.
+- **M3 — CPUless graph.  ACCEPTED (2026-07-16).**  The CPU carrier is removed
+  from the required reachable graph: every reachable function is a recovered
+  CPUless implementation, verified byte-exact against the oracle standalone
+  (§CPUless machinery).
 - **M4 — DOS-layout dissolution.**  Historical memory structures are replaced
   with native objects, oracle verification retained through the generated
   bridge.
@@ -683,6 +697,79 @@ reachable CPUless graph from canonical inputs.  DOS-layout dissolution does
 NOT mean "the agent wrote a Lemming class and patched callers"; it means the
 structure-recovery pipeline generates the native representation and its
 bridge, with AI resolving only semantic ambiguity and exceptional cases.
+
+---
+
+## 6a. CPUless machinery (the generic de-carrier, M3 — reusable)
+
+Everything below lives in `dos_re` and is game-agnostic; a new port supplies
+only recovery FACTS (entries, boundary heads, dispatch/vector evidence) in its
+own tree.  The Lemmings pilot exercised all of it; nothing here is
+Lemmings-specific.
+
+- **ABI inference** (`lift/cpuless.py`).  Over the shared recovery IR: register
+  live-ins (exit-seeded backward may-liveness), register outputs (every
+  written reg — the boundary differential observes the full file), must-defined
+  flag analysis, and stack-depth analysis (a per-address depth SET; negative
+  depth = a caller-frame read; unbalanced/varying exits make `sp` an output;
+  correlated-branch explosion widens to UNKNOWN rather than refusing).  Each
+  refusal names the missing capability — the promotion work-list.
+
+- **The CPUless emitter** (`lift/emit_cpuless.py`).  Emits, per promotable
+  function, a RECOVERED module (pure Python over `(mem[, plat], *regs)`,
+  imports nothing, returns semantic outputs) and a generated CPU-ABI ADAPTER
+  that occupies the lifted slot.  Owner corrections are load-bearing: exact
+  timing and exit-flag reproduction ride a hidden `_compat` channel owned by
+  the adapter, NEVER the recovered API; dead registers/flags are not semantic
+  outputs; uncertain contracts REFUSE loudly.  Covered constructs: the full
+  16-bit integer/logic/shift/rotate (incl. adc/sbb carry-chain, rcl/rcr
+  through-carry), string ops (df/if as compat bits, rep = one instruction of
+  virtual time), call-ABI composition (bottom-up DAG fixpoint; near + static
+  far + the MSC push-cs idiom), stack-argument ABIs, and hidden compat inputs
+  for the direction flag (`_df`) and the full flags word (`_flags_in`).
+
+- **Platform effects — two backends of one duck-typed contract**
+  (`lift/platform.py`).  `plat.inp/outp` (port I/O), `plat.intr` (INT services
+  as an explicit register-bundle request/response), `plat.boundary` (the
+  scheduler seam).  `VMlessPlatformAdapter` binds effects to a live VM for
+  VERIFICATION; `CPUlessPlatformRuntime` is the STANDALONE owner (its own
+  clock + a pure device model, no CPU/interpreter/lifted).  Timing is
+  backend-independent metadata: each effect gets the recovered graph's absolute
+  instruction offset (`_base + _cost + in-block`).
+
+- **Dynamic control flow → explicit recovered dispatch.**  A near indirect
+  call/jmp resolves its runtime selector through a generated DISPATCH registry
+  (or an intra-function jump-table landing); game-vectored interrupts and ISR
+  chains route through a generated HANDLERS registry with literal interrupt
+  frames; an unknown selector raises a structured `UnknownDispatchTarget`
+  witness — never a CPU/interpreter fallback.  Promotion is EVIDENCE-GATED:
+  a function with dynamic transfers promotes only when every probe-observed
+  target is dispatchable; mutually recursive dispatch clusters promote
+  atomically.  Interrupt/iret frames, `pushf/popf`, and the far-vector ISR
+  chain are all modelled as literal stack data.
+
+- **Boundary observers + the standalone scheduler.**  A boundary head inside a
+  recovered body emits a `plat.boundary` call; the standalone runtime parks the
+  program on a worker thread and the shell releases one boundary per frame,
+  delivering input + timer IRQs through the game's OWN recovered ISRs.  The
+  standalone ISR delivery RE-DISPATCHES (run handler → pop its iret frame →
+  follow a resume/alternate entry until control returns to the interrupted
+  point) — the explicit form of what a VM's fetch/dispatch loop does implicitly.
+
+- **The promotion pipeline** (`tools/cpuless_promote.py`, `cpuless_census.py`,
+  `cpuless_closure.py`).  A fixpoint DAG driver promotes functions whose callees
+  compose, emits the recovered + adapter pair and the DISPATCH/HANDLERS
+  registries, and measures completion by the required RUNTIME CLOSURE from the
+  declared roots (not "all named functions promoted").  The block-dispatch loop
+  carries an iteration cap so an unbounded spin fails loud with the function +
+  block rather than freezing.
+
+- **Two-level acceptance.**  The function differential (`verify_cpuless.py`
+  pattern) checks recovered-vs-oracle over randomized register/flag/memory
+  trials; the demo differential is the authoritative gate — the port's recorded
+  demo replayed on the oracle and on the recovered program in lockstep, masked
+  byte-exact at every boundary.  The clean-room form runs the STANDALONE program
+  (no VM at all) against the oracle.
 
 ---
 
