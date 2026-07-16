@@ -156,7 +156,7 @@ def test_custom_effect_tagger_tags_land_in_the_document():
 
 def test_unsupported_ledger_is_fail_loud():
     """An unliftable entry lands in the ledger, never silently dropped."""
-    bad = bytes.fromhex("d9c0")   # x87 esc — the scanner refuses
+    bad = bytes.fromhex("63c0")   # arpl — the scanner refuses
     doc = irgen_core.build_document(
         [(CS, ENTRY)],
         fetch_for=lambda cs: (lambda off: bad[(off - ENTRY) & 0xFFFF]
@@ -182,7 +182,7 @@ def test_identity_provider_embeds_in_records_and_ledger():
     assert (rec["symbol"], rec["module"], rec["ne_seg"]) == (
         "_Frob", "TEST_MODULE", 5)
 
-    bad = bytes.fromhex("d9c0")   # x87 esc — refused, so the ledger fills
+    bad = bytes.fromhex("63c0")   # arpl — refused, so the ledger fills
     doc = irgen_core.build_document(
         [(CS, ENTRY)],
         fetch_for=lambda cs: (lambda off: bad[(off - ENTRY) & 0xFFFF]

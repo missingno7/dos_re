@@ -65,8 +65,18 @@ def test_discontiguous_far_tail_is_not_a_budget_refusal():
     assert (hi - lo) > 0x4000                        # genuinely discontiguous
 
 
-def test_x87_refuses_as_unsupported():
-    code = bytes.fromhex("D8C1" "C3")     # fadd st1; ret
+def test_x87_scans_as_ordinary_sequential_instructions():
+    # ESC opcodes are plain modrm-shaped SEQ instructions now (the emitter
+    # delegates their semantics to cpu.fpu_reg_op/fpu_mem_op); a function
+    # containing x87 no longer refuses.
+    code = bytes.fromhex("D8C1" "DD5E08" "C3")   # fadd st1; fstp qword [bp+8]; ret
+    scan = scan_function(_fetch(code, 0x100), 0x100)
+    assert scan.liftable, [r.reason for r in scan.refusals]
+    assert [i.mnemonic for i in scan.insts.values()][:2] == ["x87", "x87"]
+
+
+def test_unsupported_opcode_still_refuses():
+    code = bytes.fromhex("63C0" "C3")     # arpl (286 protected-mode): refused
     scan = scan_function(_fetch(code, 0x100), 0x100)
     assert [r.reason for r in scan.refusals] == ["unsupported-opcode"]
 

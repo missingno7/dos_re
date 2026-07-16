@@ -546,6 +546,28 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str], *,
         out.append(f"cpu.set_reg8(0, mem.rb({seg}, (s.bx + (s.ax & 0xFF)) & 0xFFFF))")
         return True
 
+    # --- x87 ESC (D8-DF): shared-semantics delegation ------------------------
+    # FP semantics live in ONE place — the interpreter's execute_fpu, factored
+    # into cpu.fpu_reg_op (mod==3) and cpu.fpu_mem_op (memory forms with a
+    # pre-computed EA).  The emitted line computes the effective address
+    # natively (identical to decode_ea, seg overrides included) and calls the
+    # SAME helper the interpreter dispatches to: zero drift, including the
+    # doubles-for-80-bit precision caveat, the _f80_to_double/_double_to_f80
+    # conversions, and the UnsupportedInstruction refusals (FP-stack over/
+    # underflow and any form execute_fpu does not implement fail loud on both
+    # paths, never guess).
+    if 0xD8 <= op <= 0xDF:
+        if inst.mod == 3:
+            out.append(f"cpu.fpu_reg_op(0x{op:02X}, {inst.reg}, {inst.rm})")
+        else:
+            rm = _rm_operand(inst, 16, out, tmp)
+            out.append(f"cpu.fpu_mem_op(0x{op:02X}, {inst.reg}, "
+                       f"{rm.seg_expr}, {rm.off_var})")
+        return True
+    if op == 0x9B:                            # wait/fwait — mirror cpu op 0x9B:
+        out.append("pass  # wait (no coprocessor exceptions modelled)")
+        return True
+
     # --- string ops: reuse the interpreter's own (IP-independent) primitive -
     # cpu.string_op reads nothing from the instruction stream — it takes the
     # already-decoded opcode, the F2/F3 prefix and the segment override — so a

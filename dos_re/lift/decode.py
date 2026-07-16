@@ -8,10 +8,12 @@ tool cross-checks every decoded length against the interpreter itself (patch
 ``cpu.fetch8`` to count bytes through one ``step()`` — the ``tools/lindis.py``
 trick) and refuses to lift on any disagreement. See docs/lifting_design.md §4.
 
-Scope: the 8086/80186 encodings the interpreter executes. Two-byte ``0F``
-escapes and x87 ``ESC`` opcodes decode with correct *lengths* (so a region
-scan can keep walking) but classify as UNSUPPORTED — the CFG layer refuses
-functions containing them, and the census reports how often that happens.
+Scope: the 8086/80186 encodings the interpreter executes, including the x87
+``ESC`` opcodes (D8-DF: ordinary modrm shape, classified SEQ; the emitter
+delegates their semantics to the interpreter's own FPU helpers). Two-byte
+``0F`` escapes decode with correct *lengths* (so a region scan can keep
+walking) but classify as UNSUPPORTED — the CFG layer refuses functions
+containing them, and the census reports how often that happens.
 
 OS-free by design: no imports from dos.py/interrupts.py (lint-enforced
 extractability for a future win16_re).
@@ -207,7 +209,10 @@ _T[0xD5] = (False, 1, SEQ, "aad")
 _T[0xD6] = (False, 0, UNSUPPORTED, "salc")
 _T[0xD7] = (False, 0, SEQ, "xlat")
 for op in range(0xD8, 0xE0):
-    _T[op] = (True, 0, UNSUPPORTED, "x87-esc")   # length decodes; never lifted
+    # x87 ESC: an ordinary modrm-shaped instruction (no immediates).  SEQ —
+    # the emitter delegates semantics to the interpreter's own
+    # cpu.fpu_reg_op/fpu_mem_op (one source of truth; see lift/emit.py).
+    _T[op] = (True, 0, SEQ, "x87")
 
 _T[0xE0] = (False, 1, JCC, "loopnz")
 _T[0xE1] = (False, 1, JCC, "loopz")

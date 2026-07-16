@@ -51,7 +51,10 @@ def _decode(hexbytes: str, ip: int = 0x100):
     ("CF", 1, IRET),
     ("CC", 1, INT),
     ("F1", 1, UNSUPPORTED),
-    ("D8 C1", 2, UNSUPPORTED),     # x87 esc: length still decodes via modrm
+    ("D8 C1", 2, SEQ),             # x87 esc: ordinary modrm shape, scans as SEQ
+    ("DD 46 08", 3, SEQ),          # fld qword [bp+8]: modrm+disp8 length
+    ("26 DD 07", 3, SEQ),          # es: fld qword [bx]: seg-override form
+    ("63 C0", 2, UNSUPPORTED),     # arpl: length still decodes via modrm
     ("0F 84 10 00", 1, UNSUPPORTED),  # 0f-escape refused at the first byte
 ])
 def test_lengths_and_kinds(hexbytes, length, kind):
