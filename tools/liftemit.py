@@ -67,7 +67,8 @@ def _probe(rt, cs):
 
 def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations,
                coverage: bool = False, drop_dead_flags: bool = False,
-               boundary_heads: frozenset = frozenset()):
+               boundary_heads: frozenset = frozenset(),
+               dispatch_entries: frozenset = frozenset()):
     """Emit one entry.  Returns ("ok"|"not-liftable"|"emit-unsupported", detail)."""
     name = f"lifted_{cs:04x}_{ip:04x}"
     scan = scan_function(lambda off: mem.rb(cs, off & 0xFFFF), ip, probe=_probe(rt, cs))
@@ -87,7 +88,10 @@ def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations,
                             boundary_heads=frozenset(
                                 hip for hcs, hip in boundary_heads
                                 if hcs == cs),
-                            resume_calls=bool(boundary_heads),
+                            dispatch_entries=frozenset(
+                                dip for dcs, dip in dispatch_entries
+                                if dcs == cs),
+                            resume_calls=bool(boundary_heads or dispatch_entries),
                             min_iterations=max_iterations)
     except EmitUnsupported as exc:
         return "emit-unsupported", str(exc)
@@ -97,7 +101,8 @@ def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations,
 
 def emit_entry_from_ir(fn_rec: dict, emit_dir: Path, max_iterations,
                        coverage: bool = False, drop_dead_flags: bool = False,
-                       boundary_heads: frozenset = frozenset()):
+                       boundary_heads: frozenset = frozenset(),
+                       dispatch_entries: frozenset = frozenset()):
     """Emit one entry FROM THE RECOVERY IR (docs/recovery_ir.md §3).
 
     The record is re-elaborated by the shared consumer (``dos_re.lift.ir``):
@@ -126,7 +131,10 @@ def emit_entry_from_ir(fn_rec: dict, emit_dir: Path, max_iterations,
                             boundary_heads=frozenset(
                                 hip for hcs, hip in boundary_heads
                                 if hcs == cs),
-                            resume_calls=bool(boundary_heads),
+                            dispatch_entries=frozenset(
+                                dip for dcs, dip in dispatch_entries
+                                if dcs == cs),
+                            resume_calls=bool(boundary_heads or dispatch_entries),
                             min_iterations=max_iterations)
     except EmitUnsupported as exc:
         return "emit-unsupported", str(exc)
@@ -174,6 +182,13 @@ def main(argv=None) -> int:
                          "gets an emitted observer event + a RESUME entry, so "
                          "the port's clock parks and resumes in host code "
                          "(the VMless wall's boundary instrumentation)")
+    ap.add_argument("--dispatch-entries", default=None, metavar="@FILE",
+                    help="dynamic dispatch-entry addresses (one CS:IP per "
+                         "line): interior addresses reached by indirect "
+                         "control flow.  Each is forced as a block leader and "
+                         "exported so the installer registers a re-entry hook "
+                         "into the CONTAINING function -- sharing its "
+                         "recovered blocks, not cloning them into a module.")
     ap.add_argument("--drop-dead-flags", action="store_true",
                     help="de-carrier pass 1: elide flag writes proven "
                          "unobservable by analyze.dead_flag_sites "
@@ -190,15 +205,17 @@ def main(argv=None) -> int:
     emit_dir = Path(args.emit_dir)
     emit_dir.mkdir(parents=True, exist_ok=True)
 
-    heads: frozenset = frozenset()
-    if args.boundary_heads:
-        hpath = Path(args.boundary_heads.lstrip("@"))
-        pairs = []
-        for line in hpath.read_text().splitlines():
+    def _read_pairs(argval):
+        if not argval:
+            return frozenset()
+        out = []
+        for line in Path(argval.lstrip("@")).read_text().splitlines():
             line = line.split("#", 1)[0].strip()
             if line:
-                pairs.append(parse_addr(line))
-        heads = frozenset(pairs)
+                out.append(parse_addr(line))
+        return frozenset(out)
+    heads = _read_pairs(args.boundary_heads)
+    dispatch = _read_pairs(args.dispatch_entries)
 
     counts = {"ok": 0, "not-liftable": 0, "emit-unsupported": 0}
     skipped: list[tuple[str, str, str]] = []
@@ -212,7 +229,7 @@ def main(argv=None) -> int:
                 recs[entry], emit_dir, args.max_iterations,
                 coverage=args.coverage,
                 drop_dead_flags=args.drop_dead_flags,
-                boundary_heads=heads)
+                boundary_heads=heads, dispatch_entries=dispatch)
             counts[status] += 1
             if status != "ok":
                 skipped.append((entry, status, detail))
@@ -232,7 +249,8 @@ def main(argv=None) -> int:
                                         args.max_iterations,
                                         coverage=args.coverage,
                                         drop_dead_flags=args.drop_dead_flags,
-                                        boundary_heads=heads)
+                                        boundary_heads=heads,
+                                        dispatch_entries=dispatch)
             counts[status] += 1
             if status != "ok":
                 skipped.append((f"{cs:04X}:{ip:04X}", status, detail))

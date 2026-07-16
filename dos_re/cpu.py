@@ -192,11 +192,12 @@ class CPU8086:
     replacement_hooks: dict[tuple[int, int], Callable[["CPU8086"], None]] = field(default_factory=dict)
     hook_names: dict[tuple[int, int], str] = field(default_factory=dict)
     #: boundary observer for lifted code (lift/emit ``boundary_heads``): the
-    #: emitted event call ``cpu.boundary_hook(cpu, cs, next_ip)`` fires after
-    #: each observed head instruction; the port's clock arms it to count
-    #: passes and park exactly (re-pointing CS:IP at the RESUME entry before
-    #: raising).  None = no observation cost.
-    boundary_hook: Callable[["CPU8086", int, int], None] | None = None
+    #: emitted event call ``cpu.boundary_hook(cpu, head_cs, head_ip,
+    #: resume_ip)`` fires after each observed head instruction; the port's
+    #: clock arms it to consume per-head park costs and park exactly
+    #: (re-pointing CS:IP at the RESUME entry before raising).  None = no
+    #: observation cost.
+    boundary_hook: Callable[["CPU8086", int, int, int], None] | None = None
     #: THE VMLESS WALL POISON (docs/dos_re_2.0.md §1a): when True, any step
     #: that would fetch/decode/execute an original instruction (i.e. no
     #: replacement hook at CS:IP) raises immediately — interpretation is

@@ -569,6 +569,7 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
                   far_link_map: dict[tuple[int, int], str] | None = None,
                   dead_flag_ips: frozenset = frozenset(),
                   boundary_heads: frozenset = frozenset(),
+                  dispatch_entries: frozenset = frozenset(),
                   resume_calls: bool = False,
                   link_imports: tuple[str, ...] = ()) -> str:
     """Return the source of a module defining the lifted hook ``name``.
@@ -627,9 +628,19 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     # resumes INSIDE the lifted body: boundary observation without a single
     # interpreted instruction (boundary-shadowing dissolved).
     heads = frozenset(h for h in boundary_heads if h in scan.insts)
+    dispatch = frozenset(d for d in dispatch_entries if d in scan.insts)
     resume_points: set[int] = set()
-    if heads or resume_calls:
+    if heads or dispatch or resume_calls:
         forced = set(leaders)
+        for d in sorted(dispatch):
+            # DYNAMIC DISPATCH ENTRY (recovery-IR concept, distinct from a
+            # boundary/call/iret resume): an address reached from OUTSIDE via
+            # indirect control flow.  Force it as a block leader and export it
+            # so the installer registers a hook that re-enters THIS function's
+            # dispatcher at that block — sharing the recovered blocks, not
+            # cloning them into a new module.
+            forced.add(d)
+            resume_points.add(d)
         for h in sorted(heads):
             hi = scan.insts[h]
             if hi.kind not in (SEQ, CALL, CALL_FAR, CALL_IND, INT):
@@ -840,10 +851,13 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
                 # Boundary observer: count is flushed BEFORE the event so a
                 # park (the hook raises) never loses executed instructions;
                 # the hook re-points CS:IP at the resume entry when it parks.
+                # ABI: (cpu, head_cs, head_ip, resume_ip) — the head identity
+                # lets the clock apply per-head park costs (frame gates vs
+                # pacing spins, input_waits.HEAD_KINDS).
                 _flush()
                 lines.append("if cpu.boundary_hook is not None:")
                 lines.append(f"    cpu.boundary_hook(cpu, 0x{cs:04X}, "
-                             f"0x{inst.next_ip:04X})")
+                             f"0x{inst.ip:04X}, 0x{inst.next_ip:04X})")
 
         _flush()
         for ln in lines:

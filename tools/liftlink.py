@@ -213,7 +213,8 @@ def relink_source(scan: FunctionScan, cs: int, target_ips, *,
                   far_targets=(), signature: bytes,
                   min_iterations: int | None = None,
                   drop_dead_flags: bool = False,
-                  boundary_heads: frozenset = frozenset()) -> str:
+                  boundary_heads: frozenset = frozenset(),
+                  dispatch_entries: frozenset = frozenset()) -> str:
     """Re-emit a caller with the given near (and far) call targets linked."""
     name = f"lifted_{cs:04x}_{scan.entry:04x}"
     targets = sorted(set(target_ips))
@@ -230,7 +231,9 @@ def relink_source(scan: FunctionScan, cs: int, target_ips, *,
         count_instructions=True, dead_flag_ips=dead,
         boundary_heads=frozenset(hip for hcs, hip in boundary_heads
                                  if hcs == cs),
-        resume_calls=bool(boundary_heads),
+        dispatch_entries=frozenset(dip for dcs, dip in dispatch_entries
+                                   if dcs == cs),
+        resume_calls=bool(boundary_heads or dispatch_entries),
         min_iterations=min_iterations, link_map=link_map,
         far_link_map=far_link_map,
         link_imports=(links_table_line(keys),))
@@ -302,6 +305,9 @@ def main(argv=None) -> int:
     ap.add_argument("--boundary-heads", default=None, metavar="@FILE",
                     help="boundary-head addresses (one CS:IP per line); must "
                          "match the liftemit setting for a consistent corpus")
+    ap.add_argument("--dispatch-entries", default=None, metavar="@FILE",
+                    help="dynamic dispatch-entry addresses; must match the "
+                         "liftemit setting for a consistent corpus")
     ap.add_argument("--drop-dead-flags", action="store_true",
                     help="de-carrier pass 1 in re-emitted callers (must match "
                          "the liftemit setting for a consistent corpus)")
@@ -350,15 +356,17 @@ def main(argv=None) -> int:
                 probe=_probe(rt, cs))
 
     # 2. The linkable edge set.
-    heads: frozenset = frozenset()
-    if args.boundary_heads:
-        hpath = Path(args.boundary_heads.lstrip("@"))
-        pairs = []
-        for line in hpath.read_text().splitlines():
+    def _read_pairs(argval):
+        if not argval:
+            return frozenset()
+        out = []
+        for line in Path(argval.lstrip("@")).read_text().splitlines():
             line = line.split("#", 1)[0].strip()
             if line:
-                pairs.append(parse_addr(line))
-        heads = frozenset(pairs)
+                out.append(parse_addr(line))
+        return frozenset(out)
+    heads = _read_pairs(args.boundary_heads)
+    dispatch = _read_pairs(args.dispatch_entries)
 
     exclude: set[str] = set()
     for item in args.exclude_callees:
@@ -434,7 +442,7 @@ def main(argv=None) -> int:
             src = relink_source(scan, cs, target_ips, far_targets=far_targets,
                                 signature=sig, min_iterations=min_iters,
                                 drop_dead_flags=args.drop_dead_flags,
-                                boundary_heads=heads)
+                                boundary_heads=heads, dispatch_entries=dispatch)
         except EmitUnsupported as exc:
             print(f"skip     {caller_key}: emit-unsupported ({exc})")
             for callee_key in by_caller.get(caller_key, ()):
@@ -486,7 +494,7 @@ def main(argv=None) -> int:
         report = {
             "snapshot": str(args.snapshot),
             "boards": list(args.board),
-            "entries": len(entries),
+            "entries": len(scans),
             "edges": [list(e) for e in edges],
             "far_edges": [list(e) for e in far_edges],
             "blocked": [list(b) for b in blocked],
