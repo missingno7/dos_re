@@ -13,7 +13,11 @@ Edge rule (STRUCTURAL — the 2.0 default):
 
     caller scan is liftable, the near-CALL target is itself a census entry in
     the SAME segment (near calls guarantee that), and EVERY callee exit is a
-    near ``ret`` — tail-exit / retf / iret callees stay ``emulate_call``.
+    near ``ret`` — OR every exit is ``retf`` and every call site is the
+    ``push cs; call near`` idiom (``push_cs_idiom_at_all_sites``: MSC's
+    near-encoded far call, whose caller-pushed CS the callee's retf pops).
+    Tail-exit / iret / mixed-exit callees stay ``emulate_call``, as do retf
+    callees whose sites lack the provable push.
 
 Correctness of the linked graph is judged END-TO-END: full-state oracle
 comparison at tick boundaries over the assembled graph, with
@@ -110,7 +114,9 @@ def all_near_ret_exits(scan: FunctionScan) -> bool:
     ``call_installed_hook_like_near_call`` pushes the return IP and runs the
     callee synchronously; only a callee whose every path pops exactly that
     near return is equivalent to the original CALL.  retf/iret would pop CS
-    too; a tail exit hands control to the VM mid-flight."""
+    too; a tail exit hands control to the VM mid-flight.  (The ONE retf
+    exception is the push-cs idiom — ``push_cs_idiom_at_all_sites`` — where
+    the caller's own pushed CS is exactly the extra word the retf pops.)"""
     return bool(scan.exits) and all(i.kind == "ret" for i in scan.exits)
 
 
@@ -118,6 +124,43 @@ def all_far_ret_exits(scan: FunctionScan) -> bool:
     """True when every exit is ``retf`` — the far-linkable callee shape
     (``call_installed_hook_like_far_call`` pushes CS:IP; only retf pops both)."""
     return bool(scan.exits) and all(i.kind == "retf" for i in scan.exits)
+
+
+def push_cs_idiom_at_all_sites(scan: FunctionScan, target: int) -> bool:
+    """True when EVERY near-CALL site in ``scan`` targeting ``target`` is
+    immediately preceded — same-block fallthrough adjacency — by ``push cs``.
+
+    The MSC intra-segment far-service idiom: a far-returning function called
+    from within its own segment compiles as ``push cs; call near target`` —
+    the callee's ``retf`` pops the pushed CS + the near call's return IP, so
+    the pair behaves exactly like a far call while staying near-encoded.
+    Recognition is mechanical and per-site (never dataflow guesswork):
+
+    * the instruction at ``site.ip - 1`` is in the reachable set, is exactly
+      the one-byte ``push cs`` (op 0x0E, no prefixes — one byte, so sequence
+      adjacency IS the address relation), and falls through into the call;
+    * the call site is NOT a block leader: a branch target could be reached
+      WITHOUT executing the push, so the far frame would not be provable on
+      every path.  A ``push cs`` that belongs to another dataflow never
+      qualifies — it must be the immediately preceding instruction of the
+      same basic block.
+
+    All sites must qualify because a linked edge binds by TARGET (the
+    emitter's ``link_map`` applies to every CALL site with that target); one
+    non-idiom site would link a genuinely broken frame."""
+    sites = [i for i in scan.insts.values()
+             if i.kind == "call" and i.target == target]
+    if not sites:
+        return False
+    leaders = set(scan.block_leaders())
+    for site in sites:
+        prev = scan.insts.get((site.ip - 1) & 0xFFFF)
+        if prev is None or prev.op != 0x0E or prev.prefixes \
+                or prev.kind != "seq" or prev.next_ip != site.ip:
+            return False
+        if site.ip in leaders:
+            return False
+    return True
 
 
 def compute_far_link_edges(scans: dict[tuple[int, int], FunctionScan],
@@ -195,10 +238,28 @@ def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
                 blocked.append((caller_key, callee_key, "callee-not-liftable"))
             elif not structural and statuses.get(callee_key) != PASSING:
                 blocked.append((caller_key, callee_key, "not-passing"))
-            elif not all_near_ret_exits(callee):
-                blocked.append((caller_key, callee_key, "exit-shape"))
-            else:
+            elif all_near_ret_exits(callee):
                 edges.append((caller_key, callee_key))
+            elif all_far_ret_exits(callee) \
+                    and push_cs_idiom_at_all_sites(scan, target):
+                # The push-cs idiom (push cs; call near -> retf callee): a
+                # linkable NEAR edge with the ordinary near-link emission.
+                # The caller's own emitted ``push cs`` already put the segment
+                # word on the stack; call_installed_hook_like_near_call then
+                # pushes the return IP, and the lifted callee's retf
+                # terminator pops IP then CS — together exactly the original
+                # far-shaped frame, byte for byte (values, order, SP
+                # trajectory).  No new call-site ABI, no push suppression:
+                # the push stays a counted one-line instruction and the link
+                # COMPENSATES nothing away (subsuming the push into a far
+                # helper would break the one-line-per-instruction emit
+                # invariant and its virtual-time accounting for no gain).
+                edges.append((caller_key, callee_key))
+            elif all_far_ret_exits(callee):
+                blocked.append((caller_key, callee_key,
+                                "retf-callee-no-push-cs-idiom"))
+            else:
+                blocked.append((caller_key, callee_key, "exit-shape"))
     return edges, blocked
 
 

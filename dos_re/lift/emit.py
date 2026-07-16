@@ -667,8 +667,11 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     <callee>, ret_ip)`` instead of ``emulate_call`` — original CALL/RET stack
     semantics, no interpreter in the path, and the child remains a
     verifier-visible boundary in the hybrid (pitfall #5). Only near-RET-exit
-    callees are safe to link (the LINK TOOL enforces that precondition; tail
-    exits / retf / iret callees must stay ``emulate_call``).  ``far_link_map``
+    callees are safe to link — plus all-``retf`` callees whose every call
+    site is the ``push cs; call near`` idiom, where the caller's own emitted
+    ``push cs`` supplies the segment word the retf pops (the LINK TOOL
+    enforces both preconditions; tail exits / iret / mixed-exit callees must
+    stay ``emulate_call``).  ``far_link_map``
     is the FAR mirror: ``{(seg, off): python_callable_expr}`` — a direct far
     CALL to a mapped target emits ``call_installed_hook_like_far_call`` (far
     return frame; only all-``retf``-exit callees qualify, again enforced by
