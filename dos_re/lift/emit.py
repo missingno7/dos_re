@@ -358,6 +358,41 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str], *,
         out.extend(rm.write("_r"))
         return True
 
+    # --- PUSHA / POPA (80186+) ----------------------------------------------
+    if op == 0x60:                            # pusha: AX CX DX BX origSP BP SI DI
+        out.append("_sp0 = s.sp")
+        for r in ("s.ax", "s.cx", "s.dx", "s.bx", "_sp0", "s.bp", "s.si", "s.di"):
+            out.append(f"cpu.push({r})")
+        return True
+    if op == 0x61:                            # popa: DI SI BP (skip SP) BX DX CX AX
+        out.append("s.di = cpu.pop()")
+        out.append("s.si = cpu.pop()")
+        out.append("s.bp = cpu.pop()")
+        out.append("cpu.pop()  # discard the saved SP")
+        out.append("s.bx = cpu.pop()")
+        out.append("s.dx = cpu.pop()")
+        out.append("s.cx = cpu.pop()")
+        out.append("s.ax = cpu.pop()")
+        return True
+
+    # --- IMUL r16, r/m16, imm (80186+) --------------------------------------
+    if op in (0x69, 0x6B):
+        # Mirror CPU8086 op 0x69/0x6B: signed 16x16 multiply of r/m16 by the
+        # sign-extended immediate; low word to the reg, CF=OF=overflow-out-of-16.
+        rm = _rm_operand(inst, 16, out, tmp)
+        if op == 0x6B:
+            imm = inst.imm - 0x100 if inst.imm & 0x80 else inst.imm
+        else:
+            imm = inst.imm - 0x10000 if inst.imm & 0x8000 else inst.imm
+        out.append(f"_a = {rm.read()}")
+        out.append("_a = _a - 0x10000 if _a & 0x8000 else _a")
+        out.append(f"_r = _a * {imm}")
+        out.append(f"s.{REG16[inst.reg]} = _r & 0xFFFF")
+        out.append("_c = not (-32768 <= _r <= 32767)")
+        out.append("cpu.set_flag(CF, _c)")
+        out.append("cpu.set_flag(OF, _c)")
+        return True
+
     # --- ENTER / LEAVE (80186+; every MSC Win16 prologue/epilogue) -----------
     if op == 0xC8:
         # Mirror CPU8086 op 0xC8.  imm is 3 bytes (alloc16 + nesting8), which
@@ -378,6 +413,12 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str], *,
         return True
 
     # --- misc simple -------------------------------------------------------
+    if op == 0x9F:                            # lahf — mirror CPU8086 op 0x9F
+        out.append("s.ax = (s.ax & 0x00FF) | (((s.flags & 0xD5) | 0x02) << 8)")
+        return True
+    if op == 0x9E:                            # sahf — mirror CPU8086 op 0x9E
+        out.append("s.flags = (s.flags & ~0xD5) | ((s.ax >> 8) & 0xD5) | 0x0002")
+        return True
     if op == 0x98:
         out.append("_al = s.ax & 0x00FF")
         out.append("s.ax = _al | (0xFF00 if _al & 0x80 else 0x0000)")

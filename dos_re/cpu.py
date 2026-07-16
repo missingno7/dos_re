@@ -1173,6 +1173,13 @@ class CPU8086:
         if op == 0x9B:  # WAIT/FWAIT: no coprocessor exceptions are modelled,
             # so this is a no-op (first exercised by Win16 x87-emulator code).
             return T and "wait"
+        if op == 0x9F:  # LAHF: AH = low FLAGS byte (SF ZF 0 AF 0 PF 1 CF).
+            # First decoded in a Win16 CRT's raw-INT-21h write path.
+            s.ax = (s.ax & 0x00FF) | (((s.flags & 0xD5) | 0x02) << 8)
+            return T and "lahf"
+        if op == 0x9E:  # SAHF: SF ZF AF PF CF from AH; other flags preserved.
+            s.flags = (s.flags & ~0xD5) | ((s.ax >> 8) & 0xD5) | 0x0002
+            return T and "sahf"
         if op == 0x98:
             al = s.ax & 0x00FF
             s.ax = al | (0xFF00 if al & 0x80 else 0x0000)
