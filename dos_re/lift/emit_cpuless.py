@@ -686,12 +686,34 @@ class CalleeContract:
     needs_plat: bool = False        # the callee takes the platform interface
     ret_kind: str = "near"          # "near" (ret) | "far" (retf) exit ABI
     df_livein: bool = False         # takes the caller's DF (_df compat input)
+    sp_delta: int | None = 0        # net caller-depth effect (stack args /
+                                    # extra pops; None = varies); excludes
+                                    # the ret-addr pair
+    ret_pop: int = 0                # ret N immediate (uniform per function)
+    sp_output: bool = False         # body is unbalanced: sp is a real output
+    sp_deltas: tuple = (0,)         # ALL possible exit-depth effects -- the
+                                    # caller's depth-set tracker forks on
+                                    # each (runtime sp flows via outputs)
+
+
+@dataclass
+class PromotionSpec:
+    """Everything check_promotable proves about one promotable function."""
+    abi: object
+    exit_flags: frozenset
+    needs_plat: bool
+    ret_kind: str
+    df_livein: bool
+    sp_delta: int | None = 0
+    ret_pop: int = 0
+    sp_output: bool = False
+    sp_deltas: tuple = (0,)
 
 
 def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
                      far_callees=None, dispatch_addrs=frozenset()):
-    """The strict promotion gate.  Returns (abi, exit_flags, needs_plat,
-    ret_kind, df_livein) or raises :class:`Refusal` with the census reason.
+    """The strict promotion gate.  Returns a :class:`PromotionSpec` or
+    raises :class:`Refusal` with the census reason.
 
     ``callees`` (call-ABI composition, tier 4): maps a direct near-call
     target ip to its :class:`CalleeContract`.  ``far_callees`` (tier 9) is
@@ -757,9 +779,8 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     for i in scan.insts.values():
         e = register_effects(i)
         if i.kind in (RET, RETF):
-            if i.imm or 0:
-                raise Refusal("ret-n-stack-args (needs stack-arg ABI)")
-            continue                       # the RET ABI is the adapter's job
+            continue    # the RET ABI (incl. a uniform ret N) is the
+                        # adapter's job; the depth checker gates the rest
         if i.kind == "iret":
             raise Refusal("far-or-interrupt-return (needs adapter variant)")
         if i.op in (0x9C, 0x9D):
@@ -770,7 +791,13 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
             raise Refusal("cs-or-ss-mutation")
         if "sp" in (e.reads | e.writes) and not _is_stack_family(i):
             raise Refusal("sp-as-data")
-    _check_stack_depths(scan, alt_entries)
+    sp_delta, ret_pop, sp_output, sp_deltas = _check_stack_depths(
+        scan, alt_entries, callees, far_callees)
+    if sp_output and any(_is_dyn(i) and i.kind == JMP_IND
+                         for i in scan.insts.values()):
+        # a tail dispatch assumes the caller frame is next on the stack;
+        # an unbalanced body would hand the callee a shifted frame.
+        raise Refusal("tail-dispatch-with-unbalanced-stack")
     if any(i.ip in excluded_addrs for i in scan.insts.values()):
         raise Refusal("boundary-or-dispatch-address")
     # flag live-in at entry: a jcc may not read a flag no in-function
@@ -780,7 +807,11 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     exit_flags, df_livein = _check_flag_liveins(scan, callees, far_callees,
                                                 alt_entries)
     needs_plat = _func_needs_plat(scan, callees, far_callees)
-    return abi, exit_flags, needs_plat, ret_kind, df_livein
+    return PromotionSpec(abi=abi, exit_flags=exit_flags,
+                         needs_plat=needs_plat, ret_kind=ret_kind,
+                         df_livein=df_livein, sp_delta=sp_delta,
+                         ret_pop=ret_pop, sp_output=sp_output,
+                         sp_deltas=sp_deltas)
 
 
 def _func_needs_plat(scan, callees, far_callees=None) -> bool:
@@ -824,37 +855,79 @@ def _is_dyn(i) -> bool:
         and ((i.modrm >> 3) & 7) in (2, 4)
 
 
-def _check_stack_depths(scan, alt_entries=frozenset()) -> None:
-    """Static stack-discipline verification (tier 2): every address has ONE
-    net push depth (bytes) from entry, consistent at every join; RET happens
-    at depth 0 (balanced -- so sp never appears in the outputs and the
-    adapter's RET ABI is unchanged); the depth never goes negative (a pop
-    below the entry depth would read the caller's frame -- the return
-    address -- which is machine-ABI data, not game state).  A dynamic tail
-    dispatch (near jmp_ind) must run at depth 0 -- the dispatched callee's
-    return uses the caller's own frame.  ``alt_entries`` (dynamic arrivals)
-    seed additional depth-0 roots."""
-    depth: dict[int, int] = {scan.entry: 0}
-    work = [scan.entry]
+def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
+                        far_callees=None) -> tuple:
+    """Static stack-discipline verification (tiers 2 + 11): every address has
+    ONE net push depth (bytes) from entry, consistent at every join.
+
+    The depth MAY go negative and a RET may happen at ANY depth (tier 11,
+    stack-args ABI): pops below the entry depth read the caller's frame --
+    literal, byte-exact memory the recovered body computes over -- and an
+    unbalanced exit simply makes ``sp`` a real contract OUTPUT (the adapter
+    pops the return address at the runtime sp).  ``ret N`` is legal when the
+    immediate is UNIFORM across exits (the adapter adds it after the pop).
+
+    A dynamic tail dispatch (near jmp_ind) must still run at depth 0 -- the
+    dispatched callee's return uses the caller's own frame.  ``alt_entries``
+    (dynamic arrivals) seed additional depth-0 roots.  A composed call to a
+    callee with a static sp_delta shifts the depth by it; a callee whose
+    exit depth VARIES refuses (callee-sp-escape).
+
+    Depth is tracked as a SET per address: conditional pops before a join
+    (path-dependent depth) are legal -- the recovered body's runtime ``sp``
+    local is correct on whichever path executes -- they simply make ``sp``
+    an output and the function non-composable (sp_delta None).  A depth set
+    that would grow past the cap (correlated caller/callee branches a
+    per-address set cannot see, e.g. varying-delta callees in a loop)
+    widens to UNKNOWN (None) instead of refusing: every downstream depth is
+    unknown, sp is an output, and the exit-delta contract is None -- the
+    runtime sp stays exact throughout.
+
+    Returns (sp_delta, ret_pop, sp_output, sp_deltas):
+      sp_delta  -- uniform exit depth minus ret_pop (None when exits
+                   disagree or are unknown);
+      ret_pop   -- the uniform ret N immediate (0 if plain ret);
+      sp_output -- exits unbalanced/varying/unknown (sp joins the outputs);
+      sp_deltas -- every possible exit delta, or None when unknown."""
+    callees = callees or {}
+    far_callees = far_callees or {}
+    depths: dict[int, set[int]] = {scan.entry: {0}}
+    work = [(scan.entry, 0)]
     for a in alt_entries:
-        depth.setdefault(a, 0)
-        work.append(a)
+        depths.setdefault(a, set()).add(0)
+        work.append((a, 0))
+    exit_depths: set[int] = set()
+    ret_pops: set[int] = set()
     while work:
-        ip = work.pop()
+        ip, d = work.pop()
         i = scan.insts[ip]
         e = register_effects(i)
-        d = depth[ip]
         if i.kind in (RET, RETF):
-            if d != 0:
-                raise Refusal("unbalanced-stack-at-ret")
+            if i.kind == RETF and (i.imm or 0):
+                raise Refusal("ret-n-stack-args (retf N needs far variant)")
+            exit_depths.add(d)
+            ret_pops.add((i.imm or 0) if i.kind == RET else 0)
             continue
         if i.kind == JMP_IND:
-            if d != 0:
+            if d != 0:     # unknown depth cannot prove the tail rule either
                 raise Refusal("tail-dispatch-at-nonzero-depth")
+            exit_depths.add(0)
+            ret_pops.add(0)
             continue
-        after = d - (e.stack_delta or 0)
-        if after < 0:
-            raise Refusal("stack-underflow (reads caller frame)")
+        # a composed callee may shift the caller's depth by ANY of its exit
+        # deltas: the tracker FORKS (the runtime sp flows back through the
+        # callee's sp output, so every fork is a real executable path).
+        # UNKNOWN (None) absorbs: unknown in -> unknown out.
+        if d is None:
+            afters = [None]
+        else:
+            afters = [d - (e.stack_delta or 0)]
+            if i.kind == CALL and i.target in callees:
+                ds = callees[i.target].sp_deltas
+                afters = [None] if ds is None else [d + x for x in ds]
+            if i.kind == CALL_FAR and i.far_target in far_callees:
+                ds = far_callees[i.far_target].sp_deltas
+                afters = [None] if ds is None else [d + x for x in ds]
         succs = []
         if i.kind in (SEQ, CALL, CALL_FAR, CALL_IND):
             succs = [i.next_ip]
@@ -865,12 +938,29 @@ def _check_stack_depths(scan, alt_entries=frozenset()) -> None:
         for s in succs:
             if s is None or s not in scan.insts:
                 continue
-            if s in depth:
-                if depth[s] != after:
-                    raise Refusal("inconsistent-stack-depth-at-join")
-            else:
-                depth[s] = after
-                work.append(s)
+            seen = depths.setdefault(s, set())
+            for after in afters:
+                if len(seen) >= 8:
+                    # correlated-branch fork explosion: widen to UNKNOWN
+                    after = None
+                if after not in seen:
+                    seen.add(after)
+                    work.append((s, after))
+    if len(ret_pops) > 1:
+        raise Refusal("mixed-ret-pop (differing ret N immediates)")
+    ret_pop = next(iter(ret_pops), 0)
+    unknown = None in exit_depths
+    sp_output = unknown or len(exit_depths) > 1 \
+        or any(d != 0 for d in exit_depths)
+    if unknown:
+        sp_delta, sp_deltas = None, None
+    else:
+        sp_delta = (next(iter(exit_depths)) - ret_pop
+                    if len(exit_depths) == 1 else None)
+        sp_deltas = tuple(sorted(d - ret_pop for d in exit_depths)) or (0,)
+        if not exit_depths:
+            sp_delta = 0
+    return sp_delta, ret_pop, sp_output, sp_deltas
 
 
 def _check_flag_liveins(scan, callees=None, far_callees=None,
@@ -1040,7 +1130,8 @@ def _contract_inputs(scan, abi) -> list[str]:
 
 def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                    recovered_import_base: str = "", needs_plat=False,
-                   dispatch_addrs=frozenset(), df_livein=False) -> str:
+                   dispatch_addrs=frozenset(), df_livein=False,
+                   sp_output=False) -> str:
     """Generate the recovered module source for one promotable function.
 
     ``callees`` (tier 4): CalleeContract per direct near-call target -- the
@@ -1062,7 +1153,9 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
     bb_of = {ip: n for n, ip in enumerate(leaders)}
     has_dyn = any(_is_dyn(i) for i in scan.insts.values())
     inputs = _contract_inputs(scan, abi)
-    outputs = sorted((abi.outputs - {"sp"}) & (frozenset(W16) | frozenset({"ds", "es"})))
+    keep = frozenset(W16) | frozenset({"ds", "es"})
+    outputs = sorted((abi.outputs & keep)
+                     - (frozenset() if sp_output else frozenset({"sp"})))
 
     L: list[str] = []
     A = L.append
@@ -1264,7 +1357,10 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                                f"{fname} = (_gf & 0x{fbit:X}) != 0")
                 blk.append("    _fmask |= _gm")
                 blk.append("_cost += _c['cost']")
-                blk.append(f"sp = (sp + {4 if far else 2}) & 0xFFFF")
+                # sp after the composed call: an sp-output callee already
+                # merged its runtime sp through the outputs loop above; the
+                # ret-addr pair (+ a uniform ret N) pops here.
+                blk.append(f"sp = (sp + {4 if far else 2 + c.ret_pop}) & 0xFFFF")
                 ip = i.next_ip
                 if ip in bb_of:
                     blk.append(f"_cost += {count}")
@@ -1464,14 +1560,16 @@ def emit_dispatch_table(entries: dict) -> str:
 def emit_adapter(scan, abi, key: str, *, signature: bytes,
                  recovered_import_base: str, needs_plat=False,
                  ret_kind: str = "near", dispatch_addrs=frozenset(),
-                 df_livein=False) -> str:
+                 df_livein=False, sp_output=False, ret_pop=0) -> str:
     """Generate the CPU-ABI adapter that occupies the lifted slot."""
     cs = int(key.split(":")[0], 16)
     entry = scan.entry
     name = f"lifted_{key.replace(':', '_').lower()}"
     rec = f"func_{key.replace(':', '_').lower()}"
     inputs = _contract_inputs(scan, abi)
-    outputs = sorted((abi.outputs - {"sp"}) & (frozenset(W16) | frozenset({"ds", "es"})))
+    keep = frozenset(W16) | frozenset({"ds", "es"})
+    outputs = sorted((abi.outputs & keep)
+                     - (frozenset() if sp_output else frozenset({"sp"})))
     alt_entries = sorted(frozenset(dispatch_addrs) & frozenset(scan.insts)
                          - frozenset({scan.entry}))
 
@@ -1524,11 +1622,15 @@ def emit_adapter(scan, abi, key: str, *, signature: bytes,
     A("    # exit flags: touched bits from the compat channel, rest preserved")
     A("    s.flags = (s.flags & ~_compat['fmask']) | _compat['flags'] | 0x0002")
     A("    # historical RET ABI + exact virtual time (owns_time contract)")
+    A("    # (an unbalanced body already wrote its runtime sp back above,")
+    A("    # so the pop reads the return address exactly where it now is)")
     if ret_kind == "far":
         A("    s.ip = cpu.pop()")
         A("    s.cs = cpu.pop()")
     else:
         A("    s.ip = cpu.pop()")
+    if ret_pop:
+        A(f"    s.sp = (s.sp + {ret_pop}) & 0xFFFF   # ret {ret_pop}")
     if needs_plat:
         # plat effects already moved instruction_count to _entry + <mid cost>;
         # settle it at the absolute total (an increment would double-count).

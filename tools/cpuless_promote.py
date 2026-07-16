@@ -74,6 +74,10 @@ def _gate_dyn_evidence(scan, cs, dyn_evidence, done, dispatch_owner,
                 c = contracts_by_cs.get(tcs, {}).get(tip)
                 if c is not None and c.ret_kind != "near":
                     raise emit_cpuless.Refusal("dyn-target-not-near-return")
+                if c is not None and (c.sp_output or c.ret_pop
+                                      or c.sp_delta != 0):
+                    # the dyn bundle assumes a stack-balanced callee
+                    raise emit_cpuless.Refusal("dyn-target-sp-escape")
                 continue
             raise emit_cpuless.Refusal("dyn-target-unpromoted")
 
@@ -193,40 +197,44 @@ def main(argv=None) -> int:
                 if not rec.get("liftable", True):
                     raise emit_cpuless.Refusal("ir-not-liftable")
                 scan = scan_from_ir_record(rec)
-                abi, exit_flags, needs_plat, ret_kind, df_livein = \
-                    emit_cpuless.check_promotable(
-                        scan, excluded_addrs=excl_ips, callees=contracts,
-                        far_callees=far_contracts, dispatch_addrs=disp_ips)
+                spec = emit_cpuless.check_promotable(
+                    scan, excluded_addrs=excl_ips, callees=contracts,
+                    far_callees=far_contracts, dispatch_addrs=disp_ips)
+                abi = spec.abi
                 _gate_dyn_evidence(scan, cs, dyn_evidence, tentative,
                                    dispatch_owner, contracts_by_cs)
                 recovered_src = emit_cpuless.emit_recovered(
                     scan, abi, key, callees=contracts,
                     far_callees=far_contracts,
                     recovered_import_base=args.import_base,
-                    needs_plat=needs_plat, dispatch_addrs=disp_ips,
-                    df_livein=df_livein)
+                    needs_plat=spec.needs_plat, dispatch_addrs=disp_ips,
+                    df_livein=spec.df_livein, sp_output=spec.sp_output)
                 adapter_src = emit_cpuless.emit_adapter(
                     scan, abi, key,
                     signature=bytes.fromhex(rec["signature"]),
                     recovered_import_base=args.import_base,
-                    needs_plat=needs_plat, ret_kind=ret_kind,
-                    dispatch_addrs=disp_ips, df_livein=df_livein)
+                    needs_plat=spec.needs_plat, ret_kind=spec.ret_kind,
+                    dispatch_addrs=disp_ips, df_livein=spec.df_livein,
+                    sp_output=spec.sp_output, ret_pop=spec.ret_pop)
             except emit_cpuless.Refusal as e:
                 refused.setdefault(str(e), []).append(key)
                 continue
             promoted.append(key)
             done.add(key)
             outputs[key] = (recovered_src, adapter_src)
+            keep = frozenset(emit_cpuless.W16) | frozenset({"ds", "es"})
+            out_regs = (abi.outputs & keep) - (
+                frozenset() if spec.sp_output else frozenset({"sp"}))
             contract = emit_cpuless.CalleeContract(
                 name=f"func_{key.replace(':', '_').lower()}",
                 inputs=tuple(emit_cpuless._contract_inputs(scan, abi)),
-                outputs=tuple(sorted((abi.outputs - {"sp"})
-                                     & (frozenset(emit_cpuless.W16)
-                                        | frozenset({"ds", "es"})))),
-                exit_flags=exit_flags, needs_plat=needs_plat,
-                ret_kind=ret_kind, df_livein=df_livein)
+                outputs=tuple(sorted(out_regs)),
+                exit_flags=spec.exit_flags, needs_plat=spec.needs_plat,
+                ret_kind=spec.ret_kind, df_livein=spec.df_livein,
+                sp_delta=spec.sp_delta, ret_pop=spec.ret_pop,
+                sp_output=spec.sp_output, sp_deltas=spec.sp_deltas)
             contracts[scan.entry] = contract
-            if ret_kind == "far":
+            if spec.ret_kind == "far":
                 far_contracts[(cs, scan.entry)] = contract
             for ip in sorted(disp_ips & set(scan.insts) - {scan.entry}):
                 dispatch_owner.setdefault(f"{cs:04X}:{ip:04X}", key)
@@ -275,8 +283,9 @@ def main(argv=None) -> int:
         for key in promoted:
             kcs, kip = (int(x, 16) for x in key.split(":"))
             c = contracts_by_cs[kcs][kip]
-            if c.ret_kind != "near":
-                continue
+            if c.ret_kind != "near" or c.sp_output or c.ret_pop \
+                    or c.sp_delta != 0:
+                continue    # only balanced near-return functions dispatch
             registry[key] = (f"{args.import_base}.{c.name}", c.name, None,
                              tuple(c.inputs), c.needs_plat, c.df_livein)
         for dkey, owner in dispatch_owner.items():
