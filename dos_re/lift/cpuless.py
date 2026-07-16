@@ -367,30 +367,57 @@ def _successors(scan) -> dict[int, list[int]]:
     return succ
 
 
-def abi_scan(scan) -> AbiReport:
+def abi_scan(scan, callee_effects=None) -> AbiReport:
     """Infer the CPU ABI of one scanned function from its instruction list.
 
     Register INPUTS = live-in at entry by backward may-liveness over the
     in-function CFG (a register read on SOME path before being written).
     OUTPUTS = every register any instruction may write (the boundary
     differential observes the full register file, so scratch counts).
-    Refusal sites are aggregated by capability -- the M3 work list."""
+    Refusal sites are aggregated by capability -- the M3 work list.
+
+    ``callee_effects`` (call-ABI composition): maps a direct near-call target
+    ip to ``(reads, writes)`` -- the callee's composed register contract.  A
+    CALL whose target is present stops being a refusal and contributes the
+    callee's reads/writes (plus the machine call's own sp/ss traffic) to the
+    dataflow, so the caller's inferred contract is interprocedurally exact."""
     effs = {i.ip: register_effects(i) for i in scan.insts.values()}
+    if callee_effects:
+        for i in scan.insts.values():
+            if (i.kind == CALL and i.target is not None
+                    and i.target in callee_effects):
+                creads, cwrites = callee_effects[i.target]
+                effs[i.ip] = Effects(
+                    reads=frozenset(creads) | frozenset({"sp", "ss"}),
+                    writes=frozenset(cwrites) | frozenset({"sp"}),
+                    mem_read=True, mem_write=True, stack_delta=0)
     succ = _successors(scan)
     refusals: dict[str, list[int]] = {}
     for ip, e in effs.items():
         if e.refusal:
             refusals.setdefault(e.refusal, []).append(ip)
 
-    # Backward may-liveness (sets grow to fixpoint).
-    live_out: dict[int, frozenset] = {ip: frozenset() for ip in effs}
+    # Backward may-liveness (sets grow to fixpoint).  EXIT SEEDING: the
+    # caller observes the register file after return, so every register this
+    # function MAY write is read at exit -- a register written on only some
+    # paths passes its ENTRY value through on the others, making it a
+    # contract INPUT (without this, the emitted passthrough would reference
+    # an unbound local).
+    writes_union = frozenset().union(*(e.writes for e in effs.values()))         if effs else frozenset()
+    exit_live = writes_union - frozenset({"sp"})
+    live_out: dict[int, frozenset] = {
+        ip: (exit_live if scan.insts[ip].kind in (RET, RETF, IRET)
+             else frozenset())
+        for ip in effs}
     changed = True
     while changed:
         changed = False
         for i in sorted(scan.insts.values(), key=lambda x: -x.ip):
+            if not succ[i.ip]:
+                continue                      # exit: keeps its seeded set
             out = frozenset().union(*(
                 (live_out[s] - effs[s].writes) | effs[s].reads
-                for s in succ[i.ip])) if succ[i.ip] else frozenset()
+                for s in succ[i.ip]))
             if out != live_out[i.ip]:
                 live_out[i.ip] = out
                 changed = True

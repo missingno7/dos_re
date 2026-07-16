@@ -31,7 +31,9 @@ full-CPU fallback.
 """
 from __future__ import annotations
 
-from .decode import JCC, JMP, RET, SEQ
+from dataclasses import dataclass
+
+from .decode import CALL, JCC, JMP, RET, SEQ
 from .cpuless import abi_scan, register_effects, W16, SEGS
 
 # x86 FLAGS bits (mirrors dos_re.cpu constants; literal here because the
@@ -388,13 +390,37 @@ def _emit_alu(lines, flags, alu, wide, a, b, inst, form, dst_rm, dst_acc):
 
 # --------------------------------------------------------------------------
 
-def check_promotable(scan, *, excluded_addrs=frozenset()) -> "tuple":
-    """The strict first-subset gate.  Returns (abi, block_map) or raises
-    :class:`Refusal` with the census reason."""
-    abi = abi_scan(scan)
+@dataclass
+class CalleeContract:
+    """The composed contract of an already-promoted callee, as the emitter
+    needs it at a caller's call site."""
+    name: str                       # recovered function name (func_1010_xxxx)
+    inputs: tuple                   # keyword inputs (incl. sp/ss when needed)
+    outputs: tuple                  # register outputs in the result dict
+    exit_flags: frozenset           # flags DEFINITELY defined on every exit
+
+
+def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None):
+    """The strict promotion gate.  Returns (abi, exit_flags) or raises
+    :class:`Refusal` with the census reason.
+
+    ``callees`` (call-ABI composition, tier 4): maps a direct near-call
+    target ip to its :class:`CalleeContract`.  A CALL whose target is present
+    composes; any other call still refuses."""
+    callees = callees or {}
+    callee_effects = {ip: (frozenset(c.inputs) - frozenset({"sp", "ss"}),
+                           frozenset(c.outputs))
+                      for ip, c in callees.items()}
+    abi = abi_scan(scan, callee_effects=callee_effects)
     for cap in abi.refusals:
-        raise Refusal({"call-abi-composition": "contains-call",
-                       "int-platform-effect": "contains-interrupt",
+        if cap == "call-abi-composition":
+            missing = sorted({i.target for i in scan.insts.values()
+                              if i.kind == CALL and (i.target is None or
+                                                     i.target not in callees)})
+            if not missing:
+                continue            # every call target composes
+            raise Refusal("contains-call")
+        raise Refusal({"int-platform-effect": "contains-interrupt",
                        "indirect-or-far-transfer": "indirect-control-flow",
                        "port-io-platform-effect": "port-io",
                        }.get(cap, cap))
@@ -418,10 +444,10 @@ def check_promotable(scan, *, excluded_addrs=frozenset()) -> "tuple":
     if any(i.ip in excluded_addrs for i in scan.insts.values()):
         raise Refusal("boundary-or-dispatch-address")
     # flag live-in at entry: a jcc may not read a flag no in-function
-    # instruction has definitely written on every path -- refuse (the
-    # contract would need caller flags).
-    _check_flag_liveins(scan)
-    return abi
+    # instruction (or composed callee) has definitely written on every path
+    # -- refuse (the contract would need caller flags).
+    exit_flags = _check_flag_liveins(scan, callees)
+    return abi, exit_flags
 
 
 def _is_stack_family(i) -> bool:
@@ -434,6 +460,7 @@ def _is_stack_family(i) -> bool:
                                                     # earlier via ss-mutation)
             or op in (0x68, 0x6A)
             or (op == 0xFF and i.reg == 6) or (op == 0x8F and i.reg == 0)
+            or i.kind == CALL             # composed call: ret-addr push/pop
             or i.kind == RET)
 
 
@@ -459,7 +486,7 @@ def _check_stack_depths(scan) -> None:
         if after < 0:
             raise Refusal("stack-underflow (reads caller frame)")
         succs = []
-        if i.kind in (SEQ,):
+        if i.kind in (SEQ, CALL):
             succs = [i.next_ip]
         elif i.kind == JCC:
             succs = [i.next_ip, i.target]
@@ -476,9 +503,18 @@ def _check_stack_depths(scan) -> None:
                 work.append(s)
 
 
-def _check_flag_liveins(scan) -> None:
-    writes_all = {"cf", "pf", "af", "zf", "sf", "of"}
+def _check_flag_liveins(scan, callees=None) -> frozenset:
+    """Must-defined flag analysis over the CFG (meet = intersection).
+
+    Refuses when a jcc reads a flag not DEFINITELY defined on every path from
+    entry (a flag live-in would need caller flags in the contract).  A
+    composed CALL defines its callee's must-defined exit flags -- what makes
+    the ubiquitous ``call G; jnz ...`` idiom promotable.  Returns the
+    must-defined set at THIS function's exits (its own contribution to a
+    caller's contract)."""
+    callees = callees or {}
     defined: dict[int, frozenset] = {scan.entry: frozenset()}
+    exit_sets: dict[int, frozenset] = {}
     order = sorted(scan.insts)
     changed = True
     while changed:
@@ -494,8 +530,13 @@ def _check_flag_liveins(scan) -> None:
                 if not need <= set(defined[ip]):
                     raise Refusal("flag-live-in (caller flags observed)")
             new = defined[ip] | _flags_defined_by(i)
+            if (i.kind == CALL and i.target is not None
+                    and i.target in callees):
+                new = defined[ip] | callees[i.target].exit_flags
+            if i.kind == RET:
+                exit_sets[ip] = defined[ip]
             succs = []
-            if i.kind in (SEQ,):
+            if i.kind in (SEQ, CALL):
                 succs = [i.next_ip]
             elif i.kind == JCC:
                 succs = [i.next_ip, i.target]
@@ -509,6 +550,12 @@ def _check_flag_liveins(scan) -> None:
                 if cur is None or nxt != cur:
                     defined[s] = nxt
                     changed = True
+    if not exit_sets:
+        return frozenset()
+    out = None
+    for s in exit_sets.values():
+        out = s if out is None else (out & s)
+    return out
 
 
 def _flags_defined_by(i) -> frozenset:
@@ -526,19 +573,28 @@ def _flags_defined_by(i) -> frozenset:
 
 def _contract_inputs(scan, abi) -> list[str]:
     """The recovered function's input list.  ``sp`` joins only when the body
-    has real stack traffic (then it is an address base for the literal SS:SP
-    memory ops; balance keeps it out of the outputs).  Otherwise the RET-ABI
-    sp read stays the adapter's business."""
-    needs_sp = any(_is_stack_family(i) and i.kind != RET
+    has real stack traffic OR composed calls (both write the guest stack
+    literally: pushed bytes and return-address bytes are observable state);
+    balance keeps it out of the outputs.  Otherwise the RET-ABI sp read stays
+    the adapter's business."""
+    needs_sp = any((_is_stack_family(i) and i.kind != RET) or i.kind == CALL
                    for i in scan.insts.values())
     inputs = sorted(abi.inputs - {"sp"})
     if needs_sp:
-        inputs = sorted(set(inputs) | {"sp"})
+        inputs = sorted(set(inputs) | {"sp", "ss"})
     return inputs
 
 
-def emit_recovered(scan, abi, key: str) -> str:
-    """Generate the recovered module source for one promotable function."""
+def emit_recovered(scan, abi, key: str, *, callees=None,
+                   recovered_import_base: str = "") -> str:
+    """Generate the recovered module source for one promotable function.
+
+    ``callees`` (tier 4): CalleeContract per direct near-call target -- the
+    recovered body calls the recovered callee DIRECTLY (composition at the
+    recovered level); the machine call's return-address bytes are written
+    literally (observable stack residue), the callee's exit flags merge
+    through the compat mask, and its virtual-time cost accumulates."""
+    callees = callees or {}
     cs = int(key.split(":")[0], 16)
     name = f"func_{key.replace(':', '_').lower()}"
     leaders = scan.block_leaders()
@@ -556,6 +612,13 @@ def emit_recovered(scan, abi, key: str) -> str:
     A("(exit-flag reproduction + virtual-time cost) consumed ONLY by the")
     A("generated CPU-ABI adapter -- it is not part of the recovered API.")
     A('"""')
+    used = sorted({i.target for i in scan.insts.values()
+                   if i.kind == CALL and i.target in callees})
+    if used:
+        A("")
+        for tgt in used:
+            c = callees[tgt]
+            A(f"from {recovered_import_base}.{c.name} import {c.name}")
     A("")
     A("_PARITY = tuple((1 - bin(v).count('1') % 2) == 1 for v in range(256))")
     A("")
@@ -617,6 +680,37 @@ def emit_recovered(scan, abi, key: str) -> str:
                 blk.append("continue")
                 terminated = True
                 break
+            if i.kind == CALL:
+                c = callees[i.target]
+                # the machine call: return-address bytes are observable
+                blk.append("sp = (sp - 2) & 0xFFFF")
+                blk.append(f"mem.ww(ss, sp, 0x{i.next_ip:04X})")
+                kw = ", ".join(f"{r}={r}" for r in c.inputs)
+                blk.append(f"_o, _c = {c.name}(mem{', ' + kw if kw else ''})")
+                for r in c.outputs:
+                    blk.append(f"{r} = _o['{r}']")
+                blk.append("_gm = _c['fmask']")
+                blk.append("if _gm:")
+                blk.append("    _gf = _c['flags']")
+                for fname, fbit in (("cf", 0x01), ("pf", 0x04), ("af", 0x10),
+                                    ("zf", 0x40), ("sf", 0x80), ("of", 0x800)):
+                    blk.append(f"    if _gm & 0x{fbit:X}: "
+                               f"{fname} = (_gf & 0x{fbit:X}) != 0")
+                blk.append("    _fmask |= _gm")
+                blk.append("_cost += _c['cost']")
+                blk.append("sp = (sp + 2) & 0xFFFF")
+                ip = i.next_ip
+                if ip in bb_of:
+                    blk.append(f"_cost += {count}")
+                    if flag_written:
+                        bits = " | ".join(f"0x{_FLAG_BITS[f]:X}"
+                                          for f in sorted(flag_written))
+                        blk.append(f"_fmask |= {bits}")
+                    blk.append(f"bb = {bb_of[ip]}")
+                    blk.append("continue")
+                    terminated = True
+                    break
+                continue
             _translate(i, blk, flag_written)
             nxt = i.next_ip
             if nxt in bb_of and nxt != ip:     # falls into the next block

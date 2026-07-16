@@ -81,30 +81,58 @@ def main(argv=None) -> int:
     wanted = ([e.strip().upper() for e in args.entries.split(",") if e.strip()]
               or sorted(ir["functions"]))
 
+    # FIXPOINT over the call DAG (tier 4, call-ABI composition): each round
+    # promotes every candidate whose direct near callees are all already
+    # promoted; the callee contracts feed the callers' gates and emitters.
     promoted: list[str] = []
     refused: dict[str, list[str]] = {}
     outputs: dict[str, tuple[str, str]] = {}
-    for key in wanted:
-        rec = ir["functions"][key]
-        cs = int(key.split(":")[0], 16)
-        excl_ips = {ip for (xcs, ip) in excluded if xcs == cs}
-        try:
-            if not rec.get("liftable", True):
-                raise emit_cpuless.Refusal("ir-not-liftable")
-            scan = scan_from_ir_record(rec)
-            abi = emit_cpuless.check_promotable(scan, excluded_addrs=excl_ips)
-            recovered_src = emit_cpuless.emit_recovered(scan, abi, key)
-            adapter_src = emit_cpuless.emit_adapter(
-                scan, abi, key,
-                signature=bytes.fromhex(rec["signature"]),
-                recovered_import_base=args.import_base)
-        except emit_cpuless.Refusal as e:
-            refused.setdefault(str(e), []).append(key)
-            continue
-        promoted.append(key)
-        outputs[key] = (recovered_src, adapter_src)
-        if args.limit and len(promoted) >= args.limit:
+    contracts: dict[int, emit_cpuless.CalleeContract] = {}
+    done: set[str] = set()
+    rounds = 0
+    while True:
+        rounds += 1
+        refused = {}
+        progress = False
+        for key in wanted:
+            if key in done:
+                continue
+            rec = ir["functions"][key]
+            cs = int(key.split(":")[0], 16)
+            excl_ips = {ip for (xcs, ip) in excluded if xcs == cs}
+            try:
+                if not rec.get("liftable", True):
+                    raise emit_cpuless.Refusal("ir-not-liftable")
+                scan = scan_from_ir_record(rec)
+                abi, exit_flags = emit_cpuless.check_promotable(
+                    scan, excluded_addrs=excl_ips, callees=contracts)
+                recovered_src = emit_cpuless.emit_recovered(
+                    scan, abi, key, callees=contracts,
+                    recovered_import_base=args.import_base)
+                adapter_src = emit_cpuless.emit_adapter(
+                    scan, abi, key,
+                    signature=bytes.fromhex(rec["signature"]),
+                    recovered_import_base=args.import_base)
+            except emit_cpuless.Refusal as e:
+                refused.setdefault(str(e), []).append(key)
+                continue
+            promoted.append(key)
+            done.add(key)
+            outputs[key] = (recovered_src, adapter_src)
+            contracts[scan.entry] = emit_cpuless.CalleeContract(
+                name=f"func_{key.replace(':', '_').lower()}",
+                inputs=tuple(emit_cpuless._contract_inputs(scan, abi)),
+                outputs=tuple(sorted((abi.outputs - {"sp"})
+                                     & (frozenset(emit_cpuless.W16)
+                                        | frozenset({"ds", "es"})))),
+                exit_flags=exit_flags)
+            progress = True
+            if args.limit and len(promoted) >= args.limit:
+                progress = False
+                break
+        if not progress:
             break
+    print(f"fixpoint reached after {rounds} round(s)")
 
     print(f"cpuless promotion census ({len(wanted)} candidates):")
     print(f"  promotable                     {len(promoted):4d}")
