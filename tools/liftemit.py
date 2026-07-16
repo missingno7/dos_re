@@ -86,6 +86,45 @@ def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations,
     return "ok", name
 
 
+def emit_entry_from_ir(fn_rec: dict, emit_dir: Path, max_iterations,
+                       coverage: bool = False):
+    """Emit one entry FROM THE RECOVERY IR (docs/recovery_ir.md §3).
+
+    The IR pins every reachable instruction's bytes and length, so fetch and
+    probe are reconstructed from the document and the ONE decoder/scanner
+    re-elaborates them — no second decode path, and byte-identical output to
+    the scan-path emit when the IR captured the same code bytes."""
+    entry = fn_rec["entry"]
+    cs, ip = parse_addr(entry)
+    name = f"lifted_{cs:04x}_{ip:04x}"
+    if not fn_rec.get("liftable"):
+        reasons = ",".join(sorted({r["reason"] for r in fn_rec.get("refusals", ())}))
+        return "not-liftable", reasons
+    code: dict[int, int] = {}
+    lengths: dict[int, int] = {}
+    for blk in fn_rec["blocks"]:
+        for inst in blk["instructions"]:
+            off = int(inst["ip"], 16)
+            raw = bytes.fromhex(inst["bytes"])
+            lengths[off] = len(raw)
+            for k, b in enumerate(raw):
+                code[(off + k) & 0xFFFF] = b
+    scan = scan_function(lambda off: code.get(off & 0xFFFF, 0x90), ip,
+                         probe=lambda p2: lengths.get(p2 & 0xFFFF))
+    if not scan.liftable:
+        return "emit-unsupported", ("IR says liftable but re-scan refused: "
+                                    + ",".join(sorted({r.reason for r in scan.refusals})))
+    sig = bytes.fromhex(fn_rec["signature"])
+    try:
+        src = emit_function(scan, cs, name, signature=sig, coverage=coverage,
+                            count_instructions=True,
+                            min_iterations=max_iterations)
+    except EmitUnsupported as exc:
+        return "emit-unsupported", str(exc)
+    (emit_dir / f"{name}.py").write_text(src, encoding="utf-8")
+    return "ok", name
+
+
 def vmless_wall_report(emit_dir: Path):
     """The VMless-wall static check: ``interp_one`` CALL SITES per module.
 
@@ -102,12 +141,17 @@ def vmless_wall_report(emit_dir: Path):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--exe", required=True)
-    ap.add_argument("--snapshot", required=True,
+    ap.add_argument("--exe")
+    ap.add_argument("--snapshot",
                     help="snapshot whose memory is the code-bytes authority")
     ap.add_argument("--game-root", default=None)
-    ap.add_argument("--entries-file", required=True,
+    ap.add_argument("--entries-file",
                     help="census entry list (tools/codemap.py output)")
+    ap.add_argument("--from-ir", default=None, metavar="recovery_ir.json",
+                    help="emit from the RECOVERY IR instead of exe+snapshot+"
+                         "entries (docs/recovery_ir.md): the IR document is "
+                         "the single input; byte-identical output when the "
+                         "IR captured the same code bytes")
     ap.add_argument("--emit-dir", default="lifted")
     ap.add_argument("--max-iterations", type=int, default=None, metavar="N",
                     help="runaway-loop guard baked into each module "
@@ -121,30 +165,47 @@ def main(argv=None) -> int:
                          "interp_one fallback call site — the enforced VMless "
                          "execution wall (docs/dos_re_2.0.md §1a)")
     args = ap.parse_args(argv)
-
-    entries = []
-    for line in Path(args.entries_file).read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            entries.append(parse_addr(line))
+    if not args.from_ir and not (args.exe and args.snapshot and args.entries_file):
+        ap.error("either --from-ir IR.json or --exe + --snapshot + --entries-file")
 
     emit_dir = Path(args.emit_dir)
     emit_dir.mkdir(parents=True, exist_ok=True)
-    rt = load_snapshot(args.exe, args.snapshot, game_root=args.game_root)
-    rt.cpu.trace_enabled = False
-    mem = rt.cpu.mem
 
     counts = {"ok": 0, "not-liftable": 0, "emit-unsupported": 0}
     skipped: list[tuple[str, str, str]] = []
-    for cs, ip in entries:
-        status, detail = emit_entry(mem, rt, cs, ip, emit_dir, args.max_iterations,
-                                    coverage=args.coverage)
-        counts[status] += 1
-        if status != "ok":
-            skipped.append((f"{cs:04X}:{ip:04X}", status, detail))
-            print(f"skip     {cs:04X}:{ip:04X}: {status} ({detail})")
+    if args.from_ir:
+        import json
+        doc = json.loads(Path(args.from_ir).read_text(encoding="utf-8"))
+        recs = doc["functions"]
+        n_total = len(recs)
+        for entry in sorted(recs):
+            status, detail = emit_entry_from_ir(recs[entry], emit_dir,
+                                                args.max_iterations,
+                                                coverage=args.coverage)
+            counts[status] += 1
+            if status != "ok":
+                skipped.append((entry, status, detail))
+                print(f"skip     {entry}: {status} ({detail})")
+    else:
+        entries = []
+        for line in Path(args.entries_file).read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                entries.append(parse_addr(line))
+        n_total = len(entries)
+        rt = load_snapshot(args.exe, args.snapshot, game_root=args.game_root)
+        rt.cpu.trace_enabled = False
+        mem = rt.cpu.mem
+        for cs, ip in entries:
+            status, detail = emit_entry(mem, rt, cs, ip, emit_dir,
+                                        args.max_iterations,
+                                        coverage=args.coverage)
+            counts[status] += 1
+            if status != "ok":
+                skipped.append((f"{cs:04X}:{ip:04X}", status, detail))
+                print(f"skip     {cs:04X}:{ip:04X}: {status} ({detail})")
 
-    print(f"\nemitted {counts['ok']}/{len(entries)} modules to {emit_dir} "
+    print(f"\nemitted {counts['ok']}/{n_total} modules to {emit_dir} "
           f"(not-liftable={counts['not-liftable']}, "
           f"emit-unsupported={counts['emit-unsupported']})")
 

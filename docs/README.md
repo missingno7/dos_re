@@ -20,6 +20,7 @@ Reading order for the framework itself: the repo [README](../README.md) →
 | Doc | What it covers |
 |---|---|
 | [`dos_re_2.0.md`](dos_re_2.0.md) | **The canonical architecture (read first)**: the staged recovery pipeline (interpreted oracle → VMless → CPUless → DOS-layout-less → semantic port), the oracle-guided-convergence risk model, the automation principle (tooling does the labor, AI unblocks), platform adapters, recovery facts, the verification bridge, milestones M1–M6. Supersedes older proof-before-integration language everywhere. |
+| [`recovery_ir.md`](recovery_ir.md) | **Recovery IR v0 spec**: the shared representation every stage consumes (CFG + machine ops + calls + effects + provenance + facts + fail-loud unsupported ledger); `irgen` → IR → analyses → selected emitter; the IR-path equivalence gate. |
 | [`agent_toolbox.md`](agent_toolbox.md) | **The task index**: boot an EXE, diagnose fail-louds, snapshots, traces, frame boundaries, wait loops, demos, profiling, hooks, oracle verification, the lifter, LIFTED-vs-RECOVERED, progress metrics, guardrails — each with the command and when to use it. |
 | [`architecture.md`](architecture.md) | The package boundary, the framework module map, execution modes, adapter layering, dependencies. |
 | [`hooks_and_verification.md`](hooks_and_verification.md) | Hook registration and return mechanics, the differential hook oracle (metadata + strict modes), the frame oracle, hook taxonomy. |

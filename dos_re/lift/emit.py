@@ -535,6 +535,7 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
                   signature: bytes, count_instructions: bool = False,
                   coverage: bool = False, min_iterations: int | None = None,
                   link_map: dict[int, str] | None = None,
+                  far_link_map: dict[tuple[int, int], str] | None = None,
                   link_imports: tuple[str, ...] = ()) -> str:
     """Return the source of a module defining the lifted hook ``name``.
 
@@ -550,7 +551,11 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     semantics, no interpreter in the path, and the child remains a
     verifier-visible boundary in the hybrid (pitfall #5). Only near-RET-exit
     callees are safe to link (the LINK TOOL enforces that precondition; tail
-    exits / retf / iret callees must stay ``emulate_call``).
+    exits / retf / iret callees must stay ``emulate_call``).  ``far_link_map``
+    is the FAR mirror: ``{(seg, off): python_callable_expr}`` — a direct far
+    CALL to a mapped target emits ``call_installed_hook_like_far_call`` (far
+    return frame; only all-``retf``-exit callees qualify, again enforced by
+    the link tool).
 
     ``count_instructions`` is VIRTUAL-TIME PRESERVATION: each block advances
     ``cpu.instruction_count`` by exactly the original instructions it
@@ -616,9 +621,11 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     A("from dos_re.hooks import self_disable_if_patched")
     if link_map:
         A("from dos_re.hooks import call_installed_hook_like_near_call")
+    if far_link_map:
+        A("from dos_re.hooks import call_installed_hook_like_far_call")
     A("from dos_re.lift.runtime import (LiftRuntimeError, emulate_call, emulate_far_call,")
     A("                                 emulate_int, interp_one)")
-    if link_map:
+    if link_map or far_link_map:
         for ln in link_imports:
             A(ln)
     A("")
@@ -715,8 +722,15 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
                 seg, off = inst.far_target
                 pending[0] += 1
                 _flush()
-                lines.append(f"emulate_far_call(cpu, 0x{seg:04X}, 0x{off:04X}, "
-                             f"0x{cs:04X}, 0x{inst.next_ip:04X})")
+                if far_link_map and (seg, off) in far_link_map:
+                    # LINKED far call — far return frame, direct native callee.
+                    lines.append(f"call_installed_hook_like_far_call(cpu, "
+                                 f"(0x{seg:04X}, 0x{off:04X}), "
+                                 f"{far_link_map[(seg, off)]}, "
+                                 f"0x{cs:04X}, 0x{inst.next_ip:04X})")
+                else:
+                    lines.append(f"emulate_far_call(cpu, 0x{seg:04X}, 0x{off:04X}, "
+                                 f"0x{cs:04X}, 0x{inst.next_ip:04X})")
             elif inst.kind == CALL_IND:
                 rm = _rm_operand(inst, 16, lines, "_o")
                 pending[0] += 1

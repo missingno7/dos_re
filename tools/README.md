@@ -24,6 +24,7 @@ view (which tool for which recovery step, with context) is
 | Tool | Command | When |
 |---|---|---|
 | `codemap.py` | `python tools/codemap.py …` | Observed-execution census: the entry list the whole pipeline consumes. |
+| `irgen.py` | `python tools/irgen.py --exe <exe> --snapshot <snap> --entries-file <txt> --keep-interpreted @<file> --out recovery_ir.json` | Serialize the RECOVERY IR (docs/recovery_ir.md): decode+CFG+effect tags+provenance+facts in one regeneratable document — the single input every emitter consumes. `liftemit --from-ir` emits from it byte-identically to the scan path. |
 | `liftemit.py` | `python tools/liftemit.py --exe <exe> --snapshot <snap> --entries-file <txt> --emit-dir <game>/lifted` | Batch-emit the whole census to VMless lifted modules in one pass (byte-identical to liftverify's emit recipe). The bulk-emission step. |
 | `liftlink.py` | `python tools/liftlink.py --exe <exe> --snapshot <snap> --entries-file <txt> --emit-dir <game>/lifted` | Structural linking (default): near-CALL edges between lifted census entries with all-near-ret exits become direct Python calls. `--proven-edges` restores the 1.x ORACLE_PASSING gate (hybrid/debug only). |
 | `hook_bisect.py` | `python dos_re/tools/hook_bisect.py --driver <game>.bisect_driver:Driver --boundaries N` | When the assembled graph diverges from the oracle: binary-search the installed set to the smallest responsible function. Run from the port root. |

@@ -114,6 +114,39 @@ def all_near_ret_exits(scan: FunctionScan) -> bool:
     return bool(scan.exits) and all(i.kind == "ret" for i in scan.exits)
 
 
+def all_far_ret_exits(scan: FunctionScan) -> bool:
+    """True when every exit is ``retf`` — the far-linkable callee shape
+    (``call_installed_hook_like_far_call`` pushes CS:IP; only retf pops both)."""
+    return bool(scan.exits) and all(i.kind == "retf" for i in scan.exits)
+
+
+def compute_far_link_edges(scans: dict[tuple[int, int], FunctionScan],
+                           *, exclude: frozenset[str] = frozenset()):
+    """The far-linkable edge set: direct far CALLs between census entries whose
+    callee exits are all ``retf``.  Structural rule only (the 2.0 posture);
+    same exclusion semantics as near edges."""
+    edges: list[tuple[str, str]] = []
+    blocked: list[tuple[str, str, str]] = []
+    for (cs, ip), scan in sorted(scans.items()):
+        if not scan.liftable:
+            continue
+        caller_key = f"{cs:04X}:{ip:04X}"
+        for seg, off in sorted(scan.calls_far):
+            callee_key = f"{seg:04X}:{off:04X}"
+            callee = scans.get((seg, off))
+            if callee_key in exclude:
+                blocked.append((caller_key, callee_key, "excluded-callee"))
+            elif callee is None:
+                blocked.append((caller_key, callee_key, "not-an-entry"))
+            elif not callee.liftable:
+                blocked.append((caller_key, callee_key, "callee-not-liftable"))
+            elif not all_far_ret_exits(callee):
+                blocked.append((caller_key, callee_key, "exit-shape"))
+            else:
+                edges.append((caller_key, callee_key))
+    return edges, blocked
+
+
 def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
                        statuses: dict[str, str], *, structural: bool = True,
                        exclude: frozenset[str] = frozenset()):
@@ -177,16 +210,21 @@ def links_table_line(target_keys) -> str:
 
 
 def relink_source(scan: FunctionScan, cs: int, target_ips, *,
-                  signature: bytes, min_iterations: int | None = None) -> str:
-    """Re-emit a caller with the given near-call targets linked."""
+                  far_targets=(), signature: bytes,
+                  min_iterations: int | None = None) -> str:
+    """Re-emit a caller with the given near (and far) call targets linked."""
     name = f"lifted_{cs:04x}_{scan.entry:04x}"
     targets = sorted(set(target_ips))
+    fars = sorted(set(far_targets))
     link_map = {t: f'LINKS["{cs:04X}:{t:04X}"]' for t in targets}
+    far_link_map = {(fs, fo): f'LINKS["{fs:04X}:{fo:04X}"]' for fs, fo in fars}
+    keys = [f"{cs:04X}:{t:04X}" for t in targets] +            [f"{fs:04X}:{fo:04X}" for fs, fo in fars]
     return emit_function(
         scan, cs, name, signature=signature, coverage=False,
         count_instructions=True,
         min_iterations=min_iterations, link_map=link_map,
-        link_imports=(links_table_line(f"{cs:04X}:{t:04X}" for t in targets),))
+        far_link_map=far_link_map,
+        link_imports=(links_table_line(keys),))
 
 
 def count_emulate_calls(src: str) -> int:
@@ -307,15 +345,33 @@ def main(argv=None) -> int:
             print(f"drop     {caller_key} -> {callee_key}: callee module not in {emit_dir}")
     edges = kept
 
+    # 2b. FAR edges (structural rule; same on-disk requirement).
+    far_edges, far_blocked = compute_far_link_edges(scans,
+                                                    exclude=frozenset(exclude))
+    blocked.extend(far_blocked)
+    far_kept: list[tuple[str, str]] = []
+    for caller_key, callee_key in far_edges:
+        e_cs, e_ip = parse_addr(callee_key)
+        if (emit_dir / f"lifted_{e_cs:04x}_{e_ip:04x}.py").is_file():
+            far_kept.append((caller_key, callee_key))
+        else:
+            blocked.append((caller_key, callee_key, "callee-module-missing"))
+            print(f"drop far {caller_key} -> {callee_key}: callee module not in {emit_dir}")
+    far_edges = far_kept
+
     # 3. Re-emit every caller that gains at least one linked edge.
     by_caller: dict[str, list[str]] = {}
     for caller_key, callee_key in edges:
         by_caller.setdefault(caller_key, []).append(callee_key)
+    far_by_caller: dict[str, list[tuple[int, int]]] = {}
+    for caller_key, callee_key in far_edges:
+        far_by_caller.setdefault(caller_key, []).append(parse_addr(callee_key))
+    all_callers = sorted(set(by_caller) | set(far_by_caller))
 
     out_dir.mkdir(parents=True, exist_ok=True)
     callers_report: dict[str, dict] = {}
     total_before = total_after = 0
-    for caller_key in sorted(by_caller):
+    for caller_key in all_callers:
         cs, ip = parse_addr(caller_key)
         scan = scans[(cs, ip)]
         name = f"lifted_{cs:04x}_{ip:04x}"
@@ -327,15 +383,20 @@ def main(argv=None) -> int:
             sig, min_iters = None, None
         if sig is None:
             sig = _fresh_signature(mem, cs, ip, scan)
-        target_ips = [parse_addr(k)[1] for k in by_caller[caller_key]]
+        target_ips = [parse_addr(k)[1] for k in by_caller.get(caller_key, ())]
+        far_targets = far_by_caller.get(caller_key, ())
         try:
-            src = relink_source(scan, cs, target_ips,
+            src = relink_source(scan, cs, target_ips, far_targets=far_targets,
                                 signature=sig, min_iterations=min_iters)
         except EmitUnsupported as exc:
             print(f"skip     {caller_key}: emit-unsupported ({exc})")
-            for callee_key in by_caller[caller_key]:
+            for callee_key in by_caller.get(caller_key, ()):
                 blocked.append((caller_key, callee_key, "emit-unsupported"))
                 edges.remove((caller_key, callee_key))
+            for fs, fo in far_by_caller.get(caller_key, ()):
+                ck = f"{fs:04X}:{fo:04X}"
+                blocked.append((caller_key, ck, "emit-unsupported"))
+                far_edges.remove((caller_key, ck))
             continue
         before = count_emulate_calls(old_src) if old_src is not None \
             else count_emulate_calls(emit_function(scan, cs, name,
@@ -346,20 +407,25 @@ def main(argv=None) -> int:
         (out_dir / f"{name}.py").write_text(src, encoding="utf-8")
         total_before += before
         total_after += after
+        n_near = len(by_caller.get(caller_key, ()))
+        n_far = len(far_by_caller.get(caller_key, ()))
         callers_report[caller_key] = {
             "module": f"{name}.py",
-            "linked": sorted(by_caller[caller_key]),
+            "linked": sorted(by_caller.get(caller_key, ())),
+            "linked_far": sorted(f"{fs:04X}:{fo:04X}"
+                                 for fs, fo in far_by_caller.get(caller_key, ())),
             "emulate_call_before": before,
             "emulate_call_after": after,
         }
-        print(f"linked   {caller_key}: {len(by_caller[caller_key])} edge(s), "
+        print(f"linked   {caller_key}: {n_near} near + {n_far} far edge(s), "
               f"emulate_call {before} -> {after}")
 
     # 4. Report.
     reasons: dict[str, int] = {}
     for _, _, reason in blocked:
         reasons[reason] = reasons.get(reason, 0) + 1
-    print(f"\n{len(edges)} edges linked into {len(callers_report)} callers; "
+    print(f"\n{len(edges)} near + {len(far_edges)} far edges linked into "
+          f"{len(callers_report)} callers; "
           f"emulate_call sites in re-emitted callers: {total_before} -> {total_after}")
     if reasons:
         print("blocked edges: " + ", ".join(f"{r}={n}" for r, n in sorted(reasons.items())))
@@ -375,6 +441,7 @@ def main(argv=None) -> int:
             "boards": list(args.board),
             "entries": len(entries),
             "edges": [list(e) for e in edges],
+            "far_edges": [list(e) for e in far_edges],
             "blocked": [list(b) for b in blocked],
             "callers": callers_report,
             "totals": {

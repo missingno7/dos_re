@@ -116,6 +116,51 @@ def call_installed_hook_like_near_call(
             cpu.hook_call_site = previous_call_site
 
 
+def call_installed_hook_like_far_call(
+    cpu: CPU8086,
+    key: tuple[int, int],
+    default_handler: Hook,
+    return_cs: int,
+    return_ip: int,
+) -> None:
+    """Run an installed child hook with original FAR-CALL stack semantics.
+
+    The far mirror of :func:`call_installed_hook_like_near_call` (the linker
+    seam): pushes ``return_cs`` then ``return_ip`` (the 8086 far frame), jumps
+    to the callee, and runs the installed hook (or the linked default).  Only
+    a callee whose every exit is ``retf`` is equivalent to the original far
+    CALL — the link tool enforces that edge rule, exactly as it enforces
+    near-``ret`` exits for near links.
+    """
+    handler = cpu.replacement_hooks.get(key, default_handler)
+    name = cpu.hook_names.get(key, getattr(handler, "__name__", "replacement"))
+    call_site = (cpu.s.cs & 0xFFFF, cpu.s.ip & 0xFFFF)
+    previous_call_site = getattr(cpu, "hook_call_site", None)
+    cpu.hook_call_site = (call_site[0], call_site[1], key[0] & 0xFFFF, key[1] & 0xFFFF, return_ip & 0xFFFF)
+    cpu.push(return_cs & 0xFFFF)
+    cpu.push(return_ip & 0xFFFF)
+    cpu.s.cs = key[0] & 0xFFFF
+    cpu.s.ip = key[1] & 0xFFFF
+    verifier = getattr(cpu, "hook_verifier", None)
+    try:
+        if (
+            verifier is not None
+            and getattr(cpu, "hook_verifier_verify_nested_calls", True)
+            and key not in getattr(cpu, "hook_verifier_passthrough", set())
+        ):
+            verifier(cpu, key, handler, name)
+        else:
+            handler(cpu)
+    finally:
+        if previous_call_site is None:
+            try:
+                delattr(cpu, "hook_call_site")
+            except AttributeError:
+                pass
+        else:
+            cpu.hook_call_site = previous_call_site
+
+
 registry = HookRegistry()
 
 
