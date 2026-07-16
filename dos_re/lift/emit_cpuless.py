@@ -57,7 +57,9 @@ _JCC_READS = {
     0x7E: {"zf", "sf", "of"}, 0x7F: {"zf", "sf", "of"},
 }
 _ALU = ("add", "or", "adc", "sbb", "and", "sub", "xor", "cmp")
-_FLAG_BITS = {"cf": FCF, "pf": FPF, "af": FAF, "zf": FZF, "sf": FSF, "of": FOF}
+FDF, FIF = 0x0400, 0x0200
+_FLAG_BITS = {"cf": FCF, "pf": FPF, "af": FAF, "zf": FZF, "sf": FSF,
+              "of": FOF, "df": FDF, "intf": FIF}
 
 
 class Refusal(Exception):
@@ -298,12 +300,197 @@ def _translate(inst, lines, flag_written):
         lines.append(f"_t = ~({_rm_read(inst, wide)})")
         lines.extend(_rm_write_lines(inst, wide, "_t"))
         return
+    if op == 0x90:                                        # nop (xchg ax,ax)
+        return
+    if op in (0xF6, 0xF7) and inst.reg == 4:              # mul (unsigned)
+        lines.append(f"_b = {_rm_read(inst, wide)}")
+        if wide:
+            lines.append("_t = ax * _b")
+            lines.append("ax = _t & 0xFFFF")
+            lines.append("dx = (_t >> 16) & 0xFFFF")
+            lines.append("cf = of = dx != 0")
+        else:
+            lines.append("_t = (ax & 0xFF) * _b")
+            lines.append("ax = _t & 0xFFFF")
+            lines.append("cf = of = _t > 0xFF")
+        flags("cf", "of")     # ZF/SF/PF/AF untouched (mirrors the interpreter)
+        return
+    if op in (0xF6, 0xF7) and inst.reg == 5:              # imul (signed)
+        lines.append(f"_b = {_rm_read(inst, wide)}")
+        if wide:
+            lines.append("_sa = ax - 0x10000 if ax & 0x8000 else ax")
+            lines.append("_sb = _b - 0x10000 if _b & 0x8000 else _b")
+            lines.append("_t = _sa * _sb")
+            lines.append("ax = _t & 0xFFFF")
+            lines.append("dx = (_t >> 16) & 0xFFFF")
+            lines.append("cf = of = not (-32768 <= _t <= 32767)")
+        else:
+            lines.append("_sa = (ax & 0xFF) - 0x100 if ax & 0x80 else (ax & 0xFF)")
+            lines.append("_sb = _b - 0x100 if _b & 0x80 else _b")
+            lines.append("_t = _sa * _sb")
+            lines.append("ax = _t & 0xFFFF")
+            lines.append("cf = of = not (-128 <= _t <= 127)")
+        flags("cf", "of")
+        return
+    if op in (0xF6, 0xF7) and inst.reg == 6:              # div (unsigned)
+        # fail-loud on zero/overflow exactly like the interpreter (a crash is
+        # a crash on both sides; no flags are written by div)
+        lines.append(f"_b = {_rm_read(inst, wide)}")
+        lines.append("if _b == 0:")
+        lines.append("    raise ZeroDivisionError('div by zero (recovered)')")
+        if wide:
+            lines.append("_q, _r = divmod((dx << 16) | ax, _b)")
+            lines.append("if _q > 0xFFFF:")
+            lines.append("    raise OverflowError('16-bit div quotient overflow')")
+            lines.append("ax = _q & 0xFFFF")
+            lines.append("dx = _r & 0xFFFF")
+        else:
+            lines.append("_q, _r = divmod(ax & 0xFFFF, _b)")
+            lines.append("if _q > 0xFF:")
+            lines.append("    raise OverflowError('8-bit div quotient overflow')")
+            lines.append("ax = ((_r & 0xFF) << 8) | (_q & 0xFF)")
+        return
     if op == 0x98:                                        # cbw
         lines.append("ax = (ax & 0xFF) | (0xFF00 if ax & 0x80 else 0)")
         return
     if op == 0x99:                                        # cwd
         lines.append("dx = 0xFFFF if ax & 0x8000 else 0")
         return
+    # flag-control ops --------------------------------------------------------
+    if op == 0xF8:                                        # clc
+        lines.append("cf = False")
+        flags("cf")
+        return
+    if op == 0xF9:                                        # stc
+        lines.append("cf = True")
+        flags("cf")
+        return
+    if op == 0xFC:                                        # cld
+        lines.append("df = False")
+        flags("df")
+        return
+    if op == 0xFD:                                        # std
+        lines.append("df = True")
+        flags("df")
+        return
+    if op == 0xFA:                                        # cli
+        lines.append("intf = False")
+        flags("intf")
+        return
+    if op == 0xFB:                                        # sti
+        lines.append("intf = True")
+        flags("intf")
+        return
+
+    # shifts / rotates (mirrors the interpreter's closed-form cpu.shift():
+    # count &= 0x1F; count==0 touches NO flags; shl/shr/sar set CF+ZF/SF/PF
+    # (AF untouched); rotates set CF only; OF only defined for count==1) ----
+    if op in (0xC0, 0xC1, 0xD0, 0xD1, 0xD2, 0xD3) and inst.reg in (0, 1, 4, 5, 7):
+        grp = inst.reg
+        bits = 16 if wide else 8
+        mask = (1 << bits) - 1
+        msb = 1 << (bits - 1)
+        if op in (0xD0, 0xD1):
+            lines.append("_n = 1")
+        elif op in (0xD2, 0xD3):
+            lines.append("_n = cx & 0x1F")
+        else:
+            lines.append(f"_n = 0x{(inst.imm or 0) & 0x1F:X}")
+        lines.append(f"_a = {_rm_read(inst, wide)}")
+        lines.append("if _n:")
+        s = lines.append
+        if grp == 4:                                      # shl/sal
+            s(f"    if _n <= {bits}:")
+            s(f"        cf = ((_a >> ({bits} - _n)) & 1) != 0")
+            s(f"        _t = (_a << _n) & 0x{mask:X}")
+            s("    else:")
+            s("        cf = False; _t = 0")
+        elif grp == 5:                                    # shr
+            s(f"    if _n <= {bits}:")
+            s("        cf = ((_a >> (_n - 1)) & 1) != 0")
+            s("        _t = _a >> _n")
+            s("    else:")
+            s("        cf = False; _t = 0")
+        elif grp == 7:                                    # sar
+            s(f"    _sgn = (_a >> {bits - 1}) & 1")
+            s(f"    if _n >= {bits}:")
+            s(f"        _t = 0x{mask:X} if _sgn else 0")
+            s("        cf = _sgn != 0")
+            s("    else:")
+            s("        cf = ((_a >> (_n - 1)) & 1) != 0")
+            s(f"        _sv = _a - 0x{mask + 1:X} if _sgn else _a")
+            s(f"        _t = (_sv >> _n) & 0x{mask:X}")
+        elif grp == 0:                                    # rol
+            s(f"    _r = _n % {bits}")
+            s(f"    _t = ((_a << _r) | (_a >> ({bits} - _r))) & 0x{mask:X} if _r else _a")
+            s("    cf = (_t & 1) != 0")
+        else:                                             # ror (grp 1)
+            s(f"    _r = _n % {bits}")
+            s(f"    _t = ((_a >> _r) | (_a << ({bits} - _r))) & 0x{mask:X} if _r else _a")
+            s(f"    cf = (_t & 0x{msb:X}) != 0")
+        if grp in (4, 5, 7):
+            s(f"    zf = _t == 0")
+            s(f"    sf = (_t & 0x{msb:X}) != 0")
+            s("    pf = _PARITY[_t & 0xFF]")
+            s(f"    _fmask |= 0x{FCF | FZF | FSF | FPF:X}")
+        else:
+            s(f"    _fmask |= 0x{FCF:X}")
+        s("    if _n == 1:")
+        if grp == 4:
+            s(f"        of = (((_a >> {bits - 1}) & 1) ^ ((_t >> {bits - 1}) & 1)) != 0")
+        elif grp == 5:
+            s(f"        of = ((_a >> {bits - 1}) & 1) != 0")
+        elif grp == 7:
+            s("        of = False")
+        elif grp == 0:
+            s(f"        of = (((_t >> {bits - 1}) & 1) ^ (_t & 1)) != 0")
+        else:                                             # ror
+            s(f"        of = (((_t >> {bits - 1}) ^ (_t >> {bits - 2})) & 1) != 0")
+        s(f"        _fmask |= 0x{FOF:X}")
+        for w in _rm_write_lines(inst, wide, "_t"):
+            s("    " + w)
+        # NOTE: flags/fmask updates are emitted INSIDE the if-_n block above
+        # (count 0 touches nothing), so flag_written stays empty here.
+        return
+
+    # string ops (lods/stos/movs, +- rep; direction from the df local -- the
+    # gate refuses when DF is not defined in-body before use).  A REP string
+    # instruction counts as ONE instruction in the oracle's virtual time, so
+    # the static per-block cost of 1 is exact regardless of CX. -------------
+    if op in (0xAC, 0xAD, 0xAA, 0xAB, 0xA4, 0xA5):
+        w = 2 if wide else 1
+        rep = any(pfx in (0xF2, 0xF3) for pfx in inst.prefixes)
+        src_seg = "ds"
+        for pfx in inst.prefixes:
+            if pfx in (0x26, 0x2E, 0x36, 0x3E):
+                src_seg = SEGS[(pfx >> 3) & 3]
+        lines.append(f"_d = -{w} if df else {w}")
+        body = []
+        if op in (0xAC, 0xAD):                            # lods
+            rd = f"mem.{'rw' if wide else 'rb'}({src_seg}, si)"
+            if wide:
+                body.append(f"ax = {rd}")
+            else:
+                body.append(_r8_write(0, rd))
+            body.append("si = (si + _d) & 0xFFFF")
+        elif op in (0xAA, 0xAB):                          # stos
+            val = "ax" if wide else "(ax & 0xFF)"
+            body.append(f"mem.{'ww' if wide else 'wb'}(es, di, {val})")
+            body.append("di = (di + _d) & 0xFFFF")
+        else:                                             # movs
+            rd = f"mem.{'rw' if wide else 'rb'}({src_seg}, si)"
+            body.append(f"mem.{'ww' if wide else 'wb'}(es, di, {rd})")
+            body.append("si = (si + _d) & 0xFFFF")
+            body.append("di = (di + _d) & 0xFFFF")
+        if rep:
+            lines.append("while cx:")
+            for ln in body:
+                lines.append("    " + ln)
+            lines.append("    cx = (cx - 1) & 0xFFFF")
+        else:
+            lines.extend(body)
+        return
+
     # stack ops (tier 2) -----------------------------------------------------
     # LITERAL SS:SP memory traffic: the pushed bytes are observable state (the
     # boundary differential hashes full memory, and stack residue below SP
@@ -529,6 +716,10 @@ def _check_flag_liveins(scan, callees=None) -> frozenset:
                     raise Refusal(f"emitter-unsupported-op-{i.op:02X}")
                 if not need <= set(defined[ip]):
                     raise Refusal("flag-live-in (caller flags observed)")
+            if i.op in _STRING_OPS and "df" not in defined[ip]:
+                raise Refusal("df-live-in (direction flag from caller)")
+            if i.op == 0xF5 and "cf" not in defined[ip]:
+                raise Refusal("flag-live-in (cmc reads caller cf)")
             new = defined[ip] | _flags_defined_by(i)
             if (i.kind == CALL and i.target is not None
                     and i.target in callees):
@@ -558,8 +749,34 @@ def _check_flag_liveins(scan, callees=None) -> frozenset:
     return out
 
 
+#: string ops read the direction flag; the gate requires DF defined in-body.
+_STRING_OPS = (0xA4, 0xA5, 0xAA, 0xAB, 0xAC, 0xAD)
+
+
 def _flags_defined_by(i) -> frozenset:
     op = i.op
+    if op == 0xF8 or op == 0xF9:
+        return frozenset({"cf"})
+    if op in (0xFC, 0xFD):
+        return frozenset({"df"})
+    if op in (0xFA, 0xFB):
+        return frozenset({"intf"})
+    if op in (0xC0, 0xC1) and i.reg in (0, 1, 4, 5, 7):
+        # shift by a NONZERO immediate always writes CF (+ZF/SF/PF for
+        # shl/shr/sar); OF only when the count is exactly 1.
+        n = (i.imm or 0) & 0x1F
+        if n == 0:
+            return frozenset()
+        base = {"cf"} | ({"zf", "sf", "pf"} if i.reg in (4, 5, 7) else set())
+        if n == 1:
+            base |= {"of"}
+        return frozenset(base)
+    if op in (0xD0, 0xD1) and i.reg in (0, 1, 4, 5, 7):  # count == 1
+        base = {"cf", "of"} | ({"zf", "sf", "pf"} if i.reg in (4, 5, 7) else set())
+        return frozenset(base)
+    if op in (0xF6, 0xF7) and i.reg in (4, 5):            # mul/imul: CF+OF only
+        return frozenset({"cf", "of"})
+    # D2/D3 (count from CL) define nothing statically (count may be 0).
     if (op <= 0x3D and (op & 7) <= 5 and (op & 0xC7) not in (0x06, 0x07, 0xC6, 0xC7)) \
             or op in (0x80, 0x81, 0x83, 0x84, 0x85, 0xA8, 0xA9) \
             or (op in (0xF6, 0xF7) and i.reg == 3):
@@ -628,7 +845,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
     body: list[str] = []
     B = body.append
     B("_cost = 0")
-    B("cf = pf = af = zf = sf = of = False")
+    B("cf = pf = af = zf = sf = of = df = intf = False")
     B("_fmask = 0")
     B(f"bb = {bb_of[scan.entry]}")
     B("while True:")
@@ -693,7 +910,8 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
                 blk.append("if _gm:")
                 blk.append("    _gf = _c['flags']")
                 for fname, fbit in (("cf", 0x01), ("pf", 0x04), ("af", 0x10),
-                                    ("zf", 0x40), ("sf", 0x80), ("of", 0x800)):
+                                    ("zf", 0x40), ("sf", 0x80), ("of", 0x800),
+                                    ("intf", 0x200), ("df", 0x400)):
                     blk.append(f"    if _gm & 0x{fbit:X}: "
                                f"{fname} = (_gf & 0x{fbit:X}) != 0")
                 blk.append("    _fmask |= _gm")
@@ -732,7 +950,8 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
     # returns
     out_dict = ", ".join(f"'{r}': {r} & 0xFFFF" for r in outputs)
     fl_expr = (" | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
-                          for f in ("cf", "pf", "af", "zf", "sf", "of")))
+                          for f in ("cf", "pf", "af", "zf", "sf", "of",
+                                    "df", "intf")))
     B("_flags = (" + fl_expr + ") & _fmask")
     B(f"return {{{out_dict}}}, {{'flags': _flags, 'fmask': _fmask, 'cost': _cost}}")
     L.extend("    " + ln for ln in body)
