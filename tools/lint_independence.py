@@ -45,11 +45,22 @@ DEFAULT_FORBIDDEN = {
 DEFAULT_LOCAL_PREFIXES = ("dos_re",)
 
 
-def _module_to_path(mod: str, repo_root: Path, prefixes: tuple[str, ...]) -> Path | None:
+def _module_to_path(mod: str, repo_root: Path, prefixes: tuple[str, ...],
+                    package_dirs: dict[str, Path] | None = None) -> Path | None:
     parts = mod.split(".")
     if parts[0] not in prefixes:
         return None
-    candidates = [
+    candidates = []
+    mapped = (package_dirs or {}).get(parts[0])
+    if mapped is not None:
+        # Explicit package root (--package-dir): nested-submodule layouts
+        # (a port's framework living at e.g. win16_re/win16) resolve here.
+        candidates += [
+            mapped / Path(*parts[1:]).with_suffix(".py") if parts[1:]
+            else mapped / "__init__.py",
+            mapped / Path(*parts[1:]) / "__init__.py",
+        ]
+    candidates += [
         repo_root / Path(*parts).with_suffix(".py"),
         repo_root / "dos_re" / Path(*parts).with_suffix(".py"),
         repo_root / Path(*parts) / "__init__.py",
@@ -77,8 +88,11 @@ def _toplevel(tree: ast.Module):
 
 def _scan(path: Path, repo_root: Path, forbidden: set[str],
           prefixes: tuple[str, ...], offenders: list[str],
-          deferred: list[str]) -> set[str]:
-    """Return the local modules imported AT MODULE LEVEL by ``path``; record
+          deferred: list[str]) -> tuple[set[str], set[str]]:
+    """Return ``(required, speculative)`` local modules imported AT MODULE
+    LEVEL by ``path`` — ``required`` names must resolve to files (a hole in
+    the walk otherwise); ``speculative`` are the ``from pkg import name``
+    candidates where ``name`` may be a submodule OR a plain symbol.  Records
     forbidden module-level edges in ``offenders``, deferred ones in
     ``deferred``."""
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -87,6 +101,7 @@ def _scan(path: Path, repo_root: Path, forbidden: set[str],
     except ValueError:
         rel = path
     local_mods: set[str] = set()
+    speculative: set[str] = set()
     for node, module_level in _toplevel(tree):
         bucket = offenders if module_level else deferred
         if isinstance(node, ast.ImportFrom) and node.module:
@@ -95,9 +110,10 @@ def _scan(path: Path, repo_root: Path, forbidden: set[str],
                     bucket.append(f"{rel}: from {node.module} import {a.name}")
             if module_level and node.module.split(".")[0] in prefixes:
                 local_mods.add(node.module)
-                # `from pkg import submod` imports the SUBMODULE -- follow it too.
+                # `from pkg import submod` imports the SUBMODULE -- follow it
+                # too when it IS one (a plain symbol has no file; harmless).
                 for a in node.names:
-                    local_mods.add(f"{node.module}.{a.name}")
+                    speculative.add(f"{node.module}.{a.name}")
         elif isinstance(node, ast.Import):
             for a in node.names:
                 if module_level and a.name.split(".")[0] in prefixes:
@@ -109,16 +125,22 @@ def _scan(path: Path, repo_root: Path, forbidden: set[str],
             # executable suffix (docstrings that merely mention the EXE contain
             # spaces/newlines and are not code paths).
             v = node.value
-            if v and not any(c.isspace() for c in v) and v.lower().endswith(
-                    (".exe", ".com")):
+            # A real path/filename has a STEM; a bare suffix literal (".exe")
+            # is a comparison constant (an audit tool's own suffix check),
+            # not a path to an executable.
+            if v and not any(c.isspace() for c in v) \
+                    and v.lower().endswith((".exe", ".com")) \
+                    and not v.lower() in (".exe", ".com"):
                 offenders.append(f"{rel}: executable path literal {v!r}")
-    return local_mods
+    return local_mods, speculative
 
 
 def run_lint(roots: list[Path], repo_root: Path, forbidden: set[str],
-             prefixes: tuple[str, ...]) -> int:
+             prefixes: tuple[str, ...],
+             package_dirs: dict[str, Path] | None = None) -> int:
     offenders: list[str] = []
     deferred: list[str] = []
+    unresolved: set[str] = set()
     seen: set[Path] = set()
     work = list(roots)
     graph: list[Path] = []
@@ -128,9 +150,17 @@ def run_lint(roots: list[Path], repo_root: Path, forbidden: set[str],
             continue
         seen.add(path)
         graph.append(path)
-        for mod in _scan(path, repo_root, forbidden, prefixes, offenders, deferred):
-            p = _module_to_path(mod, repo_root, prefixes)
-            if p and p not in seen:
+        required, speculative = _scan(path, repo_root, forbidden, prefixes,
+                                      offenders, deferred)
+        for mod in required:
+            p = _module_to_path(mod, repo_root, prefixes, package_dirs)
+            if p is None:
+                unresolved.add(mod)
+            elif p not in seen:
+                work.append(p)
+        for mod in speculative:
+            p = _module_to_path(mod, repo_root, prefixes, package_dirs)
+            if p is not None and p not in seen:
                 work.append(p)
 
     rel_roots = []
@@ -141,6 +171,14 @@ def run_lint(roots: list[Path], repo_root: Path, forbidden: set[str],
             rel_roots.append(str(r))
     print(f"VMless independence lint: walked {len(graph)} MODULE-LEVEL edges "
           f"from {', '.join(rel_roots)}")
+    if unresolved:
+        # A local-prefix module the walker could not map to a file is a HOLE
+        # in the proof (its imports go unexamined) — fail, do not guess.
+        print(f"FAIL -- {len(unresolved)} local module(s) not resolvable to "
+              f"files (add --package-dir PREFIX=DIR):")
+        for m in sorted(unresolved):
+            print(f"  {m}")
+        return 1
     if deferred:
         print(f"  ({len(set(deferred))} deferred/lazy loader import(s) present "
               f"but not on the load-time graph -- not executed by the VMless "
@@ -166,6 +204,11 @@ def main(argv=None) -> int:
     ap.add_argument("--local-prefix", action="append", default=[],
                     help="additional top-level package name to follow "
                          "(dos_re is always followed)")
+    ap.add_argument("--package-dir", action="append", default=[],
+                    metavar="PREFIX=DIR",
+                    help="explicit package root for a local prefix "
+                         "(repeatable) -- nested-submodule layouts, e.g. "
+                         "win16=win16_re/win16")
     args = ap.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
@@ -173,7 +216,12 @@ def main(argv=None) -> int:
              for r in args.root]
     forbidden = DEFAULT_FORBIDDEN | set(args.forbidden)
     prefixes = tuple(dict.fromkeys(DEFAULT_LOCAL_PREFIXES + tuple(args.local_prefix)))
-    return run_lint(roots, repo_root, forbidden, prefixes)
+    package_dirs: dict[str, Path] = {}
+    for item in args.package_dir:
+        prefix, _, d = item.partition("=")
+        p = Path(d)
+        package_dirs[prefix] = p if p.is_absolute() else repo_root / p
+    return run_lint(roots, repo_root, forbidden, prefixes, package_dirs)
 
 
 if __name__ == "__main__":

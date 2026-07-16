@@ -366,6 +366,71 @@ def test_forward_jmp_and_diamond():
     _assert_equivalent(code)
 
 
+def test_enter_leave_native():
+    # The MSC Win16 prologue/epilogue pair (80186+): enter alloc,0 makes the
+    # frame, leave tears it down.  Flat (nesting==0) form is native; the
+    # emitted body must carry no interpreter fallback.
+    code = bytes.fromhex(
+        "C8120000"    # enter 0x12, 0
+        "894606"      # mov [bp+6], ax   (exercise the new frame)
+        "C9"          # leave
+        "C3")
+    src = _assert_equivalent(code, data_len=0)
+    assert "# (interpreter fallback)" not in src
+    assert "s.bp = s.sp & 0xFFFF" in src and "s.sp = s.bp" in src
+
+
+def test_enter_zero_alloc_and_nested_fallback():
+    # alloc==0 emits no SP adjust; a nested frame (nesting>0) is the rare
+    # form compilers do not emit -- it stays a loud interpreter fallback.
+    src = _assert_equivalent(bytes.fromhex("C8000000" "C9" "C3"))
+    assert "# (interpreter fallback)" not in src
+    src = _assert_equivalent(bytes.fromhex("C8040002" "C9" "C3"))
+    assert "# (interpreter fallback)" in src
+
+
+def test_pusha_popa_native():
+    # pusha snapshots all eight GPRs (orig SP in slot 4); popa restores all
+    # but the saved SP.  Clobber registers in between to prove the restore.
+    code = bytes.fromhex(
+        "60"          # pusha
+        "B84711"      # mov ax, 0x1147
+        "BB0000"      # mov bx, 0
+        "BE3412"      # mov si, 0x1234
+        "61"          # popa
+        "C3")
+    src = _assert_equivalent(code)
+    assert "# (interpreter fallback)" not in src
+
+
+def test_imul_3operand_native():
+    # imul r16, r/m16, imm8 (sign-extended, incl. negative) and imm16 —
+    # 80186+ forms all over MSC Win16 code.  CF/OF = signed overflow of 16.
+    code = bytes.fromhex(
+        "6BC30A"      # imul ax, bx, 10
+        "6BD3F6"      # imul dx, bx, -10
+        "69DB2001"    # imul bx, bx, 0x120
+        "1900"        # sbb [bx+si], ax  (consumes CF -> proves the flag)
+        "C3")
+    src = _assert_equivalent(code, data_len=0x400)
+    assert "# (interpreter fallback)" not in src
+
+
+def test_lahf_sahf_native():
+    # lahf: AH = SF ZF 0 AF 0 PF 1 CF (low FLAGS byte with bit1 forced);
+    # sahf writes those five back from AH, preserving OF/DF/IF/TF.  The CRT
+    # pairs them around raw INT 21h calls to save/restore CF.
+    code = bytes.fromhex(
+        "01D8"        # add ax, bx   (set real flags)
+        "9F"          # lahf
+        "88E3"        # mov bl, ah   (observe it)
+        "80F4FF"      # xor ah, 0xFF (perturb the saved image)
+        "9E"          # sahf         (restore the perturbed flags)
+        "C3")
+    src = _assert_equivalent(code)
+    assert "# (interpreter fallback)" not in src
+
+
 def test_ret_imm_pops_arguments():
     code = bytes.fromhex("50" "58" "C20200")   # push ax; pop ax; ret 2
     lifted, _s, _src = _lift(code)

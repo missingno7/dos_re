@@ -358,7 +358,67 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str], *,
         out.extend(rm.write("_r"))
         return True
 
+    # --- PUSHA / POPA (80186+) ----------------------------------------------
+    if op == 0x60:                            # pusha: AX CX DX BX origSP BP SI DI
+        out.append("_sp0 = s.sp")
+        for r in ("s.ax", "s.cx", "s.dx", "s.bx", "_sp0", "s.bp", "s.si", "s.di"):
+            out.append(f"cpu.push({r})")
+        return True
+    if op == 0x61:                            # popa: DI SI BP (skip SP) BX DX CX AX
+        out.append("s.di = cpu.pop()")
+        out.append("s.si = cpu.pop()")
+        out.append("s.bp = cpu.pop()")
+        out.append("cpu.pop()  # discard the saved SP")
+        out.append("s.bx = cpu.pop()")
+        out.append("s.dx = cpu.pop()")
+        out.append("s.cx = cpu.pop()")
+        out.append("s.ax = cpu.pop()")
+        return True
+
+    # --- IMUL r16, r/m16, imm (80186+) --------------------------------------
+    if op in (0x69, 0x6B):
+        # Mirror CPU8086 op 0x69/0x6B: signed 16x16 multiply of r/m16 by the
+        # sign-extended immediate; low word to the reg, CF=OF=overflow-out-of-16.
+        rm = _rm_operand(inst, 16, out, tmp)
+        if op == 0x6B:
+            imm = inst.imm - 0x100 if inst.imm & 0x80 else inst.imm
+        else:
+            imm = inst.imm - 0x10000 if inst.imm & 0x8000 else inst.imm
+        out.append(f"_a = {rm.read()}")
+        out.append("_a = _a - 0x10000 if _a & 0x8000 else _a")
+        out.append(f"_r = _a * {imm}")
+        out.append(f"s.{REG16[inst.reg]} = _r & 0xFFFF")
+        out.append("_c = not (-32768 <= _r <= 32767)")
+        out.append("cpu.set_flag(CF, _c)")
+        out.append("cpu.set_flag(OF, _c)")
+        return True
+
+    # --- ENTER / LEAVE (80186+; every MSC Win16 prologue/epilogue) -----------
+    if op == 0xC8:
+        # Mirror CPU8086 op 0xC8.  imm is 3 bytes (alloc16 + nesting8), which
+        # the decoder leaves in raw; the flat nesting==0 form is the only one
+        # compilers emit — the nested form falls back to the interpreter.
+        alloc = inst.raw[-3] | (inst.raw[-2] << 8)
+        nesting = inst.raw[-1] & 0x1F
+        if nesting:
+            return False                      # rare nested frame: interp_one
+        out.append("cpu.push(s.bp & 0xFFFF)")
+        out.append("s.bp = s.sp & 0xFFFF")
+        if alloc:
+            out.append(f"s.sp = (s.sp - 0x{alloc:X}) & 0xFFFF")
+        return True
+    if op == 0xC9:                            # leave: SP=BP, pop BP
+        out.append("s.sp = s.bp")
+        out.append("s.bp = cpu.pop()")
+        return True
+
     # --- misc simple -------------------------------------------------------
+    if op == 0x9F:                            # lahf — mirror CPU8086 op 0x9F
+        out.append("s.ax = (s.ax & 0x00FF) | (((s.flags & 0xD5) | 0x02) << 8)")
+        return True
+    if op == 0x9E:                            # sahf — mirror CPU8086 op 0x9E
+        out.append("s.flags = (s.flags & ~0xD5) | ((s.ax >> 8) & 0xD5) | 0x0002")
+        return True
     if op == 0x98:
         out.append("_al = s.ax & 0x00FF")
         out.append("s.ax = _al | (0xFF00 if _al & 0x80 else 0x0000)")
@@ -486,6 +546,28 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str], *,
         out.append(f"cpu.set_reg8(0, mem.rb({seg}, (s.bx + (s.ax & 0xFF)) & 0xFFFF))")
         return True
 
+    # --- x87 ESC (D8-DF): shared-semantics delegation ------------------------
+    # FP semantics live in ONE place — the interpreter's execute_fpu, factored
+    # into cpu.fpu_reg_op (mod==3) and cpu.fpu_mem_op (memory forms with a
+    # pre-computed EA).  The emitted line computes the effective address
+    # natively (identical to decode_ea, seg overrides included) and calls the
+    # SAME helper the interpreter dispatches to: zero drift, including the
+    # doubles-for-80-bit precision caveat, the _f80_to_double/_double_to_f80
+    # conversions, and the UnsupportedInstruction refusals (FP-stack over/
+    # underflow and any form execute_fpu does not implement fail loud on both
+    # paths, never guess).
+    if 0xD8 <= op <= 0xDF:
+        if inst.mod == 3:
+            out.append(f"cpu.fpu_reg_op(0x{op:02X}, {inst.reg}, {inst.rm})")
+        else:
+            rm = _rm_operand(inst, 16, out, tmp)
+            out.append(f"cpu.fpu_mem_op(0x{op:02X}, {inst.reg}, "
+                       f"{rm.seg_expr}, {rm.off_var})")
+        return True
+    if op == 0x9B:                            # wait/fwait — mirror cpu op 0x9B:
+        out.append("pass  # wait (no coprocessor exceptions modelled)")
+        return True
+
     # --- string ops: reuse the interpreter's own (IP-independent) primitive -
     # cpu.string_op reads nothing from the instruction stream — it takes the
     # already-decoded opcode, the F2/F3 prefix and the segment override — so a
@@ -585,8 +667,11 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     <callee>, ret_ip)`` instead of ``emulate_call`` — original CALL/RET stack
     semantics, no interpreter in the path, and the child remains a
     verifier-visible boundary in the hybrid (pitfall #5). Only near-RET-exit
-    callees are safe to link (the LINK TOOL enforces that precondition; tail
-    exits / retf / iret callees must stay ``emulate_call``).  ``far_link_map``
+    callees are safe to link — plus all-``retf`` callees whose every call
+    site is the ``push cs; call near`` idiom, where the caller's own emitted
+    ``push cs`` supplies the segment word the retf pops (the LINK TOOL
+    enforces both preconditions; tail exits / iret / mixed-exit callees must
+    stay ``emulate_call``).  ``far_link_map``
     is the FAR mirror: ``{(seg, off): python_callable_expr}`` — a direct far
     CALL to a mapped target emits ``call_installed_hook_like_far_call`` (far
     return frame; only all-``retf``-exit callees qualify, again enforced by

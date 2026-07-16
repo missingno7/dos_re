@@ -760,108 +760,134 @@ class CPU8086:
             self.mem.wb(seg, (off + i) & 0xFFFF, byte)
 
     def execute_fpu(self, op: int, seg_override: str | None) -> str:
+        """Decode the ESC instruction's modrm/EA from the stream, then delegate.
+
+        FP semantics live in :meth:`fpu_reg_op` / :meth:`fpu_mem_op` so the
+        lifter's emitted code can call the SAME helpers with a natively
+        computed effective address (dos_re/lift/emit.py) -- one source of
+        truth for x87 behaviour, zero drift between interpreter and lift.
+        """
+        _, mod, reg, rm = self.peek_modrm()
+        if mod == 3:
+            return self.fpu_reg_op(op, reg, rm)
+        seg, off, text = self._fmem(mod, rm, seg_override)
+        return self.fpu_mem_op(op, reg, seg, off, text)
+
+    def fpu_reg_op(self, op: int, reg: int, rm: int) -> str:
+        """Register-form ESC instruction (mod == 3): ST(i)/control operands.
+
+        The interpreter's own semantics, callable directly by lifted code.
+        Raises UnsupportedInstruction on any form this model does not
+        implement and on FP-stack over/underflow -- identically on both
+        paths (fail loud, never guess)."""
         import math
+        s = self.s
+        if op == 0xD8 and reg == 3:                          # FCOMP ST(i)
+            self._fcompare(self._fst(0), self._fst(rm))
+            self._fpop()
+            return f"fcomp st({rm})"
+        if op == 0xD9 and reg == 0:                          # FLD ST(i)
+            self._fpush(self._fst(rm))
+            return f"fld st({rm})"
+        if op == 0xDB and reg == 4:
+            if rm == 2:                                      # FCLEX
+                s.fsw &= 0x7F00
+                return "fclex"
+            if rm == 3:                                      # FINIT
+                s.fst = []
+                s.fsw = 0
+                s.fcw = 0x037F
+                return "finit"
+            if rm in (0, 1):                                 # FENI/FDISI (8087)
+                return "feni" if rm == 0 else "fdisi"
+        if op == 0xDD and reg == 3:                          # FSTP ST(i)
+            v = self._fst(0)
+            self._fst_set(rm, v)
+            self._fpop()
+            return f"fstp st({rm})"
+        if op == 0xDE:
+            if reg == 0:                                     # FADDP ST(i),ST
+                self._fst_set(rm, self._fst(rm) + self._fst(0))
+                self._fpop()
+                return f"faddp st({rm})"
+            if reg == 1:                                     # FMULP ST(i),ST
+                self._fst_set(rm, self._fst(rm) * self._fst(0))
+                self._fpop()
+                return f"fmulp st({rm})"
+            if reg == 4:                                     # FSUBRP ST(i),ST
+                self._fst_set(rm, self._fst(0) - self._fst(rm))
+                self._fpop()
+                return f"fsubrp st({rm})"
+            if reg == 5:                                     # FSUBP ST(i),ST
+                self._fst_set(rm, self._fst(rm) - self._fst(0))
+                self._fpop()
+                return f"fsubp st({rm})"
+            if reg == 6:                                     # FDIVRP ST(i),ST
+                self._fst_set(rm, self._fst(0) / self._fst(rm))
+                self._fpop()
+                return f"fdivrp st({rm})"
+            if reg == 7:                                     # FDIVP ST(i),ST
+                self._fst_set(rm, self._fst(rm) / self._fst(0))
+                self._fpop()
+                return f"fdivp st({rm})"
+        # -- register-form arithmetic + specials (grown for SimAnt's x87) --
+        if op == 0xD8:                                       # ST(0) op= ST(i)
+            a, b = self._fst(0), self._fst(rm)
+            if reg == 0: self._fst_set(0, a + b); return f"fadd st,st({rm})"
+            if reg == 1: self._fst_set(0, a * b); return f"fmul st,st({rm})"
+            if reg == 2: self._fcompare(a, b); return f"fcom st({rm})"
+            if reg == 4: self._fst_set(0, a - b); return f"fsub st,st({rm})"
+            if reg == 5: self._fst_set(0, b - a); return f"fsubr st,st({rm})"
+            if reg == 6: self._fst_set(0, a / b); return f"fdiv st,st({rm})"
+            if reg == 7: self._fst_set(0, b / a); return f"fdivr st,st({rm})"
+        if op == 0xDC:                                       # ST(i) op= ST(0)
+            a, b = self._fst(rm), self._fst(0)
+            if reg == 0: self._fst_set(rm, a + b); return f"fadd st({rm}),st"
+            if reg == 1: self._fst_set(rm, a * b); return f"fmul st({rm}),st"
+            if reg == 4: self._fst_set(rm, b - a); return f"fsubr st({rm}),st"
+            if reg == 5: self._fst_set(rm, a - b); return f"fsub st({rm}),st"
+            if reg == 6: self._fst_set(rm, b / a); return f"fdivr st({rm}),st"
+            if reg == 7: self._fst_set(rm, a / b); return f"fdiv st({rm}),st"
+        if op == 0xD9:
+            if reg == 1:                                     # FXCH ST(i)
+                v0, vi = self._fst(0), self._fst(rm)
+                self._fst_set(0, vi); self._fst_set(rm, v0)
+                return f"fxch st({rm})"
+            if reg == 4:                                     # FCHS/FABS/FTST/FXAM
+                if rm == 0: self._fst_set(0, -self._fst(0)); return "fchs"
+                if rm == 1: self._fst_set(0, abs(self._fst(0))); return "fabs"
+                if rm == 4: self._fcompare(self._fst(0), 0.0); return "ftst"
+                if rm == 5: self._fxam(); return "fxam"
+            if reg == 5:                                     # FLD1/FLDZ/FLDPI/...
+                c = {0: 1.0, 1: math.log2(10.0), 2: math.log2(math.e),
+                     3: math.pi, 4: math.log10(2.0), 5: math.log(2.0),
+                     6: 0.0}.get(rm)
+                if c is not None:
+                    self._fpush(c); return f"fldconst{rm}"
+            if reg == 7:                                     # FSQRT/FSIN/FCOS/...
+                v = self._fst(0)
+                if rm == 2: self._fst_set(0, math.sqrt(v)); return "fsqrt"
+                if rm == 4: self._fst_set(0, float(self._fround(v))); return "frndint"
+                if rm == 5:                                  # FSCALE
+                    self._fst_set(0, math.ldexp(v, int(self._fst(1)))); return "fscale"
+                if rm == 6: self._fst_set(0, math.sin(v)); return "fsin"
+                if rm == 7: self._fst_set(0, math.cos(v)); return "fcos"
+        if op == 0xDF and reg == 4 and rm == 0:              # FNSTSW AX
+            s.ax = s.fsw & 0xFFFF; return "fnstsw ax"
+        raise UnsupportedInstruction(
+            f"x87 opcode {op:02X} /{reg} rm={rm} (register form) at {s.cs:04X}:{s.ip:04X}")
+
+    def fpu_mem_op(self, op: int, reg: int, seg: int, off: int,
+                   text: str = "mem") -> str:
+        """Memory-form ESC instruction with a pre-computed effective address
+        (segment VALUE + offset, exactly what ``_fmem`` produces).
+
+        The interpreter's own semantics, callable directly by lifted code;
+        same fail-loud contract as :meth:`fpu_reg_op`, and the same 80-bit
+        read/write conversions (``_f80_to_double``/``_double_to_f80``) with
+        the documented doubles-for-80-bit precision caveat."""
         import struct
         s = self.s
-        _, mod, reg, rm = self.peek_modrm()
-
-        if mod == 3:
-            if op == 0xD8 and reg == 3:                          # FCOMP ST(i)
-                self._fcompare(self._fst(0), self._fst(rm))
-                self._fpop()
-                return f"fcomp st({rm})"
-            if op == 0xD9 and reg == 0:                          # FLD ST(i)
-                self._fpush(self._fst(rm))
-                return f"fld st({rm})"
-            if op == 0xDB and reg == 4:
-                if rm == 2:                                      # FCLEX
-                    s.fsw &= 0x7F00
-                    return "fclex"
-                if rm == 3:                                      # FINIT
-                    s.fst = []
-                    s.fsw = 0
-                    s.fcw = 0x037F
-                    return "finit"
-                if rm in (0, 1):                                 # FENI/FDISI (8087)
-                    return "feni" if rm == 0 else "fdisi"
-            if op == 0xDD and reg == 3:                          # FSTP ST(i)
-                v = self._fst(0)
-                self._fst_set(rm, v)
-                self._fpop()
-                return f"fstp st({rm})"
-            if op == 0xDE:
-                if reg == 0:                                     # FADDP ST(i),ST
-                    self._fst_set(rm, self._fst(rm) + self._fst(0))
-                    self._fpop()
-                    return f"faddp st({rm})"
-                if reg == 1:                                     # FMULP ST(i),ST
-                    self._fst_set(rm, self._fst(rm) * self._fst(0))
-                    self._fpop()
-                    return f"fmulp st({rm})"
-                if reg == 4:                                     # FSUBRP ST(i),ST
-                    self._fst_set(rm, self._fst(0) - self._fst(rm))
-                    self._fpop()
-                    return f"fsubrp st({rm})"
-                if reg == 5:                                     # FSUBP ST(i),ST
-                    self._fst_set(rm, self._fst(rm) - self._fst(0))
-                    self._fpop()
-                    return f"fsubp st({rm})"
-                if reg == 6:                                     # FDIVRP ST(i),ST
-                    self._fst_set(rm, self._fst(0) / self._fst(rm))
-                    self._fpop()
-                    return f"fdivrp st({rm})"
-                if reg == 7:                                     # FDIVP ST(i),ST
-                    self._fst_set(rm, self._fst(rm) / self._fst(0))
-                    self._fpop()
-                    return f"fdivp st({rm})"
-            # -- register-form arithmetic + specials (grown for SimAnt's x87) --
-            if op == 0xD8:                                       # ST(0) op= ST(i)
-                a, b = self._fst(0), self._fst(rm)
-                if reg == 0: self._fst_set(0, a + b); return f"fadd st,st({rm})"
-                if reg == 1: self._fst_set(0, a * b); return f"fmul st,st({rm})"
-                if reg == 2: self._fcompare(a, b); return f"fcom st({rm})"
-                if reg == 4: self._fst_set(0, a - b); return f"fsub st,st({rm})"
-                if reg == 5: self._fst_set(0, b - a); return f"fsubr st,st({rm})"
-                if reg == 6: self._fst_set(0, a / b); return f"fdiv st,st({rm})"
-                if reg == 7: self._fst_set(0, b / a); return f"fdivr st,st({rm})"
-            if op == 0xDC:                                       # ST(i) op= ST(0)
-                a, b = self._fst(rm), self._fst(0)
-                if reg == 0: self._fst_set(rm, a + b); return f"fadd st({rm}),st"
-                if reg == 1: self._fst_set(rm, a * b); return f"fmul st({rm}),st"
-                if reg == 4: self._fst_set(rm, b - a); return f"fsubr st({rm}),st"
-                if reg == 5: self._fst_set(rm, a - b); return f"fsub st({rm}),st"
-                if reg == 6: self._fst_set(rm, b / a); return f"fdivr st({rm}),st"
-                if reg == 7: self._fst_set(rm, a / b); return f"fdiv st({rm}),st"
-            if op == 0xD9:
-                if reg == 1:                                     # FXCH ST(i)
-                    v0, vi = self._fst(0), self._fst(rm)
-                    self._fst_set(0, vi); self._fst_set(rm, v0)
-                    return f"fxch st({rm})"
-                if reg == 4:                                     # FCHS/FABS/FTST/FXAM
-                    if rm == 0: self._fst_set(0, -self._fst(0)); return "fchs"
-                    if rm == 1: self._fst_set(0, abs(self._fst(0))); return "fabs"
-                    if rm == 4: self._fcompare(self._fst(0), 0.0); return "ftst"
-                    if rm == 5: self._fxam(); return "fxam"
-                if reg == 5:                                     # FLD1/FLDZ/FLDPI/...
-                    c = {0: 1.0, 1: math.log2(10.0), 2: math.log2(math.e),
-                         3: math.pi, 4: math.log10(2.0), 5: math.log(2.0),
-                         6: 0.0}.get(rm)
-                    if c is not None:
-                        self._fpush(c); return f"fldconst{rm}"
-                if reg == 7:                                     # FSQRT/FSIN/FCOS/...
-                    v = self._fst(0)
-                    if rm == 2: self._fst_set(0, math.sqrt(v)); return "fsqrt"
-                    if rm == 4: self._fst_set(0, float(self._fround(v))); return "frndint"
-                    if rm == 5:                                  # FSCALE
-                        self._fst_set(0, math.ldexp(v, int(self._fst(1)))); return "fscale"
-                    if rm == 6: self._fst_set(0, math.sin(v)); return "fsin"
-                    if rm == 7: self._fst_set(0, math.cos(v)); return "fcos"
-            if op == 0xDF and reg == 4 and rm == 0:              # FNSTSW AX
-                s.ax = s.fsw & 0xFFFF; return "fnstsw ax"
-            raise UnsupportedInstruction(
-                f"x87 opcode {op:02X} /{reg} rm={rm} (register form) at {s.cs:04X}:{s.ip:04X}")
-
-        seg, off, text = self._fmem(mod, rm, seg_override)
         if op == 0xD9:
             if reg == 5:                                         # FLDCW m16
                 s.fcw = self.mem.rw(seg, off)
@@ -1157,6 +1183,13 @@ class CPU8086:
         if op == 0x9B:  # WAIT/FWAIT: no coprocessor exceptions are modelled,
             # so this is a no-op (first exercised by Win16 x87-emulator code).
             return T and "wait"
+        if op == 0x9F:  # LAHF: AH = low FLAGS byte (SF ZF 0 AF 0 PF 1 CF).
+            # First decoded in a Win16 CRT's raw-INT-21h write path.
+            s.ax = (s.ax & 0x00FF) | (((s.flags & 0xD5) | 0x02) << 8)
+            return T and "lahf"
+        if op == 0x9E:  # SAHF: SF ZF AF PF CF from AH; other flags preserved.
+            s.flags = (s.flags & ~0xD5) | ((s.ax >> 8) & 0xD5) | 0x0002
+            return T and "sahf"
         if op == 0x98:
             al = s.ax & 0x00FF
             s.ax = al | (0xFF00 if al & 0x80 else 0x0000)

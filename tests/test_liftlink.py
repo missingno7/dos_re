@@ -60,7 +60,9 @@ def test_edge_rule_structural_default_links_without_proof():
     edges, blocked = liftlink.compute_link_edges(scans, statuses)
     assert ("1000:0100", "1000:0110") in edges
     assert ("1000:0100", "1000:0130") in edges          # unproven: still linked
-    assert ("1000:0100", "1000:0120", "exit-shape") in blocked
+    # retf callee called WITHOUT push cs: the sharper residue slug (a retf
+    # callee is linkable only through the push-cs idiom, proven per site).
+    assert ("1000:0100", "1000:0120", "retf-callee-no-push-cs-idiom") in blocked
 
 
 def test_edge_rule_proven_gate_requires_oracle_passing():
@@ -71,7 +73,7 @@ def test_edge_rule_proven_gate_requires_oracle_passing():
     edges, blocked = liftlink.compute_link_edges(scans, statuses,
                                                  structural=False)
     assert edges == [("1000:0100", "1000:0110")]
-    assert ("1000:0100", "1000:0120", "exit-shape") in blocked
+    assert ("1000:0100", "1000:0120", "retf-callee-no-push-cs-idiom") in blocked
     assert ("1000:0100", "1000:0130", "not-passing") in blocked
 
 
@@ -281,4 +283,217 @@ def test_far_linked_caller_and_retf_callee_run_exact(tmp_path):
     assert (hyb.s.flags & 0x0FD5) == (asm.s.flags & 0x0FD5)
     assert hyb.mem.data == asm.mem.data
     # Virtual time: identical clock (owns_time counted lift, both functions).
+    assert hyb.instruction_count == asm.instruction_count
+
+
+# --- the push-cs idiom: near-encoded far calls (push cs; call near -> retf) -----
+
+def test_push_cs_near_call_to_retf_callee_links():
+    """MSC compiles an intra-segment call to a FAR-returning function as
+    ``push cs; call near``; the callee's retf pops the pushed CS + return IP.
+    The edge links when every call site carries the provable push."""
+    code = bytearray(b"\x90" * 0x20)
+    code[0x00:0x05] = bytes.fromhex("0E" "E80C00" "C3")   # push cs; call 0110; ret
+    code[0x10:0x14] = bytes.fromhex("050500" "CB")        # add ax,5; retf
+    scans = _scan_all(bytes(code), [0x0100, 0x0110])
+    assert liftlink.all_far_ret_exits(scans[(CS, 0x0110)])
+    assert liftlink.push_cs_idiom_at_all_sites(scans[(CS, 0x0100)], 0x0110)
+    edges, blocked = liftlink.compute_link_edges(scans, {})
+    assert edges == [("1000:0100", "1000:0110")]
+    assert not blocked
+
+
+def test_push_cs_idiom_rejected_when_call_site_is_a_branch_target():
+    """A call site that is also a branch target can be reached WITHOUT the
+    push cs, so the far frame is not provable on every path -- blocked.
+    Sequence adjacency within the same basic block is the evidence rule."""
+    code = bytearray(b"\x90" * 0x20)
+    # 0100: jz 0103 ; 0102: push cs ; 0103: call 0110 ; 0106: ret
+    code[0x00:0x07] = bytes.fromhex("7401" "0E" "E80A00" "C3")
+    code[0x10] = 0xCB                                     # 0110: retf
+    scans = _scan_all(bytes(code), [0x0100, 0x0110])
+    assert not liftlink.push_cs_idiom_at_all_sites(scans[(CS, 0x0100)], 0x0110)
+    edges, blocked = liftlink.compute_link_edges(scans, {})
+    assert edges == []
+    assert ("1000:0100", "1000:0110", "retf-callee-no-push-cs-idiom") in blocked
+
+
+def test_mixed_graph_links_only_qualifying_push_cs_edges():
+    """One caller, three callees: a push-cs retf callee (links), a plain
+    near-ret callee (links), and a retf callee without the push (honest
+    residue)."""
+    code = bytearray(b"\x90" * 0x50)
+    code[0x00:0x0B] = bytes.fromhex(
+        "0E"          # 0100: push cs
+        "E81C00"      # 0101: call 0120   (idiom)
+        "E82900"      # 0104: call 0130   (plain near-ret)
+        "E83600"      # 0107: call 0140   (retf, NO push cs)
+        "C3")         # 010A: ret
+    code[0x20] = 0xCB                                     # 0120: retf
+    code[0x30] = 0xC3                                     # 0130: ret
+    code[0x40] = 0xCB                                     # 0140: retf
+    scans = _scan_all(bytes(code), [0x0100, 0x0120, 0x0130, 0x0140])
+    edges, blocked = liftlink.compute_link_edges(scans, {})
+    assert ("1000:0100", "1000:0120") in edges
+    assert ("1000:0100", "1000:0130") in edges
+    assert ("1000:0100", "1000:0140", "retf-callee-no-push-cs-idiom") in blocked
+    assert len(edges) == 2
+
+
+def test_push_cs_linked_caller_and_retf_callee_run_exact(tmp_path):
+    """End-to-end: the idiom edge links with the ORDINARY near-link emission.
+    The caller's own emitted ``push cs`` supplies the segment word; the near
+    helper pushes the return IP; the lifted callee's ``retf 2`` terminator
+    pops IP, CS and the pascal argument -- exactly the interpreted frame,
+    including SP, memory, flags and virtual time."""
+    code = bytes.fromhex(
+        "B80200"      # 0100: mov ax, 2
+        "50"          # 0103: push ax            (pascal argument)
+        "0E"          # 0104: push cs            (the idiom)
+        "E80800"      # 0105: call 0x0110
+        "050100"      # 0108: add ax, 1
+        "C3"          # 010B: ret
+        "90909090"    # pad to 0x0110
+        "8BDC"        # 0110: mov bx, sp         (callee)
+        "368B5F04"    # 0112: mov bx, ss:[bx+4]  (the arg: below IP and CS)
+        "03C3"        # 0116: add ax, bx
+        "CA0200")     # 0118: retf 2             (pops the arg too)
+    scans = _scan_all(code, [0x0100, 0x0110])
+    edges, _blocked = liftlink.compute_link_edges(scans, {})
+    assert edges == [("1000:0100", "1000:0110")]
+
+    callee_src = emit_function(scans[(CS, 0x0110)], CS, "lifted_1000_0110",
+                               signature=code[0x10:0x14],
+                               count_instructions=True)
+    caller_src = liftlink.relink_source(scans[(CS, 0x0100)], CS, [0x0110],
+                                        signature=code[:6])
+    # The compensating push stays a counted native instruction; the call site
+    # is the ordinary near link (no new ABI, no emulate_call left).
+    assert "cpu.push(s.cs)" in caller_src
+    assert "call_installed_hook_like_near_call" in caller_src
+    assert 'LINKS["1000:0110"]' in caller_src
+    assert "emulate_call" not in caller_src.split("def lifted_1000_0100")[1]
+    (tmp_path / "lifted_1000_0110.py").write_text(callee_src, encoding="utf-8")
+    (tmp_path / "lifted_1000_0100.py").write_text(caller_src, encoding="utf-8")
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "1000:0100": {"entry": "1000:0100", "module": "lifted_1000_0100.py",
+                      "status": "ORACLE_PASSING"},
+        "1000:0110": {"entry": "1000:0110", "module": "lifted_1000_0110.py",
+                      "status": "ORACLE_PASSING"},
+    }))
+
+    asm = _make_cpu(code, _state())
+    for _ in range(100):
+        if (asm.s.cs, asm.s.ip) == (CS, RET_IP):
+            break
+        asm.step()
+    assert (asm.s.cs, asm.s.ip) == (CS, RET_IP)
+
+    hyb = _make_cpu(code, _state())
+    installed = install_passing_lifts(hyb, CS, tmp_path, [manifest])
+    assert set(installed) == {(CS, 0x0100), (CS, 0x0110)}
+    hyb.step()
+
+    assert (hyb.s.cs, hyb.s.ip) == (CS, RET_IP)
+    assert hyb.s.ax == asm.s.ax == 5                   # 2 + 2 + 1
+    assert hyb.s.sp == asm.s.sp                        # CS, IP and arg all popped
+    assert (hyb.s.flags & 0x0FD5) == (asm.s.flags & 0x0FD5)
+    assert hyb.mem.data == asm.mem.data
+    assert hyb.instruction_count == asm.instruction_count
+
+
+# --- computed-return callee facts (MSC chkstk family) ---------------------------
+
+def _chkstk_code() -> bytes:
+    """0100: mov ax,2 ; call 0110 ; add ax,1 ; add sp,4 ; ret   (caller)
+    0110: pop bx ; sub sp,4 ; jmp bx                            (near chkstk shape:
+    returns to the caller's return address with SP deliberately BELOW the
+    call point — the allocated frame)."""
+    return bytes.fromhex("B80200" "E80A00" "050100" "83C404" "C3"
+                         "909090"                     # pad to 0x0110
+                         "5B" "83EC04" "FFE3")
+
+
+def test_computed_return_near_fact_links_where_exit_shape_blocked():
+    scans = _scan_all(_chkstk_code(), [0x0100, 0x0110])
+    edges, blocked = liftlink.compute_link_edges(scans, {})
+    assert edges == []                                  # jmp_ind exit: not linkable
+    assert ("1000:0100", "1000:0110", "exit-shape") in blocked
+
+    edges, blocked = liftlink.compute_link_edges(
+        scans, {}, computed_return_near=frozenset({"1000:0110"}))
+    assert edges == [("1000:0100", "1000:0110")]
+    assert not any(b[1] == "1000:0110" for b in blocked)
+
+
+def test_computed_return_far_fact_gates_far_and_push_cs_edges():
+    # Far callee ending in a computed far jump (jmp far [mem] after popping
+    # the far return into memory — the __aFchkstk/__setargv shape), reached
+    # through the push-cs idiom.  0100: push cs ; call 0110 ; ret
+    # 0110: pop [0400] ; pop [0402] ; sub sp,4 ; jmp far [0400]
+    code = bytearray(b"\x90" * 0x20)
+    code[0x00:0x05] = bytes.fromhex("0E" "E80C00" "C3")
+    code[0x10:0x1F] = bytes.fromhex("8F060004" "8F060204" "83EC04" "FF2E0004")
+    scans = _scan_all(bytes(code), [0x0100, 0x0110])
+
+    edges, blocked = liftlink.compute_link_edges(scans, {})
+    assert edges == []
+    assert ("1000:0100", "1000:0110", "exit-shape") in blocked
+
+    # The far fact alone qualifies the callee; the push-cs site rule still
+    # applies (same as a genuine retf callee).
+    edges, _ = liftlink.compute_link_edges(
+        scans, {}, computed_return_far=frozenset({"1000:0110"}))
+    assert edges == [("1000:0100", "1000:0110")]
+
+    # And a DIRECT far call to the same callee links through the far edge set.
+    far_edges, far_blocked = liftlink.compute_far_link_edges(
+        scans, computed_return_far=frozenset({"1000:0110"}))
+    assert far_edges == []                              # no far call site here
+    edges2, blocked2 = liftlink.compute_link_edges(scans, {})
+    assert ("1000:0100", "1000:0110", "exit-shape") in blocked2
+
+
+def test_computed_return_near_linked_caller_runs_exact(tmp_path):
+    """E2E: the linked chkstk-shaped edge runs byte-exact vs the interpreted
+    original — the very case emulate_call can never terminate on (SP ends
+    below the call point, so its unwind heuristic never fires)."""
+    code = _chkstk_code()
+    scans = _scan_all(code, [0x0100, 0x0110])
+
+    (tmp_path / "lifted_1000_0110.py").write_text(
+        emit_function(scans[(CS, 0x0110)], CS, "lifted_1000_0110",
+                      signature=code[0x10:0x12], count_instructions=True),
+        encoding="utf-8")
+    (tmp_path / "lifted_1000_0100.py").write_text(
+        liftlink.relink_source(scans[(CS, 0x0100)], CS, [0x0110],
+                               signature=code[:6]), encoding="utf-8")
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "1000:0100": {"entry": "1000:0100", "module": "lifted_1000_0100.py",
+                      "status": "ORACLE_PASSING"},
+        "1000:0110": {"entry": "1000:0110", "module": "lifted_1000_0110.py",
+                      "status": "ORACLE_PASSING"},
+    }))
+
+    asm = _make_cpu(code, _state())
+    for _ in range(100):
+        if (asm.s.cs, asm.s.ip) == (CS, RET_IP):
+            break
+        asm.step()
+    assert (asm.s.cs, asm.s.ip) == (CS, RET_IP)
+
+    hyb = _make_cpu(code, _state())
+    installed = install_passing_lifts(hyb, CS, tmp_path, [manifest])
+    assert set(installed) == {(CS, 0x0100), (CS, 0x0110)}
+    hyb.step()
+
+    assert (hyb.s.cs, hyb.s.ip) == (CS, RET_IP)
+    assert hyb.s.ax == asm.s.ax == 3                   # 2 + 1
+    assert hyb.s.sp == asm.s.sp
+    assert (hyb.s.flags & 0x0FD5) == (asm.s.flags & 0x0FD5)
+    assert hyb.mem.data == asm.mem.data
     assert hyb.instruction_count == asm.instruction_count

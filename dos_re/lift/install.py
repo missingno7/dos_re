@@ -28,6 +28,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+from .naming import GraphNaming
+
 #: statuses whose lifted module is proven safe to run as the replacement.
 INSTALLABLE_STATUSES = ("ORACLE_PASSING", "INSTALLED")
 
@@ -73,7 +75,7 @@ def planned_lifts(cs: int, manifest_paths, *, skip=()) -> dict[tuple[int, int], 
     return plan
 
 
-def resolve_links(loaded: dict[str, object], emit_dir) -> int:
+def resolve_links(loaded: dict[str, object], emit_dir, naming=None) -> int:
     """Second pass of the two-pass load: bind every module's ``LINKS`` table.
 
     A LINKED module (``tools/liftlink.py`` — the batch de-VM pass) carries a
@@ -87,10 +89,16 @@ def resolve_links(loaded: dict[str, object], emit_dir) -> int:
     linked.  Loud on a missing callee module: a linked caller whose callee is
     not on disk is a pipeline error, never something to skip silently.
 
+    ``naming`` maps entry addresses to module stems (the manifest seam,
+    ``dos_re.lift.naming``); ``None`` loads ``graph_manifest.json`` from
+    ``emit_dir`` — absent manifest = the historical address-derived names.
+
     ``loaded`` maps function/module stem name → loaded module and is extended
     in place with every sibling this pass pulls in.  Returns the number of
     link slots bound."""
     emit_dir = Path(emit_dir)
+    if naming is None:
+        naming = GraphNaming.load(emit_dir)
     pending = list(loaded.values())
     resolved = 0
     while pending:
@@ -99,8 +107,7 @@ def resolve_links(loaded: dict[str, object], emit_dir) -> int:
         if not links:
             continue
         for entry in sorted(links):
-            e_cs, e_ip = (int(x, 16) for x in entry.split(":"))
-            name = f"lifted_{e_cs:04x}_{e_ip:04x}"
+            name = naming.stem_of(entry)
             callee = loaded.get(name)
             if callee is None:
                 path = emit_dir / f"{name}.py"
@@ -157,23 +164,41 @@ def install_vmless_graph(cpu, emit_dir, *, skip=()) -> dict[tuple[int, int], str
     restriction only applies to LINKED calls (``liftlink``), not to entries
     reached by the interpreter and replaced whole.  ``skip`` = "CS:IP" strings
     to exclude.  Two-pass (load, resolve LINKS, register); loud on a missing
-    linked callee.  Returns {(cs,ip): module_name} for the installed set."""
+    linked callee.  Returns {(cs,ip): module_name} for the installed set.
+
+    Module discovery honours the naming manifest (``dos_re.lift.naming``):
+    manifested entries name their modules symbolically (loud when a
+    manifested module file is missing — a manifest naming a module that is
+    not there is a pipeline error); default-named ``lifted_CS_IP.py`` modules
+    not covered by the manifest install as before."""
     emit_dir = Path(emit_dir)
     skip = set(skip)
+    naming = GraphNaming.load(emit_dir)
     installed: dict[tuple[int, int], str] = {}
+    for cs, ip, stem in naming.entries():
+        if f"{cs:04X}:{ip:04X}" in skip:
+            continue
+        if not (emit_dir / f"{stem}.py").is_file():
+            raise FileNotFoundError(
+                f"graph manifest entry {cs:04X}:{ip:04X}: module "
+                f"{emit_dir / (stem + '.py')} is missing")
+        installed[(cs, ip)] = f"{stem}.py"
     for path in sorted(emit_dir.glob("lifted_*.py")):
         stem = path.stem                       # lifted_1010_16a9
         parts = stem.split("_")
         if len(parts) != 3:
             continue
-        cs, ip = int(parts[1], 16), int(parts[2], 16)
-        if f"{cs:04X}:{ip:04X}" in skip:
+        try:
+            cs, ip = int(parts[1], 16), int(parts[2], 16)
+        except ValueError:                     # a symbolic stem, not the pattern
+            continue
+        if f"{cs:04X}:{ip:04X}" in skip or (cs, ip) in installed:
             continue
         installed[(cs, ip)] = path.name
     loaded: dict[str, object] = {}
     for key, module in sorted(installed.items()):
         loaded[module[:-3]] = _load_module(emit_dir / module)
-    resolve_links(loaded, emit_dir)
+    resolve_links(loaded, emit_dir, naming)
     for key, module in sorted(installed.items()):
         name = module[:-3]
         fn = getattr(loaded[name], name)

@@ -13,7 +13,11 @@ Edge rule (STRUCTURAL — the 2.0 default):
 
     caller scan is liftable, the near-CALL target is itself a census entry in
     the SAME segment (near calls guarantee that), and EVERY callee exit is a
-    near ``ret`` — tail-exit / retf / iret callees stay ``emulate_call``.
+    near ``ret`` — OR every exit is ``retf`` and every call site is the
+    ``push cs; call near`` idiom (``push_cs_idiom_at_all_sites``: MSC's
+    near-encoded far call, whose caller-pushed CS the callee's retf pops).
+    Tail-exit / iret / mixed-exit callees stay ``emulate_call``, as do retf
+    callees whose sites lack the provable push.
 
 Correctness of the linked graph is judged END-TO-END: full-state oracle
 comparison at tick boundaries over the assembled graph, with
@@ -110,7 +114,9 @@ def all_near_ret_exits(scan: FunctionScan) -> bool:
     ``call_installed_hook_like_near_call`` pushes the return IP and runs the
     callee synchronously; only a callee whose every path pops exactly that
     near return is equivalent to the original CALL.  retf/iret would pop CS
-    too; a tail exit hands control to the VM mid-flight."""
+    too; a tail exit hands control to the VM mid-flight.  (The ONE retf
+    exception is the push-cs idiom — ``push_cs_idiom_at_all_sites`` — where
+    the caller's own pushed CS is exactly the extra word the retf pops.)"""
     return bool(scan.exits) and all(i.kind == "ret" for i in scan.exits)
 
 
@@ -120,11 +126,53 @@ def all_far_ret_exits(scan: FunctionScan) -> bool:
     return bool(scan.exits) and all(i.kind == "retf" for i in scan.exits)
 
 
+def push_cs_idiom_at_all_sites(scan: FunctionScan, target: int) -> bool:
+    """True when EVERY near-CALL site in ``scan`` targeting ``target`` is
+    immediately preceded — same-block fallthrough adjacency — by ``push cs``.
+
+    The MSC intra-segment far-service idiom: a far-returning function called
+    from within its own segment compiles as ``push cs; call near target`` —
+    the callee's ``retf`` pops the pushed CS + the near call's return IP, so
+    the pair behaves exactly like a far call while staying near-encoded.
+    Recognition is mechanical and per-site (never dataflow guesswork):
+
+    * the instruction at ``site.ip - 1`` is in the reachable set, is exactly
+      the one-byte ``push cs`` (op 0x0E, no prefixes — one byte, so sequence
+      adjacency IS the address relation), and falls through into the call;
+    * the call site is NOT a block leader: a branch target could be reached
+      WITHOUT executing the push, so the far frame would not be provable on
+      every path.  A ``push cs`` that belongs to another dataflow never
+      qualifies — it must be the immediately preceding instruction of the
+      same basic block.
+
+    All sites must qualify because a linked edge binds by TARGET (the
+    emitter's ``link_map`` applies to every CALL site with that target); one
+    non-idiom site would link a genuinely broken frame."""
+    sites = [i for i in scan.insts.values()
+             if i.kind == "call" and i.target == target]
+    if not sites:
+        return False
+    leaders = set(scan.block_leaders())
+    for site in sites:
+        prev = scan.insts.get((site.ip - 1) & 0xFFFF)
+        if prev is None or prev.op != 0x0E or prev.prefixes \
+                or prev.kind != "seq" or prev.next_ip != site.ip:
+            return False
+        if site.ip in leaders:
+            return False
+    return True
+
+
 def compute_far_link_edges(scans: dict[tuple[int, int], FunctionScan],
-                           *, exclude: frozenset[str] = frozenset()):
+                           *, exclude: frozenset[str] = frozenset(),
+                           computed_return_far: frozenset[str] = frozenset()):
     """The far-linkable edge set: direct far CALLs between census entries whose
     callee exits are all ``retf``.  Structural rule only (the 2.0 posture);
-    same exclusion semantics as near edges."""
+    same exclusion semantics as near edges.
+
+    ``computed_return_far`` — port-declared COMPUTED-RETURN facts (see
+    ``compute_link_edges``): callees proven to end every path at the caller's
+    far return address despite a non-``retf`` exit encoding."""
     edges: list[tuple[str, str]] = []
     blocked: list[tuple[str, str, str]] = []
     for (cs, ip), scan in sorted(scans.items()):
@@ -140,7 +188,8 @@ def compute_far_link_edges(scans: dict[tuple[int, int], FunctionScan],
                 blocked.append((caller_key, callee_key, "not-an-entry"))
             elif not callee.liftable:
                 blocked.append((caller_key, callee_key, "callee-not-liftable"))
-            elif not all_far_ret_exits(callee):
+            elif not (all_far_ret_exits(callee)
+                      or callee_key in computed_return_far):
                 blocked.append((caller_key, callee_key, "exit-shape"))
             else:
                 edges.append((caller_key, callee_key))
@@ -149,8 +198,25 @@ def compute_far_link_edges(scans: dict[tuple[int, int], FunctionScan],
 
 def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
                        statuses: dict[str, str], *, structural: bool = True,
-                       exclude: frozenset[str] = frozenset()):
+                       exclude: frozenset[str] = frozenset(),
+                       computed_return_near: frozenset[str] = frozenset(),
+                       computed_return_far: frozenset[str] = frozenset()):
     """The linkable edge set from fresh scans (+ proof statuses if gated).
+
+    ``computed_return_near`` / ``computed_return_far`` are port-declared
+    COMPUTED-RETURN recovery facts ("CS:IP" strings): callees whose every exit
+    path transfers control to the caller's return address through a computed
+    jump instead of an encoded ``ret``/``retf`` — MSC's stack-probe family
+    (``__aNchkstk`` pops the near return into a register, moves SP to the
+    newly allocated frame top, then ``jmp bx``; ``__aFchkstk``/``__setargv``
+    do the far equivalent through a saved pointer).  Such a callee is
+    behaviorally a returning callee, but ``emulate_call``'s termination
+    heuristic can NEVER recognize it (the callee's whole job is to leave SP
+    BELOW the call point), so the edge must be LINKED to be executable at all
+    — the lifted callee body reproduces the exact frame/SP trajectory and the
+    linked helper simply continues at the very continuation the computed jump
+    targets.  A near fact links like an all-near-ret callee; a far fact like
+    an all-retf callee (push-cs idiom sites or direct far calls).
 
     Returns ``(edges, blocked)``: ``edges`` is ``[("CS:IP", "CS:IP"), ...]``
     (caller, callee) and ``blocked`` is ``[(caller, callee, reason), ...]``
@@ -195,10 +261,28 @@ def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
                 blocked.append((caller_key, callee_key, "callee-not-liftable"))
             elif not structural and statuses.get(callee_key) != PASSING:
                 blocked.append((caller_key, callee_key, "not-passing"))
-            elif not all_near_ret_exits(callee):
-                blocked.append((caller_key, callee_key, "exit-shape"))
-            else:
+            elif all_near_ret_exits(callee) or callee_key in computed_return_near:
                 edges.append((caller_key, callee_key))
+            elif (all_far_ret_exits(callee) or callee_key in computed_return_far) \
+                    and push_cs_idiom_at_all_sites(scan, target):
+                # The push-cs idiom (push cs; call near -> retf callee): a
+                # linkable NEAR edge with the ordinary near-link emission.
+                # The caller's own emitted ``push cs`` already put the segment
+                # word on the stack; call_installed_hook_like_near_call then
+                # pushes the return IP, and the lifted callee's retf
+                # terminator pops IP then CS — together exactly the original
+                # far-shaped frame, byte for byte (values, order, SP
+                # trajectory).  No new call-site ABI, no push suppression:
+                # the push stays a counted one-line instruction and the link
+                # COMPENSATES nothing away (subsuming the push into a far
+                # helper would break the one-line-per-instruction emit
+                # invariant and its virtual-time accounting for no gain).
+                edges.append((caller_key, callee_key))
+            elif all_far_ret_exits(callee) or callee_key in computed_return_far:
+                blocked.append((caller_key, callee_key,
+                                "retf-callee-no-push-cs-idiom"))
+            else:
+                blocked.append((caller_key, callee_key, "exit-shape"))
     return edges, blocked
 
 
@@ -214,9 +298,13 @@ def relink_source(scan: FunctionScan, cs: int, target_ips, *,
                   min_iterations: int | None = None,
                   drop_dead_flags: bool = False,
                   boundary_heads: frozenset = frozenset(),
-                  dispatch_entries: frozenset = frozenset()) -> str:
-    """Re-emit a caller with the given near (and far) call targets linked."""
-    name = f"lifted_{cs:04x}_{scan.entry:04x}"
+                  dispatch_entries: frozenset = frozenset(),
+                  stem: str | None = None) -> str:
+    """Re-emit a caller with the given near (and far) call targets linked.
+
+    ``stem`` overrides the default address-derived module/function name (the
+    naming-manifest seam, ``dos_re.lift.naming``)."""
+    name = stem or f"lifted_{cs:04x}_{scan.entry:04x}"
     targets = sorted(set(target_ips))
     fars = sorted(set(far_targets))
     link_map = {t: f'LINKS["{cs:04X}:{t:04X}"]' for t in targets}
@@ -319,6 +407,22 @@ def main(argv=None) -> int:
                          "functions, env-wait recovery facts -- because a "
                          "linked edge would bypass the install skip and run "
                          "the excluded lifted body anyway.")
+    ap.add_argument("--computed-return-near", action="append", default=[],
+                    metavar="CS:IP|@FILE",
+                    help="COMPUTED-RETURN recovery facts, near shape "
+                         "(repeatable; @FILE = one CS:IP per line, # "
+                         "comments): callees proven to end every path at the "
+                         "caller's near return address via a computed jump "
+                         "with a deliberately adjusted SP (MSC __aNchkstk). "
+                         "Linked like all-near-ret callees -- emulate_call's "
+                         "SP-unwind heuristic can never terminate on them.")
+    ap.add_argument("--computed-return-far", action="append", default=[],
+                    metavar="CS:IP|@FILE",
+                    help="COMPUTED-RETURN recovery facts, far shape: callees "
+                         "proven to end every path at the caller's FAR return "
+                         "address via a computed far jump (MSC __aFchkstk / "
+                         "__setargv).  Linked like all-retf callees (push-cs "
+                         "idiom near sites, or direct far calls).")
     args = ap.parse_args(argv)
     if args.proven_edges and not args.board:
         ap.error("--proven-edges requires at least one --board")
@@ -327,6 +431,11 @@ def main(argv=None) -> int:
 
     emit_dir = Path(args.emit_dir)
     out_dir = Path(args.out_dir) if args.out_dir else emit_dir
+
+    # Naming manifest (dos_re.lift.naming): symbolic module names when the
+    # emit dir carries graph_manifest.json, the historical default otherwise.
+    from dos_re.lift.naming import GraphNaming
+    naming = GraphNaming.load(emit_dir)
 
     # 1. Code identity: EITHER fresh scans from the snapshot, OR the recovery
     #    IR re-elaborated by the one decoder (never a stale census file).
@@ -368,20 +477,28 @@ def main(argv=None) -> int:
     heads = _read_pairs(args.boundary_heads)
     dispatch = _read_pairs(args.dispatch_entries)
 
-    exclude: set[str] = set()
-    for item in args.exclude_callees:
-        if item.startswith("@"):
-            for line in Path(item[1:]).read_text().splitlines():
-                line = line.split("#", 1)[0].strip()
-                if line:
-                    exclude.add(line.upper())
-        else:
-            exclude.add(item.strip().upper())
+    def _read_keys(items) -> frozenset[str]:
+        keys: set[str] = set()
+        for item in items:
+            if item.startswith("@"):
+                for line in Path(item[1:]).read_text().splitlines():
+                    line = line.split("#", 1)[0].strip()
+                    if line:
+                        keys.add(line.upper())
+            else:
+                keys.add(item.strip().upper())
+        return frozenset(keys)
+
+    exclude = _read_keys(args.exclude_callees)
+    computed_near = _read_keys(args.computed_return_near)
+    computed_far = _read_keys(args.computed_return_far)
 
     statuses = load_statuses(args.board)
     edges, blocked = compute_link_edges(scans, statuses,
                                         structural=not args.proven_edges,
-                                        exclude=frozenset(exclude))
+                                        exclude=exclude,
+                                        computed_return_near=computed_near,
+                                        computed_return_far=computed_far)
 
     # A linked call needs its callee module ON DISK for the installer's
     # resolution pass — a proven callee that was never emitted cannot be
@@ -389,7 +506,7 @@ def main(argv=None) -> int:
     kept: list[tuple[str, str]] = []
     for caller_key, callee_key in edges:
         e_cs, e_ip = parse_addr(callee_key)
-        if (emit_dir / f"lifted_{e_cs:04x}_{e_ip:04x}.py").is_file():
+        if naming.module_path(emit_dir, e_cs, e_ip).is_file():
             kept.append((caller_key, callee_key))
         else:
             blocked.append((caller_key, callee_key, "callee-module-missing"))
@@ -397,13 +514,13 @@ def main(argv=None) -> int:
     edges = kept
 
     # 2b. FAR edges (structural rule; same on-disk requirement).
-    far_edges, far_blocked = compute_far_link_edges(scans,
-                                                    exclude=frozenset(exclude))
+    far_edges, far_blocked = compute_far_link_edges(
+        scans, exclude=exclude, computed_return_far=computed_far)
     blocked.extend(far_blocked)
     far_kept: list[tuple[str, str]] = []
     for caller_key, callee_key in far_edges:
         e_cs, e_ip = parse_addr(callee_key)
-        if (emit_dir / f"lifted_{e_cs:04x}_{e_ip:04x}.py").is_file():
+        if naming.module_path(emit_dir, e_cs, e_ip).is_file():
             far_kept.append((caller_key, callee_key))
         else:
             blocked.append((caller_key, callee_key, "callee-module-missing"))
@@ -425,7 +542,7 @@ def main(argv=None) -> int:
     for caller_key in all_callers:
         cs, ip = parse_addr(caller_key)
         scan = scans[(cs, ip)]
-        name = f"lifted_{cs:04x}_{ip:04x}"
+        name = naming.stem(cs, ip)
         old_path = emit_dir / f"{name}.py"
         old_src = old_path.read_text(encoding="utf-8") if old_path.is_file() else None
         if old_src is not None:
@@ -442,7 +559,8 @@ def main(argv=None) -> int:
             src = relink_source(scan, cs, target_ips, far_targets=far_targets,
                                 signature=sig, min_iterations=min_iters,
                                 drop_dead_flags=args.drop_dead_flags,
-                                boundary_heads=heads, dispatch_entries=dispatch)
+                                boundary_heads=heads, dispatch_entries=dispatch,
+                                stem=name)
         except EmitUnsupported as exc:
             print(f"skip     {caller_key}: emit-unsupported ({exc})")
             for callee_key in by_caller.get(caller_key, ()):
