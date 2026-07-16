@@ -87,7 +87,10 @@ def main(argv=None) -> int:
     promoted: list[str] = []
     refused: dict[str, list[str]] = {}
     outputs: dict[str, tuple[str, str]] = {}
-    contracts: dict[int, emit_cpuless.CalleeContract] = {}
+    # near-call contracts are per segment (near targets are IPs within the
+    # caller's own cs); far-call contracts are keyed by the static (seg, off).
+    contracts_by_cs: dict[int, dict[int, emit_cpuless.CalleeContract]] = {}
+    far_contracts: dict[tuple[int, int], emit_cpuless.CalleeContract] = {}
     done: set[str] = set()
     rounds = 0
     while True:
@@ -100,32 +103,41 @@ def main(argv=None) -> int:
             rec = ir["functions"][key]
             cs = int(key.split(":")[0], 16)
             excl_ips = {ip for (xcs, ip) in excluded if xcs == cs}
+            contracts = contracts_by_cs.setdefault(cs, {})
             try:
                 if not rec.get("liftable", True):
                     raise emit_cpuless.Refusal("ir-not-liftable")
                 scan = scan_from_ir_record(rec)
-                abi, exit_flags, needs_plat = emit_cpuless.check_promotable(
-                    scan, excluded_addrs=excl_ips, callees=contracts)
+                abi, exit_flags, needs_plat, ret_kind = \
+                    emit_cpuless.check_promotable(
+                        scan, excluded_addrs=excl_ips, callees=contracts,
+                        far_callees=far_contracts)
                 recovered_src = emit_cpuless.emit_recovered(
                     scan, abi, key, callees=contracts,
+                    far_callees=far_contracts,
                     recovered_import_base=args.import_base, needs_plat=needs_plat)
                 adapter_src = emit_cpuless.emit_adapter(
                     scan, abi, key,
                     signature=bytes.fromhex(rec["signature"]),
-                    recovered_import_base=args.import_base, needs_plat=needs_plat)
+                    recovered_import_base=args.import_base,
+                    needs_plat=needs_plat, ret_kind=ret_kind)
             except emit_cpuless.Refusal as e:
                 refused.setdefault(str(e), []).append(key)
                 continue
             promoted.append(key)
             done.add(key)
             outputs[key] = (recovered_src, adapter_src)
-            contracts[scan.entry] = emit_cpuless.CalleeContract(
+            contract = emit_cpuless.CalleeContract(
                 name=f"func_{key.replace(':', '_').lower()}",
                 inputs=tuple(emit_cpuless._contract_inputs(scan, abi)),
                 outputs=tuple(sorted((abi.outputs - {"sp"})
                                      & (frozenset(emit_cpuless.W16)
                                         | frozenset({"ds", "es"})))),
-                exit_flags=exit_flags, needs_plat=needs_plat)
+                exit_flags=exit_flags, needs_plat=needs_plat,
+                ret_kind=ret_kind)
+            contracts[scan.entry] = contract
+            if ret_kind == "far":
+                far_contracts[(cs, scan.entry)] = contract
             progress = True
             if args.limit and len(promoted) >= args.limit:
                 progress = False

@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .decode import CALL, INT, JCC, JMP, RET, SEQ
+from .decode import CALL, CALL_FAR, INT, JCC, JMP, RET, RETF, SEQ
 from .cpuless import abi_scan, register_effects, W16, SEGS
 
 # x86 FLAGS bits (mirrors dos_re.cpu constants; literal here because the
@@ -587,25 +587,37 @@ class CalleeContract:
     outputs: tuple                  # register outputs in the result dict
     exit_flags: frozenset           # flags DEFINITELY defined on every exit
     needs_plat: bool = False        # the callee takes the platform interface
+    ret_kind: str = "near"          # "near" (ret) | "far" (retf) exit ABI
 
 
-def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None):
-    """The strict promotion gate.  Returns (abi, exit_flags) or raises
-    :class:`Refusal` with the census reason.
+def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
+                     far_callees=None):
+    """The strict promotion gate.  Returns (abi, exit_flags, needs_plat,
+    ret_kind) or raises :class:`Refusal` with the census reason.
 
     ``callees`` (call-ABI composition, tier 4): maps a direct near-call
-    target ip to its :class:`CalleeContract`.  A CALL whose target is present
-    composes; any other call still refuses."""
+    target ip to its :class:`CalleeContract`.  ``far_callees`` (tier 9) is
+    the same map for direct FAR calls, keyed by the static (seg, off)
+    target.  A CALL/CALL FAR whose target is present composes; any other
+    call still refuses."""
     callees = callees or {}
+    far_callees = far_callees or {}
     callee_effects = {ip: (frozenset(c.inputs) - frozenset({"sp", "ss"}),
                            frozenset(c.outputs))
                       for ip, c in callees.items()}
-    abi = abi_scan(scan, callee_effects=callee_effects)
+    far_effects = {tgt: (frozenset(c.inputs) - frozenset({"sp", "ss"}),
+                         frozenset(c.outputs))
+                   for tgt, c in far_callees.items()}
+    abi = abi_scan(scan, callee_effects=callee_effects,
+                   far_callee_effects=far_effects)
     for cap in abi.refusals:
         if cap == "call-abi-composition":
-            missing = sorted({i.target for i in scan.insts.values()
-                              if i.kind == CALL and (i.target is None or
-                                                     i.target not in callees)})
+            missing = [i.ip for i in scan.insts.values()
+                       if (i.kind == CALL and (i.target is None or
+                                               i.target not in callees))
+                       or (i.kind == CALL_FAR and
+                           (i.far_target is None or
+                            i.far_target not in far_callees))]
             if not missing:
                 continue            # every call target composes
             raise Refusal("contains-call")
@@ -613,13 +625,28 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None):
                        "indirect-or-far-transfer": "indirect-control-flow",
                        "port-io-platform-effect": "port-io",
                        }.get(cap, cap))
+    # return-kind discipline: one uniform exit ABI per function (the adapter
+    # emits exactly one RET variant); a near call must compose a near callee
+    # and a far call a far callee -- the machine frame sizes differ.
+    ret_kinds = {("far" if i.kind == RETF else "near")
+                 for i in scan.insts.values() if i.kind in (RET, RETF)}
+    if len(ret_kinds) > 1:
+        raise Refusal("mixed-return-kinds")
+    ret_kind = next(iter(ret_kinds), "near")
+    for i in scan.insts.values():
+        if i.kind == CALL and i.target in callees \
+                and callees[i.target].ret_kind != "near":
+            raise Refusal("ret-kind-mismatch (near call to far callee)")
+        if i.kind == CALL_FAR and i.far_target in far_callees \
+                and far_callees[i.far_target].ret_kind != "far":
+            raise Refusal("ret-kind-mismatch (far call to near callee)")
     for i in scan.insts.values():
         e = register_effects(i)
-        if i.kind == RET:
+        if i.kind in (RET, RETF):
             if i.imm or 0:
                 raise Refusal("ret-n-stack-args (needs stack-arg ABI)")
             continue                       # the RET ABI is the adapter's job
-        if i.kind in ("retf", "iret"):
+        if i.kind == "iret":
             raise Refusal("far-or-interrupt-return (needs adapter variant)")
         if i.op in (0x9C, 0x9D):
             raise Refusal("flags-as-stack-data (pushf/popf)")
@@ -635,14 +662,14 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None):
     # flag live-in at entry: a jcc may not read a flag no in-function
     # instruction (or composed callee) has definitely written on every path
     # -- refuse (the contract would need caller flags).
-    exit_flags = _check_flag_liveins(scan, callees)
-    needs_plat = _func_needs_plat(scan, callees)
-    return abi, exit_flags, needs_plat
+    exit_flags = _check_flag_liveins(scan, callees, far_callees)
+    needs_plat = _func_needs_plat(scan, callees, far_callees)
+    return abi, exit_flags, needs_plat, ret_kind
 
 
-def _func_needs_plat(scan, callees) -> bool:
-    """A function needs the platform interface if it does port I/O (later:
-    interrupts) directly, or composes a call to a callee that needs it."""
+def _func_needs_plat(scan, callees, far_callees=None) -> bool:
+    """A function needs the platform interface if it does port I/O or
+    interrupts directly, or composes a call to a callee that needs it."""
     from .cpuless import register_effects
     for i in scan.insts.values():
         e = register_effects(i)
@@ -650,6 +677,9 @@ def _func_needs_plat(scan, callees) -> bool:
             return True
         if (i.kind == CALL and i.target in (callees or {})
                 and callees[i.target].needs_plat):
+            return True
+        if (i.kind == CALL_FAR and i.far_target in (far_callees or {})
+                and far_callees[i.far_target].needs_plat):
             return True
     return False
 
@@ -664,8 +694,8 @@ def _is_stack_family(i) -> bool:
                                                     # earlier via ss-mutation)
             or op in (0x68, 0x6A)
             or (op == 0xFF and i.reg == 6) or (op == 0x8F and i.reg == 0)
-            or i.kind == CALL             # composed call: ret-addr push/pop
-            or i.kind == RET)
+            or i.kind in (CALL, CALL_FAR)  # composed call: ret-addr push/pop
+            or i.kind in (RET, RETF))
 
 
 def _check_stack_depths(scan) -> None:
@@ -682,7 +712,7 @@ def _check_stack_depths(scan) -> None:
         i = scan.insts[ip]
         e = register_effects(i)
         d = depth[ip]
-        if i.kind == RET:
+        if i.kind in (RET, RETF):
             if d != 0:
                 raise Refusal("unbalanced-stack-at-ret")
             continue
@@ -690,7 +720,7 @@ def _check_stack_depths(scan) -> None:
         if after < 0:
             raise Refusal("stack-underflow (reads caller frame)")
         succs = []
-        if i.kind in (SEQ, CALL):
+        if i.kind in (SEQ, CALL, CALL_FAR):
             succs = [i.next_ip]
         elif i.kind == JCC:
             succs = [i.next_ip, i.target]
@@ -707,7 +737,7 @@ def _check_stack_depths(scan) -> None:
                 work.append(s)
 
 
-def _check_flag_liveins(scan, callees=None) -> frozenset:
+def _check_flag_liveins(scan, callees=None, far_callees=None) -> frozenset:
     """Must-defined flag analysis over the CFG (meet = intersection).
 
     Refuses when a jcc reads a flag not DEFINITELY defined on every path from
@@ -717,6 +747,7 @@ def _check_flag_liveins(scan, callees=None) -> frozenset:
     must-defined set at THIS function's exits (its own contribution to a
     caller's contract)."""
     callees = callees or {}
+    far_callees = far_callees or {}
     defined: dict[int, frozenset] = {scan.entry: frozenset()}
     exit_sets: dict[int, frozenset] = {}
     order = sorted(scan.insts)
@@ -741,10 +772,13 @@ def _check_flag_liveins(scan, callees=None) -> frozenset:
             if (i.kind == CALL and i.target is not None
                     and i.target in callees):
                 new = defined[ip] | callees[i.target].exit_flags
-            if i.kind == RET:
+            if (i.kind == CALL_FAR and i.far_target is not None
+                    and i.far_target in far_callees):
+                new = defined[ip] | far_callees[i.far_target].exit_flags
+            if i.kind in (RET, RETF):
                 exit_sets[ip] = defined[ip]
             succs = []
-            if i.kind in (SEQ, CALL):
+            if i.kind in (SEQ, CALL, CALL_FAR):
                 succs = [i.next_ip]
             elif i.kind == JCC:
                 succs = [i.next_ip, i.target]
@@ -816,7 +850,8 @@ def _contract_inputs(scan, abi) -> list[str]:
     literally: pushed bytes and return-address bytes are observable state);
     balance keeps it out of the outputs.  Otherwise the RET-ABI sp read stays
     the adapter's business."""
-    needs_sp = any((_is_stack_family(i) and i.kind != RET) or i.kind == CALL
+    needs_sp = any((_is_stack_family(i) and i.kind not in (RET, RETF))
+                   or i.kind in (CALL, CALL_FAR)
                    for i in scan.insts.values())
     inputs = sorted(abi.inputs - {"sp"})
     if needs_sp:
@@ -824,7 +859,7 @@ def _contract_inputs(scan, abi) -> list[str]:
     return inputs
 
 
-def emit_recovered(scan, abi, key: str, *, callees=None,
+def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                    recovered_import_base: str = "", needs_plat=False) -> str:
     """Generate the recovered module source for one promotable function.
 
@@ -832,8 +867,11 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
     recovered body calls the recovered callee DIRECTLY (composition at the
     recovered level); the machine call's return-address bytes are written
     literally (observable stack residue), the callee's exit flags merge
-    through the compat mask, and its virtual-time cost accumulates."""
+    through the compat mask, and its virtual-time cost accumulates.
+    ``far_callees`` (tier 9): the same per static far-call (seg, off) target;
+    the 4-byte far frame (static CS + return offset) is written literally."""
     callees = callees or {}
+    far_callees = far_callees or {}
     cs = int(key.split(":")[0], 16)
     name = f"func_{key.replace(':', '_').lower()}"
     leaders = scan.block_leaders()
@@ -851,13 +889,15 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
     A("(exit-flag reproduction + virtual-time cost) consumed ONLY by the")
     A("generated CPU-ABI adapter -- it is not part of the recovered API.")
     A('"""')
-    used = sorted({i.target for i in scan.insts.values()
-                   if i.kind == CALL and i.target in callees})
-    if used:
+    used_names = sorted(
+        {callees[i.target].name for i in scan.insts.values()
+         if i.kind == CALL and i.target in callees}
+        | {far_callees[i.far_target].name for i in scan.insts.values()
+           if i.kind == CALL_FAR and i.far_target in far_callees})
+    if used_names:
         A("")
-        for tgt in used:
-            c = callees[tgt]
-            A(f"from {recovered_import_base}.{c.name} import {c.name}")
+        for cname in used_names:
+            A(f"from {recovered_import_base}.{cname} import {cname}")
     A("")
     A("_PARITY = tuple((1 - bin(v).count('1') % 2) == 1 for v in range(256))")
     A("")
@@ -883,7 +923,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
         while ip in scan.insts:
             i = scan.insts[ip]
             count += 1
-            if i.kind == RET:
+            if i.kind in (RET, RETF):
                 blk.append(f"_cost += {count}")
                 if flag_written:
                     bits = " | ".join(f"0x{_FLAG_BITS[f]:X}" for f in sorted(flag_written))
@@ -921,9 +961,14 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
                 blk.append("continue")
                 terminated = True
                 break
-            if i.kind == CALL:
-                c = callees[i.target]
+            if i.kind in (CALL, CALL_FAR):
+                far = i.kind == CALL_FAR
+                c = far_callees[i.far_target] if far else callees[i.target]
                 # the machine call: return-address bytes are observable
+                if far:
+                    # far frame: static CS, then the return offset
+                    blk.append("sp = (sp - 2) & 0xFFFF")
+                    blk.append(f"mem.ww(ss, sp, 0x{cs:04X})")
                 blk.append("sp = (sp - 2) & 0xFFFF")
                 blk.append(f"mem.ww(ss, sp, 0x{i.next_ip:04X})")
                 kw = ", ".join(f"{r}={r}" for r in c.inputs)
@@ -945,7 +990,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
                                f"{fname} = (_gf & 0x{fbit:X}) != 0")
                 blk.append("    _fmask |= _gm")
                 blk.append("_cost += _c['cost']")
-                blk.append("sp = (sp + 2) & 0xFFFF")
+                blk.append(f"sp = (sp + {4 if far else 2}) & 0xFFFF")
                 ip = i.next_ip
                 if ip in bb_of:
                     blk.append(f"_cost += {count}")
@@ -1055,7 +1100,8 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
 
 
 def emit_adapter(scan, abi, key: str, *, signature: bytes,
-                 recovered_import_base: str, needs_plat=False) -> str:
+                 recovered_import_base: str, needs_plat=False,
+                 ret_kind: str = "near") -> str:
     """Generate the CPU-ABI adapter that occupies the lifted slot."""
     cs = int(key.split(":")[0], 16)
     entry = scan.entry
@@ -1100,7 +1146,11 @@ def emit_adapter(scan, abi, key: str, *, signature: bytes,
     A("    # exit flags: touched bits from the compat channel, rest preserved")
     A("    s.flags = (s.flags & ~_compat['fmask']) | _compat['flags'] | 0x0002")
     A("    # historical RET ABI + exact virtual time (owns_time contract)")
-    A("    s.ip = cpu.pop()")
+    if ret_kind == "far":
+        A("    s.ip = cpu.pop()")
+        A("    s.cs = cpu.pop()")
+    else:
+        A("    s.ip = cpu.pop()")
     if needs_plat:
         # plat effects already moved instruction_count to _entry + <mid cost>;
         # settle it at the absolute total (an increment would double-count).

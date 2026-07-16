@@ -311,12 +311,14 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         R.update({"sp", "ss"}); W.add("sp")
         return Effects(frozenset(R), frozenset(W), True, mw,
                        +4 if inst.kind == RETF else +6)
-    if inst.kind == CALL:
-        # Linked near call: callee ABI composes at a higher level; the call
-        # itself pushes/pops the return address symmetrically.
+    if inst.kind in (CALL, CALL_FAR):
+        # Linked near/far call to a STATIC target: callee ABI composes at a
+        # higher level; the call itself pushes/pops the return address
+        # symmetrically (2 bytes near, 4 bytes far -- CS is a static constant
+        # per function, so the far push is fully modelled at the caller).
         return Effects(frozenset({"sp", "ss"}), frozenset({"sp"}), True, True, 0,
                        refusal="call-abi-composition")
-    if inst.kind in (CALL_FAR, CALL_IND, JMP_IND):
+    if inst.kind in (CALL_IND, JMP_IND):
         return Effects(refusal="indirect-or-far-transfer")
     if inst.kind == INT:
         n = inst.int_no
@@ -394,7 +396,7 @@ def _successors(scan) -> dict[int, list[int]]:
     return succ
 
 
-def abi_scan(scan, callee_effects=None) -> AbiReport:
+def abi_scan(scan, callee_effects=None, far_callee_effects=None) -> AbiReport:
     """Infer the CPU ABI of one scanned function from its instruction list.
 
     Register INPUTS = live-in at entry by backward may-liveness over the
@@ -407,13 +409,24 @@ def abi_scan(scan, callee_effects=None) -> AbiReport:
     ip to ``(reads, writes)`` -- the callee's composed register contract.  A
     CALL whose target is present stops being a refusal and contributes the
     callee's reads/writes (plus the machine call's own sp/ss traffic) to the
-    dataflow, so the caller's inferred contract is interprocedurally exact."""
+    dataflow, so the caller's inferred contract is interprocedurally exact.
+    ``far_callee_effects`` is the same map for direct FAR calls, keyed by the
+    static (seg, off) target."""
     effs = {i.ip: register_effects(i) for i in scan.insts.values()}
     if callee_effects:
         for i in scan.insts.values():
             if (i.kind == CALL and i.target is not None
                     and i.target in callee_effects):
                 creads, cwrites = callee_effects[i.target]
+                effs[i.ip] = Effects(
+                    reads=frozenset(creads) | frozenset({"sp", "ss"}),
+                    writes=frozenset(cwrites) | frozenset({"sp"}),
+                    mem_read=True, mem_write=True, stack_delta=0)
+    if far_callee_effects:
+        for i in scan.insts.values():
+            if (i.kind == CALL_FAR and i.far_target is not None
+                    and i.far_target in far_callee_effects):
+                creads, cwrites = far_callee_effects[i.far_target]
                 effs[i.ip] = Effects(
                     reads=frozenset(creads) | frozenset({"sp", "ss"}),
                     writes=frozenset(cwrites) | frozenset({"sp"}),
