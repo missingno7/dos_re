@@ -33,8 +33,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .decode import (CALL, CALL_FAR, CALL_IND, INT, JCC, JMP, JMP_IND, RET,
-                     RETF, SEQ)
+from .decode import (CALL, CALL_FAR, CALL_IND, INT, IRET, JCC, JMP, JMP_IND,
+                     RET, RETF, SEQ)
 from .cpuless import abi_scan, register_effects, W16, SEGS
 
 # x86 FLAGS bits (mirrors dos_re.cpu constants; literal here because the
@@ -694,6 +694,8 @@ class CalleeContract:
     sp_deltas: tuple = (0,)         # ALL possible exit-depth effects -- the
                                     # caller's depth-set tracker forks on
                                     # each (runtime sp flows via outputs)
+    flags_livein: bool = False      # takes the caller's full FLAGS word
+                                    # (_flags_in compat input, tier 12)
 
 
 @dataclass
@@ -708,6 +710,7 @@ class PromotionSpec:
     ret_pop: int = 0
     sp_output: bool = False
     sp_deltas: tuple = (0,)
+    flags_livein: bool = False
 
 
 def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
@@ -763,9 +766,12 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
                        }.get(cap, cap))
     # return-kind discipline: one uniform exit ABI per function (the adapter
     # emits exactly one RET variant); a near call must compose a near callee
-    # and a far call a far callee -- the machine frame sizes differ.
-    ret_kinds = {("far" if i.kind == RETF else "near")
-                 for i in scan.insts.values() if i.kind in (RET, RETF)}
+    # and a far call a far callee -- the machine frame sizes differ.  An
+    # IRET exit (tier 12) makes the function an interrupt handler: invoked
+    # only through the vector-dispatch path, never near/far-composed.
+    _KIND = {RET: "near", RETF: "far", IRET: "iret"}
+    ret_kinds = {_KIND[i.kind] for i in scan.insts.values()
+                 if i.kind in (RET, RETF, IRET)}
     if len(ret_kinds) > 1:
         raise Refusal("mixed-return-kinds")
     ret_kind = next(iter(ret_kinds), "near")
@@ -778,11 +784,10 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
             raise Refusal("ret-kind-mismatch (far call to near callee)")
     for i in scan.insts.values():
         e = register_effects(i)
-        if i.kind in (RET, RETF):
-            continue    # the RET ABI (incl. a uniform ret N) is the
-                        # adapter's job; the depth checker gates the rest
-        if i.kind == "iret":
-            raise Refusal("far-or-interrupt-return (needs adapter variant)")
+        if i.kind in (RET, RETF, IRET):
+            continue    # the RET ABI (incl. a uniform ret N / the iret
+                        # frame) is the adapter's job; the depth checker
+                        # gates the rest
         if i.op in (0x9C, 0x9D):
             raise Refusal("flags-as-stack-data (pushf/popf)")
         if e.stack_delta is None:
@@ -807,11 +812,21 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     exit_flags, df_livein = _check_flag_liveins(scan, callees, far_callees,
                                                 alt_entries)
     needs_plat = _func_needs_plat(scan, callees, far_callees)
+    # the full FLAGS word becomes a hidden compat input when a game-INT
+    # frame is pushed here (its untracked bits ride the caller word) or a
+    # composed callee needs it -- transitive, like _df (tier 12).
+    flags_livein = any(_is_game_int(i) for i in scan.insts.values()) \
+        or any(i.kind == CALL and i.target in callees
+               and callees[i.target].flags_livein
+               for i in scan.insts.values()) \
+        or any(i.kind == CALL_FAR and i.far_target in far_callees
+               and far_callees[i.far_target].flags_livein
+               for i in scan.insts.values())
     return PromotionSpec(abi=abi, exit_flags=exit_flags,
                          needs_plat=needs_plat, ret_kind=ret_kind,
                          df_livein=df_livein, sp_delta=sp_delta,
                          ret_pop=ret_pop, sp_output=sp_output,
-                         sp_deltas=sp_deltas)
+                         sp_deltas=sp_deltas, flags_livein=flags_livein)
 
 
 def _func_needs_plat(scan, callees, far_callees=None) -> bool:
@@ -822,8 +837,8 @@ def _func_needs_plat(scan, callees, far_callees=None) -> bool:
         e = register_effects(i)
         if e.port_io or e.int_effect is not None:
             return True
-        if _is_dyn(i):
-            return True     # a dynamic callee may need the platform
+        if _is_dyn(i) or _is_game_int(i):
+            return True     # a dynamic/vectored callee may need the platform
         if (i.kind == CALL and i.target in (callees or {})
                 and callees[i.target].needs_plat):
             return True
@@ -845,7 +860,8 @@ def _is_stack_family(i) -> bool:
             or (op == 0xFF and i.reg == 6) or (op == 0x8F and i.reg == 0)
             or i.kind in (CALL, CALL_FAR)  # composed call: ret-addr push/pop
             or _is_dyn(i)                  # recovered dispatch: balanced
-            or i.kind in (RET, RETF))
+            or _is_game_int(i)             # vector dispatch: frame symmetric
+            or i.kind in (RET, RETF, IRET))
 
 
 def _is_dyn(i) -> bool:
@@ -853,6 +869,13 @@ def _is_dyn(i) -> bool:
     dispatch (tier 9).  Far variants stay refusals (isr-chain tier)."""
     return i.kind in (CALL_IND, JMP_IND) and i.modrm is not None \
         and ((i.modrm >> 3) & 7) in (2, 4)
+
+
+def _is_game_int(i) -> bool:
+    """A game-vectored INT (tier 12): dispatched through the runtime IVT to
+    a recovered IRET-contract handler -- a call into game code, never a
+    platform effect."""
+    return i.kind == INT and i.int_no in (0x60, 0x61)
 
 
 def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
@@ -902,6 +925,14 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
         ip, d = work.pop()
         i = scan.insts[ip]
         e = register_effects(i)
+        if i.kind == IRET:
+            # the handler must leave the interrupt frame intact (the
+            # composed INT site reads the stacked flags word back)
+            if d != 0:
+                raise Refusal("unbalanced-iret")
+            exit_depths.add(0)
+            ret_pops.add(0)
+            continue
         if i.kind in (RET, RETF):
             if i.kind == RETF and (i.imm or 0):
                 raise Refusal("ret-n-stack-args (retf N needs far variant)")
@@ -1034,7 +1065,7 @@ def _flag_pass(scan, callees, far_callees, alt_entries, *, seed_df):
             if (i.kind == CALL_FAR and i.far_target is not None
                     and i.far_target in far_callees):
                 new = defined[ip] | far_callees[i.far_target].exit_flags
-            if i.kind in (RET, RETF):
+            if i.kind in (RET, RETF, IRET):
                 exit_sets[ip] = defined[ip]
             if i.kind == JMP_IND:
                 # dynamic tail: the exit flags are the runtime callee's --
@@ -1131,7 +1162,7 @@ def _contract_inputs(scan, abi) -> list[str]:
 def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                    recovered_import_base: str = "", needs_plat=False,
                    dispatch_addrs=frozenset(), df_livein=False,
-                   sp_output=False) -> str:
+                   sp_output=False, flags_livein=False) -> str:
     """Generate the recovered module source for one promotable function.
 
     ``callees`` (tier 4): CalleeContract per direct near-call target -- the
@@ -1176,9 +1207,13 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
         A("")
         for cname in used_names:
             A(f"from {recovered_import_base}.{cname} import {cname}")
+    has_ivec = any(_is_game_int(i) for i in scan.insts.values())
     if has_dyn:
         A("")
         A(f"from {recovered_import_base}._dyncall import dyn_exec as _dyn")
+    if has_ivec:
+        A("")
+        A(f"from {recovered_import_base}._dyncall import ivec_exec as _ivec")
     A("")
     A("_PARITY = tuple((1 - bin(v).count('1') % 2) == 1 for v in range(256))")
     if alt_entries:
@@ -1198,6 +1233,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
     argl = (["_base=0"] if needs_plat else []) \
         + (["_entry_ip=None"] if alt_entries else []) \
         + (["_df=0"] if df_livein else []) \
+        + (["_flags_in=2"] if flags_livein else []) \
         + [f"{r}=0" for r in inputs]
     args = ", ".join(argl)
     _p = "mem, plat" if needs_plat else "mem"
@@ -1224,7 +1260,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
         while ip in scan.insts:
             i = scan.insts[ip]
             count += 1
-            if i.kind in (RET, RETF):
+            if i.kind in (RET, RETF, IRET):
                 blk.append(f"_cost += {count}")
                 if flag_written:
                     bits = " | ".join(f"0x{_FLAG_BITS[f]:X}" for f in sorted(flag_written))
@@ -1338,6 +1374,14 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 blk.append(f"mem.ww(ss, sp, 0x{i.next_ip:04X})")
                 kw = ", ".join(f"{r}={r}" for r in c.inputs)
                 _pass = "mem, plat" if c.needs_plat else "mem"
+                if c.flags_livein:
+                    # the callee needs the caller's FULL flags word: runtime
+                    # bits we defined, entry word for the rest
+                    fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
+                                    for f in ("cf", "pf", "af", "zf", "sf",
+                                              "of", "df", "intf"))
+                    kw = (f"_flags_in=((_flags_in & ~_fmask) | (({fw}) & _fmask))"
+                          + (", " + kw if kw else ""))
                 if c.df_livein:
                     kw = ("_df=(1 if df else 0)" + (", " + kw if kw else ""))
                 if c.needs_plat:
@@ -1372,6 +1416,52 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                     blk.append("continue")
                     terminated = True
                     break
+                continue
+            if _is_game_int(i):
+                # tier 12: a GAME-VECTORED interrupt is a call into game
+                # code.  Push the literal interrupt frame (full flags word
+                # composed from runtime-defined bits + the caller word),
+                # read the runtime IVT vector, dispatch to the recovered
+                # IRET-contract handler, then pop the frame -- flags reload
+                # from the (possibly handler-modified) stacked word.
+                off = count - 1
+                cost = "_base + _cost" if off == 0 else f"_base + _cost + {off}"
+                fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
+                                for f in ("cf", "pf", "af", "zf", "sf", "of",
+                                          "df", "intf"))
+                blk.append(f"_fw = (_flags_in & ~_fmask) | (({fw}) & _fmask)")
+                blk.append("sp = (sp - 2) & 0xFFFF")
+                blk.append("mem.ww(ss, sp, _fw)")
+                blk.append("sp = (sp - 2) & 0xFFFF")
+                blk.append(f"mem.ww(ss, sp, 0x{cs:04X})")
+                blk.append("sp = (sp - 2) & 0xFFFF")
+                blk.append(f"mem.ww(ss, sp, 0x{i.next_ip:04X})")
+                blk.append(f"_vo = mem.rw(0, 0x{i.int_no * 4:X})")
+                blk.append(f"_vs = mem.rw(0, 0x{i.int_no * 4 + 2:X})")
+                bundle = ", ".join(f"'{r}': {r}" for r in _DYN_REGS) \
+                    + ", 'cs': _vs, '_df': (1 if df else 0), '_flags_in': _fw"
+                blk.append(f"_do, _dc = _ivec(\"%04X:%04X\" % (_vs, _vo), "
+                           f"mem, plat, {cost}, {{{bundle}}})")
+                for r in _DYN_REGS:
+                    blk.append(f"{r} = _do['{r}']")
+                blk.append("_cost += _dc['cost']")
+                # iret: flags come from the stacked word (handler may have
+                # edited it in place); ip/cs slots are ours by construction.
+                blk.append("_rw = mem.rw(ss, (sp + 4) & 0xFFFF)")
+                blk.append("sp = (sp + 6) & 0xFFFF")
+                for fname, fbit in (("cf", 0x01), ("pf", 0x04), ("af", 0x10),
+                                    ("zf", 0x40), ("sf", 0x80), ("of", 0x800),
+                                    ("intf", 0x200), ("df", 0x400)):
+                    blk.append(f"{fname} = (_rw & 0x{fbit:X}) != 0")
+                blk.append("_fmask |= 0xED5")
+                nxt = i.next_ip
+                if nxt in bb_of and nxt != ip:
+                    blk.append(f"_cost += {count}")
+                    blk.append(f"bb = {bb_of[nxt]}")
+                    blk.append("continue")
+                    terminated = True
+                    break
+                ip = nxt
                 continue
             if i.kind == INT:
                 off = count - 1
@@ -1486,7 +1576,7 @@ fallback path: not to a CPU, not to a lifted graph, not to an interpreter.
 DO NOT hand-edit; regenerate."""
 import importlib
 
-from .dispatch import DISPATCH
+from .dispatch import DISPATCH, HANDLERS
 
 
 class UnknownDispatchTarget(RuntimeError):
@@ -1506,24 +1596,24 @@ class UnknownDispatchTarget(RuntimeError):
 _cache = {}
 
 
-def dyn_exec(key, mem, plat, base, regs):
-    """Dispatch one dynamic transfer: full register bundle in, merged bundle
-    out (unwritten registers pass through), plus the callee compat channel."""
-    ent = DISPATCH.get(key)
+def _exec(table, kind, key, mem, plat, base, regs):
+    ent = table.get(key)
     if ent is None:
-        raise UnknownDispatchTarget(key, regs, base)
-    fn = _cache.get(key)
+        raise UnknownDispatchTarget(kind + " " + key, regs, base)
+    fn = _cache.get((kind, key))
     if fn is None:
-        modname, fname, entry_ip, inputs, needs_plat, df_livein = ent
+        modname, fname, entry_ip, inputs, needs_plat, df_livein, fl_livein = ent
         f = getattr(importlib.import_module(modname), fname)
 
         def fn(mem, plat, base, regs, _f=f, _e=entry_ip, _ins=inputs,
-               _np=needs_plat, _dfl=df_livein):
+               _np=needs_plat, _dfl=df_livein, _fl=fl_livein):
             kw = {r: regs[r] for r in _ins}
             if _e is not None:
                 kw["_entry_ip"] = _e
             if _dfl:
                 kw["_df"] = regs.get("_df", 0)
+            if _fl:
+                kw["_flags_in"] = regs.get("_flags_in", 2)
             if _np:
                 out, c = _f(mem, plat, _base=base, **kw)
             else:
@@ -1532,35 +1622,62 @@ def dyn_exec(key, mem, plat, base, regs):
             merged.update(out)
             return merged, c
 
-        _cache[key] = fn
+        _cache[(kind, key)] = fn
     return fn(mem, plat, base, regs)
+
+
+def dyn_exec(key, mem, plat, base, regs):
+    """Dispatch one dynamic near transfer: full register bundle in, merged
+    bundle out (unwritten registers pass through), plus the compat channel."""
+    return _exec(DISPATCH, "dyn", key, mem, plat, base, regs)
+
+
+def ivec_exec(key, mem, plat, base, regs):
+    """Dispatch one game-vectored interrupt (tier 12) to its recovered
+    IRET-contract handler.  The CALLER owns the interrupt frame (already
+    pushed; popped after); the handler is an ordinary recovered function
+    whose iret exits are plain returns."""
+    return _exec(HANDLERS, "ivec", key, mem, plat, base, regs)
 '''
 
 
-def emit_dispatch_table(entries: dict) -> str:
+def emit_dispatch_table(entries: dict, handlers: dict | None = None) -> str:
     """Generate the dispatch registry module source.  ``entries`` maps a
     "CS:IP" selector to (module_name, func_name, entry_ip_or_None,
-    input_names, needs_plat, df_livein)."""
+    input_names, needs_plat, df_livein, flags_livein); ``handlers`` is the
+    same map for game-vectored interrupt handlers (IRET contract, keyed by
+    the runtime vector value)."""
+    def block(name, table):
+        out = [f"{name} = {{"]
+        for key in sorted(table or {}):
+            mod, fn, eip, inputs, np, dfl, fl = table[key]
+            eip_s = "None" if eip is None else f"0x{eip:04X}"
+            ins = "(" + ", ".join(f"{r!r}" for r in inputs) \
+                + ("," if len(inputs) == 1 else "") + ")"
+            out.append(f"    {key!r}: ({mod!r}, {fn!r}, {eip_s}, {ins}, "
+                       f"{np}, {dfl}, {fl}),")
+        out.append("}")
+        return out
+
     L = ['"""AUTOGENERATED by dos_re.lift.emit_cpuless -- the recovered',
-         "dynamic-dispatch registry (tier 9): runtime CS:IP selector ->",
+         "dynamic-dispatch registry (tiers 9/12): runtime CS:IP selector ->",
          "(module, function, alternate-entry ip, contract inputs, needs_plat,",
-         "df_livein).  Regenerated by the promote driver every fixpoint round;",
-         'only near-return recovered functions are dispatchable.  DO NOT hand-edit."""',
-         "",
-         "DISPATCH = {"]
-    for key in sorted(entries):
-        mod, fn, eip, inputs, np, dfl = entries[key]
-        eip_s = "None" if eip is None else f"0x{eip:04X}"
-        ins = "(" + ", ".join(f"{r!r}" for r in inputs) + ("," if len(inputs) == 1 else "") + ")"
-        L.append(f"    {key!r}: ({mod!r}, {fn!r}, {eip_s}, {ins}, {np}, {dfl}),")
-    L.append("}")
+         "df_livein, flags_livein).  DISPATCH serves near indirect transfers",
+         "(balanced near-return functions only); HANDLERS serves game-vectored",
+         "interrupts (IRET-contract functions, keyed by the runtime vector).",
+         'Regenerated by the promote driver every apply.  DO NOT hand-edit."""',
+         ""]
+    L += block("DISPATCH", entries)
+    L.append("")
+    L += block("HANDLERS", handlers)
     return "\n".join(L) + "\n"
 
 
 def emit_adapter(scan, abi, key: str, *, signature: bytes,
                  recovered_import_base: str, needs_plat=False,
                  ret_kind: str = "near", dispatch_addrs=frozenset(),
-                 df_livein=False, sp_output=False, ret_pop=0) -> str:
+                 df_livein=False, sp_output=False, ret_pop=0,
+                 flags_livein=False) -> str:
     """Generate the CPU-ABI adapter that occupies the lifted slot."""
     cs = int(key.split(":")[0], 16)
     entry = scan.entry
@@ -1611,6 +1728,8 @@ def emit_adapter(scan, abi, key: str, *, signature: bytes,
         A("    _entry = cpu.instruction_count")
         A("    _plat = make_cpu_platform(cpu)")
     kw = ", ".join(f"{r}=s.{r}" for r in inputs)
+    if flags_livein:
+        kw = ("_flags_in=s.flags" + (", " + kw if kw else ""))
     if df_livein:
         kw = ("_df=(s.flags >> 10) & 1" + (", " + kw if kw else ""))
     if alt_entries:
@@ -1624,7 +1743,11 @@ def emit_adapter(scan, abi, key: str, *, signature: bytes,
     A("    # historical RET ABI + exact virtual time (owns_time contract)")
     A("    # (an unbalanced body already wrote its runtime sp back above,")
     A("    # so the pop reads the return address exactly where it now is)")
-    if ret_kind == "far":
+    if ret_kind == "iret":
+        A("    s.ip = cpu.pop()")
+        A("    s.cs = cpu.pop()")
+        A("    s.flags = cpu.pop() | 0x0002")
+    elif ret_kind == "far":
         A("    s.ip = cpu.pop()")
         A("    s.cs = cpu.pop()")
     else:

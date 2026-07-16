@@ -59,10 +59,18 @@ def test_int_effect_and_vectored_int_and_indirect():
                               raw=b"\xcd\x21", op=0xCD, int_no=0x21))
     assert e.refusal is None and e.int_effect == 0x21
     assert {"ax", "bx", "cx", "dx", "ds", "es"} <= set(e.reads) <= set(e.writes | e.reads)
-    # A game-installed vector (INT 61h sound driver) is a vectored call, refuse.
+    # A game-installed vector (INT 61h sound driver) is a CALL INTO GAME
+    # CODE through the runtime IVT (tier 12): full-bundle effect, the
+    # recovered IRET-contract handler composes -- no refusal.
     ev = register_effects(Inst(ip=0, length=2, kind="int", mnemonic="int",
                                raw=b"\xcd\x61", op=0xCD, int_no=0x61))
-    assert ev.refusal == "vectored-int-call"
+    assert ev.refusal is None
+    assert {"ax", "bx", "ds", "es", "ss"} <= set(ev.reads)
+    assert "ss" not in ev.writes and "ax" in ev.writes
+    # Any OTHER installed vector still refuses honestly.
+    ev2 = register_effects(Inst(ip=0, length=2, kind="int", mnemonic="int",
+                                raw=b"\xcd\x62", op=0xCD, int_no=0x62))
+    assert ev2.refusal == "vectored-int-call"
     # NEAR indirect transfers are runtime-resolved recovered dispatch
     # (tier 9): conservative full-bundle dataflow, no refusal.
     e2 = register_effects(Inst(ip=0, length=2, kind="jmp_ind", mnemonic="jmp",

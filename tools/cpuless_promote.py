@@ -78,8 +78,31 @@ def _gate_dyn_evidence(scan, cs, dyn_evidence, done, dispatch_owner,
                                       or c.sp_delta != 0):
                     # the dyn bundle assumes a stack-balanced callee
                     raise emit_cpuless.Refusal("dyn-target-sp-escape")
+                if c is not None and c.flags_livein:
+                    # the near-dyn bundle carries no full flags word
+                    raise emit_cpuless.Refusal("dyn-target-needs-flags")
                 continue
             raise emit_cpuless.Refusal("dyn-target-unpromoted")
+
+
+def _gate_vector_evidence(scan, cs, vec_evidence, done, contracts_by_cs,
+                          iret_keys) -> None:
+    """Evidence-gated interrupt dispatch (tier 12): a function containing
+    game-vectored INT sites promotes only when every OBSERVED runtime
+    vector of its sites resolves to a promoted (or tentative-this-round)
+    IRET-contract handler.  A site with no observed vectors promotes
+    optimistically -- a live unknown vector raises the witness."""
+    for i in scan.insts.values():
+        if not emit_cpuless._is_game_int(i):
+            continue
+        site = f"{cs:04X}:{i.ip:04X}"
+        for tgt in vec_evidence.get(site, []):
+            if tgt in iret_keys:
+                continue                    # promoted IRET handler
+            if tgt in done:
+                # promoted/tentative but NOT an iret handler -- wrong kind
+                raise emit_cpuless.Refusal("int-handler-not-iret")
+            raise emit_cpuless.Refusal("int-handler-unpromoted")
 
 
 def _read_addr_file(path: Path) -> set[tuple[int, int]]:
@@ -114,6 +137,11 @@ def main(argv=None) -> int:
                          "promotes only when every OBSERVED target of its "
                          "sites is dispatchable (local leader, promoted "
                          "function, or owned dispatch entry)")
+    ap.add_argument("--vector-evidence", default=None,
+                    help="vector_sites.json (game-vectored INT probe "
+                         "evidence): a function with INT 60/61 sites "
+                         "promotes only when every OBSERVED runtime vector "
+                         "resolves to a promoted IRET-contract handler")
     ap.add_argument("--entries", default="",
                     help="comma-separated CS:IP candidates (default: all)")
     ap.add_argument("--limit", type=int, default=0,
@@ -137,6 +165,12 @@ def main(argv=None) -> int:
         for site in doc.get("sites", []):
             dyn_evidence[site["site"].upper()] = \
                 sorted(k.upper() for k in site.get("targets", {}))
+    vec_evidence: dict[str, list[str]] = {}
+    if args.vector_evidence and Path(args.vector_evidence).is_file():
+        doc = json.loads(Path(args.vector_evidence).read_text(encoding="utf-8"))
+        for site in doc.get("sites", []):
+            vec_evidence[site["site"].upper()] = \
+                sorted(k.upper() for k in site.get("vectors", {}))
 
     wanted = ([e.strip().upper() for e in args.entries.split(",") if e.strip()]
               or sorted(ir["functions"]))
@@ -155,6 +189,7 @@ def main(argv=None) -> int:
     # whose recovered blocks serve it (first promoted container wins,
     # deterministically -- containing scans share the original instructions).
     dispatch_owner: dict[str, str] = {}
+    iret_keys: set[str] = set()     # promoted IRET-contract handlers
     done: set[str] = set()
     rounds = 0
     while True:
@@ -203,19 +238,23 @@ def main(argv=None) -> int:
                 abi = spec.abi
                 _gate_dyn_evidence(scan, cs, dyn_evidence, tentative,
                                    dispatch_owner, contracts_by_cs)
+                _gate_vector_evidence(scan, cs, vec_evidence, tentative,
+                                      contracts_by_cs, iret_keys)
                 recovered_src = emit_cpuless.emit_recovered(
                     scan, abi, key, callees=contracts,
                     far_callees=far_contracts,
                     recovered_import_base=args.import_base,
                     needs_plat=spec.needs_plat, dispatch_addrs=disp_ips,
-                    df_livein=spec.df_livein, sp_output=spec.sp_output)
+                    df_livein=spec.df_livein, sp_output=spec.sp_output,
+                    flags_livein=spec.flags_livein)
                 adapter_src = emit_cpuless.emit_adapter(
                     scan, abi, key,
                     signature=bytes.fromhex(rec["signature"]),
                     recovered_import_base=args.import_base,
                     needs_plat=spec.needs_plat, ret_kind=spec.ret_kind,
                     dispatch_addrs=disp_ips, df_livein=spec.df_livein,
-                    sp_output=spec.sp_output, ret_pop=spec.ret_pop)
+                    sp_output=spec.sp_output, ret_pop=spec.ret_pop,
+                    flags_livein=spec.flags_livein)
             except emit_cpuless.Refusal as e:
                 refused.setdefault(str(e), []).append(key)
                 continue
@@ -232,10 +271,13 @@ def main(argv=None) -> int:
                 exit_flags=spec.exit_flags, needs_plat=spec.needs_plat,
                 ret_kind=spec.ret_kind, df_livein=spec.df_livein,
                 sp_delta=spec.sp_delta, ret_pop=spec.ret_pop,
-                sp_output=spec.sp_output, sp_deltas=spec.sp_deltas)
+                sp_output=spec.sp_output, sp_deltas=spec.sp_deltas,
+                flags_livein=spec.flags_livein)
             contracts[scan.entry] = contract
             if spec.ret_kind == "far":
                 far_contracts[(cs, scan.entry)] = contract
+            if spec.ret_kind == "iret":
+                iret_keys.add(key)
             for ip in sorted(disp_ips & set(scan.insts) - {scan.entry}):
                 dispatch_owner.setdefault(f"{cs:04X}:{ip:04X}", key)
             progress = True
@@ -280,23 +322,31 @@ def main(argv=None) -> int:
         # is a selector; owned dispatch entries route to their owner's
         # generated alternate entry.  Regenerated every apply (tier 9).
         registry: dict[str, tuple] = {}
+        handlers: dict[str, tuple] = {}
         for key in promoted:
             kcs, kip = (int(x, 16) for x in key.split(":"))
             c = contracts_by_cs[kcs][kip]
+            if c.ret_kind == "iret" and c.sp_delta == 0 and not c.ret_pop:
+                handlers[key] = (f"{args.import_base}.{c.name}", c.name,
+                                 None, tuple(c.inputs), c.needs_plat,
+                                 c.df_livein, c.flags_livein)
+                continue
             if c.ret_kind != "near" or c.sp_output or c.ret_pop \
-                    or c.sp_delta != 0:
+                    or c.sp_delta != 0 or c.flags_livein:
                 continue    # only balanced near-return functions dispatch
             registry[key] = (f"{args.import_base}.{c.name}", c.name, None,
-                             tuple(c.inputs), c.needs_plat, c.df_livein)
+                             tuple(c.inputs), c.needs_plat, c.df_livein,
+                             c.flags_livein)
         for dkey, owner in dispatch_owner.items():
             ocs, oip = (int(x, 16) for x in owner.split(":"))
             c = contracts_by_cs[ocs][oip]
             registry[dkey] = (f"{args.import_base}.{c.name}", c.name,
                               int(dkey.split(":")[1], 16),
-                              tuple(c.inputs), c.needs_plat, c.df_livein)
+                              tuple(c.inputs), c.needs_plat, c.df_livein,
+                              c.flags_livein)
         (rec_dir / "dispatch.py").write_text(
-            emit_cpuless.emit_dispatch_table(registry), encoding="utf-8",
-            newline="\n")
+            emit_cpuless.emit_dispatch_table(registry, handlers),
+            encoding="utf-8", newline="\n")
         (rec_dir / "_dyncall.py").write_text(
             emit_cpuless.DYNCALL_SUPPORT_SRC, encoding="utf-8", newline="\n")
         print(f"APPLIED: {len(promoted)} recovered function(s) -> {rec_dir}; "

@@ -351,7 +351,17 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
                            mem_read=True, mem_write=True, int_effect=n)
         if n == 0x20:
             return Effects(refusal="program-terminate")
-        return Effects(refusal="vectored-int-call")   # game-installed (60/61)
+        if n in (0x60, 0x61):
+            # a GAME-INSTALLED vector (tier 12): dispatched as a CALL INTO
+            # GAME CODE through the runtime IVT -- the interrupt frame
+            # (flags/cs/ip) is written literally, the recovered handler
+            # (IRET contract) composes, and the frame pop restores flags
+            # from the possibly-handler-modified stacked word.  Conservative
+            # full-bundle dataflow; frame push/pop is symmetric.
+            allr = frozenset(W16) | frozenset({"ds", "es", "ss"})
+            return Effects(reads=allr, writes=allr - frozenset({"ss"}),
+                           mem_read=True, mem_write=True, stack_delta=0)
+        return Effects(refusal="vectored-int-call")   # other installed ints
     if inst.kind == HLT:
         return Effects(refusal="hlt")
     # port I/O -> a platform effect (tier 6): real dataflow + the port_io flag.
