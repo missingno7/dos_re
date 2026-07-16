@@ -389,7 +389,7 @@ def _translate(inst, lines, flag_written):
     # shifts / rotates (mirrors the interpreter's closed-form cpu.shift():
     # count &= 0x1F; count==0 touches NO flags; shl/shr/sar set CF+ZF/SF/PF
     # (AF untouched); rotates set CF only; OF only defined for count==1) ----
-    if op in (0xC0, 0xC1, 0xD0, 0xD1, 0xD2, 0xD3) and inst.reg in (0, 1, 4, 5, 7):
+    if op in (0xC0, 0xC1, 0xD0, 0xD1, 0xD2, 0xD3) and inst.reg in (0, 1, 2, 3, 4, 5, 7):
         grp = inst.reg
         bits = 16 if wide else 8
         mask = (1 << bits) - 1
@@ -428,10 +428,26 @@ def _translate(inst, lines, flag_written):
             s(f"    _r = _n % {bits}")
             s(f"    _t = ((_a << _r) | (_a >> ({bits} - _r))) & 0x{mask:X} if _r else _a")
             s("    cf = (_t & 1) != 0")
-        else:                                             # ror (grp 1)
+        elif grp == 1:                                    # ror
             s(f"    _r = _n % {bits}")
             s(f"    _t = ((_a >> _r) | (_a << ({bits} - _r))) & 0x{mask:X} if _r else _a")
             s(f"    cf = (_t & 0x{msb:X}) != 0")
+        elif grp == 2:                                    # rcl: (bits+1)-wide
+            width = bits + 1
+            s(f"    _c = ((1 if cf else 0) << {bits}) | _a")
+            s(f"    _r = _n % {width}")
+            s("    if _r:")
+            s(f"        _c = ((_c << _r) | (_c >> ({width} - _r))) & 0x{(1 << width) - 1:X}")
+            s(f"    _t = _c & 0x{mask:X}")
+            s(f"    cf = ((_c >> {bits}) & 1) != 0")
+        else:                                             # rcr (grp 3)
+            width = bits + 1
+            s(f"    _c = ((1 if cf else 0) << {bits}) | _a")
+            s(f"    _r = _n % {width}")
+            s("    if _r:")
+            s(f"        _c = ((_c >> _r) | (_c << ({width} - _r))) & 0x{(1 << width) - 1:X}")
+            s(f"    _t = _c & 0x{mask:X}")
+            s(f"    cf = ((_c >> {bits}) & 1) != 0")
         if grp in (4, 5, 7):
             s(f"    zf = _t == 0")
             s(f"    sf = (_t & 0x{msb:X}) != 0")
@@ -448,7 +464,9 @@ def _translate(inst, lines, flag_written):
             s("        of = False")
         elif grp == 0:
             s(f"        of = (((_t >> {bits - 1}) & 1) ^ (_t & 1)) != 0")
-        else:                                             # ror
+        elif grp == 2:                                    # rcl: msb ^ new CF
+            s(f"        of = (((_t >> {bits - 1}) & 1) ^ (1 if cf else 0)) != 0")
+        else:                                             # ror / rcr
             s(f"        of = (((_t >> {bits - 1}) ^ (_t >> {bits - 2})) & 1) != 0")
         s(f"        _fmask |= 0x{FOF:X}")
         for w in _rm_write_lines(inst, wide, "_t"):
@@ -540,6 +558,82 @@ def _translate(inst, lines, flag_written):
         lines.append("_t = mem.rw(ss, sp)")
         lines.append("sp = (sp + 2) & 0xFFFF")
         lines.extend(_rm_write_lines(inst, True, "_t"))
+        return
+    # xchg ---------------------------------------------------------------------
+    if 0x91 <= op <= 0x97:                                # xchg ax, r16
+        r = _reg16(op & 7)
+        lines.append(f"_t = ax; ax = {r}; {r} = _t")
+        return
+    if op in (0x86, 0x87):                                # xchg r, r/m
+        if wide:
+            src = _reg16(inst.reg)
+            lines.append(f"_t = {_rm_read(inst, True)}")
+            lines.extend(_rm_write_lines(inst, True, src))
+            lines.append(f"{src} = _t & 0xFFFF")
+        else:
+            # read both halves BEFORE either write; the half-register writes
+            # then preserve the CURRENT sibling half (aliased xchg al,ah is
+            # exact this way).
+            lines.append(f"_t = {_rm_read(inst, False)}")
+            lines.append(f"_u = {_r8_read(inst.reg)}")
+            lines.extend(_rm_write_lines(inst, False, "_u"))
+            lines.append(_r8_write(inst.reg, "_t"))
+        return
+    # les / lds (load far pointer from memory) ----------------------------------
+    if op in (0xC4, 0xC5) and inst.mod != 3:
+        off, seg = _ea(inst)
+        lines.append(f"_o = {off}")
+        lines.append(f"{_reg16(inst.reg)} = mem.rw({seg}, _o)")
+        lines.append(f"{'es' if op == 0xC4 else 'ds'} = mem.rw({seg}, (_o + 2) & 0xFFFF)")
+        return
+    # xlat -----------------------------------------------------------------------
+    if op == 0xD7:
+        seg = "ds"
+        for p in inst.prefixes:
+            if p in (0x26, 0x2E, 0x36, 0x3E):
+                seg = SEGS[(p >> 3) & 3]
+        lines.append(_r8_write(0, f"mem.rb({seg}, (bx + (ax & 0xFF)) & 0xFFFF)"))
+        return
+    # cmps / scas (compare string ops; repe/repne terminate on ZF; a REP
+    # instruction is ONE instruction of virtual time -- tier-5 cost rule).
+    # Flags ride a runtime _fmask update inside the body: a rep with cx=0
+    # executes zero iterations and touches NOTHING. ---------------------------
+    if op in (0xA6, 0xA7, 0xAE, 0xAF):
+        w = 2 if wide else 1
+        rep = None
+        for pfx in inst.prefixes:
+            if pfx in (0xF2, 0xF3):
+                rep = pfx
+        src_seg = "ds"
+        for pfx in inst.prefixes:
+            if pfx in (0x26, 0x2E, 0x36, 0x3E):
+                src_seg = SEGS[(pfx >> 3) & 3]
+        lines.append(f"_d = -{w} if df else {w}")
+        body: list[str] = []
+        if op in (0xA6, 0xA7):                            # cmps: [si] - es:[di]
+            body.append(f"_a = mem.{'rw' if wide else 'rb'}({src_seg}, si)")
+            body.append(f"_b = mem.{'rw' if wide else 'rb'}(es, di)")
+        else:                                             # scas: acc - es:[di]
+            body.append(f"_a = {'ax' if wide else '(ax & 0xFF)'}")
+            body.append(f"_b = mem.{'rw' if wide else 'rb'}(es, di)")
+        body.append("_t = _a - _b")
+        _flags_arith(body, "sub", wide, "_a", "_b", "_t")
+        body.append(f"_fmask |= 0x{FCF | FPF | FAF | FZF | FSF | FOF:X}")
+        if op in (0xA6, 0xA7):
+            body.append("si = (si + _d) & 0xFFFF")
+        body.append("di = (di + _d) & 0xFFFF")
+        if rep:
+            lines.append("while cx:")
+            for ln in body:
+                lines.append("    " + ln)
+            lines.append("    cx = (cx - 1) & 0xFFFF")
+            if rep == 0xF3:                               # repe: stop when NZ
+                lines.append("    if not zf:")
+            else:                                         # repne: stop when Z
+                lines.append("    if zf:")
+            lines.append("        break")
+        else:
+            lines.extend(body)
         return
     raise Refusal(f"emitter-unsupported-op-{op:02X}"
                   + (f"-grp{inst.reg}" if inst.modrm is not None else ""))
@@ -840,6 +934,9 @@ def _flag_pass(scan, callees, far_callees, alt_entries, *, seed_df):
                     df_consumed = True
             if i.op == 0xF5 and "cf" not in defined[ip]:
                 raise Refusal("flag-live-in (cmc reads caller cf)")
+            if (i.op in (0xC0, 0xC1, 0xD0, 0xD1, 0xD2, 0xD3)
+                    and i.reg in (2, 3) and "cf" not in defined[ip]):
+                raise Refusal("flag-live-in (rcl/rcr reads caller cf)")
             new = defined[ip] | _flags_defined_by(i)
             if (i.kind == CALL and i.target is not None
                     and i.target in callees):
@@ -876,8 +973,9 @@ def _flag_pass(scan, callees, far_callees, alt_entries, *, seed_df):
     return out, df_consumed
 
 
-#: string ops read the direction flag; the gate requires DF defined in-body.
-_STRING_OPS = (0xA4, 0xA5, 0xAA, 0xAB, 0xAC, 0xAD)
+#: string ops read the direction flag; DF undefined at one of these makes
+#: the function df-live-in (the hidden _df compat input).
+_STRING_OPS = (0xA4, 0xA5, 0xA6, 0xA7, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF)
 
 
 _ALL_FLAGS = frozenset({"cf", "pf", "af", "zf", "sf", "of", "df", "intf"})
@@ -893,7 +991,7 @@ def _flags_defined_by(i) -> frozenset:
         return frozenset({"df"})
     if op in (0xFA, 0xFB):
         return frozenset({"intf"})
-    if op in (0xC0, 0xC1) and i.reg in (0, 1, 4, 5, 7):
+    if op in (0xC0, 0xC1) and i.reg in (0, 1, 2, 3, 4, 5, 7):
         # shift by a NONZERO immediate always writes CF (+ZF/SF/PF for
         # shl/shr/sar); OF only when the count is exactly 1.
         n = (i.imm or 0) & 0x1F
@@ -903,9 +1001,14 @@ def _flags_defined_by(i) -> frozenset:
         if n == 1:
             base |= {"of"}
         return frozenset(base)
-    if op in (0xD0, 0xD1) and i.reg in (0, 1, 4, 5, 7):  # count == 1
+    if op in (0xD0, 0xD1) and i.reg in (0, 1, 2, 3, 4, 5, 7):  # count == 1
         base = {"cf", "of"} | ({"zf", "sf", "pf"} if i.reg in (4, 5, 7) else set())
         return frozenset(base)
+    if op in (0xA6, 0xA7, 0xAE, 0xAF) \
+            and not any(p in (0xF2, 0xF3) for p in i.prefixes):
+        # non-rep cmps/scas: exactly one comparison, full subtraction flags.
+        # (With repe/repne, cx may be 0 -- nothing is defined statically.)
+        return frozenset({"cf", "pf", "af", "zf", "sf", "of"})
     if op in (0xF6, 0xF7) and i.reg in (4, 5):            # mul/imul: CF+OF only
         return frozenset({"cf", "of"})
     # D2/D3 (count from CL) define nothing statically (count may be 0).
