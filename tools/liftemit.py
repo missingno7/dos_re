@@ -102,17 +102,24 @@ def emit_entry(mem, rt, cs: int, ip: int, emit_dir: Path, max_iterations,
 def emit_entry_from_ir(fn_rec: dict, emit_dir: Path, max_iterations,
                        coverage: bool = False, drop_dead_flags: bool = False,
                        boundary_heads: frozenset = frozenset(),
-                       dispatch_entries: frozenset = frozenset()):
+                       dispatch_entries: frozenset = frozenset(),
+                       stem: str | None = None):
     """Emit one entry FROM THE RECOVERY IR (docs/recovery_ir.md §3).
 
     The record is re-elaborated by the shared consumer (``dos_re.lift.ir``):
     the ONE decoder/scanner runs over the IR's pinned bytes — no second
     decode path, and byte-identical output to the scan-path emit when the IR
-    captured the same code bytes."""
+    captured the same code bytes.
+
+    ``stem`` overrides the default address-derived module/function name (the
+    naming-manifest seam, ``dos_re.lift.naming``): the module is written as
+    ``{stem}.py`` defining ``def {stem}(...)``, and the caller records the
+    entry→stem mapping in the emit dir's ``graph_manifest.json`` so the
+    link/install machinery can find it."""
     from dos_re.lift.ir import record_signature, scan_from_ir_record
     entry = fn_rec["entry"]
     cs, ip = parse_addr(entry)
-    name = f"lifted_{cs:04x}_{ip:04x}"
+    name = stem or f"lifted_{cs:04x}_{ip:04x}"
     if not fn_rec.get("liftable"):
         reasons = ",".join(sorted({r["reason"] for r in fn_rec.get("refusals", ())}))
         return "not-liftable", reasons
@@ -147,9 +154,10 @@ def vmless_wall_report(emit_dir: Path):
 
     Counts real fallback invocations (``interp_one(``) — the import line and
     prose mentions do not match.  Returns {module_name: count} for modules
-    with a nonzero count."""
+    with a nonzero count.  Scans every ``.py`` in the emit dir (symbolically
+    named modules — the naming manifest — are part of the corpus too)."""
     offenders: dict[str, int] = {}
-    for path in sorted(emit_dir.glob("lifted_*.py")):
+    for path in sorted(emit_dir.glob("*.py")):
         n = path.read_text(encoding="utf-8").count("interp_one(")
         if n:
             offenders[path.name] = n
@@ -169,6 +177,12 @@ def main(argv=None) -> int:
                          "entries (docs/recovery_ir.md): the IR document is "
                          "the single input; byte-identical output when the "
                          "IR captured the same code bytes")
+    ap.add_argument("--manifest", default=None, metavar="MAP.json",
+                    help="with --from-ir: a {\"CS:IP\": \"module_stem\"} map "
+                         "for symbolic module naming (dos_re.lift.naming); "
+                         "it is validated, applied per entry, and written to "
+                         "the emit dir as graph_manifest.json for the "
+                         "link/install machinery")
     ap.add_argument("--emit-dir", default="lifted")
     ap.add_argument("--max-iterations", type=int, default=None, metavar="N",
                     help="runaway-loop guard baked into each module "
@@ -201,9 +215,19 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     if not args.from_ir and not (args.exe and args.snapshot and args.entries_file):
         ap.error("either --from-ir IR.json or --exe + --snapshot + --entries-file")
+    if args.manifest and not args.from_ir:
+        ap.error("--manifest requires --from-ir")
 
     emit_dir = Path(args.emit_dir)
     emit_dir.mkdir(parents=True, exist_ok=True)
+
+    naming = None
+    if args.manifest:
+        import json as _json
+        from dos_re.lift.naming import GraphNaming
+        naming = GraphNaming(_json.loads(
+            Path(args.manifest).read_text(encoding="utf-8")))
+        naming.save(emit_dir)
 
     def _read_pairs(argval):
         if not argval:
@@ -229,7 +253,8 @@ def main(argv=None) -> int:
                 recs[entry], emit_dir, args.max_iterations,
                 coverage=args.coverage,
                 drop_dead_flags=args.drop_dead_flags,
-                boundary_heads=heads, dispatch_entries=dispatch)
+                boundary_heads=heads, dispatch_entries=dispatch,
+                stem=naming.stem_of(entry) if naming else None)
             counts[status] += 1
             if status != "ok":
                 skipped.append((entry, status, detail))

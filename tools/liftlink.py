@@ -214,9 +214,13 @@ def relink_source(scan: FunctionScan, cs: int, target_ips, *,
                   min_iterations: int | None = None,
                   drop_dead_flags: bool = False,
                   boundary_heads: frozenset = frozenset(),
-                  dispatch_entries: frozenset = frozenset()) -> str:
-    """Re-emit a caller with the given near (and far) call targets linked."""
-    name = f"lifted_{cs:04x}_{scan.entry:04x}"
+                  dispatch_entries: frozenset = frozenset(),
+                  stem: str | None = None) -> str:
+    """Re-emit a caller with the given near (and far) call targets linked.
+
+    ``stem`` overrides the default address-derived module/function name (the
+    naming-manifest seam, ``dos_re.lift.naming``)."""
+    name = stem or f"lifted_{cs:04x}_{scan.entry:04x}"
     targets = sorted(set(target_ips))
     fars = sorted(set(far_targets))
     link_map = {t: f'LINKS["{cs:04X}:{t:04X}"]' for t in targets}
@@ -328,6 +332,11 @@ def main(argv=None) -> int:
     emit_dir = Path(args.emit_dir)
     out_dir = Path(args.out_dir) if args.out_dir else emit_dir
 
+    # Naming manifest (dos_re.lift.naming): symbolic module names when the
+    # emit dir carries graph_manifest.json, the historical default otherwise.
+    from dos_re.lift.naming import GraphNaming
+    naming = GraphNaming.load(emit_dir)
+
     # 1. Code identity: EITHER fresh scans from the snapshot, OR the recovery
     #    IR re-elaborated by the one decoder (never a stale census file).
     scans: dict[tuple[int, int], FunctionScan] = {}
@@ -389,7 +398,7 @@ def main(argv=None) -> int:
     kept: list[tuple[str, str]] = []
     for caller_key, callee_key in edges:
         e_cs, e_ip = parse_addr(callee_key)
-        if (emit_dir / f"lifted_{e_cs:04x}_{e_ip:04x}.py").is_file():
+        if naming.module_path(emit_dir, e_cs, e_ip).is_file():
             kept.append((caller_key, callee_key))
         else:
             blocked.append((caller_key, callee_key, "callee-module-missing"))
@@ -403,7 +412,7 @@ def main(argv=None) -> int:
     far_kept: list[tuple[str, str]] = []
     for caller_key, callee_key in far_edges:
         e_cs, e_ip = parse_addr(callee_key)
-        if (emit_dir / f"lifted_{e_cs:04x}_{e_ip:04x}.py").is_file():
+        if naming.module_path(emit_dir, e_cs, e_ip).is_file():
             far_kept.append((caller_key, callee_key))
         else:
             blocked.append((caller_key, callee_key, "callee-module-missing"))
@@ -425,7 +434,7 @@ def main(argv=None) -> int:
     for caller_key in all_callers:
         cs, ip = parse_addr(caller_key)
         scan = scans[(cs, ip)]
-        name = f"lifted_{cs:04x}_{ip:04x}"
+        name = naming.stem(cs, ip)
         old_path = emit_dir / f"{name}.py"
         old_src = old_path.read_text(encoding="utf-8") if old_path.is_file() else None
         if old_src is not None:
@@ -442,7 +451,8 @@ def main(argv=None) -> int:
             src = relink_source(scan, cs, target_ips, far_targets=far_targets,
                                 signature=sig, min_iterations=min_iters,
                                 drop_dead_flags=args.drop_dead_flags,
-                                boundary_heads=heads, dispatch_entries=dispatch)
+                                boundary_heads=heads, dispatch_entries=dispatch,
+                                stem=name)
         except EmitUnsupported as exc:
             print(f"skip     {caller_key}: emit-unsupported ({exc})")
             for callee_key in by_caller.get(caller_key, ()):
