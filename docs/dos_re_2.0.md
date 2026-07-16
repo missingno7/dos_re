@@ -305,6 +305,17 @@ run recovery pipeline
 → repeat
 ```
 
+**The recorded demo is the test.**  When a recorded input demo exists for a
+path, it is the authoritative input corpus: replay exactly the same semantic
+events on the oracle and on the candidate at the same semantic boundaries
+(the framework's lockstep playback), and compare state there.  Never
+approximate a demo with synthetic frame-number drives, periodic key spam, or
+mouse-hold heuristics — a guessed test verifies a guessed path.  Gate on
+compatibility first (clock semantics, hook-topology fingerprint); a stale
+demo is migrated or re-recorded ONCE, not approximated.  Input models are
+investigated only when the same demo succeeds on the oracle and diverges on
+the candidate.
+
 ---
 
 ## 3. The automation principle (non-negotiable)
@@ -415,6 +426,76 @@ Only genuinely semantic, post-recovery refactoring may become an AI-authored
 implementation, and even then: the generated CPUless implementation remains
 the reference, the replacement has an explicit contract, is oracle-verified,
 and can fall back to the generated implementation during development.
+
+### 3a. Automate the 99%, isolate the 1%
+
+Each stage mechanically transforms the overwhelming majority of the reachable
+program; what remains is a SMALL exceptional frontier that fails loudly, and
+AI investigates ONLY that frontier.  The target metric is never "hundreds of
+functions manually repaired"; it is:
+
+```
+nearly all functions transformed automatically
++ a small number of generic capability improvements
++ a small number of explicit recovery facts
++ zero hand-edited generated functions
+```
+
+Per stage, the expected exceptional frontier:
+
+- **VMless**: interrupt delivery during lifted execution, environment-wait
+  loops, scheduler/boundary seams, indirect control flow, overlays,
+  self-modifying code, unresolved platform effects.
+- **CPUless** (the analyses handle the rest automatically): unusual stack
+  switching, cross-call flag dependencies, multiple logical entries,
+  non-standard calling conventions.
+- **DOS-layout dissolution** (base/stride, field clustering, structure and
+  reference recovery handle the rest): unions, overlapping scratch memory,
+  aliasing, ownership, intentionally reused buffers.
+
+**The frontier is a queue of unresolved automation gaps, not a resting
+state.**  Entries kept interpreted / kept un-promoted are TEMPORARY: a
+completed stage may not leave them behind.  An env-wait excluded from the
+VMless graph today must eventually become an explicit scheduler-yield effect,
+a resumable lifted control-flow construct, or an IRQ-at-loop-boundary runtime
+capability — so the function itself returns to the VMless graph.  The
+dissolution loop:
+
+```
+temporary exclusion/hook  → understand the missing semantic effect
+→ encode the effect / recovery fact / capability → regenerate → remove it
+```
+
+A manually authored hook is permitted only as an investigative probe or a
+behavioral specification — never the permanent implementation of something a
+generic capability, fact, adapter, or generated transformation can express.
+The long-term target is not "160 lifted functions + 3 permanently handwritten
+hooks"; it is "163 automatically promoted functions + a few reusable
+capabilities or facts + generated adapters + zero duplicated game logic".
+
+### 3b. Automatic promotion, not manual reimplementation
+
+The staged promotion — VMless → CPUless → DOS-layout-less → true native — is
+performed BY THE TOOLING for ~99% of functions.  A normal function moves
+
+```
+decoded machine function → VMless implementation → CPUless implementation
+→ native-state implementation
+```
+
+with NO manual intervention; the toolchain generates whatever lower-stage
+compatibility adapters the mixed graph needs along the way.  The agent must
+not maintain separate hand-made VMless/CPUless/native versions of ordinary
+functions — that would turn the 1% into a manually maintained parallel port.
+Each stage consumes the shared recovery IR and the recovery facts, never
+hand-modified output of the previous stage; every stage's output remains
+regeneratable from the original binary + IR + configuration + facts + the
+current toolchain.
+
+The scaling shape: first game — many new capabilities discovered; later games
+— most already exist; mature toolchain — nearly the entire program lifts
+directly to true native.  **Automation owns the program.  AI owns only the
+exceptional frontier.  Every solved exception becomes automation.**
 
 ---
 
