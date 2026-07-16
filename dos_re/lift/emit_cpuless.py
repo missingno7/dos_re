@@ -404,6 +404,8 @@ def check_promotable(scan, *, excluded_addrs=frozenset()) -> "tuple":
             if i.imm or 0:
                 raise Refusal("ret-n-stack-args (needs stack-arg ABI)")
             continue                       # the RET ABI is the adapter's job
+        if i.kind in ("retf", "iret"):
+            raise Refusal("far-or-interrupt-return (needs adapter variant)")
         if i.op in (0x9C, 0x9D):
             raise Refusal("flags-as-stack-data (pushf/popf)")
         if e.stack_delta is None:
@@ -426,7 +428,11 @@ def _is_stack_family(i) -> bool:
     """Instructions whose sp use IS the stack discipline (allowed), as opposed
     to sp used as general data (refused)."""
     op = i.op
-    return (0x50 <= op <= 0x5F or op in (0x06, 0x0E, 0x16, 0x1E, 0x68, 0x6A)
+    return (0x50 <= op <= 0x5F
+            or op in (0x06, 0x0E, 0x16, 0x1E)      # push seg
+            or op in (0x07, 0x17, 0x1F)            # pop seg (pop ss refuses
+                                                    # earlier via ss-mutation)
+            or op in (0x68, 0x6A)
             or (op == 0xFF and i.reg == 6) or (op == 0x8F and i.reg == 0)
             or i.kind == RET)
 
