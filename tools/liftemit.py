@@ -90,34 +90,24 @@ def emit_entry_from_ir(fn_rec: dict, emit_dir: Path, max_iterations,
                        coverage: bool = False):
     """Emit one entry FROM THE RECOVERY IR (docs/recovery_ir.md §3).
 
-    The IR pins every reachable instruction's bytes and length, so fetch and
-    probe are reconstructed from the document and the ONE decoder/scanner
-    re-elaborates them — no second decode path, and byte-identical output to
-    the scan-path emit when the IR captured the same code bytes."""
+    The record is re-elaborated by the shared consumer (``dos_re.lift.ir``):
+    the ONE decoder/scanner runs over the IR's pinned bytes — no second
+    decode path, and byte-identical output to the scan-path emit when the IR
+    captured the same code bytes."""
+    from dos_re.lift.ir import record_signature, scan_from_ir_record
     entry = fn_rec["entry"]
     cs, ip = parse_addr(entry)
     name = f"lifted_{cs:04x}_{ip:04x}"
     if not fn_rec.get("liftable"):
         reasons = ",".join(sorted({r["reason"] for r in fn_rec.get("refusals", ())}))
         return "not-liftable", reasons
-    code: dict[int, int] = {}
-    lengths: dict[int, int] = {}
-    for blk in fn_rec["blocks"]:
-        for inst in blk["instructions"]:
-            off = int(inst["ip"], 16)
-            raw = bytes.fromhex(inst["bytes"])
-            lengths[off] = len(raw)
-            for k, b in enumerate(raw):
-                code[(off + k) & 0xFFFF] = b
-    scan = scan_function(lambda off: code.get(off & 0xFFFF, 0x90), ip,
-                         probe=lambda p2: lengths.get(p2 & 0xFFFF))
-    if not scan.liftable:
-        return "emit-unsupported", ("IR says liftable but re-scan refused: "
-                                    + ",".join(sorted({r.reason for r in scan.refusals})))
-    sig = bytes.fromhex(fn_rec["signature"])
     try:
-        src = emit_function(scan, cs, name, signature=sig, coverage=coverage,
-                            count_instructions=True,
+        scan = scan_from_ir_record(fn_rec)
+    except ValueError as exc:
+        return "emit-unsupported", str(exc)
+    try:
+        src = emit_function(scan, cs, name, signature=record_signature(fn_rec),
+                            coverage=coverage, count_instructions=True,
                             min_iterations=max_iterations)
     except EmitUnsupported as exc:
         return "emit-unsupported", str(exc)

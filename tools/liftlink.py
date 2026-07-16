@@ -257,12 +257,17 @@ def _fresh_signature(mem, cs: int, ip: int, scan: FunctionScan) -> bytes:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--exe", required=True)
-    ap.add_argument("--snapshot", required=True,
+    ap.add_argument("--exe")
+    ap.add_argument("--snapshot",
                     help="snapshot whose memory is the code-bytes authority")
     ap.add_argument("--game-root", default=None)
-    ap.add_argument("--entries-file", required=True,
+    ap.add_argument("--entries-file",
                     help="census entry list (tools/codemap.py output)")
+    ap.add_argument("--from-ir", default=None, metavar="recovery_ir.json",
+                    help="take code identity from the RECOVERY IR instead of "
+                         "exe+snapshot+entries (docs/recovery_ir.md): scans "
+                         "are re-elaborated from the IR's pinned bytes by the "
+                         "one decoder; no snapshot rescans")
     ap.add_argument("--board", action="append", default=[], metavar="JSON",
                     help="proof board / lift manifest JSON (repeatable). "
                          "Optional under the structural default; required "
@@ -296,25 +301,38 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     if args.proven_edges and not args.board:
         ap.error("--proven-edges requires at least one --board")
+    if not args.from_ir and not (args.exe and args.snapshot and args.entries_file):
+        ap.error("either --from-ir IR.json or --exe + --snapshot + --entries-file")
 
-    entries = []
-    for line in Path(args.entries_file).read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            entries.append(parse_addr(line))
     emit_dir = Path(args.emit_dir)
     out_dir = Path(args.out_dir) if args.out_dir else emit_dir
 
-    rt = load_snapshot(args.exe, args.snapshot, game_root=args.game_root)
-    rt.cpu.trace_enabled = False
-    mem = rt.cpu.mem
-
-    # 1. Fresh scans from the snapshot — code identity is never taken from a
-    #    stale census file.
+    # 1. Code identity: EITHER fresh scans from the snapshot, OR the recovery
+    #    IR re-elaborated by the one decoder (never a stale census file).
     scans: dict[tuple[int, int], FunctionScan] = {}
-    for cs, ip in entries:
-        scans[(cs, ip)] = scan_function(
-            lambda off, cs=cs: mem.rb(cs, off & 0xFFFF), ip, probe=_probe(rt, cs))
+    ir_sigs: dict[tuple[int, int], bytes] = {}
+    if args.from_ir:
+        from dos_re.lift.ir import (load_recovery_ir, record_signature,
+                                    scan_from_ir_record)
+        doc = load_recovery_ir(args.from_ir)
+        for entry, rec in sorted(doc["functions"].items()):
+            cs, ip = parse_addr(entry)
+            if rec.get("liftable"):
+                scans[(cs, ip)] = scan_from_ir_record(rec)
+                ir_sigs[(cs, ip)] = record_signature(rec)
+    else:
+        entries = []
+        for line in Path(args.entries_file).read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                entries.append(parse_addr(line))
+        rt = load_snapshot(args.exe, args.snapshot, game_root=args.game_root)
+        rt.cpu.trace_enabled = False
+        mem = rt.cpu.mem
+        for cs, ip in entries:
+            scans[(cs, ip)] = scan_function(
+                lambda off, cs=cs: mem.rb(cs, off & 0xFFFF), ip,
+                probe=_probe(rt, cs))
 
     # 2. The linkable edge set.
     exclude: set[str] = set()
@@ -381,6 +399,8 @@ def main(argv=None) -> int:
             sig, min_iters = _existing_module_facts(old_src)
         else:
             sig, min_iters = None, None
+        if sig is None:
+            sig = ir_sigs.get((cs, ip))
         if sig is None:
             sig = _fresh_signature(mem, cs, ip, scan)
         target_ips = [parse_addr(k)[1] for k in by_caller.get(caller_key, ())]

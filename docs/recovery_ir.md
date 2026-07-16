@@ -1,6 +1,12 @@
 # Recovery IR v0 — the shared representation every stage consumes
 
-**Status: v0 SPEC (2026-07-17).  Companion to [`dos_re_2.0.md`](dos_re_2.0.md)
+**Status: v0 LANDED (2026-07-17) — all §6 success criteria met on the
+Lemmings pilot: `tools/irgen.py` regenerates the document deterministically;
+`liftemit --from-ir` and `liftlink --from-ir` consume it through the shared
+`dos_re.lift.ir` re-elaborator; the IR-path corpus (unlinked AND linked) is
+byte-identical to the snapshot path, 212/212 modules; the demo corpus
+replays ORACLE-CLEAN on the resulting graph; unsupported constructs land in
+the IR's fail-loud ledger.  Originally drafted as:**  Companion to [`dos_re_2.0.md`](dos_re_2.0.md)
 §1b: the system is built around one shared recovery IR + analyses + selected
 emitters; every stage artifact is a projection of the IR.  This document
 defines v0 — the smallest IR that lets the VMless emitter consume IR instead
