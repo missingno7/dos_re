@@ -2,7 +2,7 @@
 
 Promoted from the first completed port's `overlay_menu.py`. This is a POST-ENDGAME widget: it belongs to
 the native product only — the hybrid/VM runtimes are recovery instruments and stay pristine (their F10 is
-a screenshot key). See template_dos_port's `docs/post_endgame.md` for when and how to use it.
+a screenshot key). See docs/post_endgame.md for when and how to use it.
 
 Host-presentation layer ONLY — the determinism firewall is structural:
   * the menu is MODAL: while open the caller freezes the game tick (like a pause) and routes every key
@@ -329,7 +329,7 @@ class OverlayMenu:
             label = (bold if selected else font).render(str(item.get("label", "")), True,
                                                         _TEXT_SELECTED if selected else _TEXT)
             screen.blit(label, label.get_rect(midleft=(x + S(26), row.centery)))
-            vtext = f"‹ {item.get('value', '')} ›" if arrows else str(item.get("value", ""))
+            vtext = f"< {item.get('value', '')} >" if arrows else str(item.get("value", ""))
             val = font.render(vtext, True, _VALUE_SELECTED if selected else _VALUE)
             vrect = val.get_rect(midright=(x + panel_w - S(28) - sb_pad, row.centery))
             screen.blit(val, vrect)

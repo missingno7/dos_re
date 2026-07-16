@@ -267,7 +267,7 @@ class CoverageCollector:
             f"  hook ASM-equivalent : {s['hook_equiv']:,.0f}  (measured {s['hook_equiv_measured']:,}"
             f" + estimated {s['hook_equiv_estimated']:,.0f})",
             f"  hook calls          : {s['total_hook_calls']:,}"
-            + (f"  [{s['unmeasured_hook_calls']:,} UNMEASURED — outside the %]"
+            + (f"  [{s['unmeasured_hook_calls']:,} UNMEASURED -- outside the %]"
                if s["unmeasured_hook_calls"] else ""),
             "  islands (interpreted | hook-equiv):",
         ]

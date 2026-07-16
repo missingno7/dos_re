@@ -25,6 +25,12 @@ interpreted oracle → VMless lifted runtime → CPUless lifted runtime
 → DOS-layout-less native runtime → semantic clean source port
 ```
 
+**Proven through M2 on the Lemmings pilot** (`lemmings_port`): strict VMless
+(zero interpreted instructions, interpreter poisoned) AND EXE-independent (a
+generated data-only boot image; the original binary is build-time input only),
+demo-verified byte-exact against the interpreted oracle.  Current milestone:
+M3 -- CPUless via the automated de-carrier process over the recovery IR.
+
 The largest supported graph is assembled mechanically and early; known-
 unsupported constructs fail loudly; the end-to-end oracle finds silent
 mistakes and auto-bisection localizes them; AI resolves only the concrete
@@ -123,10 +129,13 @@ original EXE ──▶ dos_re VM (the oracle) ──▶ traces / snapshots / dem
 ## Where the work happens
 
 Game-specific work does **not** happen in this repo, and does not happen by a
-person driving these APIs by hand. It happens in a **porting repo** —
-[`template_dos_port`](https://github.com/missingno7/template_dos_port) is the
-starting point — where an AI agent follows the documented method with this
-framework wired in as the `dos_re/` submodule. The hard boundary, enforced by
+person driving these APIs by hand. It happens in a **port repo** — scaffolded
+by `python tools/new_project.py` and walked through in
+[`docs/getting_started.md`](docs/getting_started.md); the Lemmings pilot
+(`lemmings_port`) is the canonical reference implementation — with this
+framework wired in as the `dos_re/` submodule. (The old DOS_RE 1.0 starter,
+`template_dos_port`, is retired; see
+[`docs/migration_1.0_to_2.0.md`](docs/migration_1.0_to_2.0.md).) The hard boundary, enforced by
 lint: `dos_re/` never learns any game's addresses, filenames, or formats;
 everything game-specific lives in the port's adapter package.
 
@@ -146,7 +155,7 @@ python -m pytest tests -q                        # framework suite (no game asse
 |---|---|
 | A human wondering what this is | this README — you're done |
 | Anyone touching architecture, terminology, or the roadmap | [`docs/dos_re_2.0.md`](docs/dos_re_2.0.md) — the canonical staged-recovery pipeline, vocabulary, risk model, milestones |
-| The agent porting a game | `template_dos_port`'s `AGENTS.md`/`START_HERE.md` (the method), then [`docs/agent_toolbox.md`](docs/agent_toolbox.md) (task → tool → command here) |
+| The agent porting a game | [`docs/getting_started.md`](docs/getting_started.md) (the workflow), then [`docs/agent_toolbox.md`](docs/agent_toolbox.md) (task → tool → command here); `lemmings_port` is the worked reference |
 | The agent extending this framework | [`AGENTS.md`](AGENTS.md) (the rules), [`docs/architecture.md`](docs/architecture.md) (the module map) |
 | Mechanism reference | [`docs/README.md`](docs/README.md) (hooks/verification, demos/snapshots, state mirrors, hardware status, lifting, performance, glossary) |
 
@@ -169,7 +178,9 @@ Headless workloads run unchanged — and much faster — under PyPy.
 ## Provenance & honesty
 
 Extracted from `pre2_port` (primary) and `overkill_port` (earlier pilot);
-`template_dos_port`'s `MIGRATION.md` records exactly what came from where.
+the retired 1.0 starter's `MIGRATION.md` (archived in `template_dos_port`)
+records exactly what came from where.  The 2.0 pipeline was proven on the
+Lemmings pilot (`lemmings_port` — strict VMless + EXE-independent, M2).
 [`docs/hardware_support.md`](docs/hardware_support.md) is the honest status of
 the hardware models — including what is *not* modeled.
 
@@ -178,7 +189,7 @@ owned game to port.
 
 ## License
 
-MIT ([LICENSE](LICENSE)), except the vendored [`pynuked_opl3/`](pynuked_opl3/)
+MIT ([LICENSE](LICENSE)), except the OPTIONAL external `pynuked_opl3`
 submodule and `graveyard/opl3_exact.py` (a pure-Python translation of
 [Nuked-OPL3](https://github.com/nukeykt/Nuked-OPL3)) — both
 LGPL-2.1-or-later; self-contained and separable (see LICENSE).

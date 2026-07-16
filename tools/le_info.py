@@ -56,7 +56,7 @@ def main(argv=None) -> int:
         try:
             import capstone
         except ImportError:
-            print("  (capstone not installed — skipping entry disassembly)")
+            print("  (capstone not installed -- skipping entry disassembly)")
             return 0
         md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
         off = img.entry_linear - img.mem_base

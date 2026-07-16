@@ -104,21 +104,21 @@ def main(argv=None) -> int:
                         "it run freely (each verification clones + re-runs the ASM "
                         "oracle, so a hot function would otherwise crawl). Per-hook, "
                         "so one hot function never starves the sample budget of the "
-                        "others — that sample is what proves the hook.")
+                        "others -- that sample is what proves the hook.")
     p.add_argument("--drive", metavar="MOD:FUNC", default=None,
                    help="per-frame drive callback FUNC(rt, frame), called before "
-                        "each frame's timer IRQs — lets a game feed menu keys / "
+                        "each frame's timer IRQs -- lets a game feed menu keys / "
                         "mouse so verification runs along a real session instead "
                         "of idling at one snapshot (requires --timer-irqs)")
     p.add_argument("--verify-timeout", type=float, default=8.0,
                    help="wall-clock seconds a single ASM-oracle re-run may take before "
                         "that verification is abandoned (a function that reaches deep "
                         "into the program can be slow to re-interpret). Keep batches "
-                        "small — this is a per-slice tool, not a whole-census sweep.")
+                        "small -- this is a per-slice tool, not a whole-census sweep.")
     p.add_argument("--timer-irqs", type=int, default=0, metavar="N",
                    help="deliver N INT 08h timer interrupts per frame while running "
-                        "forward (0 = none). Interrupt-gated code — timer ISRs and "
-                        "everything they call — is never reached by a plain forward "
+                        "forward (0 = none). Interrupt-gated code -- timer ISRs and "
+                        "everything they call -- is never reached by a plain forward "
                         "run; this is how you exercise it (mirror the game's own "
                         "frontend, e.g. skyroads uses 6).")
     p.add_argument("--frame-steps", type=int, default=30_000, metavar="N",
@@ -201,7 +201,7 @@ def main(argv=None) -> int:
     to_verify = set(hooks)
     if len(hooks) > 12:
         print(f"note: verifying {len(hooks)} functions at once is slow (each sampled "
-              f"call re-runs the ASM oracle). liftverify is a per-slice tool — prefer "
+              f"call re-runs the ASM oracle). liftverify is a per-slice tool -- prefer "
               f"batches of a handful of entries.\n")
     verifier = install_hook_verifier(
         rt, HookVerifierConfig.strict(hooks=to_verify, asm_wall_timeout_s=args.verify_timeout),

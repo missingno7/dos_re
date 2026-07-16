@@ -197,6 +197,12 @@ def self_disable_if_patched(cpu: CPU8086, ip: int, expected: bytes | tuple[bytes
     as "no live signature available" and remains enabled. Returns False when the
     signature is fine; raises RuntimeError on an unknown variant.
     """
+    # Under a poisoned data-only boot image the recovered code bytes are zeroed
+    # by design (the EXE-independence wall); the lifted host function is the
+    # authoritative implementation, so the entry-signature comparison is both
+    # meaningless and prone to false-alarm on the poisoned bytes.  Skip it.
+    if getattr(cpu, "code_poisoned", False):
+        return False
     cs = cpu.s.cs & 0xFFFF
     start = ((cs << 4) + (ip & 0xFFFF)) & 0xFFFFF
     variants = expected if isinstance(expected, tuple) else (expected,)

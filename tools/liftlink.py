@@ -185,7 +185,7 @@ def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
             continue
         caller_key = f"{cs:04X}:{ip:04X}"
         for target in sorted(scan.calls_near):
-            callee_key = f"{cs:04X}:{target:04X}"   # near call ⇒ same segment
+            callee_key = f"{cs:04X}:{target:04X}"   # near call => same segment
             callee = scans.get((cs, target))
             if callee_key in exclude:
                 blocked.append((caller_key, callee_key, "excluded-callee"))
@@ -300,8 +300,8 @@ def main(argv=None) -> int:
     ap.add_argument("--proven-edges", action="store_true",
                     help="1.x conservative gate: additionally require the "
                          "callee to be ORACLE_PASSING on some --board. For "
-                         "the hybrid tier / debugging only — graph assembly "
-                         "is judged end-to-end (docs/dos_re_2.0.md §2).")
+                         "the hybrid tier / debugging only -- graph assembly "
+                         "is judged end-to-end (docs/dos_re_2.0.md section 2).")
     ap.add_argument("--boundary-heads", default=None, metavar="@FILE",
                     help="boundary-head addresses (one CS:IP per line); must "
                          "match the liftemit setting for a consistent corpus")
@@ -315,8 +315,8 @@ def main(argv=None) -> int:
                     metavar="CS:IP|@FILE",
                     help="block edges INTO these entries (repeatable; @FILE = "
                          "one CS:IP per line, # comments). Use for entries "
-                         "the port keeps interpreted — boundary-shadowing "
-                         "functions, env-wait recovery facts — because a "
+                         "the port keeps interpreted -- boundary-shadowing "
+                         "functions, env-wait recovery facts -- because a "
                          "linked edge would bypass the install skip and run "
                          "the excluded lifted body anyway.")
     args = ap.parse_args(argv)
@@ -484,7 +484,7 @@ def main(argv=None) -> int:
           f"emulate_call sites in re-emitted callers: {total_before} -> {total_after}")
     if reasons:
         print("blocked edges: " + ", ".join(f"{r}={n}" for r, n in sorted(reasons.items())))
-    print("NOTE: re-emitted callers carry NEW bodies — the linked graph is "
+    print("NOTE: re-emitted callers carry NEW bodies -- the linked graph is "
           "judged END-TO-END (tick-boundary oracle comparison over the "
           "assembled VMless graph; hook_bisect localizes any divergence). "
           "liftverify along a drive remains available for per-function "

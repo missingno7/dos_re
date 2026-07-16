@@ -3,7 +3,7 @@
 **Audience: the AI agent using `dos_re` to recover a game.** This is the
 operational index: for each recurring task, the tool that does it mechanically,
 the command, and what to do when it fails. The porting *method* (phases, loop
-protocol, checklists) lives in `template_dos_port`; the mechanism deep-dives
+protocol, checklists) lives in [`getting_started.md`](getting_started.md); the mechanism deep-dives
 live in the other docs here. This page is the routing layer between them.
 
 ## The division of labor (who does what)

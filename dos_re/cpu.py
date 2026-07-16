@@ -208,6 +208,15 @@ class CPU8086:
     #: (cs,ip) here and interprets instead of raising — one run enumerates
     #: the whole interpreted frontier (the census-closure work list).
     interp_frontier: set | None = None
+    #: EXE-INDEPENDENCE (docs/dos_re_2.0.md §"The EXE-independence wall"): when
+    #: True, the lifted entry guard ``self_disable_if_patched`` is a no-op.  A
+    #: data-only boot image has the recovered code ZEROED (poisoned), so an
+    #: entry-signature comparison against the live bytes is meaningless — the
+    #: lifted host function IS the authoritative implementation, and the byte
+    #: check would false-alarm on the intentionally-poisoned bytes.  Set only
+    #: by the strict-VMless boot path (lemmings.vmless_boot); never armed when
+    #: the original code is present.
+    code_poisoned: bool = False
     hook_verifier: Callable[["CPU8086", tuple[int, int], Callable[["CPU8086"], None], str], None] | None = None
     hook_verifier_passthrough: set[tuple[int, int]] = field(default_factory=set)
     # Optional live-side replacements used only while a differential hook
@@ -602,11 +611,11 @@ class CPU8086:
             else:
                 raise RuntimeError(
                     f"VMLESS WALL VIOLATION: attempted to interpret an original "
-                    f"instruction at {start_cs:04X}:{start_ip:04X} — no lifted "
+                    f"instruction at {start_cs:04X}:{start_ip:04X} -- no lifted "
                     f"hook covers this address.  The candidate must never "
                     f"fetch/decode/execute x86; register a resume entry, lift "
                     f"the code, or record the recovery fact that explains this "
-                    f"address (docs/dos_re_2.0.md §1a).")
+                    f"address (docs/dos_re_2.0.md section 1a).")
 
         seg_override: str | None = None
         rep: int | None = None

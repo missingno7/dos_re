@@ -19,7 +19,7 @@ view (which tool for which recovery step, with context) is
 
 ## The 2.0 assembly pipeline (docs/dos_re_2.0.md)
 
-`codemap → liftemit → liftlink → install_vmless_graph (in the port's play_native) → end-to-end oracle → hook_bisect` — assemble the largest supported VMless graph early, judge it end-to-end, localize divergences automatically.
+`codemap/irgen → liftemit → liftlink → install_vmless_graph (in the port's play_vmless) → end-to-end oracle → hook_bisect` — assemble the largest supported VMless graph early, judge it end-to-end, localize divergences automatically.
 
 | Tool | Command | When |
 |---|---|---|

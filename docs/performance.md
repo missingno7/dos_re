@@ -96,7 +96,7 @@ and the live viewer, where it is worth a steady ~2x.
 
 | Backend | What | Speed | When used |
 |---|---|---|---|
-| `pynuked_opl3` (submodule) | compiled Nuked-OPL3, bit-exact | native (~1% core) | whenever built (`python -m pynuked_opl3._ffi_build`); what releases bundle |
+| `pynuked_opl3` (external, optional) | compiled Nuked-OPL3, bit-exact | native (~1% core) | opt-in accuracy upgrade: install/build the external package, select with `DOSRE_OPL3_BACKEND=nuked` |
 | `dos_re/opl3_fast.py` | numpy APPROXIMATE synth, perceptually matched | ~50x RT CPython / ~43x PyPy | the default whenever the compiled build is absent (both interpreters) |
 | `graveyard/opl3_exact.py` | pure-Python bit-exact Nuked translation | ~1x CPython / ~24x PyPy | DORMANT — never selected at runtime; the calibration/golden reference only |
 

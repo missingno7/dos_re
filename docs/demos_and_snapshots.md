@@ -115,7 +115,7 @@ waits must return deterministically.
 5. A demo corpus covering all levels, bosses, spawn types, and RNG paths —
    with coverage *measured*, not vibed.
 
-See template_dos_port's `docs/ai_porting_charter.md` §5–6 for the full treatment.
+See the retired 1.0 starter's porting charter (historical) §5–6 for the full treatment.
 
 ## Tick demos (`dos_re/tick_demo.py`) — the endgame's mode-independent clock
 

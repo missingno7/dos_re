@@ -2,8 +2,9 @@
 
 **Status: the canonical architecture (owner-ratified, 2026-07-17).  This
 document supersedes any older doc language that gates native-graph assembly on
-per-function proof.  The Lemmings pilot (`dos-re-2.0` branch) is the proving
-ground.**
+per-function proof.  The Lemmings pilot (`lemmings_port`) is the reference
+implementation: M2 (strict VMless + EXE-independent) is ACCEPTED and merged;
+the current milestone is M3 (CPUless via the automated de-carrier process).**
 
 DOS_RE 2.0 is an explicit architecture reset, not an extension of the
 conservative hook workflow.  1.x recovered games one proven routine at a time;
@@ -220,6 +221,52 @@ play_native.py    output of the automated DOS-layout dissolution pipeline,
 ```
 
 A runner may not carry a name whose wall its artifacts do not satisfy.
+
+There are **two independent walls at the VMless stage**, and both must hold
+before M2 is accepted:
+
+- the **VMless execution wall** above (no interpretation inside the corpus); and
+- the **EXE-independence wall** below (the runtime never sees the binary).
+
+### 1a′. The EXE-independence wall
+
+> The EXE goes into the recovery pipeline.  Generated host code and data come
+> out.  The VMless runtime never sees the EXE again.
+
+The VMless execution wall says the recovered CODE runs as host code.  The
+EXE-independence wall says the runtime does not depend on the original
+executable *at all* — not for code, not for data, not as a hidden byte source.
+It is enforced **physically**, not by convention:
+
+- **Data-only boot image.**  `scripts/build_vmless_boot_image.py` runs the
+  loader (the PKLITE self-extractor + the machine-type menu — interpreted, at
+  BUILD time) from the EXE to the canonical post-decompression entry, captures
+  the memory + machine state, and **poisons the recovered code**: every byte the
+  recovery IR decoded as an instruction is ZEROED.  The generated lifted host
+  functions are the only executable implementation of those routines; a zeroed
+  range trips neither the lifted entry guard (`self_disable_if_patched` treats
+  all-zero as "no live signature"; `cpu.code_poisoned` disables it outright) nor
+  — behind the armed interpreter poison — any usable interpretation.  Bytes the
+  game reads AS DATA (self-checksums, embedded tables) are declared
+  `code_as_data` in the recovery facts and preserved.  Output:
+  `generated/vmless_boot/{memory_1mb.bin, state.json, manifest.json}`.
+- **EXE-free load path.**  `dos_re.runtime_core.create_runtime_from_image` +
+  `dos_re.snapshot_headless.load_snapshot_headless` build the runtime from the
+  image alone (`program.exe is None`).  The EXE loader (`create_runtime` →
+  `load_mz_program`) lives in a *different* module that the VMless graph never
+  imports.
+- **Interpreter poison.**  `cpu.interp_forbidden` is armed from instruction
+  zero; any attempt to fetch/decode an original instruction raises.
+- **File-access guard.**  `lemmings.vmless_boot.exe_access_guard` refuses to open
+  the binary by name OR by content hash (a rename does not launder it), while
+  leaving game data readable.
+
+Enforced by tooling: `scripts/lint_vmless_independence.py` (static import-graph
+proof the runtime reaches no loader edge), `scripts/audit_vmless_boot_image.py`
+(no bundled executable; every recovered code byte poisoned or declared
+`code_as_data`), and `tests/test_vmless_cleanroom.py` (boot + run to gameplay in
+a temp dir with the EXE physically absent).  The runner prints a DERIVED banner
+(`independence_report`) ending `EXE-independence wall: HOLDS`.
 
 ### 1b. The staged pipeline is a STRATEGY, not the required final architecture
 

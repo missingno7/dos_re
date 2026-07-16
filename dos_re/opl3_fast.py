@@ -5,7 +5,8 @@ the exact core for game music, at 10-40x real-time.  It is NOT bit-exact and
 never claims to be — the vendored ``pynuked_opl3`` C core (bit-exact,
 native) and ``graveyard/opl3_exact.py`` (the dormant literal Nuked-OPL3
 translation, calibration reference) remain the exact implementations.
-``dos_re.audio_sink.load_opl3`` selects pynuked_opl3 when built, else this.
+``dos_re.audio_sink.load_opl3`` selects this by default; the external
+pynuked_opl3 package is an opt-in accuracy upgrade (DOSRE_OPL3_BACKEND=nuked).
 
 What is modeled faithfully (calibrated against the exact core — see
 ``tests/test_opl3_fast.py`` and the calibration notes below):

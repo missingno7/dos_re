@@ -196,8 +196,8 @@ def main(argv=None) -> int:
                          "like every transformation.")
     ap.add_argument("--require-vmless-wall", action="store_true",
                     help="fail (exit 2) if any emitted module contains an "
-                         "interp_one fallback call site — the enforced VMless "
-                         "execution wall (docs/dos_re_2.0.md §1a)")
+                         "interp_one fallback call site -- the enforced VMless "
+                         "execution wall (docs/dos_re_2.0.md section 1a)")
     args = ap.parse_args(argv)
     if not args.from_ir and not (args.exe and args.snapshot and args.entries_file):
         ap.error("either --from-ir IR.json or --exe + --snapshot + --entries-file")

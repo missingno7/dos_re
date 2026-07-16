@@ -5,10 +5,10 @@ reference — the mechanisms `dos_re/` ships (the VM, the proof engines, the
 lifter, the state-view seam) and their honest status. The only human-facing
 document in this repo is the top-level [README](../README.md).
 
-If you are the agent about to port a game, the *method* lives in
-[`template_dos_port`](https://github.com/missingno7/template_dos_port) (start
-at its `AGENTS.md`/`START_HERE.md`); come back here for the machinery. The
-fastest route into this repo is
+If you are the agent about to port a game, start at
+[`getting_started.md`](getting_started.md) (the DOS_RE 2.0 workflow; the
+Lemmings pilot `lemmings_port` is the worked reference); come back here for
+the machinery. The fastest route into this repo is
 [`agent_toolbox.md`](agent_toolbox.md) — task → tool → command for every
 recurring recovery job.
 
@@ -29,7 +29,11 @@ Reading order for the framework itself: the repo [README](../README.md) →
 | [`hardware_support.md`](hardware_support.md) | Honest, status-legend-based matrix of the video/audio/timing/DOS models, the unmodeled-I/O policy, and the rule for extending them. |
 | [`performance.md`](performance.md) | How to run dos_re fast: PyPy for headless workloads (~13-17x interpretation), pytest-xdist for suites, and the byte-exact equivalence-gate method required for any interpreter optimization. |
 | [`lifting_design.md`](lifting_design.md) | The automatic lifter (LANDED): ASM function → generated literal Python hook → in-situ oracle verification. Design, failure policy, the proof ledger. Read its 2.0 supersession note first: per-function proof gates only the hybrid tier, never VMless graph assembly. |
-| [`glossary.md`](glossary.md) | Every project term (oracle, island, coastline, golden, heartbeat, …) in one table — shared vocabulary with `template_dos_port`'s methodology docs. |
+| [`getting_started.md`](getting_started.md) | **Start a new game here**: what DOS_RE 2.0 is, the concept map into the canonical doc, the `tools/new_project.py` starter, milestones, how to reproduce the Lemmings pilot, current limitations. |
+| [`migration_1.0_to_2.0.md`](migration_1.0_to_2.0.md) | Migrating a DOS_RE 1.0 / template_dos_port-era project: the conceptual inversion and the practical old→new mappings. |
+| [`pitfalls.md`](pitfalls.md), [`cookbook.md`](cookbook.md) | Hard-won mechanics references (determinism traps, worked techniques), promoted from the retired 1.0 starter; dos_re_2.0.md wins where framing conflicts. |
+| [`enhancements.md`](enhancements.md), [`post_endgame.md`](post_endgame.md) | The enhanced-layer / post-endgame playbook (parity gate, overlay menu taxonomy). |
+| [`glossary.md`](glossary.md) | Every project term (oracle, island, coastline, golden, heartbeat, …) in one table — 1.x terms kept for reading historical ledgers; dos_re_2.0.md vocabulary wins. |
 
 Related, outside `docs/`:
 
@@ -44,5 +48,6 @@ Related, outside `docs/`:
 - [`../AGENTS.md`](../AGENTS.md) — the rules for extending this framework
   (including the missing-behaviour → extension recipes).
 
-Porting methodology, the adapter template, and the file-provenance ledger
-(`MIGRATION.md`) live in `template_dos_port`, not here.
+The retired DOS_RE 1.0 starter (`template_dos_port`) is archived; its
+file-provenance ledger (`MIGRATION.md`) stays there as history.  New ports:
+[`getting_started.md`](getting_started.md).

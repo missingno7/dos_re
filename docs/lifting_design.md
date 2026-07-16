@@ -31,7 +31,7 @@
 > original; a passing lift is then refactored into clean recovered source
 > with the same oracle. Proven end to end: skyroads_port's first island (its
 > master timer ISR) was recovered this way. The lifter is the optional
-> accelerator a porting agent reaches for (wired into `template_dos_port`'s
+> accelerator a porting agent reaches for (wired into the port workflow's
 > checklist + cookbook, and adopted as an overkill_port workflow invariant).
 
 ## 0. The idea, in this ecosystem's terms
@@ -316,7 +316,7 @@ translation at scale).
   port, zero hooks, hot LZS/frame candidates already profiled).
 - **M3 — the refactor loop, proven end-to-end.** Take 2–3 ORACLE_PASSING
   lifted islands, have the AI refactor them to clean Python with tests
-  unchanged, land as REFACTORED. Update `template_dos_port` methodology docs
+  unchanged, land as REFACTORED. Update the framework method docs
   + prompts. This is the milestone that proves the *actual* thesis.
 - **M4+ — widen.** Jump tables; runtime-bail partial lifts; block-local
   register caching if profiling justifies; structurizer pass (source-to-
@@ -457,7 +457,7 @@ round-trips as readable JSON. `tests/test_lift_manifest.py` adds ledger
 round-trip, the disjoint-status invariant, and accumulating block-coverage
 tests; the lift suite is now 77 cases.
 
-Discoverability: `template_dos_port` now teaches the tool — a new "Automatic
+Discoverability: the getting-started workflow now teaches the tool — a new "Automatic
 lifting" cookbook entry (problem-indexed) and an "optional accelerator" block
 in the porting checklist's lifting-loop step, both stressing that a lift is
 recovered *only after* an AI refactors it and tags `@oracle_link` (M3).

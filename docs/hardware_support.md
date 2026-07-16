@@ -62,7 +62,7 @@ behaviour looks impossible, alongside `dos.port_log`), and setting
 | Area | Status | Where |
 |---|---|---|
 | AdLib/OPL2 register file + timer-status detection handshake (ports 388/389) | modeled | `dos.py` (`opl_registers`, `adlib_callback`) |
-| OPL2/OPL3 FM synthesis (actual sound) | modeled | `dos_re/opl3_fast.py` — numpy approximate synth, perceptually matched to the exact chip (default); compiled `pynuked_opl3` used when built. Bit-exact core dormant in `graveyard/opl3_exact.py`. Wired to viewers via `dos_re.audio_sink`. |
+| OPL2/OPL3 FM synthesis (actual sound) | modeled | `dos_re/opl3_fast.py` — numpy approximate synth, perceptually matched to the exact chip (the default and only bundled backend); the external `pynuked_opl3` package is an opt-in bit-exact upgrade (`DOSRE_OPL3_BACKEND=nuked`). Bit-exact core dormant in `graveyard/opl3_exact.py`. Wired to viewers via `dos_re.audio_sink`. |
 | PC speaker (port 61h gate + PIT channel 2 frequency) | modeled | `dos.py` (`speaker_callback`) |
 | Sound Blaster DSP + DMA + block IRQs (+ detection-only stub mode) | modeled | `sblaster.py`, wired by `runtime.enable_sound_blaster` |
 | 8259 PIC (IRQ raise/acknowledge/EOI, priority, mask) | modeled | `pic.py` |

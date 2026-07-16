@@ -6,7 +6,7 @@ generic runtime and the simple deterministic pacing model, so you get the full
 standard CLI — viewer by default (``--headless`` to disable), snapshot
 save/resume, demo record/replay (F11), F12 snapshots, F10 screenshots — with no
 game adapter at all.  A real port's ``scripts/play.py`` subclasses GameFrontend
-instead (worked example: template_dos_port/scripts/play.py).
+instead (worked example: the Lemmings pilot's lemmings_port/scripts/ runners).
 
 Usage:
     python tools/view.py --exe assets/GAME.EXE [--dos-args "..."]

@@ -45,7 +45,7 @@ Import discipline: this module is the FRONTEND RING (see tools/lint.py).  It kee
 numpy/pygame imports lazy — importing ``dos_re.player`` (and running headless demo
 replay) needs neither installed; only opening the viewer or taking a screenshot does.
 
-The worked example a new port starts from: ``template_dos_port/scripts/play.py``.
+Worked examples: the Lemmings pilot's runners (lemmings_port/scripts/) and the tools/new_project.py starter.
 """
 from __future__ import annotations
 
@@ -60,8 +60,12 @@ from dos_re.hooks import registry as hook_registry
 from dos_re.input_demo import InputDemoPlayback, InputDemoRecorder, mouse_sample
 from dos_re.interrupts import deliver_interrupt, deliver_scancode
 from dos_re.keyboard import KeyDispatcher
-from dos_re.runtime import create_runtime
-from dos_re.snapshot import load_snapshot, write_snapshot
+# NOTE: the EXE loader (create_runtime) and the EXE-based load_snapshot are
+# imported LAZILY inside the default GameFrontend methods below, not at module
+# level.  A frontend that overrides create_runtime/load_snapshot_runtime (e.g.
+# the strict-VMless runner) then never pulls the loader onto its import graph
+# (scripts/lint_vmless_independence.py).  write_snapshot is EXE-free.
+from dos_re.snapshot import write_snapshot
 
 WIDTH, HEIGHT = 320, 200
 PLANAR_ROW_BYTES = 40
@@ -195,11 +199,13 @@ class GameFrontend:
         ``create_<game>_runtime`` (which installs their hooks)."""
         if not args.exe:
             raise SystemExit("--exe is required (this frontend has no default_exe)")
-        return create_runtime(args.exe, game_root=args.game_root,
+        from dos_re.runtime import create_runtime  # lazy: keeps the loader off
+        return create_runtime(args.exe, game_root=args.game_root,  # an override's graph
                               command_tail=args.dos_args)
 
     def load_snapshot_runtime(self, args: argparse.Namespace, snapshot_dir: str | Path):
         """Resume from a snapshot directory."""
+        from dos_re.snapshot import load_snapshot  # lazy (see create_runtime)
         return load_snapshot(args.exe, snapshot_dir, game_root=args.game_root)
 
     # --- per-frame behaviour ------------------------------------------------------
@@ -261,7 +267,7 @@ class GameFrontend:
 
     def window_title(self, args: argparse.Namespace, mode: str) -> str:
         exe = Path(args.exe).name if args.exe else self.name
-        return f"{exe} — dos_re VM ({mode})"
+        return f"{exe} -- dos_re VM ({mode})"
 
     def create_audio_sink(self, pygame, rt, args: argparse.Namespace):
         """Viewer audio, or None.  The default honours ``--audio adlib`` with the
@@ -612,7 +618,7 @@ def run_view(frontend: GameFrontend, rt, args,
             if replaying and playback.finished(frame_box["n"]):
                 if args.demo_continue:
                     replaying = False
-                    status = "demo finished — live input"
+                    status = "demo finished -- live input"
                     print(status)
                 else:
                     status = "demo replay complete"
