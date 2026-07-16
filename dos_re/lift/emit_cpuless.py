@@ -585,6 +585,7 @@ class CalleeContract:
     inputs: tuple                   # keyword inputs (incl. sp/ss when needed)
     outputs: tuple                  # register outputs in the result dict
     exit_flags: frozenset           # flags DEFINITELY defined on every exit
+    needs_plat: bool = False        # the callee takes the platform interface
 
 
 def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None):
@@ -634,7 +635,21 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None):
     # instruction (or composed callee) has definitely written on every path
     # -- refuse (the contract would need caller flags).
     exit_flags = _check_flag_liveins(scan, callees)
-    return abi, exit_flags
+    needs_plat = _func_needs_plat(scan, callees)
+    return abi, exit_flags, needs_plat
+
+
+def _func_needs_plat(scan, callees) -> bool:
+    """A function needs the platform interface if it does port I/O (later:
+    interrupts) directly, or composes a call to a callee that needs it."""
+    from .cpuless import register_effects
+    for i in scan.insts.values():
+        if register_effects(i).port_io:
+            return True
+        if (i.kind == CALL and i.target in (callees or {})
+                and callees[i.target].needs_plat):
+            return True
+    return False
 
 
 def _is_stack_family(i) -> bool:
@@ -803,7 +818,7 @@ def _contract_inputs(scan, abi) -> list[str]:
 
 
 def emit_recovered(scan, abi, key: str, *, callees=None,
-                   recovered_import_base: str = "") -> str:
+                   recovered_import_base: str = "", needs_plat=False) -> str:
     """Generate the recovered module source for one promotable function.
 
     ``callees`` (tier 4): CalleeContract per direct near-call target -- the
@@ -841,7 +856,8 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
     A("")
     A("")
     args = ", ".join(f"{r}=0" for r in inputs)
-    A(f"def {name}(mem, *, {args}):" if inputs else f"def {name}(mem):")
+    _p = "mem, plat" if needs_plat else "mem"
+    A(f"def {name}({_p}, *, {args}):" if inputs else f"def {name}({_p}):")
     body: list[str] = []
     B = body.append
     B("_cost = 0")
@@ -903,7 +919,8 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
                 blk.append("sp = (sp - 2) & 0xFFFF")
                 blk.append(f"mem.ww(ss, sp, 0x{i.next_ip:04X})")
                 kw = ", ".join(f"{r}={r}" for r in c.inputs)
-                blk.append(f"_o, _c = {c.name}(mem{', ' + kw if kw else ''})")
+                _pass = "mem, plat" if c.needs_plat else "mem"
+                blk.append(f"_o, _c = {c.name}({_pass}{', ' + kw if kw else ''})")
                 for r in c.outputs:
                     blk.append(f"{r} = _o['{r}']")
                 blk.append("_gm = _c['fmask']")
@@ -928,6 +945,46 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
                     blk.append("continue")
                     terminated = True
                     break
+                continue
+            if i.op in (0xE4, 0xE5, 0xE6, 0xE7, 0xEC, 0xED, 0xEE, 0xEF):
+                width = 2 if (i.op & 1) else 1
+                # instruction_count the interpreter would hold at this port
+                # access: entry + prior-in-block instructions (count-1).
+                off = count - 1
+                cost = "_cost" if off == 0 else f"_cost + {off}"
+                if i.op in (0xE4, 0xE5):          # in acc, imm8
+                    port = f"0x{(i.imm or 0) & 0xFF:X}"
+                    read = True
+                elif i.op in (0xEC, 0xED):        # in acc, dx
+                    port = "dx"
+                    read = True
+                elif i.op in (0xE6, 0xE7):        # out imm8, acc
+                    port = f"0x{(i.imm or 0) & 0xFF:X}"
+                    read = False
+                else:                             # out dx, acc
+                    port = "dx"
+                    read = False
+                if read:
+                    blk.append(f"_pv = plat.inp({port}, {width}, {cost})")
+                    if width == 2:
+                        blk.append("ax = _pv")
+                    else:
+                        blk.append(_r8_write(0, "_pv"))
+                else:
+                    val = "ax" if width == 2 else "(ax & 0xFF)"
+                    blk.append(f"plat.outp({port}, {val}, {width}, {cost})")
+                nxt = i.next_ip
+                if nxt in bb_of and nxt != ip:
+                    blk.append(f"_cost += {count}")
+                    if flag_written:
+                        bits = " | ".join(f"0x{_FLAG_BITS[f]:X}"
+                                          for f in sorted(flag_written))
+                        blk.append(f"_fmask |= {bits}")
+                    blk.append(f"bb = {bb_of[nxt]}")
+                    blk.append("continue")
+                    terminated = True
+                    break
+                ip = nxt
                 continue
             _translate(i, blk, flag_written)
             nxt = i.next_ip
@@ -960,7 +1017,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None,
 
 
 def emit_adapter(scan, abi, key: str, *, signature: bytes,
-                 recovered_import_base: str) -> str:
+                 recovered_import_base: str, needs_plat=False) -> str:
     """Generate the CPU-ABI adapter that occupies the lifted slot."""
     cs = int(key.split(":")[0], 16)
     entry = scan.entry
@@ -983,6 +1040,8 @@ def emit_adapter(scan, abi, key: str, *, signature: bytes,
     A("from __future__ import annotations")
     A("")
     A(f"from {recovered_import_base}.{rec} import {rec}")
+    if needs_plat:
+        A("from dos_re.lift.platform import make_cpu_platform")
     A("")
     A(f"ENTRY = (0x{cs:04X}, 0x{entry:04X})")
     A(f"SIGNATURE = bytes.fromhex({signature.hex()!r})")
@@ -992,15 +1051,24 @@ def emit_adapter(scan, abi, key: str, *, signature: bytes,
     A(f'    """Generated CPU-ABI adapter for {key} (recovered body is the')
     A('    single implementation)."""')
     A("    s = cpu.s")
+    if needs_plat:
+        A("    _entry = cpu.instruction_count")
+        A("    _plat = make_cpu_platform(cpu)")
     kw = ", ".join(f"{r}=s.{r}" for r in inputs)
-    A(f"    _out, _compat = {rec}(cpu.mem{', ' + kw if kw else ''})")
+    _mem = "cpu.mem, _plat" if needs_plat else "cpu.mem"
+    A(f"    _out, _compat = {rec}({_mem}{', ' + kw if kw else ''})")
     for r in outputs:
         A(f"    s.{r} = _out['{r}']")
     A("    # exit flags: touched bits from the compat channel, rest preserved")
     A("    s.flags = (s.flags & ~_compat['fmask']) | _compat['flags'] | 0x0002")
     A("    # historical RET ABI + exact virtual time (owns_time contract)")
     A("    s.ip = cpu.pop()")
-    A("    cpu.instruction_count += _compat['cost']")
+    if needs_plat:
+        # plat effects already moved instruction_count to _entry + <mid cost>;
+        # settle it at the absolute total (an increment would double-count).
+        A("    cpu.instruction_count = _entry + _compat['cost']")
+    else:
+        A("    cpu.instruction_count += _compat['cost']")
     A("")
     A("")
     A(f"#: this adapter accounts its own instruction_count per executed path.")

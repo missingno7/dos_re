@@ -104,15 +104,15 @@ def main(argv=None) -> int:
                 if not rec.get("liftable", True):
                     raise emit_cpuless.Refusal("ir-not-liftable")
                 scan = scan_from_ir_record(rec)
-                abi, exit_flags = emit_cpuless.check_promotable(
+                abi, exit_flags, needs_plat = emit_cpuless.check_promotable(
                     scan, excluded_addrs=excl_ips, callees=contracts)
                 recovered_src = emit_cpuless.emit_recovered(
                     scan, abi, key, callees=contracts,
-                    recovered_import_base=args.import_base)
+                    recovered_import_base=args.import_base, needs_plat=needs_plat)
                 adapter_src = emit_cpuless.emit_adapter(
                     scan, abi, key,
                     signature=bytes.fromhex(rec["signature"]),
-                    recovered_import_base=args.import_base)
+                    recovered_import_base=args.import_base, needs_plat=needs_plat)
             except emit_cpuless.Refusal as e:
                 refused.setdefault(str(e), []).append(key)
                 continue
@@ -125,7 +125,7 @@ def main(argv=None) -> int:
                 outputs=tuple(sorted((abi.outputs - {"sp"})
                                      & (frozenset(emit_cpuless.W16)
                                         | frozenset({"ds", "es"})))),
-                exit_flags=exit_flags)
+                exit_flags=exit_flags, needs_plat=needs_plat)
             progress = True
             if args.limit and len(promoted) >= args.limit:
                 progress = False

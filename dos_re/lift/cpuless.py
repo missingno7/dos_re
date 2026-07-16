@@ -49,6 +49,7 @@ class Effects:
     mem_write: bool = False
     stack_delta: int | None = 0        # bytes; None = data-dependent/unknown
     refusal: str | None = None         # non-None: not analyzable yet (why)
+    port_io: bool = False              # a port in/out platform effect (needs plat)
 
 
 def _r8(n: int) -> str:
@@ -320,8 +321,23 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         return Effects(refusal="int-platform-effect")
     if inst.kind == HLT:
         return Effects(refusal="hlt")
-    if op in (0xE4, 0xE5, 0xE6, 0xE7, 0xEC, 0xED, 0xEE, 0xEF):
-        return Effects(refusal="port-io-platform-effect")
+    # port I/O -> a platform effect (tier 6): real dataflow + the port_io flag.
+    if op in (0xE4, 0xE5):               # in al/ax, imm8
+        W.add("ax")
+        if op == 0xE4:
+            R.add("ax")                  # AL write preserves AH (word read)
+        return Effects(frozenset(R), frozenset(W), port_io=True)
+    if op in (0xEC, 0xED):               # in al/ax, dx
+        W.add("ax"); R.add("dx")
+        if op == 0xEC:
+            R.add("ax")
+        return Effects(frozenset(R), frozenset(W), port_io=True)
+    if op in (0xE6, 0xE7):               # out imm8, al/ax
+        R.add("ax")
+        return Effects(frozenset(R), frozenset(W), port_io=True)
+    if op in (0xEE, 0xEF):               # out dx, al/ax
+        R.update({"ax", "dx"})
+        return Effects(frozenset(R), frozenset(W), port_io=True)
 
     return Effects(refusal=f"unanalyzed-opcode-{op:02X}")
 
