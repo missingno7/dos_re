@@ -11,6 +11,8 @@ THE CONTRACT (duck-typed -- a recovered module names only these methods):
     plat.inp(port, width, cost) -> int          # port read  (width 1 or 2)
     plat.outp(port, value, width, cost) -> None  # port write
     plat.intr(num, regs, cost) -> regs           # INT: explicit reg bundle in/out
+    plat.boundary(head_cs, head_ip, resume_ip, regs, cost)
+        -> (regs, flags_word, extra_cost)        # boundary-head observer (t13)
 
 ``cost`` is GENERATED EXECUTION METADATA: the recovered graph's own absolute
 instruction offset at the effect (``_base + _cost + in_block_offset``).  It is
@@ -87,6 +89,28 @@ class VMlessPlatformAdapter:
             setattr(cpu.s, r, saved[r])
         cpu.s.flags = saved_flags
         return out
+
+    def boundary(self, head_cs, head_ip, resume_ip, regs, cost):
+        """Boundary-head observer (verification binding).  Writes the live
+        bundle back to the VM so a park resumes from CURRENT state, then
+        fires the VM's boundary hook (which may raise BoundaryReached).
+        NOTE: parking functions are STANDALONE-ONLY in the demo graph (their
+        adapters are not installed -- an unwound park would lose composed
+        caller locals), so this path serves the differential harness, where
+        no hook is armed and the observer is inert."""
+        cpu = self.cpu
+        hook = getattr(cpu, "boundary_hook", None)
+        if hook is not None:
+            s = cpu.s
+            for r in ("ax", "cx", "dx", "bx", "sp", "bp", "si", "di",
+                      "ds", "es", "ss"):
+                setattr(s, r, regs[r] & 0xFFFF)
+            s.flags = (regs.get("_flags_in", 2) | 0x0002) & 0xFFFF
+            s.cs = head_cs & 0xFFFF
+            s.ip = resume_ip & 0xFFFF
+            cpu.instruction_count = self.entry + cost
+            hook(cpu, head_cs, head_ip, resume_ip)
+        return regs, regs.get("_flags_in", 2), 0
 
 
 def make_cpu_platform(cpu):
@@ -185,6 +209,13 @@ class CPUlessPlatformRuntime:
         self.clock = 0
         self._entry = 0
         self._carrier = _ClockCarrier(mem)
+        #: the standalone SCHEDULER seam: play_cpuless installs a callback
+        #: (head_cs, head_ip, resume_ip, regs, abs_cost) -> (regs, flags,
+        #: extra_cost) that counts boundary-head passes and, on quota, PARKS
+        #: in-line: applies demo inputs, delivers timer IRQs through the
+        #: recovered HANDLERS, and returns the post-IRQ state.  Without a
+        #: callback the observer is inert (free-running).
+        self.boundary_cb = None
         if dos is not None:
             self.dos = dos                 # reuse a prepared device model
         else:
@@ -227,6 +258,18 @@ class CPUlessPlatformRuntime:
             raise UnsupportedPlatformEffect(
                 f"INT {num & 0xFF:02X} not implemented by the CPUless runtime "
                 f"(unset vector or game-installed handler): {e}") from e
+
+    def boundary(self, head_cs, head_ip, resume_ip, regs, cost):
+        """Boundary-head observer (standalone owner): advance the clock to
+        the head and hand the pass to the scheduler callback -- which may
+        PARK in-line (inputs + IRQs) and returns the possibly-updated
+        bundle, flags word, and the extra virtual time the delivered ISRs
+        executed."""
+        self._carrier.instruction_count = self._entry + cost
+        if self.boundary_cb is None:
+            return regs, regs.get("_flags_in", 2), 0
+        return self.boundary_cb(head_cs, head_ip, resume_ip, regs,
+                                self._entry + cost)
 
     # -- recovered-root invocation ---------------------------------------
 

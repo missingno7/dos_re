@@ -335,10 +335,13 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
             return Effects(reads=allr, writes=allr - frozenset({"ss"}),
                            mem_read=True, mem_write=True, stack_delta=0)
         if r == 5:
-            # far indirect jmp through a memory vector: observed evidence
-            # says these chain to a SAVED INTERRUPT VECTOR (ISR tail) -- the
-            # interrupt-frame tier's business, refused honestly until then.
-            return Effects(refusal="far-vector-chain (isr tail)")
+            # far indirect jmp through a memory vector (tier 13): the ISR
+            # CHAIN tail -- the saved vector's recovered handler runs on our
+            # interrupt frame and ITS iret ends our interrupt.  Full-bundle
+            # conservative dataflow; must run at depth 0 (tail rule).
+            allr = frozenset(W16) | frozenset({"ds", "es", "ss"})
+            return Effects(reads=allr, writes=allr - frozenset({"ss"}),
+                           mem_read=True, mem_write=True, stack_delta=0)
         return Effects(refusal="indirect-or-far-transfer")
     if inst.kind == INT:
         n = inst.int_no

@@ -43,7 +43,7 @@ from dos_re.lift import emit_cpuless  # noqa: E402
 
 
 def _gate_dyn_evidence(scan, cs, dyn_evidence, done, dispatch_owner,
-                       contracts_by_cs) -> None:
+                       contracts_by_cs, iret_keys=frozenset()) -> None:
     """Evidence-gated dynamic dispatch (tier 9): a function containing
     near-indirect transfers promotes only when every OBSERVED runtime target
     of its sites (the canonical-demo probe evidence) is dispatchable --
@@ -55,9 +55,18 @@ def _gate_dyn_evidence(scan, cs, dyn_evidence, done, dispatch_owner,
     A site with no observed targets promotes optimistically: the demo never
     executes it, and a live selector outside the registry raises the
     UnknownDispatchTarget witness -- never a fallback.  Refusals here retry
-    every fixpoint round, so promotion order follows the evidence."""
+    every fixpoint round, so promotion order follows the evidence.
+
+    An ISR-CHAIN site (far vector tail, tier 13) gates its observed vectors
+    against the promoted IRET-handler set instead."""
     leaders = None
     for i in scan.insts.values():
+        if emit_cpuless._is_isr_chain(i):
+            site = f"{cs:04X}:{i.ip:04X}"
+            for tgt in dyn_evidence.get(site, []):
+                if tgt not in iret_keys:
+                    raise emit_cpuless.Refusal("isr-chain-handler-unpromoted")
+            continue
         if not emit_cpuless._is_dyn(i):
             continue
         site = f"{cs:04X}:{i.ip:04X}"
@@ -137,6 +146,13 @@ def main(argv=None) -> int:
                          "promotes only when every OBSERVED target of its "
                          "sites is dispatchable (local leader, promoted "
                          "function, or owned dispatch entry)")
+    ap.add_argument("--boundary-heads", default=None,
+                    help="@FILE of boundary-head CS:IP addresses (tier 13): "
+                         "a head inside a function becomes an emitted "
+                         "plat.boundary observer; the function (and its "
+                         "composed callers) become STANDALONE-ONLY -- the "
+                         "recovered module is written, but the VMless demo "
+                         "graph keeps the original lifted module")
     ap.add_argument("--vector-evidence", default=None,
                     help="vector_sites.json (game-vectored INT probe "
                          "evidence): a function with INT 60/61 sites "
@@ -158,6 +174,9 @@ def main(argv=None) -> int:
     dispatch_addrs: set[tuple[int, int]] = set()
     if args.dispatch_entries:
         dispatch_addrs = _read_addr_file(Path(args.dispatch_entries.lstrip("@")))
+    boundary_addrs: set[tuple[int, int]] = set()
+    if args.boundary_heads:
+        boundary_addrs = _read_addr_file(Path(args.boundary_heads.lstrip("@")))
     # per-site dynamic-target evidence: "CS:IP" site -> [observed target keys]
     dyn_evidence: dict[str, list[str]] = {}
     if args.dyn_evidence and Path(args.dyn_evidence).is_file():
@@ -216,6 +235,8 @@ def main(argv=None) -> int:
                     callees=contracts_by_cs.setdefault(cs, {}),
                     far_callees=far_contracts,
                     dispatch_addrs={ip for (xcs, ip) in dispatch_addrs
+                                    if xcs == cs},
+                    boundary_addrs={ip for (xcs, ip) in boundary_addrs
                                     if xcs == cs})
                 tentative.add(key)
             except emit_cpuless.Refusal:
@@ -227,17 +248,39 @@ def main(argv=None) -> int:
             cs = int(key.split(":")[0], 16)
             excl_ips = {ip for (xcs, ip) in excluded if xcs == cs}
             disp_ips = {ip for (xcs, ip) in dispatch_addrs if xcs == cs}
+            head_ips = {ip for (xcs, ip) in boundary_addrs if xcs == cs}
             contracts = contracts_by_cs.setdefault(cs, {})
+            injected_self = None
             try:
                 if not rec.get("liftable", True):
                     raise emit_cpuless.Refusal("ir-not-liftable")
                 scan = scan_from_ir_record(rec)
+                # DIRECT SELF-RECURSION: compose the self-call with a
+                # conservative full-bundle contract (the inductive fixed
+                # point: assuming the callee balanced/side-effect-full, the
+                # checker proves the body consistent).  The emitter calls
+                # the module-level name directly -- no self-import.
+                if any(i.kind == "call" and i.target == scan.entry
+                       for i in scan.insts.values()) \
+                        and scan.entry not in contracts:
+                    _all = tuple(sorted(frozenset(emit_cpuless.W16)
+                                        | frozenset({"ds", "es", "ss"})))
+                    contracts[scan.entry] = emit_cpuless.CalleeContract(
+                        name=f"func_{key.replace(':', '_').lower()}",
+                        inputs=_all,
+                        outputs=tuple(sorted(
+                            (frozenset(emit_cpuless.W16)
+                             | frozenset({"ds", "es"}))
+                            - frozenset({"sp"}))),
+                        exit_flags=frozenset(), needs_plat=True)
+                    injected_self = scan.entry
                 spec = emit_cpuless.check_promotable(
                     scan, excluded_addrs=excl_ips, callees=contracts,
-                    far_callees=far_contracts, dispatch_addrs=disp_ips)
+                    far_callees=far_contracts, dispatch_addrs=disp_ips,
+                    boundary_addrs=head_ips)
                 abi = spec.abi
                 _gate_dyn_evidence(scan, cs, dyn_evidence, tentative,
-                                   dispatch_owner, contracts_by_cs)
+                                   dispatch_owner, contracts_by_cs, iret_keys)
                 _gate_vector_evidence(scan, cs, vec_evidence, tentative,
                                       contracts_by_cs, iret_keys)
                 recovered_src = emit_cpuless.emit_recovered(
@@ -246,7 +289,7 @@ def main(argv=None) -> int:
                     recovered_import_base=args.import_base,
                     needs_plat=spec.needs_plat, dispatch_addrs=disp_ips,
                     df_livein=spec.df_livein, sp_output=spec.sp_output,
-                    flags_livein=spec.flags_livein)
+                    flags_livein=spec.flags_livein, boundary_addrs=head_ips)
                 adapter_src = emit_cpuless.emit_adapter(
                     scan, abi, key,
                     signature=bytes.fromhex(rec["signature"]),
@@ -256,6 +299,8 @@ def main(argv=None) -> int:
                     sp_output=spec.sp_output, ret_pop=spec.ret_pop,
                     flags_livein=spec.flags_livein)
             except emit_cpuless.Refusal as e:
+                if injected_self is not None:
+                    contracts.pop(injected_self, None)
                 refused.setdefault(str(e), []).append(key)
                 continue
             promoted.append(key)
@@ -272,7 +317,7 @@ def main(argv=None) -> int:
                 ret_kind=spec.ret_kind, df_livein=spec.df_livein,
                 sp_delta=spec.sp_delta, ret_pop=spec.ret_pop,
                 sp_output=spec.sp_output, sp_deltas=spec.sp_deltas,
-                flags_livein=spec.flags_livein)
+                flags_livein=spec.flags_livein, parks=spec.parks)
             contracts[scan.entry] = contract
             if spec.ret_kind == "far":
                 far_contracts[(cs, scan.entry)] = contract
@@ -311,13 +356,24 @@ def main(argv=None) -> int:
         rec_dir = Path(args.recovered_dir)
         ad_dir = Path(args.adapter_dir)
         rec_dir.mkdir(parents=True, exist_ok=True)
+        standalone_only: list[str] = []
         for key in promoted:
             rec_src, ad_src = outputs[key]
             stem = key.replace(":", "_").lower()
             (rec_dir / f"func_{stem}.py").write_text(rec_src, encoding="utf-8",
                                                      newline="\n")
+            kcs, kip = (int(x, 16) for x in key.split(":"))
+            if contracts_by_cs[kcs][kip].parks:
+                # STANDALONE-ONLY: the recovered body parks in-line via
+                # plat.boundary; the demo graph keeps the original lifted
+                # module (a park unwind would lose composed caller locals).
+                standalone_only.append(key)
+                continue
             (ad_dir / f"lifted_{stem}.py").write_text(ad_src, encoding="utf-8",
                                                       newline="\n")
+        if standalone_only:
+            print(f"STANDALONE-ONLY (parking; no adapter installed): "
+                  f"{len(standalone_only)}: {', '.join(standalone_only)}")
         # the dynamic-dispatch registry: every promoted NEAR-return function
         # is a selector; owned dispatch entries route to their owner's
         # generated alternate entry.  Regenerated every apply (tier 9).

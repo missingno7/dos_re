@@ -78,12 +78,15 @@ def test_int_effect_and_vectored_int_and_indirect():
     assert e2.refusal is None
     assert {"ax", "bx", "ds", "es", "ss"} <= set(e2.reads)
     assert "ss" not in e2.writes and "ax" in e2.writes
-    # FAR indirect jmp chains to a saved interrupt vector -- the
-    # interrupt-frame tier's business, refused honestly.
+    # FAR indirect jmp chains to a saved interrupt vector: the ISR-chain
+    # tail (tier 13) -- full-bundle effect dispatched through HANDLERS on
+    # the invoker's interrupt frame, no refusal.
     e3 = register_effects(Inst(ip=0, length=4, kind="jmp_ind", mnemonic="jmp",
                                raw=b"\xff\x2e\xbe\x1f", op=0xFF, modrm=0x2E,
                                disp=0x1FBE))
-    assert e3.refusal == "far-vector-chain (isr tail)"
+    assert e3.refusal is None
+    assert {"ax", "ds", "es", "ss"} <= set(e3.reads)
+    assert "ss" not in e3.writes and "ax" in e3.writes
     # FAR indirect call still refuses.
     e4 = register_effects(Inst(ip=0, length=2, kind="call_ind", mnemonic="call",
                                raw=b"\xff\xd8", op=0xFF, modrm=0xD8))
