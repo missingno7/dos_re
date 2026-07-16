@@ -61,6 +61,12 @@ _ALU = ("add", "or", "adc", "sbb", "and", "sub", "xor", "cmp")
 _INT_REGS = ("ax", "bx", "cx", "dx", "si", "di", "bp", "ds", "es")
 #: the full bundle a runtime-dispatched callee may read/write (tier 9).
 _DYN_REGS = ("ax", "cx", "dx", "bx", "sp", "bp", "si", "di", "ds", "es", "ss")
+#: safety net for the recovered block-dispatch loop -- a spin-wait on a wrong
+#: port or an interrupt-only flag would otherwise hang forever.  Set far above
+#: any legitimate in-function loop (a retrace/vblank wait exits in a handful of
+#: block transitions; a rep is ONE dispatch step) so it only catches genuine
+#: unbounded spins, and reports the function + block instead of freezing.
+_DISPATCH_ITER_CAP = 20_000_000
 FDF, FIF = 0x0400, 0x0200
 _FLAG_BITS = {"cf": FCF, "pf": FPF, "af": FAF, "zf": FZF, "sf": FSF,
               "of": FOF, "df": FDF, "intf": FIF}
@@ -1003,10 +1009,10 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
                 # chain tail: the chained handler returns balanced and the
                 # invoking site pops the frame at the merged runtime sp --
                 # no static depth requirement.
-                exit_depths.add(d)
+                exit_depths.add(d if d is not None else 0)
                 ret_pops.add(0)
                 continue
-            if d != 0:     # unknown depth cannot prove the tail rule either
+            if d not in (0, None):  # unknown cannot prove the tail rule
                 raise Refusal("tail-dispatch-at-nonzero-depth")
             exit_depths.add(0)
             ret_pops.add(0)
@@ -1371,7 +1377,19 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
         B(f"bb = {bb_of[scan.entry]} if _entry_ip is None else _ENTRIES[_entry_ip]")
     else:
         B(f"bb = {bb_of[scan.entry]}")
+    # Unbounded-spin guard (mirrors the VMless emitter): the block-dispatch
+    # loop only exits via a block's break/return.  A recovered spin-wait on a
+    # condition an interrupt must change -- or on a wrong port after a state
+    # divergence -- would loop forever; fail LOUD with the function + block so
+    # a hang is a debuggable error, never a silent freeze.
+    B("_iters = 0")
     B("while True:")
+    B(f"    _iters += 1")
+    B(f"    if _iters > {_DISPATCH_ITER_CAP}:")
+    B(f"        raise RuntimeError('CPUless dispatch spin in {key} "
+      f"(block %d, cost %d): loop exceeded {_DISPATCH_ITER_CAP} iterations "
+      f"-- an unbounded wait (interrupt-updated flag, or a wrong port after "
+      f"a state divergence)' % (bb, _cost))")
     # blocks
     for n, leader in enumerate(leaders):
         blk: list[str] = []
