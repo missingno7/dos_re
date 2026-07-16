@@ -63,9 +63,23 @@ def test_int_effect_and_vectored_int_and_indirect():
     ev = register_effects(Inst(ip=0, length=2, kind="int", mnemonic="int",
                                raw=b"\xcd\x61", op=0xCD, int_no=0x61))
     assert ev.refusal == "vectored-int-call"
+    # NEAR indirect transfers are runtime-resolved recovered dispatch
+    # (tier 9): conservative full-bundle dataflow, no refusal.
     e2 = register_effects(Inst(ip=0, length=2, kind="jmp_ind", mnemonic="jmp",
                                raw=b"\xff\xe0", op=0xFF, modrm=0xE0))
-    assert e2.refusal == "indirect-or-far-transfer"
+    assert e2.refusal is None
+    assert {"ax", "bx", "ds", "es", "ss"} <= set(e2.reads)
+    assert "ss" not in e2.writes and "ax" in e2.writes
+    # FAR indirect jmp chains to a saved interrupt vector -- the
+    # interrupt-frame tier's business, refused honestly.
+    e3 = register_effects(Inst(ip=0, length=4, kind="jmp_ind", mnemonic="jmp",
+                               raw=b"\xff\x2e\xbe\x1f", op=0xFF, modrm=0x2E,
+                               disp=0x1FBE))
+    assert e3.refusal == "far-vector-chain (isr tail)"
+    # FAR indirect call still refuses.
+    e4 = register_effects(Inst(ip=0, length=2, kind="call_ind", mnemonic="call",
+                               raw=b"\xff\xd8", op=0xFF, modrm=0xD8))
+    assert e4.refusal == "indirect-or-far-transfer"
 
 
 def test_loop_reads_and_writes_cx():

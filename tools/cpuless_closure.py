@@ -33,7 +33,12 @@ def _promoted_keys(recovered_dir: Path) -> set[str]:
 
 
 def walk_closure(ir: dict, roots: list[str], promoted: set[str],
-                 refusals: dict[str, str]) -> dict:
+                 refusals: dict[str, str],
+                 dyn_evidence: dict[str, list[str]] | None = None) -> dict:
+    """``dyn_evidence`` (tier 9): "CS:IP" site -> observed dynamic target
+    keys (lemmings-style indirect_sites.json), so the walk follows dynamic
+    dispatch and static far calls, not just near calls."""
+    dyn_evidence = dyn_evidence or {}
     reached: set[str] = set()
     frontier: dict[str, str] = {}
     work = list(roots)
@@ -56,6 +61,20 @@ def walk_closure(ir: dict, roots: list[str], promoted: set[str],
             for i in blk["instructions"]:
                 if i["mnemonic"] == "call" and "target" in i:
                     work.append(f"{cs:04X}:{int(i['target'], 16):04X}")
+                elif i.get("kind") == "call_far":
+                    by = bytes.fromhex(i["bytes"])
+                    if by and by[0] == 0x9A:
+                        off = by[1] | (by[2] << 8)
+                        seg = by[3] | (by[4] << 8)
+                        work.append(f"{seg:04X}:{off:04X}")
+                elif i.get("kind") in ("call_ind", "jmp_ind"):
+                    site = f"{cs:04X}:{int(i['ip'], 16):04X}"
+                    for tgt in dyn_evidence.get(site, ()):
+                        # an observed target that is an IR function walks;
+                        # a dispatch-entry arrival shares blocks already
+                        # reached through its containing function.
+                        if tgt.upper() in ir["functions"]:
+                            work.append(tgt.upper())
     prom_reached = sorted(reached & promoted)
     return {
         "roots": roots,
@@ -74,6 +93,9 @@ def main(argv=None) -> int:
                     help="promotion census JSON (for frontier refusal reasons)")
     ap.add_argument("--roots", required=True,
                     help="comma-separated CS:IP startup/gameplay roots")
+    ap.add_argument("--dyn-evidence", default=None,
+                    help="indirect_sites.json (per-site dynamic-target "
+                         "evidence) so the walk follows dynamic dispatch")
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
 
@@ -86,8 +108,14 @@ def main(argv=None) -> int:
             for k in keys:
                 refusals[k.upper()] = reason
     roots = [r.strip().upper() for r in args.roots.split(",") if r.strip()]
+    dyn_evidence: dict[str, list[str]] = {}
+    if args.dyn_evidence and Path(args.dyn_evidence).is_file():
+        for site in json.loads(Path(args.dyn_evidence).read_text(
+                encoding="utf-8")).get("sites", []):
+            dyn_evidence[site["site"].upper()] = \
+                sorted(k.upper() for k in site.get("targets", {}))
 
-    rep = walk_closure(ir, roots, promoted, refusals)
+    rep = walk_closure(ir, roots, promoted, refusals, dyn_evidence)
     print(f"CPUless runtime closure from roots {roots}:")
     print(f"  reachable functions:   {rep['reached']}")
     print(f"  promoted (reached):    {rep['promoted_reached']}")

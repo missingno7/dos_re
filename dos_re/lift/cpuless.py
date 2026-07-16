@@ -286,6 +286,9 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         R.update({"si", "di", "ds", "es"} if op in (0xA4, 0xA5, 0xA6, 0xA7)
                  else ({"di", "es", "ax"} if op in (0xAA, 0xAB, 0xAE, 0xAF)
                        else {"si", "ds"}))
+        if op == 0xAC:
+            R.add("ax")     # lodsb writes AL only: AH is preserved, so the
+                            # word-granularity write READS the entry ax
         W.update({"si", "di"} if op in (0xA4, 0xA5, 0xA6, 0xA7)
                  else ({"di"} if op in (0xAA, 0xAB, 0xAE, 0xAF) else {"si", "ax"}))
         if any(p in (0xF2, 0xF3) for p in inst.prefixes):
@@ -319,6 +322,23 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         return Effects(frozenset({"sp", "ss"}), frozenset({"sp"}), True, True, 0,
                        refusal="call-abi-composition")
     if inst.kind in (CALL_IND, JMP_IND):
+        r = ((inst.modrm >> 3) & 7) if inst.modrm is not None else None
+        if r in (2, 4):
+            # NEAR indirect call/jmp (tier 9): runtime-resolved RECOVERED
+            # DISPATCH -- the target is computed from registers/memory (fully
+            # modelled), then dispatched through the generated registry to a
+            # direct recovered callee (or an intra-function block leader).
+            # Conservative contract: the dynamic callee may read and write
+            # the whole register bundle; an unknown selector fails loudly at
+            # runtime (UnknownDispatchTarget witness), never a CPU fallback.
+            allr = frozenset(W16) | frozenset({"ds", "es", "ss"})
+            return Effects(reads=allr, writes=allr - frozenset({"ss"}),
+                           mem_read=True, mem_write=True, stack_delta=0)
+        if r == 5:
+            # far indirect jmp through a memory vector: observed evidence
+            # says these chain to a SAVED INTERRUPT VECTOR (ISR tail) -- the
+            # interrupt-frame tier's business, refused honestly until then.
+            return Effects(refusal="far-vector-chain (isr tail)")
         return Effects(refusal="indirect-or-far-transfer")
     if inst.kind == INT:
         n = inst.int_no
