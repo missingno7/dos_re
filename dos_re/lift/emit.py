@@ -833,6 +833,7 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     if far_link_map:
         A("from dos_re.hooks import call_installed_hook_like_far_call")
     A("from dos_re.lift.runtime import (LiftRuntimeError, emulate_call, emulate_far_call,")
+    A("                                 stuck_error,")
     A("                                 emulate_int, interp_one)")
     if link_map or far_link_map:
         for ln in link_imports:
@@ -840,8 +841,30 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     A("")
     A(f"ENTRY = (0x{cs:04X}, 0x{scan.entry:04X})")
     A(f"SIGNATURE = bytes.fromhex({signature.hex()!r})")
-    A(f"MAX_ITERATIONS = {max(min_iterations or 10_000, len(scan.insts) * 5_000)}  "
-      "# runaway guard: fail loud, never hang")
+    # A BACKSTOP, not the guard. The no-progress detector below catches a real
+    # spin in ~64K dispatches by PROVING it (same block, identical registers),
+    # so this only has to stop the pathological rest: a loop that keeps changing
+    # state yet never terminates. It must therefore be far above anything honest
+    # code does.
+    #
+    # It used to be `len(insts) * 5_000`, which is not a bound on anything: a
+    # loop's trip count has no relation to its instruction count. A 27-
+    # instruction LZS decompressor got 135,000 -- and legitimately needs
+    # millions -- so every port hit it and "fixed" it by raising a magic number
+    # until the number stopped mattering. That is how a guard trains people to
+    # ignore it.
+    A(f"MAX_ITERATIONS = {min_iterations or 100_000_000}  "
+      "# backstop only -- the no-progress detector below is the real guard")
+    #: bb -> leader address, so a stuck report can name WHERE it is spinning
+    #: instead of just "unbounded internal loop".
+    A("#: dispatch block -> its leader address (for the stuck diagnosis)")
+    A("BLOCK_ADDRS = {"
+      + ", ".join(f"{bi}: 0x{body[0].ip:04X}" for bi, body in enumerate(blocks))
+      + "}")
+    #: How often the no-progress detector samples. A spin returns to the same
+    #: (block, registers) every iteration, so it is caught at the 2nd sample;
+    #: a decompressor's registers advance every iteration, so it never is.
+    A("PROGRESS_SAMPLE = 0xFFFF  # sample the state every 64K dispatches")
     if resume_points:
         entries_txt = ", ".join(
             f'"{cs:04X}:{rp:04X}": {bb_of[rp]}'
@@ -878,12 +901,24 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     # Hardcoding 0 executed the lowest-address block first — wrong code, at
     # the wrong time, for that entry class (found by the Lemmings pilot's
     # whole-program census; caught in-situ as guaranteed DIVERGED lifts).
-    A("    # A lifted function runs SYNCHRONOUSLY to completion -- unlike the")
-    A("    # interpreter, no external I/O/timing advances between its blocks. A")
-    A("    # loop that waits on hardware state (retrace/timer polls) would spin")
-    A("    # forever here, so bound it and fail loud (such env-waits are poor lift")
-    A("    # targets -- hook them by hand instead).")
+    A("    # A lifted function runs SYNCHRONOUSLY to completion: the interpreter")
+    A("    # interleaves the outside world between instructions, but nothing")
+    A("    # external can happen inside a lifted body -- so a loop WAITING for the")
+    A("    # world to change waits forever. Detect that precisely rather than")
+    A("    # guessing from an iteration count: a spin returns to the same block")
+    A("    # with IDENTICAL registers, which is provably no progress; a long but")
+    A("    # honest loop (a decompressor) advances its registers and is never")
+    A("    # reported. MAX_ITERATIONS remains only as a backstop.")
+    A("    _last_snap = None")
     A("    for _guard in range(MAX_ITERATIONS):")
+    A("        if not _guard & PROGRESS_SAMPLE:")
+    A("            _snap = (bb, s.ax, s.bx, s.cx, s.dx, s.si, s.di,")
+    A("                     s.bp, s.sp, s.ds, s.es, s.flags)")
+    A("            if _snap == _last_snap:")
+    A("                raise stuck_error(__name__, cpu, bb, BLOCK_ADDRS,")
+    A("                                  iterations=_guard,")
+    A("                                  no_progress=PROGRESS_SAMPLE + 1)")
+    A("            _last_snap = _snap")
 
     ind = " " * 12
     for bi, body in enumerate(blocks):
@@ -999,9 +1034,8 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     # The dispatch loop only exits via a block's `return`. Reaching here means
     # MAX_ITERATIONS blocks executed without returning — an unbounded internal
     # wait/spin. Fail loud instead of hanging.
-    A(f"    raise LiftRuntimeError(")
-    A(f"        {name!r} + ' exceeded MAX_ITERATIONS (unbounded internal loop -- "
-      f"likely an environment wait; hook it by hand)')")
+    A("    raise stuck_error(__name__, cpu, bb, BLOCK_ADDRS,")
+    A("                      iterations=MAX_ITERATIONS, no_progress=0)")
     if count_instructions:
         A("")
         A("")

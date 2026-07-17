@@ -547,7 +547,16 @@ def test_runaway_internal_loop_fails_loud_not_hangs():
     st = _rand_state(random.Random(9))
     st.flags &= ~0x0880           # SF=0, OF=0 -> jge taken -> infinite self-loop
     cpu = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
-    with pytest.raises(LiftRuntimeError, match="MAX_ITERATIONS"):
+    # The BACKSTOP path (guard shrunk below the no-progress sampler's window, so
+    # the detector never gets a second sample).  It must still fail loud -- and
+    # now it must also say WHERE, instead of the old bare "exceeded
+    # MAX_ITERATIONS ... likely an environment wait; hook it by hand", which
+    # named no address and guessed at the cause.  See tests/test_lift_stuck.py
+    # for the detector path, which catches a real spin in ~64K rather than
+    # counting to the guard.
+    with pytest.raises(LiftRuntimeError, match="guard limit"):
+        ns["lifted"](cpu)
+    with pytest.raises(LiftRuntimeError, match=f"{CS:04X}:{ENTRY:04X}"):
         ns["lifted"](cpu)
 
 
