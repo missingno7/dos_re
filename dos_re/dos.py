@@ -12,6 +12,23 @@ if TYPE_CHECKING:                       # type hints only -- not a runtime impor
     from .cpu import CPU8086
 from .memory import EGA_APERTURE, EGA_PLANE_STRIDE, EGA_PLANE_WINDOW
 
+# Which device tracker owns which OUT port (see DOSMachine.port_write, which
+# routes a write to exactly one of them instead of offering it to all four).
+# These must mirror the ports each _track_* method matches on; they are derived
+# from those methods, not invented, and the assert below is the contract that
+# makes routing equivalent to the old fan-out: if two trackers ever claim the
+# same port, "the one owner" stops being a well-defined idea and the write has
+# to go to both.
+_SPEAKER_PORTS = frozenset((0x40, 0x42, 0x43, 0x61))
+_DAC_PORTS = frozenset((0x03C7, 0x03C8, 0x03C9))
+_EGA_PORTS = frozenset((0x03B4, 0x03B5, 0x03C0, 0x03C2, 0x03C4, 0x03C5,
+                        0x03CE, 0x03CF, 0x03D4, 0x03D5))
+_ADLIB_PORTS = frozenset((0x388, 0x389))
+assert not (_SPEAKER_PORTS & _DAC_PORTS) and not (_SPEAKER_PORTS & _EGA_PORTS) \
+    and not (_SPEAKER_PORTS & _ADLIB_PORTS) and not (_DAC_PORTS & _EGA_PORTS) \
+    and not (_DAC_PORTS & _ADLIB_PORTS) and not (_EGA_PORTS & _ADLIB_PORTS), \
+    "port ownership must be disjoint -- see DOSMachine.port_write"
+
 
 def _dac8(v6: int) -> int:
     """Expand a 6-bit VGA DAC component to 8 bits the way real VGA does.
@@ -726,11 +743,51 @@ class DOSMachine:
         return 0
 
     def port_write(self, cpu: CPU8086, port: int, value: int, bits: int) -> None:
+        # ROUTE TO THE ONE OWNER, do not offer the write to all four trackers.
+        # Every OUT used to call all of them, and each re-checked the port and
+        # (for a 16-bit OUT) split itself into two more calls: 12 Python calls
+        # per 16-bit write, 11 of which did nothing.  It is a hot path -- a game
+        # doing EGA planar writes hits it ~500x per tick, ~21% of a gameplay
+        # boundary.  The port sets below are DISJOINT (asserted at import), so
+        # routing one byte to one tracker is the same thing, minus the misses.
         if len(self.port_log) < 4096:
             self.port_log.append(("out", port & 0xFFFF, value & ((1 << bits) - 1), bits))
         port &= 0xFFFF
         if self.sound_blaster is not None and bits == 8 and self._route_sound_write(port, value):
             return
+        if bits == 8:
+            if port in _EGA_PORTS:
+                self._track_ega_ports(cpu, port, value, 8)
+            elif port in _DAC_PORTS:
+                self._track_vga_dac_ports(port, value, 8,
+                                          int(getattr(cpu, "instruction_count", 0)))
+            elif port in _SPEAKER_PORTS:
+                self._track_pc_speaker(cpu, port, value, 8)
+            elif port in _ADLIB_PORTS:
+                self._track_adlib_ports(port, value, 8)
+            return
+        if bits == 16:
+            # The EGA tracker consumes a 16-bit OUT NATIVELY (AL=index, AH=data
+            # -- the game writes the map mask that way), so it sees the whole
+            # word at the BASE port and never the high byte's port.  The other
+            # three split a word into two independent byte writes, so each byte
+            # goes to whichever tracker owns ITS port.  That asymmetry is the
+            # historical behaviour, preserved exactly.
+            if port in _EGA_PORTS:
+                self._track_ega_ports(cpu, port, value, 16)
+            hi_port = (port + 1) & 0xFFFF
+            for p, v in ((port, value & 0xFF), (hi_port, (value >> 8) & 0xFF)):
+                if p in _DAC_PORTS:
+                    self._track_vga_dac_ports(p, v, 8,
+                                              int(getattr(cpu, "instruction_count", 0)))
+                elif p in _SPEAKER_PORTS:
+                    self._track_pc_speaker(cpu, p, v, 8)
+                elif p in _ADLIB_PORTS:
+                    self._track_adlib_ports(p, v, 8)
+            return
+        # Any other width: the historical fan-out.  Cold (a 16-bit guest only
+        # ever emits 8/16) and the trackers disagree about what a non-8/16 width
+        # even means -- two act on it, two return -- so do not paraphrase it.
         self._track_pc_speaker(cpu, port, value, bits)
         self._track_vga_dac_ports(port, value, bits,
                                   int(getattr(cpu, "instruction_count", 0)))
