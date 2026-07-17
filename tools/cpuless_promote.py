@@ -51,7 +51,10 @@ def _scan_for(rec: dict, desmc: bool):
     slots = desmc_operand_slots(rec)
     if slots is None or (slots and not desmc):
         raise emit_cpuless.Refusal("ir-not-liftable")
-    if any(s[0] != "imm" for s in slots.values()):
+    # supported de-SMC operand kinds: an `imm` (read from live code memory), and
+    # a `far-target` (a runtime-patched EA ptr16:16 -- the ISR-chain tail, whose
+    # target is read from code memory and handed to plat.chain_interrupt).
+    if any(s[0] not in ("imm", "far-target") for s in slots.values()):
         raise emit_cpuless.Refusal("desmc-unsupported-field")
     scan = scan_from_ir_record(rec)
     if slots:
@@ -78,6 +81,11 @@ def _gate_dyn_evidence(scan, cs, dyn_evidence, done, dispatch_owner,
     against the promoted IRET-handler set instead."""
     leaders = None
     for i in scan.insts.values():
+        if emit_cpuless._is_desmc_far_chain(i):
+            # a de-SMC'd EA chain tail leaves the recovered corpus for an
+            # EXTERNAL handler (plat.chain_interrupt) -- there is no recovered
+            # IRET handler to gate against, so it is unconditionally allowed.
+            continue
         if emit_cpuless._is_isr_chain(i):
             site = f"{cs:04X}:{i.ip:04X}"
             for tgt in dyn_evidence.get(site, []):

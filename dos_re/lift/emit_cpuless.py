@@ -33,8 +33,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .decode import (CALL, CALL_FAR, CALL_IND, INT, IRET, JCC, JMP, JMP_IND,
-                     RET, RETF, SEQ)
+from .decode import (CALL, CALL_FAR, CALL_IND, INT, IRET, JCC, JMP, JMP_FAR,
+                     JMP_IND, RET, RETF, SEQ)
 from .cpuless import abi_scan, register_effects, W16, SEGS
 
 # x86 FLAGS bits (mirrors dos_re.cpu constants; literal here because the
@@ -1357,12 +1357,28 @@ def _is_game_int(i) -> bool:
     return i.kind == INT and i.int_no in (3, 0x60, 0x61)
 
 
+def _is_desmc_far_chain(i) -> bool:
+    """A de-SMC'd DIRECT far jmp (EA ptr16:16) whose target operand is
+    runtime-patched (tier 13): the ISR installer wrote the CHAINED (previous)
+    handler into the jmp's ptr16:16 at hook time.  The chained handler is
+    OUTSIDE the recovered corpus (the prior INT owner -- BIOS, or a TSR), so it
+    is modelled as an explicit platform effect (``plat.chain_interrupt``), NOT
+    dispatched as recovered code."""
+    return i.kind == JMP_FAR and getattr(i, "patched_slot", None) is not None \
+        and i.patched_slot[0] == "far-target"
+
+
 def _is_isr_chain(i) -> bool:
-    """A far indirect jmp through a memory vector (tier 13): the ISR chain
-    tail -- dispatched through HANDLERS; the chained handler's iret ends
-    THIS function's interrupt (the function's exit kind is iret)."""
-    return i.kind == JMP_IND and i.modrm is not None \
-        and ((i.modrm >> 3) & 7) == 5
+    """An ISR chain tail (tier 13): the chained handler's iret ends THIS
+    function's interrupt (the function's exit kind is iret).  Two forms:
+      * FF /5 far indirect jmp through a memory vector -- a game/BIOS vector
+        slot, dispatched to a recovered handler through HANDLERS;
+      * a de-SMC'd DIRECT far jmp whose ptr16:16 is runtime-patched to the
+        previous (external) handler -- an explicit platform chain effect."""
+    if i.kind == JMP_IND and i.modrm is not None \
+            and ((i.modrm >> 3) & 7) == 5:
+        return True
+    return _is_desmc_far_chain(i)
 
 
 def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
@@ -1805,7 +1821,11 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
         A("")
         for cname in used_names:
             A(f"from {recovered_import_base}.{cname} import {cname}")
-    has_ivec = any(_is_game_int(i) or _is_isr_chain(i)
+    # _ivec (HANDLERS dispatch) serves game-vectored INTs and the FF /5 memory-
+    # vector chain -- NOT the de-SMC'd external far chain (that is plat.chain_
+    # interrupt, no recovered handler), so it must not force the _ivec import.
+    has_ivec = any(_is_game_int(i)
+                   or (_is_isr_chain(i) and not _is_desmc_far_chain(i))
                    for i in scan.insts.values())
     if has_dyn:
         A("")
@@ -1930,25 +1950,41 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 terminated = True
                 break
             if _is_isr_chain(i):
-                # tier 13: the ISR CHAIN tail -- read the saved far vector
-                # from memory, dispatch its recovered handler (HANDLERS
-                # registry) on OUR interrupt frame; its iret ends this
-                # interrupt, so this is the function's exit.  An unknown
-                # vector raises the witness -- never a fallback.
+                # tier 13: the ISR CHAIN tail -- read the chained handler's far
+                # vector, run it on OUR interrupt frame; its iret ends this
+                # interrupt, so this is the function's exit.
                 off = count - 1
                 cost = "_base + _cost" if off == 0 else f"_base + _cost + {off}"
-                eoff, eseg = _ea(i)
-                blk.append(f"_co = {eoff}")
-                blk.append(f"_vo = mem.rw({eseg}, _co)")
-                blk.append(f"_vs = mem.rw({eseg}, (_co + 2) & 0xFFFF)")
+                desmc_far = _is_desmc_far_chain(i)
+                if desmc_far:
+                    # de-SMC'd EA far-jmp: the ptr16:16 operand was runtime-
+                    # patched (install time) to the PREVIOUS handler.  Read it
+                    # from live CODE memory -- the operand sits after the EA
+                    # opcode at the function's own cs.
+                    paddr = i.patched_slot[1]
+                    blk.append(f"_vo = mem.rw(cs, 0x{paddr & 0xFFFF:04X})")
+                    blk.append(f"_vs = mem.rw(cs, 0x{(paddr + 2) & 0xFFFF:04X})")
+                else:
+                    # FF /5 far indirect jmp through a memory vector.
+                    eoff, eseg = _ea(i)
+                    blk.append(f"_co = {eoff}")
+                    blk.append(f"_vo = mem.rw({eseg}, _co)")
+                    blk.append(f"_vs = mem.rw({eseg}, (_co + 2) & 0xFFFF)")
                 fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
                                 for f in ("cf", "pf", "af", "zf", "sf", "of",
                                           "df", "intf"))
                 bundle = ", ".join(f"'{r}': {r}" for r in _DYN_REGS) \
                     + (", 'cs': _vs, '_df': (1 if df else 0), "
                        f"'_flags_in': ((_flags_in & ~_fmask) | (({fw}) & _fmask))")
-                blk.append(f"_do, _dc = _ivec(\"%04X:%04X\" % (_vs, _vo), "
-                           f"mem, plat, {cost}, {{{bundle}}})")
+                if desmc_far:
+                    # the chained handler is OUTSIDE the recovered corpus (the
+                    # prior INT owner -- BIOS, or a TSR): an EXPLICIT platform
+                    # effect, NEVER a recovered-code (HANDLERS) dispatch.
+                    blk.append(f"_do, _dc = plat.chain_interrupt("
+                               f"_vs, _vo, {{{bundle}}}, {cost})")
+                else:
+                    blk.append(f"_do, _dc = _ivec(\"%04X:%04X\" % (_vs, _vo), "
+                               f"mem, plat, {cost}, {{{bundle}}})")
                 for r in _DYN_REGS:
                     blk.append(f"{r} = _do['{r}']")
                 blk.append("_gm = _dc['fmask']")

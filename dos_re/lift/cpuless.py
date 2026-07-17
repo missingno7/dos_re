@@ -432,6 +432,16 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
             R.add("cx")
         return Effects(frozenset(R), frozenset(W), mr, mw, sd)
     if inst.kind in (JMP, JMP_FAR):
+        if inst.kind == JMP_FAR \
+                and getattr(inst, "patched_slot", None) is not None \
+                and inst.patched_slot[0] == "far-target":
+            # de-SMC'd ISR chain tail (EA ptr16:16, runtime-patched to the
+            # previous handler): the chained (external) handler runs on our
+            # interrupt frame and its iret ends our interrupt.  Full-bundle
+            # conservative dataflow, depth-0 tail -- like the FF /5 form.
+            allr = frozenset(W16) | frozenset({"ds", "es", "ss"})
+            return Effects(reads=allr, writes=allr - frozenset({"ss"}),
+                           mem_read=True, mem_write=True, stack_delta=0)
         return Effects()
     if inst.kind == RET:
         R.update({"sp", "ss"}); W.add("sp")

@@ -172,6 +172,15 @@ class VMlessPlatformAdapter:
             hook(cpu, head_cs, head_ip, resume_ip)
         return regs, regs.get("_flags_in", 2), 0
 
+    def chain_interrupt(self, vec_seg: int, vec_off: int, regs: dict,
+                        cost: int) -> tuple:
+        """ISR chain tail (de-SMC'd far jmp to the previous, external handler).
+        Verification binding: the interpreted oracle far-jumps to the same
+        target (the BIOS IRET stub in low memory), so this reads the shared VM
+        memory and models the iret stub identically."""
+        self.cpu.instruction_count = self.entry + cost
+        return _chain_iret_stub(self.cpu.mem, vec_seg, vec_off, regs)
+
 
 def make_cpu_platform(cpu):
     """VMless verification factory: a :class:`VMlessPlatformAdapter` bound to
@@ -203,6 +212,28 @@ class _ClockCarrier:
 class UnsupportedPlatformEffect(RuntimeError):
     """A reached platform effect the CPUless runtime does not implement.  Fail
     loud with a witness; never fall back to interpretation."""
+
+
+def _chain_iret_stub(mem, vec_seg: int, vec_off: int, regs: dict) -> tuple:
+    """Model a recovered ISR chaining (``jmp far``) to the PREVIOUS handler of
+    its vector -- an EXTERNAL handler outside the recovered corpus.
+
+    In the EXE-free boot image the default/uninstalled interrupt vectors point
+    at the BIOS IRET stub ``seed_low_memory`` wrote (a bare ``0xCF``), so the
+    chain is a NO-OP: the stub's iret simply ends the interrupt, leaving the
+    register bundle and flags as the recovered body left them.  This is
+    VERIFIED, not assumed -- the target's first byte is read from live memory
+    and MUST be ``iret``.  Any other target is an unmodelled external handler:
+    fail loud (the hard wall).  Returns the ``(regs, compat)`` pair the emitter
+    expects from a chain, same shape as the recovered-handler dispatch."""
+    op = mem.rb(vec_seg & 0xFFFF, vec_off & 0xFFFF)
+    if op != 0xCF:
+        raise UnsupportedPlatformEffect(
+            f"ISR chain to {vec_seg & 0xFFFF:04X}:{vec_off & 0xFFFF:04X} is not "
+            f"the BIOS IRET stub (first byte {op:02X}): no external handler is "
+            f"modelled by the CPUless runtime")
+    return dict(regs), {"flags": regs.get("_flags_in", 2) & 0xFFFF,
+                        "fmask": 0, "cost": 0}
 
 
 #: registers an INT service reads/writes as an explicit bundle (no sp/ss/cs:
@@ -323,6 +354,16 @@ class CPUlessPlatformRuntime:
             raise UnsupportedPlatformEffect(
                 f"INT {num & 0xFF:02X} not implemented by the CPUless runtime "
                 f"(unset vector or game-installed handler): {e}") from e
+
+    def chain_interrupt(self, vec_seg: int, vec_off: int, regs: dict,
+                        cost: int) -> tuple:
+        """ISR chain tail: a recovered interrupt handler jmp-far's to the
+        PREVIOUS owner of its vector (the de-SMC'd EA target).  In the EXE-free
+        image that owner is the BIOS IRET stub -- an explicit no-op platform
+        effect, never a recovered-code dispatch (there is no recovered handler
+        at a BIOS address)."""
+        self._carrier.instruction_count = self._entry + cost
+        return _chain_iret_stub(self.mem, vec_seg, vec_off, regs)
 
     def farcall(self, seg: int, off: int, regs: dict, argbytes: int,
                 cost: int) -> dict:
