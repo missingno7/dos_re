@@ -847,7 +847,19 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
                    far_callee_effects=far_effects)
     heads = frozenset(boundary_addrs) & frozenset(scan.insts)
     for h in heads:
-        if scan.insts[h].kind != SEQ:
+        hk = scan.insts[h].kind
+        # A boundary head yields AFTER its instruction (the CPUless observer is
+        # a synchronous plat.boundary call, no unwind/re-entry).  A SEQ head
+        # yields after the op; a COMPOSED CALL/CALL_FAR head yields after the
+        # recovered callee returns -- the frame/event loop's natural boundary is
+        # exactly this (`call <frame-boundary>` then yield).  Other kinds (a bare
+        # jmp/jcc/ret, an uncomposed or indirect call, a game INT) are not a
+        # meaningful "instruction then continue" site -- refuse loud.
+        if hk == SEQ:
+            continue
+        composed = (hk == CALL and scan.insts[h].target in callees) or \
+                   (hk == CALL_FAR and scan.insts[h].far_target in far_callees)
+        if not composed:
             raise Refusal("boundary-head-on-transfer")
     if alt_entries or heads:
         # dynamic arrival / boundary observer: liveness is unknown (the
@@ -1783,6 +1795,13 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 # return offset plus the caller's explicitly pushed CS.
                 pop_n = 4 if (far or c.ret_kind == "far") else 2 + c.ret_pop
                 blk.append(f"sp = (sp + {pop_n}) & 0xFFFF")
+                if i.ip in heads:
+                    # a boundary head ON this call: yield AFTER the recovered
+                    # callee returns (the frame-boundary call site).  _cost
+                    # already carries the callee's virtual time, so the observer
+                    # fires at the post-call offset; registers/flags reflect the
+                    # returned state and merge back any delivered-ISR effects.
+                    _emit_boundary_observer(blk, cs, i, count)
                 ip = i.next_ip
                 if ip in bb_of:
                     blk.append(f"_cost += {count}")
