@@ -50,6 +50,14 @@ def main(argv=None) -> int:
     ap.add_argument("--vector-evidence", default=None,
                     help="vector_sites.json: observed vectored handlers are "
                          "externally reachable")
+    ap.add_argument("--boundary-heads", default=None,
+                    help="@FILE of boundary-head CS:IP addresses: a park "
+                         "digests the full register bundle, so its function "
+                         "widens and its site observes everything")
+    ap.add_argument("--dispatch-entries", default=None,
+                    help="@FILE of dynamic-arrival CS:IP addresses: an "
+                         "alt-entry function widens and its returns stay "
+                         "conservative")
     ap.add_argument("--names", default=None,
                     help="recovery facts JSON with an optional "
                          "'function_names' {CS:IP: name} table (provenance "
@@ -68,7 +76,22 @@ def main(argv=None) -> int:
             Path(args.names).read_text(encoding="utf-8")).get(
                 "function_names", {}).items()}
 
-    census = infer_contracts(ir, external=frozenset(external), names=names)
+    def addr_file(spec: str | None) -> frozenset:
+        if not spec:
+            return frozenset()
+        out = set()
+        for line in Path(spec.lstrip("@")).read_text(
+                encoding="utf-8").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                cs, ip = line.split(":")
+                out.add((int(cs, 16), int(ip, 16)))
+        return frozenset(out)
+
+    census = infer_contracts(
+        ir, external=frozenset(external), names=names,
+        boundary_addrs=addr_file(args.boundary_heads),
+        dispatch_addrs=addr_file(args.dispatch_entries))
 
     s = census["summary"]
     print(f"M3b ABI-contract census over {s['total']} functions:")

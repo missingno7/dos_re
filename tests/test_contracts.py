@@ -147,6 +147,33 @@ def test_infer_contracts_names_attach_as_metadata():
     assert any(n == "name: init_pair [1010:0100]" for n in notes)
 
 
+def test_boundary_observer_blocks_narrowing():
+    # A boundary head right after the call digests the FULL register bundle
+    # against the oracle -- so the callee's bx must NOT be dropped even
+    # though the caller's own dataflow overwrites it later.
+    ir = _ir({"1010:0000": CALLER, "1010:0100": CALLEE})
+    plain = infer_contracts(ir)
+    assert plain["functions"]["1010:0100"]["dropped_outputs"] == ["bx"]
+    with_park = infer_contracts(
+        ir, boundary_addrs=frozenset({(0x1010, 0x0003)}))
+    f = with_park["functions"]["1010:0100"]
+    assert f["dropped_outputs"] == [] and set(f["returns"]) >= {"ax", "bx"}
+    # the park-containing caller widens its inputs (mirrors check_promotable)
+    caller = with_park["functions"]["1010:0000"]
+    assert "inputs-widened-observer" in caller["notes"]
+
+
+def test_dispatch_alt_entry_forces_conservative():
+    # a dynamic arrival lands mid-callee: its outputs also exit through the
+    # dispatcher, so narrowing must not apply
+    ir = _ir({"1010:0000": CALLER, "1010:0100": CALLEE})
+    census = infer_contracts(
+        ir, dispatch_addrs=frozenset({(0x1010, 0x0103)}))
+    f = census["functions"]["1010:0100"]
+    assert f["returns_status"] == "external-conservative"
+    assert f["dropped_outputs"] == []
+
+
 def test_mixed_return_convention_refuses():
     # jz +1 over retf; ret  (both near and far exits)
     ir = _ir({"1010:0000": "74 01 C3 CB"})

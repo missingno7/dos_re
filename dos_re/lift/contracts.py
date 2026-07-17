@@ -57,6 +57,11 @@ MACHINE_REGS = frozenset({"sp", "ss"})
 _CONS_READS = frozenset(W16) | frozenset({"ds", "es", "ss"})
 _CONS_WRITES = _CONS_READS - frozenset({"ss", "sp"})
 
+#: the bundle a boundary observer digests at a park (emit_cpuless._DYN_REGS
+#: + the flags word): the acceptance harness compares the REGISTER FILE at
+#: every tick boundary, so a park site observes all of these.
+_OBSERVER_REGS = frozenset(W16) | frozenset({"ds", "es", "ss"})
+
 
 def scan_for(rec: dict):
     """``(FunctionScan, None)`` for one IR record -- de-SMC applied when the
@@ -103,16 +108,25 @@ def _call_sites(scan, cs: int):
     return sites
 
 
-def compose_effects(ir: dict, scans: dict) -> tuple[dict, dict, dict]:
+def compose_effects(ir: dict, scans: dict, *,
+                    widen_full: frozenset = frozenset()) -> tuple[dict, dict,
+                                                                  dict]:
     """Interprocedural (inputs, outputs) per function key, composed bottom-up
     over the direct call graph to fixpoint.
+
+    ``widen_full``: keys whose INPUTS widen to the full register bundle --
+    functions containing a boundary head or a dynamic-arrival address, where
+    liveness at the observer/arrival is externally governed.  Mirrors
+    emit_cpuless.check_promotable's widening, so the composed contracts here
+    agree with what the mechanical emitter actually shipped.
 
     Returns ``(effects, reports, notes)``: ``effects[key] = (inputs,
     outputs)`` frozensets, ``reports[key]`` the underlying
     :class:`~dos_re.lift.cpuless.AbiReport`, and ``notes[key]`` composition
-    caveats ("self-recursive", "conservative-composition", "dead-call-stub").
-    A direct target absent from the IR corpus is a runtime-dead stub (empty
-    effects, matching the shipped mechanical graph)."""
+    caveats ("self-recursive", "conservative-composition", "dead-call-stub",
+    "inputs-widened-observer").  A direct target absent from the IR corpus is
+    a runtime-dead stub (empty effects, matching the shipped mechanical
+    graph)."""
     corpus = frozenset(ir["functions"])
     effects: dict[str, tuple] = {}
     reports: dict[str, object] = {}
@@ -159,7 +173,11 @@ def compose_effects(ir: dict, scans: dict) -> tuple[dict, dict, dict]:
                     del effects[key]
                 continue
             r = abi_scan(scan, callee_effects=near, far_callee_effects=far)
-            effects[key] = (r.inputs, r.outputs)
+            ins = r.inputs
+            if key in widen_full:
+                ins = ins | frozenset(W16) | frozenset({"ds", "es", "ss"})
+                note(key, "inputs-widened-observer")
+            effects[key] = (ins, r.outputs)
             reports[key] = r
             if self_rec:
                 note(key, "self-recursive")
@@ -176,7 +194,11 @@ def compose_effects(ir: dict, scans: dict) -> tuple[dict, dict, dict]:
         cs = int(key.split(":")[0], 16)
         near, far = callee_maps(scan, cs, conservative_missing=True)
         r = abi_scan(scan, callee_effects=near, far_callee_effects=far)
-        effects[key] = (r.inputs, r.outputs)
+        ins = r.inputs
+        if key in widen_full:
+            ins = ins | frozenset(W16) | frozenset({"ds", "es", "ss"})
+            note(key, "inputs-widened-observer")
+        effects[key] = (ins, r.outputs)
         reports[key] = r
         note(key, "conservative-composition")
     return effects, reports, notes
@@ -184,6 +206,27 @@ def compose_effects(ir: dict, scans: dict) -> tuple[dict, dict, dict]:
 
 # ---------------------------------------------------------------------------
 # interprocedural exit liveness: which outputs a caller actually observes
+
+def observer_effects(effs: dict, observer_ips: frozenset) -> dict:
+    """Overlay boundary-observer semantics onto per-instruction effects: a
+    park site hands the full live bundle to ``plat.boundary`` (digested
+    against the oracle) and merges the resumed bundle back -- so for
+    liveness it READS and WRITES the whole observer bundle.  Applied to the
+    ips named in ``observer_ips`` (boundary heads inside this function)."""
+    out = dict(effs)
+    for ip in observer_ips:
+        if ip not in out:
+            continue
+        e = out[ip]
+        out[ip] = Effects(reads=e.reads | _OBSERVER_REGS,
+                          writes=e.writes | (_OBSERVER_REGS
+                                             - frozenset({"ss"})),
+                          mem_read=True, mem_write=e.mem_write,
+                          stack_delta=e.stack_delta,
+                          refusal=e.refusal, port_io=e.port_io,
+                          int_effect=e.int_effect)
+    return out
+
 
 def _live_out_map(scan, effs, exit_seed: frozenset) -> dict[int, frozenset]:
     """Per-instruction live-AFTER register sets by backward may-liveness --
@@ -218,7 +261,8 @@ def _live_out_map(scan, effs, exit_seed: frozenset) -> dict[int, frozenset]:
 
 
 def observed_returns(ir: dict, scans: dict, effects: dict, *,
-                     external: frozenset = frozenset()) -> tuple[dict, dict]:
+                     external: frozenset = frozenset(),
+                     observers: dict | None = None) -> tuple[dict, dict]:
     """Narrow every function's register outputs to the CALLER-OBSERVED set.
 
     ``observed[key]`` = union over all direct call sites of the registers
@@ -228,10 +272,15 @@ def observed_returns(ir: dict, scans: dict, effects: dict, *,
     anything reachable outside the static graph -- and functions with NO
     static call site keep their full output set, flagged conservative.
 
+    ``observers``: per-key boundary-head ips inside that function -- a park
+    digests the full register bundle against the oracle, so those sites
+    read/write everything in the liveness (see :func:`observer_effects`).
+
     Decreasing fixpoint from the all-outputs seed (exit seeds only shrink,
     so liveness and observation only shrink; terminates).  Returns
     ``(observed, status)`` with ``status[key]`` one of "narrowed" |
     "external-conservative" | "no-static-caller"."""
+    observers = observers or {}
     callers: dict[str, list] = {k: [] for k in scans}
     for ckey, scan in sorted(scans.items()):
         cs = int(ckey.split(":")[0], 16)
@@ -251,7 +300,7 @@ def observed_returns(ir: dict, scans: dict, effects: dict, *,
             effs[ip] = Effects(reads=frozenset(ins) | frozenset({"sp", "ss"}),
                                writes=frozenset(outs) | frozenset({"sp"}),
                                mem_read=True, mem_write=True, stack_delta=0)
-        return effs
+        return observer_effects(effs, observers.get(ckey, frozenset()))
 
     effs_cache = {k: caller_effs(k) for k in sorted(scans)}
     # SEMANTIC registers only: sp/ss are stack machinery in every contract,
@@ -500,23 +549,45 @@ def _param_kinds(scan, inputs: frozenset, pairs: dict) -> list[dict]:
 
 
 def infer_contracts(ir: dict, *, external: frozenset = frozenset(),
-                    names: dict[str, str] | None = None) -> dict:
+                    names: dict[str, str] | None = None,
+                    boundary_addrs: frozenset = frozenset(),
+                    dispatch_addrs: frozenset = frozenset()) -> dict:
     """The M3b contract census over a recovery IR.
 
     ``external``: "CS:IP" keys reachable outside the static direct-call
     graph (roots, dynamic-dispatch targets, vectored handlers) -- their
-    return sets stay conservative.  ``names``: optional recovered-name
-    metadata; provenance stays the address, names attach as ``name
-    [CS:IP]``.
+    return sets stay conservative.  ``boundary_addrs`` / ``dispatch_addrs``:
+    (cs, ip) sets of boundary heads and dynamic-arrival addresses.  A
+    function CONTAINING one widens its inputs to the full bundle (mirroring
+    the mechanical emitter); a park site observes the full bundle in the
+    narrowing liveness; an alt-entry function's returns stay conservative
+    (its outputs also exit through the dispatcher).  ``names``: optional
+    recovered-name metadata; provenance stays the address, names attach as
+    ``name [CS:IP]``.
 
     Returns a deterministic JSON-ready census: per-function proposals plus
     the summary work list.  A function with any refusal is NOT
     contract-promotable -- the refusal names the evidence."""
     names = names or {}
     scans, skipped = build_scans(ir)
-    effects, reports, notes = compose_effects(ir, scans)
-    observed, obs_status = observed_returns(ir, scans, effects,
-                                            external=external)
+    observers: dict[str, frozenset] = {}
+    alt_entry_keys: set[str] = set()
+    for key, scan in scans.items():
+        cs = int(key.split(":")[0], 16)
+        heads = frozenset(ip for (hcs, ip) in boundary_addrs
+                          if hcs == cs and ip in scan.insts)
+        if heads:
+            observers[key] = heads
+        if any(hcs == cs and ip in scan.insts and ip != scan.entry
+               for (hcs, ip) in dispatch_addrs):
+            alt_entry_keys.add(key)
+    widen_full = frozenset(observers) | frozenset(alt_entry_keys)
+    effects, reports, notes = compose_effects(ir, scans,
+                                              widen_full=widen_full)
+    observed, obs_status = observed_returns(
+        ir, scans, effects,
+        external=external | frozenset(alt_entry_keys),
+        observers=observers)
 
     proposals: dict[str, ContractProposal] = {}
     for key in sorted(ir["functions"]):
