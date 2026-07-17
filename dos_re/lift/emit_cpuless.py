@@ -859,8 +859,14 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     # the full FLAGS word is ALSO a compat input when a game-INT frame or
     # pushf writes it here (untracked bits ride the caller word) or a
     # composed callee needs it -- transitive, like _df (tier 12).
+    # A near-DYNAMIC site needs it for the same reason a vectored one does
+    # (tier 14): the target is unknown at emit time, so the site must be able
+    # to hand the callee a full FLAGS word -- reconstructing it needs the
+    # untracked bits, which only _flags_in carries.  Without this a
+    # flags-livein function could not be a dispatch target at all.
     flags_livein = fl_needed or bool(heads) \
-        or any(_is_game_int(i) or _is_isr_chain(i) or i.op == 0x9C
+        or any(_is_dyn(i) or _is_game_int(i) or _is_isr_chain(i)
+               or i.op == 0x9C
                for i in scan.insts.values()) \
         or any(i.kind == CALL and i.target in callees
                and callees[i.target].flags_livein
@@ -1502,8 +1508,18 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                     blk.append(f"mem.ww(ss, sp, 0x{i.next_ip:04X})")
                 # near dispatch stays in this segment, so the callee's CS is
                 # this function's static CS (cs-as-data contracts need it).
+                # The bundle carries the full FLAGS word (tier 14, same
+                # reconstruction as the vectored site above): bits this
+                # function never wrote ride _flags_in, the rest are packed
+                # from the live flag vars.  _exec forwards it only to a
+                # target whose contract declares flags_livein.
+                fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
+                                for f in ("cf", "pf", "af", "zf", "sf", "of",
+                                          "df", "intf"))
                 bundle = ", ".join(f"'{r}': {r}" for r in _DYN_REGS) \
-                    + f", 'cs': 0x{cs:04X}, '_df': (1 if df else 0)"
+                    + (f", 'cs': 0x{cs:04X}, '_df': (1 if df else 0), "
+                       f"'_flags_in': ((_flags_in & ~_fmask) "
+                       f"| (({fw}) & _fmask))")
                 blk.append(f"_do, _dc = _dyn(\"{cs:04X}:%04X\" % _dt, "
                            f"mem, plat, {cost}, {{{bundle}}})")
                 for r in _DYN_REGS:

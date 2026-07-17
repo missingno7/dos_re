@@ -87,9 +87,10 @@ def _gate_dyn_evidence(scan, cs, dyn_evidence, done, dispatch_owner,
                                       or c.sp_delta != 0):
                     # the dyn bundle assumes a stack-balanced callee
                     raise emit_cpuless.Refusal("dyn-target-sp-escape")
-                if c is not None and c.flags_livein:
-                    # the near-dyn bundle carries no full flags word
-                    raise emit_cpuless.Refusal("dyn-target-needs-flags")
+                # (tier 14) a flags-livein target is fine: the near-dyn
+                # bundle now carries the reconstructed FLAGS word, exactly
+                # like the vectored site, and _exec forwards it only when the
+                # target's contract declares it.
                 continue
             raise emit_cpuless.Refusal("dyn-target-unpromoted")
 
@@ -411,8 +412,6 @@ def main(argv=None) -> int:
                 reason = "ret-pop"                  # callee-pops stack args
             elif c.sp_delta != 0:
                 reason = "sp-delta"                 # unbalanced exit
-            elif c.flags_livein:
-                reason = "flags-livein"             # bundle carries no FLAGS
             if reason is not None:
                 dispatch_excluded[key] = reason
                 continue    # only balanced near-return functions dispatch
