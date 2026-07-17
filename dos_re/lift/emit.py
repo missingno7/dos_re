@@ -801,7 +801,17 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
                 raise EmitUnsupported(
                     f"boundary head {cs:04X}:{h:04X} has no in-region "
                     f"successor -- a park there could not resume in host code")
+            # The head is a re-entry point TOO, not just its successor. A park
+            # leaves IP on the successor, so that is where a resumed park comes
+            # back -- but it is not the only way to be here. The machine can sit
+            # ON the head: a snapshot captured while the game spun in the wait
+            # (skyroads' gameplay demos all start at 1010:22F8, mid-spin), or an
+            # IRET returning to it after an IRQ landed on that instruction. Both
+            # are ordinary; neither could dispatch, because the head was forced
+            # as a block leader but never exported, so the wall fired at the one
+            # address the game is most often found at.
             forced.add(h)
+            resume_points.add(h)
             forced.add(nip)
             resume_points.add(nip)
         # THE UNWIND RE-ENTRY RULE: a boundary park unwinds the WHOLE lifted
