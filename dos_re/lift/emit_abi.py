@@ -30,7 +30,13 @@ support, raises -- never a silently degraded module.
 """
 from __future__ import annotations
 
-from .emit_cpuless import Refusal
+from .decode import (CALL, CALL_FAR, CALL_IND, HLT, INT, IRET, JCC, JMP,
+                     JMP_FAR, JMP_IND, RET, RETF, SEQ)
+from .cpuless import SEGS
+from .contracts import _STRING_PAIRS
+from .emit_cpuless import (Refusal, _check_flag_liveins, _DISPATCH_ITER_CAP,
+                           _FLAG_BITS, _JCC_EXPR, _patched_read, _reg16,
+                           _rm_read, _rm_write_lines, _translate)
 
 #: XOR perturbation for proven-unobserved outputs: guaranteed to differ
 #: from the mechanical value if anything observes it.
@@ -138,6 +144,373 @@ def emit_abi_module(key: str, proposal: dict, *, import_base: str,
         '',
     ]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# slice 2: the DE-STACKED algorithmic core (leaf tier)
+#
+# The mechanical core writes its local push/pop traffic into guest memory
+# (observable residue) and threads sp/ss through every contract.  The
+# ABI-recovered core keeps those locals in a Python VIRTUAL STACK: the
+# machine stack disappears from the contract (no sp/ss parameters, no stack
+# memory writes), which is the first real memory-dependency reduction on
+# the road to the memoryless stage.  Everything else -- instruction
+# semantics, flag bookkeeping, virtual-time cost -- reuses the mechanical
+# emitter's own translator, so the compat channel stays bit-identical and
+# the seeded differential (dos_re.lift.abi_diff) can compare the two forms
+# exactly.
+
+#: virtual-stack slot deltas for the stack family this tier virtualises.
+_PUSH_R16 = range(0x50, 0x58)
+_POP_R16 = range(0x58, 0x60)
+_PUSH_SEG = (0x06, 0x0E, 0x16, 0x1E)
+_POP_SEG = (0x07, 0x1F)                    # pop ss (0x17) refuses
+_PORT_IO = (0xE4, 0xE5, 0xE6, 0xE7, 0xEC, 0xED, 0xEE, 0xEF)
+
+
+def _ea_seg_of(i) -> str | None:
+    """The segment a memory ModRM operand addresses, or None for mod=3 /
+    no ModRM.  Mirrors the emitter's _ea default rule (bp-based -> ss)."""
+    if i.modrm is None or i.mod == 3:
+        return None
+    for p in i.prefixes:
+        if p in (0x26, 0x2E, 0x36, 0x3E):
+            return SEGS[(p >> 3) & 3]
+    if i.mod == 0 and i.rm == 6:
+        return "ds"
+    return "ss" if i.rm in (2, 3, 6) else "ds"
+
+
+def _vslot_delta(i) -> int | None:
+    """Virtual-stack slot delta for a stack-family instruction this tier
+    supports, or None for a non-stack instruction."""
+    op = i.op
+    if op in _PUSH_R16 or op in _PUSH_SEG or op in (0x68, 0x6A) \
+            or (op == 0xFF and i.reg == 6):
+        return +1
+    if op in _POP_R16 or op in _POP_SEG or (op == 0x8F and i.reg == 0):
+        return -1
+    if op == 0x60:                          # pusha
+        return +8
+    if op == 0x61:                          # popa
+        return -8
+    return None
+
+
+def check_destackable(scan, *, boundary_addrs=frozenset(),
+                      dispatch_addrs=frozenset()) -> dict[int, int]:
+    """Prove one function's machine-stack use is PURELY LOCAL so its stack
+    can become Python locals.  Returns the per-ip entry depth map (slots).
+
+    Refusal-first; each reason is a slice-2 capability name:
+      * leaf-only: calls, interrupts, dynamic transfers compose later;
+      * platform-port-io / flags-word-stack / sp-adjust / frame-or-sp-data /
+        ss-write: shapes whose stack or platform coupling this tier keeps
+        mechanical;
+      * stack-addressed-memory: an ss-segment effective address -- the
+        function reads/writes its stack as MEMORY, so the stack must stay
+        memory-backed;
+      * touches-return-address: a pop below entry depth;
+      * unbalanced-stack / depth-join-mismatch: the virtual stack cannot be
+        proven consistent;
+      * observer/alt-entry: park- or dispatch-carrying functions stay
+        mechanical (their frames are externally observable)."""
+    from .cpuless import register_effects
+
+    cs_addrs = {ip for ip in scan.insts}
+    if frozenset(boundary_addrs) & cs_addrs:
+        raise Refusal("observer-in-function")
+    if frozenset(dispatch_addrs) & (cs_addrs - {scan.entry}):
+        raise Refusal("alt-entry-in-function")
+    for i in scan.insts.values():
+        k = i.kind
+        if k in (CALL, CALL_FAR, CALL_IND, JMP_IND, JMP_FAR, INT, HLT):
+            raise Refusal(f"leaf-only:{k}")
+        if k == IRET:
+            raise Refusal("iret-contract")
+        if i.op in _PORT_IO:
+            raise Refusal("platform-port-io")
+        if i.op in (0x9C, 0x9D):
+            raise Refusal("flags-word-stack")
+        if i.op in (0xC8, 0xC9):
+            raise Refusal("frame-or-sp-data")
+        if i.op == 0x17 or (i.op == 0x8E and (i.reg & 3) == 2):
+            raise Refusal("ss-write")
+        if i.op == 0x16 or (i.op == 0x8C and (i.reg & 3) == 2):
+            # push ss / mov r,ss: the stack SEGMENT VALUE flows as data
+            # (push ss; pop es addressing idiom) -- a de-stacked core has
+            # no ss; slice 3 promotes it to a semantic segment parameter.
+            raise Refusal("ss-value-as-data")
+        if i.op in (0x81, 0x83) and i.mod == 3 and i.rm == 4 \
+                and i.reg in (0, 5):
+            raise Refusal("sp-adjust")
+        e = register_effects(i)
+        if e.frame_establish or e.frame_restore or e.frame_restore_to_base:
+            raise Refusal("frame-or-sp-data")
+        if _vslot_delta(i) is None and ("sp" in e.reads or "sp" in e.writes) \
+                and k not in (RET, RETF):
+            raise Refusal("frame-or-sp-data")   # sp as general data
+        if _ea_seg_of(i) == "ss":
+            raise Refusal("stack-addressed-memory")
+        if i.op in _STRING_PAIRS or i.op == 0xD7 \
+                or 0xA0 <= i.op <= 0xA3:      # moffs has no ModRM
+            for p in i.prefixes:
+                if p == 0x36:
+                    raise Refusal("stack-addressed-memory")
+
+    # virtual-stack depth walk: every ip one provable slot depth
+    depth: dict[int, int] = {scan.entry: 0}
+    work = [scan.entry]
+    while work:
+        ip = work.pop()
+        i = scan.insts[ip]
+        d = depth[ip]
+        delta = _vslot_delta(i) or 0
+        nd = d + delta
+        if nd < 0:
+            raise Refusal("touches-return-address")
+        if i.kind in (RET, RETF):
+            if nd != 0:
+                raise Refusal("unbalanced-stack")
+            continue
+        succs = []
+        if i.kind == SEQ:
+            succs = [i.next_ip]
+        elif i.kind == JCC:
+            succs = [i.next_ip, i.target]
+        elif i.kind == JMP:
+            succs = [i.target]
+        for s in succs:
+            if s is None or s not in scan.insts:
+                raise Refusal("leaves-region")
+            if s in depth:
+                if depth[s] != nd:
+                    raise Refusal("depth-join-mismatch")
+            else:
+                depth[s] = nd
+                work.append(s)
+    return depth
+
+
+def _emit_vstack(i, blk, cs) -> bool:
+    """Emit the VIRTUAL-STACK form of a supported stack-family instruction
+    (Python list ``_vs``; masking mirrors the mechanical mem.ww).  Returns
+    False for non-stack instructions (delegate to the shared translator)."""
+    op = i.op
+    if op in _PUSH_R16:
+        blk.append(f"_vs.append({_reg16(op & 7)} & 0xFFFF)")
+        return True
+    if op in _POP_R16:
+        blk.append(f"{_reg16(op & 7)} = _vs.pop()")
+        return True
+    if op in _PUSH_SEG:
+        blk.append(f"_vs.append({SEGS[(op >> 3) & 3]} & 0xFFFF)")
+        return True
+    if op in _POP_SEG:
+        blk.append(f"{SEGS[(op >> 3) & 3]} = _vs.pop()")
+        return True
+    if op in (0x68, 0x6A):
+        pr = _patched_read(i, cs)
+        if pr is not None:
+            if op == 0x6A:
+                blk.append(f"_pi = {pr}")
+                blk.append("_pi = (_pi | 0xFF00) if (_pi & 0x80) else _pi")
+                blk.append("_vs.append(_pi & 0xFFFF)")
+            else:
+                blk.append(f"_vs.append(({pr}) & 0xFFFF)")
+            return True
+        imm = (i.imm or 0) & 0xFFFF
+        if op == 0x6A and imm & 0x80:
+            imm |= 0xFF00
+        blk.append(f"_vs.append(0x{imm & 0xFFFF:X})")
+        return True
+    if op == 0xFF and i.reg == 6:
+        blk.append(f"_vs.append(({_rm_read(i, True)}) & 0xFFFF)")
+        return True
+    if op == 0x8F and i.reg == 0:
+        blk.append("_t = _vs.pop()")
+        blk.extend(_rm_write_lines(i, True, "_t"))
+        return True
+    if op == 0x60:                          # pusha (0 placeholder for sp)
+        blk.append("_vs.extend((ax & 0xFFFF, cx & 0xFFFF, dx & 0xFFFF, "
+                   "bx & 0xFFFF, 0, bp & 0xFFFF, si & 0xFFFF, di & 0xFFFF))")
+        return True
+    if op == 0x61:                          # popa (discards the saved sp)
+        for r in ("di", "si", "bp"):
+            blk.append(f"{r} = _vs.pop()")
+        blk.append("_vs.pop()")
+        for r in ("bx", "dx", "cx", "ax"):
+            blk.append(f"{r} = _vs.pop()")
+        return True
+    return False
+
+
+def emit_abi_core(scan, proposal: dict, key: str, *,
+                  name: str | None = None,
+                  boundary_addrs=frozenset(),
+                  dispatch_addrs=frozenset()) -> str:
+    """Generate the TRUE ABI-recovered core module for one destackable leaf
+    function: semantic signature (no sp/ss, no CPU bundle), virtual local
+    stack, observed-only returns + the bit-identical compat channel; a
+    public entry over the one core.  Refuses (named capability) anything
+    outside the slice-2 tier -- the refusal census IS the slice-3 work
+    list."""
+    if proposal.get("refusals"):
+        raise Refusal("contract-not-promotable")
+    check_destackable(scan, boundary_addrs=boundary_addrs,
+                      dispatch_addrs=dispatch_addrs)
+    exit_flags, df_livein, flags_livein = _check_flag_liveins(scan)
+    if flags_livein:
+        raise Refusal("flags-livein")
+
+    cs = int(key.split(":")[0], 16)
+    stem = _stem(key)
+    public = name or f"abi_{stem}"
+    if not public.isidentifier():
+        raise Refusal(f"recovered-name-not-identifier: {public!r}")
+    params = sorted(p["reg"] for p in proposal["params"])
+    returns = list(proposal["returns"])
+    machine = set(proposal["machine_private"])
+    if machine - {"sp", "ss", "cs"}:
+        raise Refusal("unsupported-machine-private: "
+                      + ",".join(sorted(machine - {"sp", "ss", "cs"})))
+
+    leaders = sorted(set(scan.block_leaders()))
+    bb_of = {ip: n for n, ip in enumerate(leaders)}
+
+    L: list[str] = []
+    A = L.append
+    prov = f"{name} [{key}]" if name else f"[{key}]"
+    A('"""AUTOGENERATED by dos_re.lift.emit_abi -- DE-STACKED ABI-recovered')
+    A(f'core for {key} (M3b slice 2).  DO NOT hand-edit; regenerate.')
+    A('')
+    A('The machine stack is a Python virtual stack: no sp/ss parameters, no')
+    A('stack memory writes -- the historical memory image is touched only by')
+    A("the function's SEMANTIC reads/writes.  The compat channel (exit")
+    A('flags + virtual-time cost) is bit-identical to the mechanical core;')
+    A('dos_re.lift.abi_diff compares the two forms exactly.')
+    A('"""')
+    A('')
+    A("_PARITY = tuple((1 - bin(v).count('1') % 2) == 1 for v in range(256))")
+    A('')
+    A('')
+    argl = (["_df=0"] if df_livein else []) + [f"{r}=0" for r in params]
+    args = ", ".join(argl)
+    A(f"def _abi_core(mem, *, {args}):" if args else "def _abi_core(mem):")
+    body: list[str] = []
+    B = body.append
+    B("_cost = 0")
+    B("cf = pf = af = zf = sf = of = df = intf = False")
+    if df_livein:
+        B("df = _df != 0    # caller DF (hidden compat input)")
+    B("_fmask = 0")
+    B(f"cs = 0x{cs:04X}")
+    B("_vs = []")
+    B(f"bb = {bb_of[scan.entry]}")
+    B("_iters = 0")
+    B("while True:")
+    B("    _iters += 1")
+    B(f"    if _iters > {_DISPATCH_ITER_CAP}:")
+    # the same wording as the mechanical emitter, so a spin-wait raises
+    # IDENTICALLY on both sides of the differential
+    B(f"        raise RuntimeError('CPUless dispatch spin in {key} "
+      f"(block %d, cost %d): loop exceeded {_DISPATCH_ITER_CAP} iterations "
+      f"-- an unbounded wait (interrupt-updated flag, or a wrong port after "
+      f"a state divergence)' % (bb, _cost))")
+    for n, leader in enumerate(leaders):
+        blk: list[str] = []
+        flag_written: set[str] = set()
+        ip = leader
+        count = 0
+        terminated = False
+
+        def _flush_flags():
+            if flag_written:
+                bits = " | ".join(f"0x{_FLAG_BITS[f]:X}"
+                                  for f in sorted(flag_written))
+                blk.append(f"_fmask |= {bits}")
+
+        while ip in scan.insts:
+            i = scan.insts[ip]
+            count += 1
+            if i.kind in (RET, RETF):
+                blk.append(f"_cost += {count}")
+                _flush_flags()
+                blk.append("break")
+                terminated = True
+                break
+            if i.kind == JMP:
+                blk.append(f"_cost += {count}")
+                _flush_flags()
+                blk.append(f"bb = {bb_of[i.target]}")
+                blk.append("continue")
+                terminated = True
+                break
+            if i.kind == JCC:
+                blk.append(f"_cost += {count}")
+                _flush_flags()
+                if i.op in (0xE0, 0xE1, 0xE2):
+                    blk.append("cx = (cx - 1) & 0xFFFF")
+                    cond = {0xE0: "cx != 0 and not zf",
+                            0xE1: "cx != 0 and zf",
+                            0xE2: "cx != 0"}[i.op]
+                elif i.op == 0xE3:
+                    cond = "cx == 0"
+                else:
+                    cond = _JCC_EXPR[i.op]
+                blk.append(f"if {cond}:")
+                blk.append(f"    bb = {bb_of[i.target]}")
+                blk.append("    continue")
+                blk.append(f"bb = {bb_of[i.next_ip]}")
+                blk.append("continue")
+                terminated = True
+                break
+            if not _emit_vstack(i, blk, cs):
+                _translate(i, blk, flag_written, cs)
+            nxt = i.next_ip
+            if nxt in bb_of and nxt != ip:
+                blk.append(f"_cost += {count}")
+                _flush_flags()
+                blk.append(f"bb = {bb_of[nxt]}")
+                blk.append("continue")
+                terminated = True
+                break
+            ip = nxt
+        if not terminated:
+            raise Refusal("block-falls-off-region")
+        B(f"    if bb == {n}:  # {cs:04X}:{leader:04X}")
+        for ln in blk:
+            B(f"        {ln}")
+    B("    raise AssertionError('unreachable dispatch')")
+    fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
+                    for f in ("cf", "pf", "af", "zf", "sf", "of",
+                              "df", "intf"))
+    B(f"_flags = ({fw}) & _fmask")
+    out_dict = ", ".join(f"'{r}': {r} & 0xFFFF" for r in returns)
+    B("return {" + out_dict + "}, "
+      "{'flags': _flags, 'fmask': _fmask, 'cost': _cost}")
+    for ln in body:
+        A(f"    {ln}")
+    A('')
+    A('')
+    if not returns:
+        ret_doc, ret_line = "None", "    return None"
+    elif len(returns) == 1:
+        ret_doc = returns[0]
+        ret_line = f"    return _o['{returns[0]}']"
+    else:
+        ret_doc = "(" + ", ".join(returns) + ")"
+        ret_line = ("    return ("
+                    + ", ".join(f"_o['{r}']" for r in returns) + ")")
+    psig = ", ".join(["mem"] + (["*"] if argl else []) + argl)
+    fwd = ", ".join(f"{a.split('=')[0]}={a.split('=')[0]}" for a in argl)
+    A(f"def {public}({psig}):")
+    A(f'    """Public ABI-recovered entry {prov}: semantic contract only.')
+    A(f'    Returns {ret_doc}."""')
+    A(f"    _o, _c = _abi_core(mem{', ' + fwd if fwd else ''})")
+    A(ret_line)
+    A('')
+    return "\n".join(L)
 
 
 def emit_shadow_loader(keys: list[str], *, abi_base: str,
