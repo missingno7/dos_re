@@ -48,6 +48,12 @@ class Effects:
     mem_read: bool = False
     mem_write: bool = False
     stack_delta: int | None = 0        # bytes; None = data-dependent/unknown
+    #: `leave`: sp is RESTORED from bp, not shifted by a constant. There is no
+    #: delta that describes it -- but the effect is exact anyway, because the
+    #: matching `enter` set bp to the frame base: the depth returns to the
+    #: function's entry depth. A consumer walking depth handles this by RESET,
+    #: not by arithmetic (see emit_cpuless._check_stack_depths).
+    frame_restore: bool = False
     refusal: str | None = None         # non-None: not analyzable yet (why)
     port_io: bool = False              # a port in/out platform effect (needs plat)
     int_effect: int | None = None      # an INT n platform effect (needs plat)
@@ -181,13 +187,19 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         R.update({"bp", "sp", "ss"}); W.update({"bp", "sp"})
         return Effects(frozenset(R), frozenset(W), mr, True, -(2 + size))
     if op == 0xC9:                       # leave
-        # mov sp,bp; pop bp. The stack effect is genuinely DATA-DEPENDENT -- sp
-        # comes from a register, not a constant -- so the honest delta is None.
-        # It is not a refusal: None only makes max_stack_use unknown for the
-        # function, which is a supported report state, and the frame it tears
-        # down was already measured at the matching `enter`.
+        # mov sp,bp; pop bp. No constant DELTA describes this -- sp comes from a
+        # register -- so stack_delta stays None. But the effect is not unknown:
+        # the matching `enter` put the frame base in bp, so this returns the
+        # depth to the function's entry depth. ``frame_restore`` says exactly
+        # that, and a depth walker handles it by RESET.
+        #
+        # The distinction earns its keep downstream: None alone reads as "we do
+        # not know", which costs the function its promotion (an unresolved stack
+        # effect, or an sp that becomes a contract output and blocks every
+        # caller). frame_restore is "we know precisely, just not as a number".
         R.update({"bp", "sp", "ss"}); W.update({"bp", "sp"})
-        return Effects(frozenset(R), frozenset(W), True, mw, None)
+        return Effects(frozenset(R), frozenset(W), True, mw, None,
+                       frame_restore=True)
     if op == 0x60:                       # pusha
         R.update(W16); R.add("ss"); W.add("sp")
         return Effects(frozenset(R), frozenset(W), mr, True, -16)

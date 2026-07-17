@@ -356,6 +356,31 @@ def _translate(inst, lines, flag_written):
             lines.append("    raise OverflowError('8-bit div quotient overflow')")
             lines.append("ax = ((_r & 0xFF) << 8) | (_q & 0xFF)")
         return
+    if op in (0xF6, 0xF7) and inst.reg == 7:             # idiv (signed)
+        # Mirrors the interpreter (cpu.py IDIV) BYTE for byte: truncate toward
+        # zero via int(a/b) -- NOT Python's floor // -- so the remainder takes
+        # the dividend's sign, exactly as the 8086 does. Same fail-loud on
+        # zero/overflow (a crash is a crash on both sides).
+        lines.append(f"_b = {_rm_read(inst, wide)}")
+        lines.append("if _b == 0:")
+        lines.append("    raise ZeroDivisionError('idiv by zero (recovered)')")
+        if wide:
+            lines.append("_d = (dx << 16) | ax")
+            lines.append("if _d & 0x80000000: _d -= 0x100000000")
+            lines.append("_v = _b - 0x10000 if _b & 0x8000 else _b")
+            lines.append("_q = int(_d / _v); _r = _d - _q * _v")
+            lines.append("if _q < -32768 or _q > 32767:")
+            lines.append("    raise OverflowError('16-bit idiv quotient overflow')")
+            lines.append("ax = _q & 0xFFFF")
+            lines.append("dx = _r & 0xFFFF")
+        else:
+            lines.append("_d = ax - 0x10000 if ax & 0x8000 else ax")
+            lines.append("_v = _b - 0x100 if _b & 0x80 else _b")
+            lines.append("_q = int(_d / _v); _r = _d - _q * _v")
+            lines.append("if _q < -128 or _q > 127:")
+            lines.append("    raise OverflowError('8-bit idiv quotient overflow')")
+            lines.append("ax = ((_r & 0xFF) << 8) | (_q & 0xFF)")
+        return
     if op == 0x98:                                        # cbw
         lines.append("ax = (ax & 0xFF) | (0xFF00 if ax & 0x80 else 0)")
         return
@@ -522,6 +547,44 @@ def _translate(inst, lines, flag_written):
     # ``sp`` is a plain integer local -- an address base, never data (the gate
     # refuses sp-as-data); balance is verified statically, so sp never appears
     # in the outputs and the adapter's RET ABI is unchanged.
+    if op == 0xC8:                                        # enter imm16, 0
+        # level 0 IS `push bp; mov bp,sp; sub sp,size` -- emitted as those three,
+        # because that is what it is (nesting level > 0 refuses in the ABI pass).
+        size = inst.raw[-3] | (inst.raw[-2] << 8)
+        lines.append("sp = (sp - 2) & 0xFFFF")
+        lines.append("mem.ww(ss, sp, bp)")
+        lines.append("bp = sp")
+        if size:
+            lines.append(f"sp = (sp - {size}) & 0xFFFF")
+        return
+    if op == 0xC9:                                        # leave
+        lines.append("sp = bp")
+        lines.append("bp = mem.rw(ss, sp)")
+        lines.append("sp = (sp + 2) & 0xFFFF")
+        return
+    if op == 0x60:                                        # pusha
+        # push ax,cx,dx,bx, the ORIGINAL sp, bp,si,di -- sp is captured before
+        # any push (8086 semantics), so snapshot it first.
+        lines.append("_sp0 = sp")
+        for r in ("ax", "cx", "dx", "bx"):
+            lines.append("sp = (sp - 2) & 0xFFFF")
+            lines.append(f"mem.ww(ss, sp, {r})")
+        lines.append("sp = (sp - 2) & 0xFFFF")
+        lines.append("mem.ww(ss, sp, _sp0)")
+        for r in ("bp", "si", "di"):
+            lines.append("sp = (sp - 2) & 0xFFFF")
+            lines.append(f"mem.ww(ss, sp, {r})")
+        return
+    if op == 0x61:                                        # popa
+        # pop di,si,bp, DISCARD the stacked sp, then bx,dx,cx,ax.
+        for r in ("di", "si", "bp"):
+            lines.append(f"{r} = mem.rw(ss, sp)")
+            lines.append("sp = (sp + 2) & 0xFFFF")
+        lines.append("sp = (sp + 2) & 0xFFFF")            # skip the saved sp
+        for r in ("bx", "dx", "cx", "ax"):
+            lines.append(f"{r} = mem.rw(ss, sp)")
+            lines.append("sp = (sp + 2) & 0xFFFF")
+        return
     if 0x50 <= op <= 0x57:                                # push r16
         lines.append("sp = (sp - 2) & 0xFFFF")
         lines.append(f"mem.ww(ss, sp, {_reg16(op & 7)})")
@@ -834,12 +897,13 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
             continue    # the RET ABI (incl. a uniform ret N / the iret
                         # frame) is the adapter's job; the depth checker
                         # gates the rest
-        if e.stack_delta is None:
+        if e.stack_delta is None and not e.frame_restore:
             raise Refusal("unresolved-stack-effect")
         if e.writes & frozenset({"cs", "ss"}):
             raise Refusal("cs-or-ss-mutation")
         if "sp" in (e.reads | e.writes) and not _is_stack_family(i):
             raise Refusal("sp-as-data")
+    _check_frame_pointer(scan)
     sp_delta, ret_pop, sp_output, sp_deltas = _check_stack_depths(
         scan, alt_entries, callees, far_callees)
     if sp_output and any(_is_dyn(i) and i.kind == JMP_IND
@@ -911,11 +975,53 @@ def _func_needs_plat(scan, callees, far_callees=None) -> bool:
     return False
 
 
+def _check_frame_pointer(scan) -> None:
+    """``leave`` restores sp FROM bp, so its depth effect is exact only while bp
+    still holds the frame base its ``enter`` put there.
+
+    That is the ONE assumption behind treating leave as a depth reset, so it is
+    checked rather than assumed: a leave with no enter has no frame base to
+    return to, and anything else writing bp means the value leave reads is not
+    the one enter wrote. Both refuse -- the alternative is a stack depth that is
+    confidently wrong, which is worse than a refusal by exactly the margin that
+    makes refusals worth having.
+
+    A balanced ``push bp`` / ``pop bp`` is fine and NOT a clobber: the stack
+    depth tracker already proves the pair balances, and a ``pop bp`` that
+    restores the frame base is exactly the value ``leave`` needs. Only a
+    NON-stack write to bp -- ``mov bp,sp`` re-pointing the frame, ``mov
+    bp,<data>``, ``les bp,...`` -- breaks the leave-as-reset invariant, and that
+    is what this catches. (A push/pop pair with bp used as scratch BETWEEN them
+    would need dominance analysis to prove the restore precedes the leave; that
+    still refuses, via the mov-bp write in the middle.)
+    """
+    leaves = [i for i in scan.insts.values() if i.op == 0xC9]
+    if not leaves:
+        return
+    if not any(i.op == 0xC8 for i in scan.insts.values()):
+        raise Refusal("leave-without-enter")
+    for i in scan.insts.values():
+        # Only a SEQUENTIAL instruction can clobber bp as data. A transfer's
+        # register writes are a CONSERVATIVE dataflow bundle, not a literal
+        # assignment: register_effects models a DOS/BIOS INT and a CALL as
+        # writing the whole bundle (bp included) for input/output inference, but
+        # neither destroys the frame pointer -- the callee restores it by ABI,
+        # the INT preserves it, and each is gated on its own terms elsewhere.
+        # Counting those as clobbers mislabels every INT/call function as
+        # "frame-pointer-clobbered" instead of its true reason.
+        if i.kind != SEQ or i.op in (0xC8, 0xC9) or _is_stack_family(i):
+            continue                       # transfers + frame ops + push/pop bp
+        if "bp" in register_effects(i).writes:
+            raise Refusal("frame-pointer-clobbered")
+
+
 def _is_stack_family(i) -> bool:
     """Instructions whose sp use IS the stack discipline (allowed), as opposed
     to sp used as general data (refused)."""
     op = i.op
     return (0x50 <= op <= 0x5F
+            or op in (0xC8, 0xC9)                  # enter/leave: the frame ops
+            or op in (0x60, 0x61)                  # pusha/popa
             or op in (0x06, 0x0E, 0x16, 0x1E)      # push seg
             or op in (0x9C, 0x9D)                  # pushf/popf (tier 12)
             or op in (0x07, 0x17, 0x1F)            # pop seg (pop ss refuses
@@ -1027,7 +1133,15 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
         # deltas: the tracker FORKS (the runtime sp flows back through the
         # callee's sp output, so every fork is a real executable path).
         # UNKNOWN (None) absorbs: unknown in -> unknown out.
-        if d is None:
+        if e.frame_restore:
+            # `leave`: sp := bp, and bp is the frame base its `enter` set (that
+            # is checked, see _check_frame_pointer), so the depth returns to the
+            # function's entry depth -- 0. A RESET, not arithmetic, and exact
+            # even when d is UNKNOWN: whatever the body did to the depth, leave
+            # discards it. That is what makes an enter/leave function composable
+            # instead of an sp-output that blocks every caller.
+            afters = [0]
+        elif d is None:
             afters = [None]
         else:
             afters = [d - (e.stack_delta or 0)]
