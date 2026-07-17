@@ -12,6 +12,7 @@ from .hooks import registry
 # load_mz_program loader edge (dos_re_2.0 §"The EXE-independence wall").
 from .runtime_core import (Runtime, create_runtime_from_image, BIOS_INT9_ENTRY,
                            _BIOS_IRET_STUB, _BIOS_INT9_LINEAR,
+                           install_bios_environment_hooks,
                            _init_bios_environment)
 
 
@@ -106,12 +107,12 @@ def create_runtime(
     cpu.interrupt_handler = dos.interrupt
     cpu.port_reader = dos.port_read
     cpu.port_writer = dos.port_write
-    # The power-on INT 09h (IRQ1) keyboard ISR.  Installed as a native handler at
-    # the BIOS entry the IVT points to, so a game that installs its own INT 9 and
-    # chains to the previous vector gets real BIOS scancode->buffer translation
-    # (the type-ahead buffer INT 16h reads).  See DOSMachine.bios_int9_keyboard.
-    cpu.replacement_hooks[BIOS_INT9_ENTRY] = dos.bios_int9_keyboard
-    cpu.hook_names[BIOS_INT9_ENTRY] = "bios_int9_keyboard"
+    # The power-on BIOS handlers a game can vector to, in native form: the INT
+    # 09h (IRQ1) keyboard ISR, so a game that installs its own INT 9 and chains
+    # to the previous vector gets real BIOS scancode->buffer translation (the
+    # type-ahead buffer INT 16h reads); and the dummy IRET stub, which the same
+    # chaining idiom reaches on every unclaimed IRQ.
+    install_bios_environment_hooks(cpu, dos)
     registry.install(cpu)
     return Runtime(program, cpu, dos)
 

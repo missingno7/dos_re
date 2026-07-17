@@ -11,12 +11,30 @@ chained interrupt.
 """
 from __future__ import annotations
 
+import struct
 from pathlib import Path
 
 from dos_re.cpu import CPU8086, CPUState
 from dos_re.memory import Memory
-from dos_re.runtime_core import (BIOS_IRET_ENTRY, bios_iret_stub,
-                                 create_runtime_from_image)
+from dos_re.runtime_core import (BIOS_INT9_ENTRY, BIOS_IRET_ENTRY,
+                                 bios_iret_stub, create_runtime_from_image)
+
+#: Every power-on BIOS entry a game can vector to. EVERY load path must install
+#: all of them: which handlers exist is a property of the MACHINE, not of how
+#: the program happened to be loaded.
+BIOS_HOOKS = {BIOS_INT9_ENTRY: "bios_int9_keyboard",
+              BIOS_IRET_ENTRY: "bios_iret_stub"}
+
+
+def _tiny_exe(tmp_path: Path) -> str:
+    exe = tmp_path / "T.EXE"
+    hdr = bytearray(32)
+    hdr[0:2] = b"MZ"
+    struct.pack_into("<H", hdr, 2, 32 + 1)
+    struct.pack_into("<H", hdr, 4, 1)
+    struct.pack_into("<H", hdr, 8, 2)
+    exe.write_bytes(bytes(hdr) + b"\xf4")
+    return str(exe)
 
 
 def test_stub_performs_a_real_iret() -> None:
@@ -39,6 +57,41 @@ def test_image_runtime_installs_the_stub_as_a_native_hook() -> None:
                                    game_root=Path("."))
     assert BIOS_IRET_ENTRY in rt.cpu.replacement_hooks
     assert rt.cpu.hook_names[BIOS_IRET_ENTRY] == "bios_iret_stub"
+
+
+def test_exe_runtime_installs_the_same_bios_hooks(tmp_path: Path) -> None:
+    """LOAD-PATH PARITY. Which BIOS handlers exist is a property of the
+    machine, not of how the program was loaded -- so the EXE path must install
+    exactly what the EXE-free path does.
+
+    It did not. The EXE path had INT 09h but not the IRET stub, and nothing
+    noticed because that path is normally interpreted, where the 0xCF byte
+    works fine. It surfaced only once a snapshot -- restored THROUGH this path
+    -- was run behind the VMless wall: first chained timer IRQ, violation at
+    F000:FF53, and no game code anywhere near the blame.
+    """
+    from dos_re.runtime import create_runtime
+    rt = create_runtime(_tiny_exe(tmp_path), game_root=str(tmp_path))
+    for entry, name in BIOS_HOOKS.items():
+        assert rt.cpu.hook_names.get(entry) == name, (
+            f"the EXE path is missing the native {name} at "
+            f"{entry[0]:04X}:{entry[1]:04X}")
+
+
+def test_snapshot_resume_installs_the_same_bios_hooks(tmp_path: Path) -> None:
+    """A snapshot resume is a THIRD load path (it goes through create_runtime
+    and then overwrites memory + CPU state), and it is the one the VMless demo
+    differential uses. Restoring the image must not cost the machine its BIOS
+    hooks."""
+    from dos_re.runtime import create_runtime
+    from dos_re.snapshot import load_snapshot, write_snapshot
+    exe = _tiny_exe(tmp_path)
+    rt = create_runtime(exe, game_root=str(tmp_path))
+    write_snapshot(rt, tmp_path / "snap", status="t", steps=0)
+    rt2 = load_snapshot(exe, tmp_path / "snap", game_root=str(tmp_path))
+    for entry, name in BIOS_HOOKS.items():
+        assert rt2.cpu.hook_names.get(entry) == name, (
+            f"a snapshot resume lost the native {name}")
 
 
 def test_chained_irq_returns_through_the_stub_with_no_interpretation() -> None:

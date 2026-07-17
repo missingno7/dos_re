@@ -51,6 +51,28 @@ def bios_iret_stub(cpu) -> None:
     s.flags = cpu.pop() | 0x0002
 
 
+def install_bios_environment_hooks(cpu, dos) -> None:
+    """Give the power-on BIOS handlers their NATIVE form.
+
+    THE RULE: every ROM-BIOS entry a game can vector to must exist both as the
+    byte the interpreter executes AND as a native hook -- because a game is
+    free to reach it from either kind of runtime, and the two must model the
+    same machine.
+
+    Not a VMless-only concern, which is exactly how this drifted: the EXE path
+    and the EXE-free path each wired these by hand, INT 09h got both, and the
+    IRET stub got only the EXE-free one.  The symptom was invisible until a
+    snapshot-resumed run armed the wall -- a snapshot is restored through
+    ``create_runtime`` (the EXE path), so it inherited the interpreted-only
+    stub and failed the wall on the first chained timer IRQ, at F000:FF53,
+    with nothing in the game to blame.  One function, both callers, no drift.
+    """
+    cpu.replacement_hooks[BIOS_INT9_ENTRY] = dos.bios_int9_keyboard
+    cpu.hook_names[BIOS_INT9_ENTRY] = "bios_int9_keyboard"
+    cpu.replacement_hooks[BIOS_IRET_ENTRY] = bios_iret_stub
+    cpu.hook_names[BIOS_IRET_ENTRY] = "bios_iret_stub"
+
+
 def create_runtime_from_image(
     memory_image: bytes | bytearray,
     state: CPUState,
@@ -87,14 +109,7 @@ def create_runtime_from_image(
     cpu.interrupt_handler = dos.interrupt
     cpu.port_reader = dos.port_read
     cpu.port_writer = dos.port_write
-    cpu.replacement_hooks[BIOS_INT9_ENTRY] = dos.bios_int9_keyboard
-    cpu.hook_names[BIOS_INT9_ENTRY] = "bios_int9_keyboard"
-    # The power-on BIOS environment must be reachable WITHOUT interpretation
-    # here: this runtime may be running behind the strict-VMless wall, where a
-    # game ISR chaining to the previous IRQ vector (-> the dummy IRET stub)
-    # would otherwise fail the wall on the first timer tick.
-    cpu.replacement_hooks[BIOS_IRET_ENTRY] = bios_iret_stub
-    cpu.hook_names[BIOS_IRET_ENTRY] = "bios_iret_stub"
+    install_bios_environment_hooks(cpu, dos)
     registry.install(cpu)
     program = LoadedProgram(
         exe=None,
