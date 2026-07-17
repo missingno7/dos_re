@@ -280,6 +280,11 @@ def main(argv=None) -> int:
     # (abi_scan, depth, flag) treats the call as sound on every LIVE path; the
     # emitter (stub_targets) turns the call site itself into a `raise`.
     stub_targets: dict[int, set[int]] = {}       # cs -> {dead near-call target ips}
+    # --observed: runtime-dead EXITS (a ret/retf/iret on a never-executed
+    # instruction) do not constrain the exit ABI and become fail-loud raises --
+    # what lets a function whose only LIVE exit is a platform effect (int 21/4C
+    # terminate; an external ISR chain) promote despite dead in-corpus returns.
+    dead_exits_by_key: dict[str, frozenset] = {}    # "CS:IP" -> {dead exit ips}
     if args.observed and Path(args.observed).is_file():
         obs = {a.upper() for a in json.loads(
             Path(args.observed).read_text(encoding="utf-8")).get("executed", ())
@@ -291,6 +296,12 @@ def main(argv=None) -> int:
                 tk = f"{kcs:04X}:{int(t, 16):04X}"
                 if tk not in entry_ips and tk not in obs:
                     stub_targets.setdefault(kcs, set()).add(int(t, 16))
+            dead = {int(i["ip"], 16)
+                    for b in rec["blocks"] for i in b["instructions"]
+                    if i.get("kind") in ("ret", "retf", "iret")
+                    and f"{kcs:04X}:{int(i['ip'], 16):04X}" not in obs}
+            if dead:
+                dead_exits_by_key[key] = frozenset(dead)
         _STUB = emit_cpuless.CalleeContract(
             name="<unrecovered>", inputs=(), outputs=(),
             exit_flags=frozenset({"cf", "pf", "af", "zf", "sf", "of", "df",
@@ -339,7 +350,8 @@ def main(argv=None) -> int:
                                     if xcs == cs},
                     boundary_addrs={ip for (xcs, ip) in boundary_addrs
                                     if xcs == cs},
-                    plat_far_segs=plat_far_segs, plat_farcalls=plat_farcalls)
+                    plat_far_segs=plat_far_segs, plat_farcalls=plat_farcalls,
+                    dead_exits=dead_exits_by_key.get(key, frozenset()))
                 tentative.add(key)
             except emit_cpuless.Refusal:
                 pass
@@ -378,7 +390,8 @@ def main(argv=None) -> int:
                     scan, excluded_addrs=excl_ips, callees=contracts,
                     far_callees=far_contracts, dispatch_addrs=disp_ips,
                     boundary_addrs=head_ips, plat_far_segs=plat_far_segs,
-                    plat_farcalls=plat_farcalls)
+                    plat_farcalls=plat_farcalls,
+                    dead_exits=dead_exits_by_key.get(key, frozenset()))
                 abi = spec.abi
                 prune_removed[key] = emit_cpuless.output_prune_removed(
                     abi, spec.sp_output)
@@ -394,7 +407,8 @@ def main(argv=None) -> int:
                     df_livein=spec.df_livein, sp_output=spec.sp_output,
                     flags_livein=spec.flags_livein, boundary_addrs=head_ips,
                     stub_targets=stub_targets.get(cs, frozenset()),
-                    plat_farcalls=plat_farcalls)
+                    plat_farcalls=plat_farcalls,
+                    dead_exits=dead_exits_by_key.get(key, frozenset()))
                 adapter_src = emit_cpuless.emit_adapter(
                     scan, abi, key,
                     signature=bytes.fromhex(rec["signature"]),

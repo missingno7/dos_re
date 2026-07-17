@@ -903,7 +903,7 @@ class PromotionSpec:
 def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
                      far_callees=None, dispatch_addrs=frozenset(),
                      boundary_addrs=frozenset(), plat_far_segs=frozenset(),
-                     plat_farcalls=None):
+                     plat_farcalls=None, dead_exits=frozenset()):
     """The strict promotion gate.  Returns a :class:`PromotionSpec` or
     raises :class:`Refusal` with the census reason.
 
@@ -999,9 +999,14 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     # and a far call a far callee -- the machine frame sizes differ.  An
     # IRET exit (tier 12) makes the function an interrupt handler: invoked
     # only through the vector-dispatch path, never near/far-composed.
+    # a runtime-DEAD exit (never executed; --observed evidence) does not
+    # constrain the exit ABI -- the emitter turns it into a fail-loud raise,
+    # so its return kind is irrelevant. This is what lets a function whose only
+    # LIVE exit is a platform effect (int 21/4C terminate; an external ISR
+    # chain) promote despite runtime-dead near/far returns in dead branches.
     _KIND = {RET: "near", RETF: "far", IRET: "iret"}
     ret_kinds = {_KIND[i.kind] for i in scan.insts.values()
-                 if i.kind in (RET, RETF, IRET)}
+                 if i.kind in (RET, RETF, IRET) and i.ip not in dead_exits}
     # an ISR-chain tail exits through the chained handler's iret: the
     # function IS an interrupt handler (tier 13).
     if any(_is_isr_chain(i) for i in scan.insts.values()):
@@ -1034,7 +1039,7 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
             raise Refusal("sp-as-data")
     _check_frame_pointer(scan, callees, far_callees)
     sp_delta, ret_pop, sp_output, sp_deltas = _check_stack_depths(
-        scan, alt_entries, callees, far_callees, plat_farcalls)
+        scan, alt_entries, callees, far_callees, plat_farcalls, dead_exits)
     if sp_output and any(_is_dyn(i) and i.kind == JMP_IND
                          for i in scan.insts.values()):
         # a tail dispatch assumes the caller frame is next on the stack;
@@ -1361,7 +1366,8 @@ def _is_isr_chain(i) -> bool:
 
 
 def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
-                        far_callees=None, plat_farcalls=None) -> tuple:
+                        far_callees=None, plat_farcalls=None,
+                        dead_exits=frozenset()) -> tuple:
     """Static stack-discipline verification (tiers 2 + 11): every address has
     ONE net push depth (bytes) from entry, consistent at every join.
 
@@ -1417,6 +1423,10 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
                 raise Refusal("multiple-frame-establish")
             frame_base = d
         if i.kind in (RET, RETF, IRET):
+            if i.ip in dead_exits:
+                # a runtime-dead exit raises at emit time -- it is terminal but
+                # constrains nothing (no exit depth / ret_pop recorded).
+                continue
             # ANY exit depth is legal: an unbalanced/varying exit makes sp a
             # runtime output, and both the adapter's frame pops and a
             # composed INT site's frame read use the RETURNED sp -- exact
@@ -1743,7 +1753,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                    dispatch_addrs=frozenset(), df_livein=False,
                    sp_output=False, flags_livein=False,
                    boundary_addrs=frozenset(), stub_targets=frozenset(),
-                   plat_farcalls=None) -> str:
+                   plat_farcalls=None, dead_exits=frozenset()) -> str:
     """Generate the recovered module source for one promotable function.
 
     ``callees`` (tier 4): CalleeContract per direct near-call target -- the
@@ -1872,6 +1882,16 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
             i = scan.insts[ip]
             count += 1
             if i.kind in (RET, RETF, IRET):
+                if i.ip in dead_exits:
+                    # a runtime-dead return (never executed; --observed): the
+                    # function's only LIVE exit is a platform effect elsewhere
+                    # (int 21/4C terminate; an external ISR chain). Fail loud if
+                    # this dead path is ever reached -- the hard wall.
+                    blk.append(f"raise RuntimeError('CPUless: runtime-dead exit "
+                               f"at {cs:04X}:{i.ip:04X} reached -- frontier "
+                               f"witness (untested exit path)')")
+                    terminated = True
+                    break
                 blk.append(f"_cost += {count}")
                 if flag_written:
                     bits = " | ".join(f"0x{_FLAG_BITS[f]:X}" for f in sorted(flag_written))

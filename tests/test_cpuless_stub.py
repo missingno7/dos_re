@@ -12,9 +12,12 @@ reached at runtime, it fails loud instead of silently falling through.  A real
 """
 from __future__ import annotations
 
+import pytest
+
 from dos_re.lift.cfg import FunctionScan
 from dos_re.lift.decode import decode_one
-from dos_re.lift.emit_cpuless import CalleeContract, emit_recovered
+from dos_re.lift.emit_cpuless import (CalleeContract, Refusal,
+                                      check_promotable, emit_recovered)
 from dos_re.lift.cpuless import abi_scan
 
 
@@ -28,6 +31,20 @@ def _scan(code: bytes) -> FunctionScan:
         if i.kind in ("ret", "retf", "iret"):
             s.exits.append(i)
             break
+        ip = i.next_ip
+    return s
+
+
+def _scan_all(code: bytes) -> FunctionScan:
+    """Decode every byte, marking each ret/retf/iret an exit (multi-exit)."""
+    fetch = lambda o: code[o] if o < len(code) else 0x90  # noqa: E731
+    s = FunctionScan(entry=0)
+    ip = 0
+    while ip < len(code):
+        i = decode_one(fetch, ip)
+        s.insts[ip] = i
+        if i.kind in ("ret", "retf", "iret"):
+            s.exits.append(i)
         ip = i.next_ip
     return s
 
@@ -69,3 +86,28 @@ def test_a_real_call_still_composes_when_not_stubbed() -> None:
                          stub_targets=frozenset())
     assert "func_1010_0010(" in src
     assert "unrecovered call" not in src
+
+
+# --- runtime-dead EXITS (symmetric to the dead-call stub) --------------------
+# jz 0003 ; ret (near) ; retf (far).  Two exits of DIFFERENT return kinds.
+_MIXED = bytes.fromhex("7401" "c3" "cb")   # 0000 jcc, 0002 ret, 0003 retf
+
+
+def test_mixed_return_kinds_refuses_without_dead_exit_evidence() -> None:
+    # both exits live -> a near ret and a far retf in one function: the exit
+    # ABI is ambiguous, refuse.
+    with pytest.raises(Refusal, match="mixed-return-kinds"):
+        check_promotable(_scan_all(_MIXED))
+
+
+def test_a_runtime_dead_exit_no_longer_constrains_the_exit_abi() -> None:
+    # the retf at 0003 is runtime-dead -> only the live near ret constrains the
+    # ABI, so the function promotes (ret_kind near) instead of refusing.
+    scan = _scan_all(_MIXED)
+    spec = check_promotable(scan, dead_exits=frozenset({0x0003}))
+    assert spec.ret_kind == "near"
+    src = emit_recovered(scan, spec.abi, "1010:2000",
+                         dead_exits=frozenset({0x0003}))
+    # the dead retf becomes a fail-loud raise; the live ret stays a normal exit.
+    assert "raise RuntimeError('CPUless: runtime-dead exit at 1010:0003" in src
+    compile(src, "<dead-exit>", "exec")
