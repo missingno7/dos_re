@@ -85,6 +85,58 @@ class Display:
         self._last_rect = rect
         return rect
 
+    # --- GPU compositing primitives -------------------------------------------------------------------
+    # For viewers that build the window from a SMALL source frame with a free camera (zoom/pan) instead of
+    # letterboxing the whole frame: upload the small frame ONCE, then let the GPU scale sub-rects of it to
+    # window rects (srcrect->dstrect). This keeps present cost ~constant with window size — the CPU never
+    # touches a window-sized buffer. Falls back to pygame.transform.scale per quad on the software path.
+    def clear(self) -> None:
+        """Clear the target to black. Call before a frame's draw_textured/fill_rect sequence."""
+        if self.gpu:
+            self.renderer.clear()
+        else:
+            self.screen.fill((0, 0, 0))
+
+    def upload_frame(self, rgb) -> tuple[int, int]:
+        """Upload an H×W×3 uint8 frame as the current SOURCE (a streaming texture on GPU, a Surface on the
+        software path). Draw regions of it with draw_textured(). Only the small native frame is uploaded --
+        never a window-sized array. Returns (w, h) of the source."""
+        arr = np.asarray(rgb, np.uint8)
+        fh, fw = arr.shape[:2]
+        if self._texsize != (fw, fh):
+            if self.gpu:
+                self._tex = self._sdl2.Texture(self.renderer, (fw, fh), streaming=True)
+            self._srcsurf = pygame.Surface((fw, fh))
+            self._texsize = (fw, fh)
+        pygame.surfarray.blit_array(self._srcsurf, arr.swapaxes(0, 1))
+        if self.gpu:
+            self._tex.update(self._srcsurf)
+        return (fw, fh)
+
+    def draw_textured(self, src_rect, dst_rect) -> None:
+        """GPU-scale a sub-rect of the uploaded source (upload_frame) to a window rect. Nearest-neighbour
+        (SDL's default scale quality) keeps pixel-art crisp when zoomed in."""
+        sr = pygame.Rect(src_rect)
+        dr = pygame.Rect(dst_rect)
+        if self.gpu:
+            self._tex.draw(srcrect=sr, dstrect=dr)
+        elif self._srcsurf is not None:
+            sr = sr.clip(self._srcsurf.get_rect())
+            if sr.w > 0 and sr.h > 0 and dr.w > 0 and dr.h > 0:
+                sub = self._srcsurf.subsurface(sr)
+                pygame.transform.scale(sub, dr.size, self.screen.subsurface(
+                    dr.clip(self.screen.get_rect())))
+
+    def fill_rect(self, dst_rect, color) -> None:
+        """Filled window-space rect (entity markers / overlays)."""
+        dr = pygame.Rect(dst_rect)
+        if self.gpu:
+            self.renderer.draw_color = (int(color[0]), int(color[1]), int(color[2]), 255)
+            self.renderer.fill_rect(dr)
+            self.renderer.draw_color = (0, 0, 0, 255)
+        else:
+            self.screen.fill(color, dr.clip(self.screen.get_rect()))
+
     # --- input mapping --------------------------------------------------------------------------------
     def window_to_frame_norm(self, pos):
         """Window pixel -> normalized (u, v) within the GAME FRAME, clamped to it.
