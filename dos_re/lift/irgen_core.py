@@ -178,7 +178,12 @@ def build_document(entries, *,
     for cs, ip in entries:
         fetch = fetch_for(cs)
         probe = probe_for(cs) if probe_for is not None else None
-        scans.append((cs, ip, scan_function(fetch, ip, probe=probe)))
+        # Boundary heads are declared as (cs, ip); the scan is per-segment, so
+        # pass only THIS segment's head IPs.  A boundary-delimited main loop then
+        # scans as a liftable coroutine instead of refusing no-exit (cfg.py).
+        seg_heads = frozenset(hip for hcs, hip in boundary_heads if hcs == cs)
+        scans.append((cs, ip, scan_function(fetch, ip, probe=probe,
+                                            boundary_heads=seg_heads)))
 
     from .cfg import Refusal, inst_byte_offsets
     byte_sets = {(cs, ip): inst_byte_offsets(scan) for cs, ip, scan in scans}

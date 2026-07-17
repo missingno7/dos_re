@@ -87,6 +87,36 @@ def test_no_exit_refuses():
     assert [r.reason for r in scan.refusals] == ["no-exit"]
 
 
+def test_boundary_head_makes_a_yielding_loop_liftable():
+    # The top-level frame/event loop every DOS game has: an infinite loop with
+    # no ret, that YIELDS to the scheduler once per frame.  Declaring the yield
+    # point (here the NOP at 0102, standing in for a per-frame wait/boundary
+    # call) as a boundary head makes it a liftable coroutine instead of no-exit.
+    #   0100: dec cx
+    #   0101: nop            <- boundary head (scheduler yield each frame)
+    #   0102: jmp 0x0100     (back-edge, rel8 = -4 = FC; no ret anywhere)
+    code = bytes.fromhex("49" "90" "EBFC")
+    plain = scan_function(_fetch(code, 0x100), 0x100)
+    assert not plain.liftable and [r.reason for r in plain.refusals] == ["no-exit"]
+
+    withhead = scan_function(_fetch(code, 0x100), 0x100,
+                             boundary_heads=frozenset({0x101}))
+    assert withhead.liftable            # the boundary head is the terminating construct
+    assert not withhead.refusals
+    assert withhead.boundary_heads == [0x101]
+    assert not withhead.exits           # still no ret -- it yields, it doesn't return
+
+
+def test_boundary_head_outside_region_does_not_suppress_no_exit():
+    # A declared head that the walk never reaches must NOT rescue a real dead end.
+    code = bytes.fromhex("EBFE")          # jmp self, no head inside
+    scan = scan_function(_fetch(code, 0x100), 0x100,
+                         boundary_heads=frozenset({0x0500}))
+    assert not scan.liftable
+    assert [r.reason for r in scan.refusals] == ["no-exit"]
+    assert scan.boundary_heads == []
+
+
 def test_region_budget_refuses():
     code = bytes.fromhex("90" * 64 + "C3")
     scan = scan_function(_fetch(code, 0x100), 0x100, max_insts=16)

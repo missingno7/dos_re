@@ -57,10 +57,19 @@ class FunctionScan:
     #: code the program retunes at runtime (observed: SkyRoads' LZS decoder
     #: patches its per-file bit-width immediates into its own body).
     cs_store_targets: list[tuple[int, int]] = field(default_factory=list)
+    #: boundary-head IPs found inside the reachable set (subset of the caller's
+    #: declared ``--boundary-heads``).  A boundary head is a scheduler-yield
+    #: point (docs/recovery_ir.md, dos_re_2.0.md §6a): the top-level frame/event
+    #: loop yields there each frame instead of returning.  A function whose only
+    #: terminating construct is a boundary head is a legitimately non-returning
+    #: COROUTINE, not a dead end -- so its presence suppresses the ``no-exit``
+    #: refusal (the emitter's resume machinery, emit.py, turns the head into a
+    #: boundary event + ResumePoint).  Empty unless the caller declares heads.
+    boundary_heads: list[int] = field(default_factory=list)
 
     @property
     def liftable(self) -> bool:
-        return not self.refusals and bool(self.exits)
+        return not self.refusals and (bool(self.exits) or bool(self.boundary_heads))
 
     @property
     def region(self) -> tuple[int, int]:
@@ -131,7 +140,8 @@ def inst_byte_offsets(scan: "FunctionScan") -> set[int]:
 
 def scan_function(fetch: Callable[[int], int], entry: int, *,
                   max_insts: int = 4096, max_bytes: int = 16384,
-                  probe: Callable[[int], int | None] | None = None) -> FunctionScan:
+                  probe: Callable[[int], int | None] | None = None,
+                  boundary_heads: "frozenset[int] | None" = None) -> FunctionScan:
     """Discover the statically reachable region of the function at ``entry``.
 
     ``probe(ip)`` (optional) returns the interpreter-measured IP-DELTA of one
@@ -142,7 +152,18 @@ def scan_function(fetch: Callable[[int], int], entry: int, *,
     so a successful probe that disagrees with the static decode is fatal —
     either an operand-length bug or a transfer misclassified as SEQ. Transfer
     encodings are fixed-size and covered by the decoder's unit tests.
+
+    ``boundary_heads`` (optional) is the set of scheduler-yield IPs the caller
+    declared for THIS segment.  When the walk finds no ret/retf/iret/far/indirect
+    exit but the reachable set contains a boundary head, the function is a
+    boundary-delimited COROUTINE loop (the top-level frame/event loop that every
+    DOS game has: it yields one frame at the boundary instead of returning) — so
+    the ``no-exit`` refusal is suppressed and the function stays liftable, its
+    boundary head(s) recorded for the emitter's resume machinery.  Without this a
+    game's own main loop is unliftable, capping the VMless graph short of the
+    root (docs/dos_re_2.0.md §6a).
     """
+    heads = boundary_heads or frozenset()
     scan = FunctionScan(entry=entry)
     work = [entry]
     budget_hit = False
@@ -210,7 +231,8 @@ def scan_function(fetch: Callable[[int], int], entry: int, *,
         scan.refusals.append(Refusal(scan.entry, "region-budget",
                                      f"insts={len(scan.insts)} bytes={decoded_bytes} "
                                      f"span={lo:04X}..{hi:04X}"))
-    if not scan.exits and not scan.refusals:
+    scan.boundary_heads = sorted(h for h in heads if h in scan.insts)
+    if not scan.exits and not scan.refusals and not scan.boundary_heads:
         scan.refusals.append(Refusal(scan.entry, "no-exit",
                                      "no ret/retf/iret/far-jmp/indirect-jmp reachable"))
 

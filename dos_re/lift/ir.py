@@ -53,8 +53,18 @@ def scan_from_ir_record(rec: dict) -> FunctionScan:
         raise ValueError(f"IR record {rec.get('entry')} is not liftable")
     code, lengths = code_map_from_record(rec)
     cs, ip = (int(x, 16) for x in rec["entry"].split(":"))
+    # Boundary heads are recovered FROM the IR record (the single source of
+    # truth): irgen marked each yield site ``boundary_effect``.  Re-supplying
+    # them keeps the re-scan identical to the original -- a boundary-delimited
+    # main loop stays liftable instead of re-refusing no-exit (cfg.scan_function,
+    # dos_re_2.0.md §6a).
+    heads = frozenset(int(inst["ip"], 16)
+                      for blk in rec.get("blocks", ())
+                      for inst in blk["instructions"]
+                      if inst.get("boundary_effect"))
     scan = scan_function(lambda off: code.get(off & 0xFFFF, 0x90), ip,
-                         probe=lambda p: lengths.get(p & 0xFFFF))
+                         probe=lambda p: lengths.get(p & 0xFFFF),
+                         boundary_heads=heads)
     if not scan.liftable:
         reasons = sorted({r.reason for r in scan.refusals})
         # A desmc-candidate legitimately re-scans as self-modifying (the code
