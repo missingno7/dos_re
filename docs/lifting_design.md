@@ -432,17 +432,40 @@ Design points that made it practical:
   the function ran but wasn't sampled (raise `--steps`/`--samples`); only
   `blocks_covered==0` is a true `NOT_REACHED`. No function is silently
   mislabelled.
-- **Runaway guard — fail loud, never hang.** A lifted function runs
-  SYNCHRONOUSLY to completion; unlike the interpreter, no external I/O or
-  timing advances between its blocks. So a loop that waits on hardware state
-  (a retrace/timer poll) would spin forever in the generated dispatch loop.
-  The emitted loop is therefore bounded (`MAX_ITERATIONS`) and raises
-  `LiftRuntimeError` on overrun; `liftverify` catches it, retires just that
-  hook, marks it `DIVERGED` (runaway), and keeps verifying the rest. Confirmed
-  live: pointed at overkill's `0679` timer-wait, the lift failed loud and was
-  retired while `0162` still verified byte-exact in the same run — no hang.
-  (This is why the porting guide steers lifts at leaf COMPUTE routines;
-  environment-wait loops are hand-hook territory.)
+- **Stuck detection — fail loud, never hang, and say WHY.** A lifted function
+  runs SYNCHRONOUSLY to completion; unlike the interpreter, no external I/O or
+  timing advances between its blocks. So a loop that waits on hardware state (a
+  retrace/timer poll) would spin forever in the generated dispatch loop.
+
+  The detector is a *checkable claim*, not a magic number: a spin returns to the
+  same dispatch block with **identical registers**, which is provably no
+  progress. Emitted bodies sample `(bb, regs)` every 64K dispatches
+  (`PROGRESS_SAMPLE`) and raise `LiftStuck` on a repeat — caught in ~64K, with
+  the address (`BLOCK_ADDRS`), the machine state, whether it is provably stuck
+  or merely long, and the fixes in likelihood order (**declare a boundary head**
+  first — usually right; then *is the host delivering the IRQ the loop waits
+  for?*; then *is it just a long loop?*). `IF=0` is called out explicitly: a
+  wait loop with interrupts disabled can never be released by any ISR.
+
+  A loop whose registers advance — every honest long loop — is **never**
+  reported. That false-positive half is what lets `MAX_ITERATIONS` relax to a
+  pure backstop (100M) for the pathological rest (state changes, never
+  terminates). It used to be `len(insts) * 5_000`, which bounds nothing: a
+  loop's trip count has no relation to its instruction count. A 27-instruction
+  LZS decompressor got 135,000 and legitimately needs millions, so ports "fixed"
+  it by raising a magic number until the number stopped mattering — which is how
+  a guard trains people to ignore it.
+
+  `liftverify` catches the raise, retires just that hook, and keeps verifying
+  the rest. Confirmed live twice: overkill's `0679` timer-wait failed loud while
+  `0162` still verified byte-exact in the same run; and SkyRoads' undiagnosed
+  stall reported `lifted_1010_3a96 ... at 1010:3ABC` + "registers WERE still
+  changing … may be a genuinely long loop" — correctly fingering the ANIM
+  decompressor's guard rather than a phantom env-wait.
+
+  (An env-wait loop is *not* automatically hand-hook territory any more —
+  declaring it a boundary head lets the lifted body park and resume; see §
+  boundary heads.)
 - **The ledger is separate.** Results land in `dos_re.lift.manifest`
   (`LIFTED → ORACLE_PASSING → INSTALLED → REFACTORED`), whose statuses are
   asserted *disjoint* from `islands.STATUSES` by a test — a lift cannot be
