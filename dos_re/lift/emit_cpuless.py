@@ -1066,12 +1066,37 @@ def _is_stack_family(i) -> bool:
             or op in (0x07, 0x17, 0x1F)            # pop seg (pop ss refuses
                                                     # earlier via ss-mutation)
             or op in (0x68, 0x6A)
+            or _is_sp_capture(i)                   # mov r16, sp: frame base into
+                                                    # a GP reg (bp/bx frame ptr)
+            or (op in (0x81, 0x83) and i.mod == 3 and i.rm == 4
+                and i.reg in (0, 5))               # add/sub sp, imm: cdecl
+                                                    # cleanup / frameless alloc
             or (op == 0xFF and i.reg == 6) or (op == 0x8F and i.reg == 0)
             or i.kind in (CALL, CALL_FAR)  # composed call: ret-addr push/pop
             or _is_dyn(i)                  # recovered dispatch: balanced
             or _is_game_int(i)             # vector dispatch: frame symmetric
             or _is_isr_chain(i)            # chain tail: frame is the callee's
             or i.kind in (RET, RETF, IRET))
+
+
+def _is_sp_capture(i) -> bool:
+    """`mov r16, sp` -- the current stack pointer READ into a general register.
+
+    The frameless Borland/Turbo idiom for a routine that reads its stack
+    arguments: `mov bx,sp` (then `[bx+k]`), or the hand-rolled prologue's
+    `mov bp,sp` (paired with a preceding `push bp`).  sp is a SOURCE only, never
+    written, so the depth is untouched and this is stack discipline, not
+    sp-as-data.  The dependent `[reg+k]` reads are ordinary memory operands the
+    emitter already handles; only the sp READ needed unblocking.
+
+    Both encodings: 8B (mov r16, r/m16 -- sp is the r/m) and 89 (mov r/m16, r16
+    -- sp is the reg).  A write to sp (`mov sp, r16`) is deliberately NOT here:
+    that is a frame RESTORE, handled only when its establishing `mov bp,sp` is
+    proven un-clobbered -- a separate, heavier analysis.
+    """
+    return (i.mod == 3
+            and ((i.op == 0x8B and i.rm == 4)       # mov r16, sp
+                 or (i.op == 0x89 and i.reg == 4)))  # mov r/m16, sp
 
 
 def _is_dyn(i) -> bool:

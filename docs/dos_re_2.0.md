@@ -725,7 +725,10 @@ Lemmings-specific.
   16-bit integer/logic/shift/rotate (incl. adc/sbb carry-chain, rcl/rcr
   through-carry), string ops (df/if as compat bits, rep = one instruction of
   virtual time), call-ABI composition (bottom-up DAG fixpoint; near + static
-  far + the MSC push-cs idiom), stack-argument ABIs, and hidden compat inputs
+  far + the MSC push-cs idiom), stack-argument ABIs, the frameless Borland
+  cdecl idioms (`add/sub sp,imm` as a constant depth delta; `mov bx,sp` /
+  `mov bp,sp` capturing a frame base to read args — sp stays statically exact,
+  so it is stack discipline, not sp-as-data), and hidden compat inputs
   for the direction flag (`_df`) and the full flags word (`_flags_in`).
 
 - **Platform effects — two backends of one duck-typed contract**

@@ -81,6 +81,58 @@ def test_pusha_snapshots_sp_before_pushing() -> None:
            ("sp",))
 
 
+def test_add_sub_sp_imm_match_interp() -> None:
+    # 83 c4 08  add sp, 8   (cdecl caller cleanup)
+    # 83 ec 04  sub sp, 4   (frameless local alloc)
+    # 81 c4 00 01  add sp, 0x100  (imm16 form)
+    # 83 c4 fc  add sp, -4  (imm8 sign-extends)
+    for code in ("83c408", "83ec04", "81c40001", "83c4fc"):
+        _check(bytes.fromhex(code), {"sp": 0x0120}, ("sp",))
+
+
+def test_mov_reg_sp_captures_the_stack_pointer() -> None:
+    # 8b dc  mov bx, sp     (frameless arg base)
+    # 8b ec  mov bp, sp     (hand-rolled prologue's frame set)
+    # 89 e3  mov bx, sp     (the 89 encoding: sp is the reg source)
+    # 89 e5  mov bp, sp
+    for code, dst in [("8bdc", "bx"), ("8bec", "bp"),
+                      ("89e3", "bx"), ("89e5", "bp")]:
+        _check(bytes.fromhex(code), {"sp": 0x0abc}, (dst,))
+
+
+def _emit_seq(code: bytes) -> list[str]:
+    """Translate a byte string of back-to-back instructions (not just one)."""
+    lines: list[str] = []
+    off = 0
+    while off < len(code):
+        inst = decode_one(lambda o: code[o] if o < len(code) else 0x90, off)
+        _translate(inst, lines, set())
+        off += inst.length
+    return lines
+
+
+def test_mov_bx_sp_then_read_stack_arg_matches_interp() -> None:
+    # The whole frameless idiom end to end: `mov bx,sp; mov ax,[bx+2]` reads the
+    # word 2 bytes above sp (the caller's first pushed arg in the small model,
+    # where the read defaults to DS == SS).  Seed that slot and require the
+    # emitted pair to read it exactly as the VM does.
+    ss = 0x3000
+    code = bytes.fromhex("8bdc8b4702")          # mov bx,sp ; mov ax,[bx+2]
+    m1, m2 = Memory(), Memory()
+    for m in (m1, m2):
+        m.data[(ss << 4) + 0x0102] = 0x34       # [sp+2] low
+        m.data[(ss << 4) + 0x0103] = 0x12       # [sp+2] high
+    ns = {"ss": ss, "ds": ss, "sp": 0x0100, "mem": m1, "_PARITY": [0] * 256}
+    exec("\n".join(_emit_seq(code)), {}, ns)
+    s = CPUState(cs=0x2000, ip=0, ss=ss, ds=ss)
+    s.sp = 0x0100
+    cpu = CPU8086(m2, s)
+    for k, b in enumerate(code):
+        m2.data[(0x2000 << 4) + k] = b
+    cpu.step(); cpu.step()
+    assert ns["ax"] & 0xFFFF == cpu.s.ax & 0xFFFF == 0x1234
+
+
 def test_popa_discards_the_saved_sp() -> None:
     # 0x61 popa restores all but SP (the stacked sp word is skipped). Round-trip
     # a pusha frame: push then pop must return every register unchanged.

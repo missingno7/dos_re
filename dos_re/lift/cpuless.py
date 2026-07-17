@@ -142,6 +142,28 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
             if not is_cmp:
                 W.add("ax")
         return Effects(frozenset(R), frozenset(W), mr, mw, sd)
+    if op in (0x81, 0x83) and inst.mod == 3 and inst.rm == 4 \
+            and inst.reg in (0, 5):
+        # add/sub sp, imm -- the cdecl caller-cleanup (`add sp,N` after pushing
+        # call args) and the frameless local alloc (`sub sp,N`).  sp stays
+        # STATICALLY EXACT: the immediate is a constant depth delta, so this is
+        # stack discipline (like a multi-word pop/push), NOT sp-as-data.  The
+        # depth convention is "bytes currently pushed", and the walker computes
+        # `after = d - stack_delta`; `add sp,N` RAISES sp (shrinks depth), so it
+        # matches a pop's positive delta, and `sub sp,N` matches a push's
+        # negative one.
+        imm = inst.imm or 0
+        if op == 0x83:                   # imm8, sign-extended to 16 bits
+            imm &= 0xFF
+            if imm & 0x80:
+                imm -= 0x100
+        else:                            # imm16
+            imm &= 0xFFFF
+            if imm & 0x8000:
+                imm -= 0x10000
+        delta = imm if inst.reg == 0 else -imm      # add: + (pop) / sub: - (push)
+        R.add("sp"); W.add("sp")
+        return Effects(frozenset(R), frozenset(W), mr, mw, delta)
     if op in (0x80, 0x81, 0x83):         # grp1 r/m, imm
         is_cmp = inst.reg == 7
         modrm_rm(wide_write=not is_cmp, also_read_rm=True)

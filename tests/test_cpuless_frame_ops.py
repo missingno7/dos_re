@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dos_re.lift.cfg import scan_function
 from dos_re.lift.cpuless import register_effects
+from dos_re.lift.emit_cpuless import _is_sp_capture, _is_stack_family
 
 
 def _inst(code: bytes):
@@ -81,3 +82,50 @@ def test_imul_three_operand_invents_no_ax_dx() -> None:
     assert "si" in e.reads
     assert "dx" not in e.writes              # the F7 cousin writes dx; this does not
     assert e.stack_delta == 0
+
+
+# --- the Borland stack-arg idiom (sp as maintained-exact quantity) -----------
+# The frameless cdecl idioms: `add sp,N` cleans the caller's pushed args,
+# `mov bx,sp`/`mov bp,sp` capture a frame base to read them.  sp stays
+# STATICALLY EXACT, so these are stack discipline, not sp-as-data.
+
+def test_add_sp_imm_is_a_positive_depth_delta() -> None:
+    # `add sp,N` raises sp -- it POPS N bytes, matching a pop's positive delta.
+    assert _eff(bytes.fromhex("83c408")).stack_delta == +8      # add sp,8
+    assert _eff(bytes.fromhex("83c410")).stack_delta == +16     # add sp,16
+    assert _eff(bytes.fromhex("81c40001")).stack_delta == +0x100  # add sp,0x100
+    # sub sp,N lowers sp -- it PUSHES (allocates), a negative delta.
+    assert _eff(bytes.fromhex("83ec04")).stack_delta == -4      # sub sp,4
+    # imm8 sign-extends: add sp,-4 lowers sp like a sub.
+    assert _eff(bytes.fromhex("83c4fc")).stack_delta == -4
+    for code in ("83c408", "83ec04", "81c40001", "83c4fc"):
+        e = _eff(bytes.fromhex(code))
+        assert e.refusal is None
+        assert e.reads == frozenset({"sp"}) and e.writes == frozenset({"sp"})
+
+
+def test_grp1_sp_only_add_and_sub_get_a_delta() -> None:
+    # and/or/xor/cmp sp,imm are NOT depth arithmetic: sp stays general data
+    # there (the generic grp1 path, stack_delta 0 -- gated as sp-as-data).
+    assert _eff(bytes.fromhex("81e4f0ff")).stack_delta == 0     # and sp,0xFFF0
+    assert _eff(bytes.fromhex("83fc08")).stack_delta == 0       # cmp sp,8
+
+
+def test_sp_capture_recognises_both_encodings() -> None:
+    # mov r16, sp -- sp read into a GP register (frame base).  Both the 8B form
+    # (sp is the r/m) and the 89 form (sp is the reg).
+    assert _is_sp_capture(_inst(bytes.fromhex("8bdc")))         # mov bx, sp (8B)
+    assert _is_sp_capture(_inst(bytes.fromhex("8bec")))         # mov bp, sp (8B)
+    assert _is_sp_capture(_inst(bytes.fromhex("89e3")))         # mov bx, sp (89)
+    # a WRITE to sp is a frame restore, NOT a capture -- must stay refused.
+    assert not _is_sp_capture(_inst(bytes.fromhex("8be5")))     # mov sp, bp (8B)
+    assert not _is_sp_capture(_inst(bytes.fromhex("89ec")))     # mov sp, bp (89)
+    # an ordinary reg-reg mov not touching sp is not a capture.
+    assert not _is_sp_capture(_inst(bytes.fromhex("8bd8")))     # mov bx, ax
+
+
+def test_stack_family_admits_the_sp_discipline_forms() -> None:
+    for code in ("83c408", "83ec04", "8bdc", "8bec", "89e3"):
+        assert _is_stack_family(_inst(bytes.fromhex(code))), code
+    # the frame RESTORE `mov sp,bp` is deliberately still refused (sp write).
+    assert not _is_stack_family(_inst(bytes.fromhex("8be5")))
