@@ -754,8 +754,32 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     heads = frozenset(h for h in boundary_heads if h in scan.insts)
     dispatch = frozenset(d for d in dispatch_entries if d in scan.insts)
     resume_points: set[int] = set()
+    forced = set(leaders)
+    # THE BLOCKING-INT RE-ENTRY RULE.  Unconditional, and deliberately not
+    # gated on boundary observation: an INT is a SYNCHRONOUS UNWIND POINT in
+    # its own right.  The host-service convention (dos.py: a console read with
+    # nothing queued does ``cpu.s.ip -= 2; raise ConsoleInputWouldBlock``) puts
+    # IP back ON the INT and expects the RETRY to re-execute it — exactly what
+    # the interpreter would do.  So the address the retry lands on is the INT
+    # itself, never its successor, and the ``next_ip`` continuation the unwind
+    # rule below records is the one address that CANNOT serve it.
+    #
+    # Without this a lifted body is a one-way door: the INT unwinds out of the
+    # whole Python call chain and the resume finds no hook at the INT, so it
+    # continues INTERPRETED — a VMless wall violation, and a silent divergence
+    # anywhere the wall is not armed.  Found by skyroads' menu loop, whose
+    # ``mov ah,07 / int 21h`` (1010:5FEB) blocks on every keypress wait.
+    #
+    # Forcing the INT as a leader is what makes re-entry FAITHFUL rather than
+    # merely possible: the preceding ``mov ah,07`` stays in the previous block,
+    # so resuming at the INT re-executes the INT alone, with AH as the guest
+    # left it.  Cost when nothing ever blocks: one extra block boundary and one
+    # unused hook.
+    for inst in scan.insts.values():
+        if inst.kind == INT:
+            forced.add(inst.ip)
+            resume_points.add(inst.ip)
     if heads or dispatch or resume_calls:
-        forced = set(leaders)
         for d in sorted(dispatch):
             # DYNAMIC DISPATCH ENTRY (recovery-IR concept, distinct from a
             # boundary/call/iret resume): an address reached from OUTSIDE via
@@ -790,10 +814,11 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
         # INTERPRETED (a wall violation and a pass-count asymmetry).
         if resume_calls or heads:
             for inst in scan.insts.values():
-                if inst.kind in (CALL, CALL_FAR, CALL_IND, INT)                         and inst.next_ip in scan.insts:
+                if (inst.kind in (CALL, CALL_FAR, CALL_IND, INT)
+                        and inst.next_ip in scan.insts):
                     forced.add(inst.next_ip)
                     resume_points.add(inst.next_ip)
-        leaders = sorted(forced)
+    leaders = sorted(forced)
     bb_of = {ip: i for i, ip in enumerate(leaders)}
     leader_set = set(leaders)
 
@@ -869,9 +894,11 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
         entries_txt = ", ".join(
             f'"{cs:04X}:{rp:04X}": {bb_of[rp]}'
             for rp in sorted(resume_points))
-        A("#: boundary-park resume entries (head successors + every call-site")
-        A("#: continuation -- the unwind re-entry rule): address -> dispatch")
-        A("#: block index; the installer registers re-entry hooks at each.")
+        A("#: re-entry points into this body: every INT (a blocking host service")
+        A("#: rewinds IP onto it and retries), plus -- when boundary observation")
+        A("#: is on -- head successors and call-site continuations (the unwind")
+        A("#: re-entry rule). address -> dispatch block index; the installer")
+        A("#: registers a re-entry hook at each.")
         A(f"RESUME_ENTRIES = {{{entries_txt}}}")
     if coverage:
         A("")
