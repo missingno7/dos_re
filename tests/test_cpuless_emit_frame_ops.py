@@ -133,6 +133,53 @@ def test_mov_bx_sp_then_read_stack_arg_matches_interp() -> None:
     assert ns["ax"] & 0xFFFF == cpu.s.ax & 0xFFFF == 0x1234
 
 
+def test_bp_relative_operand_uses_bp_not_none() -> None:
+    # `[bp+disp]` (ModRM rm=6, mod=1/2) must address off bp -- the base-less
+    # direct `[disp16]` form is ONLY rm=6 with mod=0.  A regression guard for
+    # _EA_EXPR[6]: it was None, so every stack local emitted `(None + disp)`.
+    ss = 0x3000
+    # mov [bp-2], ax  (89 46 fe)  then  mov bx, [bp-2]  (8b 5e fe)
+    code = bytes.fromhex("8946fe8b5efe")
+    m1, m2 = Memory(), Memory()
+    ns = {"ss": ss, "ds": ss, "bp": 0x0100, "ax": 0x1234, "bx": 0,
+          "mem": m1, "_PARITY": [0] * 256}
+    exec("\n".join(_emit_seq(code)), {}, ns)
+    s = CPUState(cs=0x2000, ip=0, ss=ss, ds=ss, ax=0x1234)
+    s.bp = 0x0100
+    cpu = CPU8086(m2, s)
+    for k, b in enumerate(code):
+        m2.data[(0x2000 << 4) + k] = b
+    cpu.step(); cpu.step()
+    assert ns["bx"] & 0xFFFF == cpu.s.bx & 0xFFFF == 0x1234
+    # the store landed at ss:[bp-2] in both
+    base = ss << 4
+    assert bytes(m1.data[base + 0x00FE:base + 0x0100]) == \
+        bytes(m2.data[base + 0x00FE:base + 0x0100]) == bytes([0x34, 0x12])
+
+
+def test_bp_disp16_and_direct_disp16_stay_distinct() -> None:
+    # mod=2 rm=6 is [bp+disp16]; mod=0 rm=6 is the base-less [disp16].
+    ss = 0x3000
+    # mov ax, [bp+0x10]  (8b 86 10 00)  -- bp-relative, SS
+    code_bp = bytes.fromhex("8b861000")
+    m1, m2 = Memory(), Memory()
+    for m in (m1, m2):
+        m.data[(ss << 4) + 0x0110] = 0x55
+        m.data[(ss << 4) + 0x0111] = 0x66
+    ns = {"ss": ss, "ds": ss, "bp": 0x0100, "ax": 0,
+          "mem": m1, "_PARITY": [0] * 256}
+    exec("\n".join(_emit_seq(code_bp)), {}, ns)
+    assert ns["ax"] & 0xFFFF == 0x6655           # [bp+0x10] off SS
+    # mov ax, [0x0110]  (a1 10 01) direct -- DS, base-less
+    m3 = Memory()
+    m3.data[(ss << 4) + 0x0110] = 0x77
+    m3.data[(ss << 4) + 0x0111] = 0x88
+    ns2 = {"ss": ss, "ds": ss, "bp": 0x9999, "ax": 0,
+           "mem": m3, "_PARITY": [0] * 256}
+    exec("\n".join(_emit_seq(bytes.fromhex("a11001"))), {}, ns2)
+    assert ns2["ax"] & 0xFFFF == 0x8877          # direct, ignores bp
+
+
 def test_popa_discards_the_saved_sp() -> None:
     # 0x61 popa restores all but SP (the stacked sp word is skipped). Round-trip
     # a pusha frame: push then pop must return every register unchanged.

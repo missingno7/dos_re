@@ -94,7 +94,10 @@ def _r8_write(n, val):
     return f"{r} = ({r} & 0x00FF) | ((({val}) & 0xFF) << 8)"
 
 
-_EA_EXPR = ("bx + si", "bx + di", "bp + si", "bp + di", "si", "di", None, "bx")
+# 16-bit ModRM base expressions.  rm=6 is `[bp+disp]` for mod=1/2; the mod=0
+# rm=6 form is the base-less direct `[disp16]`, resolved in _ea() BEFORE this
+# table is consulted -- so index 6 is always the bp base by the time it is read.
+_EA_EXPR = ("bx + si", "bx + di", "bp + si", "bp + di", "si", "di", "bp", "bx")
 
 
 def _ea(inst):
