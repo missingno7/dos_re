@@ -331,3 +331,25 @@ def test_unimplemented_x87_form_stays_a_loud_refusal():
     # FFREE ST(0) (dd c0): execute_fpu does not implement it — the SAME
     # UnsupportedInstruction fires interpreted and lifted (never guess).
     _raise_both_paths(bytes.fromhex("DDC0" "C3"), [1.0], "x87 opcode DD")
+
+
+def test_fst_underflow_raises_unsupported_not_indexerror():
+    """Reading/writing ST(i) on an empty (or too-shallow) x87 stack must raise
+    the model's standard UnsupportedInstruction -- the fail-loud signal the
+    runner's gap-snapshot machinery understands -- NOT a bare IndexError.
+
+    Regression: _fst / _fst_set indexed self.s.fst[-1-i] with no bounds check,
+    so a memory-form FPU op reading ST(0) on an empty stack (reachable on an
+    upstream execution divergence, e.g. VGA Lemmings' interactive cold-boot
+    load path 2026-07-17) died with an opaque IndexError mid-step."""
+    st = CPUState(cs=CS, ip=ENTRY, ss=0x9000, sp=0x2000)
+    cpu = _make_cpu(b"\x90", st)
+    assert cpu.s.fst == []                      # empty x87 stack
+    with pytest.raises(UnsupportedInstruction):
+        cpu._fst(0)
+    with pytest.raises(UnsupportedInstruction):
+        cpu._fst_set(0, 1.0)
+    cpu._fpush(3.5)                             # one value -> ST(0) ok, ST(1) not
+    assert cpu._fst(0) == 3.5
+    with pytest.raises(UnsupportedInstruction):
+        cpu._fst(1)

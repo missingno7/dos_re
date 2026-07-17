@@ -638,9 +638,23 @@ class CPU8086:
         return self.s.fst.pop()
 
     def _fst(self, i: int) -> float:
+        # Reading ST(i) when the x87 stack has fewer than i+1 values is a stack
+        # underflow -- raise the model's standard signal (as _fpop does), not a
+        # bare IndexError.  On real hardware with the invalid-op exception
+        # MASKED this returns the indefinite rather than faulting, but this
+        # model is FAIL-LOUD by design (a reached underflow means either an
+        # unmodelled x87 form or an execution divergence upstream); surface it
+        # as UnsupportedInstruction so the runner's gap-snapshot machinery
+        # captures a diagnosable state instead of an opaque list-index error.
+        if not (0 <= i < len(self.s.fst)):
+            raise UnsupportedInstruction("x87 stack underflow (read ST(%d) of %d)"
+                                         % (i, len(self.s.fst)))
         return self.s.fst[-1 - i]
 
     def _fst_set(self, i: int, v: float) -> None:
+        if not (0 <= i < len(self.s.fst)):
+            raise UnsupportedInstruction("x87 stack underflow (write ST(%d) of %d)"
+                                         % (i, len(self.s.fst)))
         self.s.fst[-1 - i] = v
 
     def _fcompare(self, a: float, b: float) -> None:
