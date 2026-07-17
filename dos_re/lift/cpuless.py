@@ -165,6 +165,46 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         modrm_rm(wide_write=True)
         return Effects(frozenset(R), frozenset(W), True, mw, +2)
 
+    # --- 80186 frame + bulk stack ops ---------------------------------------
+    # The Borland/Turbo frame. Nearly every function of a Borland-compiled DOS
+    # program opens `enter N,0` and closes `leave`, so leaving these unmodelled
+    # refuses the whole program: skyroads (Borland) had 85 functions blocked on
+    # each, which was its single largest M3 blocker.
+    if op == 0xC8:                       # enter imm16, imm8
+        size, level = inst.raw[-3] | (inst.raw[-2] << 8), inst.raw[-1]
+        if level != 0:
+            # Nested lexical scoping: copies `level` display words from the
+            # caller's frame. Real, rare, and NOT what a C compiler emits --
+            # so refuse loudly rather than model it from a guess.
+            return Effects(refusal=f"enter-nesting-level-{level}")
+        # level 0 IS exactly: push bp; mov bp,sp; sub sp,size
+        R.update({"bp", "sp", "ss"}); W.update({"bp", "sp"})
+        return Effects(frozenset(R), frozenset(W), mr, True, -(2 + size))
+    if op == 0xC9:                       # leave
+        # mov sp,bp; pop bp. The stack effect is genuinely DATA-DEPENDENT -- sp
+        # comes from a register, not a constant -- so the honest delta is None.
+        # It is not a refusal: None only makes max_stack_use unknown for the
+        # function, which is a supported report state, and the frame it tears
+        # down was already measured at the matching `enter`.
+        R.update({"bp", "sp", "ss"}); W.update({"bp", "sp"})
+        return Effects(frozenset(R), frozenset(W), True, mw, None)
+    if op == 0x60:                       # pusha
+        R.update(W16); R.add("ss"); W.add("sp")
+        return Effects(frozenset(R), frozenset(W), mr, True, -16)
+    if op == 0x61:                       # popa
+        # Pops all eight, but DISCARDS the stacked SP (the 8086/186 defines it
+        # so): sp ends at +16 regardless, and is written by the pop itself.
+        W.update(W16); R.update({"sp", "ss"})
+        return Effects(frozenset(R), frozenset(W), True, mw, +16)
+    if op in (0x69, 0x6B):               # imul r16, r/m16, imm16|imm8
+        # The 80186 THREE-operand form: unlike F7 /5, it touches no implicit
+        # ax/dx -- it reads r/m, multiplies by the immediate, and writes only
+        # the reg operand (keeping the low half). Modelling it off its F7
+        # cousin would invent ax/dx in the contract.
+        modrm_rm(wide_write=False, also_read_rm=True)
+        W.add(W16[inst.reg])
+        return Effects(frozenset(R), frozenset(W), mr, mw)
+
     # --- inc/dec r16, xchg, mov, lea ---------------------------------------
     if 0x40 <= op <= 0x4F:
         r = W16[op & 7]; R.add(r); W.add(r)
