@@ -60,6 +60,23 @@ def test_the_routing_table_matches_the_tracker_it_claims_to_describe(method, tab
         f"stale {sorted(hex(p) for p in declared - actual)}")
 
 
+def test_every_tracker_is_actually_routed():
+    """The hole the table test alone leaves open.
+
+    Routing means port_write must NAME each tracker.  Adding a new _track_*
+    method and wiring it into the old fan-out was enough to make it work; now,
+    forgetting to give it a port table and a branch here means its device never
+    sees a write -- silently, because nothing calls it.  So: every tracker the
+    class defines must be reachable from port_write."""
+    routed = {n.attr for n in ast.walk(
+        ast.parse(textwrap.dedent(inspect.getsource(DOSMachine.port_write))))
+        if isinstance(n, ast.Attribute) and n.attr.startswith("_track_")}
+    defined = {n for n in dir(DOSMachine) if n.startswith("_track_")}
+    assert defined <= routed, (
+        f"port_write never routes to {sorted(defined - routed)} -- give it a "
+        f"port table and a branch, or its device silently misses every write")
+
+
 def test_port_ownership_is_disjoint():
     tables = [dos_mod._SPEAKER_PORTS, dos_mod._DAC_PORTS, dos_mod._EGA_PORTS,
               dos_mod._ADLIB_PORTS]
