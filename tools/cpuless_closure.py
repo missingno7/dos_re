@@ -34,10 +34,22 @@ def _promoted_keys(recovered_dir: Path) -> set[str]:
 
 def walk_closure(ir: dict, roots: list[str], promoted: set[str],
                  refusals: dict[str, str],
-                 dyn_evidence: dict[str, list[str]] | None = None) -> dict:
+                 dyn_evidence: dict[str, list[str]] | None = None,
+                 observed: set[str] | None = None) -> dict:
     """``dyn_evidence`` (tier 9): "CS:IP" site -> observed dynamic target
     keys (lemmings-style indirect_sites.json), so the walk follows dynamic
-    dispatch and static far calls, not just near calls."""
+    dispatch and static far calls, not just near calls.
+
+    ``observed`` (function entries the game ACTUALLY executed, from the census
+    probe): the static near-call walk over-approximates -- a `call` in a branch
+    no run ever takes reaches a target that never runs (SkyRoads: 15 such,
+    zero of them executed across 7,651 observed addresses). Supplying it splits
+    the frontier into RUNTIME-REACHABLE (real work: the game runs it, so a true
+    CPUless build must recover it) and STATIC-ONLY (reached only through an
+    untaken call -- no runtime evidence it is live). The runtime frontier is the
+    honest completion target; static-only items are REPORTED, never dropped
+    (replay coverage is not proof of deadness -- each still owes an explanation
+    or a lift before the wall can call itself closed)."""
     dyn_evidence = dyn_evidence or {}
     reached: set[str] = set()
     frontier: dict[str, str] = {}
@@ -76,12 +88,25 @@ def walk_closure(ir: dict, roots: list[str], promoted: set[str],
                         if tgt.upper() in ir["functions"]:
                             work.append(tgt.upper())
     prom_reached = sorted(reached & promoted)
+    observed = observed or set()
+    # split the frontier by runtime evidence when an observed set is supplied.
+    # Without one, every frontier item is treated as runtime-reachable (the
+    # conservative default -- no evidence to demote anything to static-only).
+    runtime_frontier = {k: v for k, v in frontier.items()
+                        if not observed or k in observed}
+    static_only = {k: v for k, v in frontier.items()
+                   if observed and k not in observed}
     return {
         "roots": roots,
         "reached": len(reached),
         "promoted_reached": len(prom_reached),
         "frontier": dict(sorted(frontier.items())),
-        "closure_complete": not frontier,
+        "runtime_frontier": dict(sorted(runtime_frontier.items())),
+        "static_only_frontier": dict(sorted(static_only.items())),
+        # the honest target: every function the game RUNS is CPUless. Static-only
+        # items are reported (they still owe an explanation) but do not block it.
+        "closure_complete": not runtime_frontier,
+        "static_closure_complete": not frontier,
     }
 
 
@@ -96,11 +121,22 @@ def main(argv=None) -> int:
     ap.add_argument("--dyn-evidence", default=None,
                     help="indirect_sites.json (per-site dynamic-target "
                          "evidence) so the walk follows dynamic dispatch")
+    ap.add_argument("--observed", default=None,
+                    help="observed.json (probe execution trace): splits the "
+                         "frontier into runtime-reachable vs static-only, so a "
+                         "call never taken at runtime does not block closure")
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
 
     ir = json.loads(Path(args.ir).read_text(encoding="utf-8"))
     promoted = _promoted_keys(Path(args.recovered_dir))
+    observed: set[str] = set()
+    if args.observed and Path(args.observed).is_file():
+        doc = json.loads(Path(args.observed).read_text(encoding="utf-8"))
+        # the executed trace lists every address stepped; a function is
+        # "observed" when its ENTRY was executed.
+        observed = {a.upper() for a in doc.get("executed", ())
+                    if isinstance(a, str)}
     refusals: dict[str, str] = {}
     if args.census and Path(args.census).is_file():
         for reason, keys in json.loads(
@@ -115,16 +151,25 @@ def main(argv=None) -> int:
             dyn_evidence[site["site"].upper()] = \
                 sorted(k.upper() for k in site.get("targets", {}))
 
-    rep = walk_closure(ir, roots, promoted, refusals, dyn_evidence)
+    rep = walk_closure(ir, roots, promoted, refusals, dyn_evidence, observed)
+    from collections import Counter
     print(f"CPUless runtime closure from roots {roots}:")
     print(f"  reachable functions:   {rep['reached']}")
     print(f"  promoted (reached):    {rep['promoted_reached']}")
-    print(f"  frontier (to promote): {len(rep['frontier'])}")
-    from collections import Counter
-    by_reason = Counter(rep["frontier"].values())
-    for reason, n in by_reason.most_common():
+    rt = rep["runtime_frontier"]
+    so = rep["static_only_frontier"]
+    label = "runtime-reachable" if observed else "to promote"
+    print(f"  frontier ({label}): {len(rt)}")
+    for reason, n in Counter(rt.values()).most_common():
         print(f"    {reason:<34} {n}")
-    print(f"  CLOSURE COMPLETE: {rep['closure_complete']}")
+    if observed:
+        print(f"  static-only (reached via an untaken call; no runtime "
+              f"evidence): {len(so)}")
+        for reason, n in Counter(so.values()).most_common():
+            print(f"    {reason:<34} {n}")
+    print(f"  CLOSURE COMPLETE (runtime): {rep['closure_complete']}"
+          + ("" if not observed else
+             f"   (static-strict: {rep['static_closure_complete']})"))
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(json.dumps(rep, indent=1), encoding="utf-8")
