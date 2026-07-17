@@ -1736,6 +1736,11 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
     if df_livein:
         B("df = _df != 0    # caller DF (hidden compat input, tier 9)")
     B("_fmask = 0")
+    # CS is the function's fixed code segment -- a compile-time CONSTANT, never a
+    # runtime input (the ABI carries ds/es/ss, not cs).  A `cs:[...]` access
+    # (notably the dynamic-dispatch SELECTOR read `mov reg, cs:[bx+disp]`, which
+    # bypasses the normal ABI input pass) resolves against this local.
+    B(f"cs = 0x{cs:04X}")
     if alt_entries:
         B(f"bb = {bb_of[scan.entry]} if _entry_ip is None else _ENTRIES[_entry_ip]")
     else:

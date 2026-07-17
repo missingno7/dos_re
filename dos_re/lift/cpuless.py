@@ -104,7 +104,9 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
     def _ea_segment() -> str:
         # Implicit segment of a memory EA: an override prefix wins; BP-based
         # addressing defaults to SS; everything else to DS.  The segment is an
-        # ABI INPUT (the adapter must supply it).
+        # ABI INPUT (the adapter must supply it) -- EXCEPT CS, which is the
+        # function's own fixed code segment (a compile-time constant the emitter
+        # materialises as a local), so it is never carried as a runtime input.
         for p in inst.prefixes:
             if p in (0x26, 0x2E, 0x36, 0x3E):
                 return SEGS[(p >> 3) & 3]
@@ -112,6 +114,11 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
                 inst.rm in (2, 3) or (inst.rm == 6 and inst.mod != 0)):
             return "ss"                   # BP-based EA defaults to SS
         return "ds"                       # incl. moffs (no ModRM)
+
+    def _add_ea_seg() -> None:
+        s = _ea_segment()
+        if s != "cs":                     # cs is a constant, not a runtime input
+            R.add(s)
 
     def modrm_rm(wide_write: bool, also_read_rm: bool = False):
         nonlocal mr, mw
@@ -131,7 +138,7 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
                 pass                      # direct address: no base/index reads
             else:
                 R.update(_EA_REGS[inst.rm])
-            R.add(_ea_segment())
+            _add_ea_seg()
             if wide_write:
                 mw = True
             if also_read_rm or not wide_write:
@@ -320,12 +327,12 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         modrm_rm(wide_write=True)
         return Effects(frozenset(R), frozenset(W), mr, mw, sd)
     if op in (0xA0, 0xA1):               # mov acc, moffs
-        W.add("ax"); R.add(_ea_segment())
+        W.add("ax"); _add_ea_seg()
         if op == 0xA0:
             R.add("ax")                   # AL write preserves AH (word read)
         return Effects(frozenset(R), frozenset(W), True, mw, sd)
     if op in (0xA2, 0xA3):               # mov moffs, acc
-        R.update({"ax", _ea_segment()})
+        R.add("ax"); _add_ea_seg()
         return Effects(frozenset(R), frozenset(W), mr, True, sd)
     if op in (0x68, 0x6A):               # push imm (186)
         R.update({"sp", "ss"}); W.add("sp")
