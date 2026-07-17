@@ -276,7 +276,18 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         W.add("ax")
         return Effects(frozenset(R), frozenset(W), mr, mw, sd)
     if op == 0xD7:                       # xlat
-        R.update({"ax", "bx"}); W.add("ax")
+        # xlat reads [seg:bx+al], and the emitter HONOURS a segment-override
+        # prefix when it renders that read (emit_cpuless: seg = SEGS[...]).
+        # The effects model must declare the SAME register, or the emitted body
+        # names a segment the function never took as an input.  Declaring a bare
+        # "ds" masked this for the default segment; `2E D7` (xlat cs:) does not
+        # -- it emitted mem.rb(cs, ...) into a function without cs and raised
+        # NameError at runtime (1010:1462, the machine-type-2 video probe).
+        seg = "ds"
+        for p in inst.prefixes:
+            if p in (0x26, 0x2E, 0x36, 0x3E):
+                seg = SEGS[(p >> 3) & 3]
+        R.update({"ax", "bx", seg}); W.add("ax")
         return Effects(frozenset(R), frozenset(W), True, mw, sd)
     if op in (0xF5, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD):  # cmc/clc/stc/cli/sti/cld/std
         return Effects()

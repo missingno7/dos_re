@@ -97,3 +97,23 @@ def test_loop_reads_and_writes_cx():
     e = register_effects(Inst(ip=0, length=2, kind="jcc", mnemonic="loop",
                               raw=b"\xe2\xfe", op=0xE2, target=0))
     assert "cx" in e.reads and "cx" in e.writes
+
+
+def test_xlat_declares_the_segment_it_reads():
+    """xlat reads [seg:bx+al] and the EMITTER honours a segment-override
+    prefix; the effects model must declare the SAME register or the emitted
+    body names an input the function never took (NameError at runtime).
+
+    Regression: `2E D7` (xlat cs:) emitted mem.rb(cs, ...) into a function
+    without cs -- lemmings 1010:1462, the machine-type-2 video probe.
+    """
+    plain = register_effects(Inst(ip=0, length=1, kind="seq", mnemonic="xlat",
+                                  raw=b"\xd7", op=0xD7))
+    assert "ds" in plain.reads and "ax" in plain.reads and "bx" in plain.reads
+
+    for prefix, seg in ((0x2E, "cs"), (0x26, "es"), (0x36, "ss"), (0x3E, "ds")):
+        e = register_effects(Inst(ip=0, length=2, kind="seq", mnemonic="xlat",
+                                  raw=bytes((prefix, 0xD7)), op=0xD7,
+                                  prefixes=(prefix,)))
+        assert seg in e.reads, f"xlat with {prefix:#04x} must declare {seg}"
+        assert "ax" in e.writes
