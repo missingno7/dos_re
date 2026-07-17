@@ -29,6 +29,28 @@ class Runtime:
     dos: DOSMachine
 
 
+#: The dummy-IRET stub as a hook entry.  The byte at _BIOS_IRET_STUB is an IRET
+#: that the INTERPRETER can simply execute -- but a strict-VMless runtime may
+#: not interpret ANY x86, and a game that chains an IRQ vector to "the previous
+#: handler" (the universal idiom) jumps straight here on every single IRQ.  So
+#: the power-on environment needs a NATIVE form of it too, or the EXE-free
+#: runtime cannot service a chained interrupt at all.
+BIOS_IRET_ENTRY = (0xF000, 0xFF53)
+
+
+def bios_iret_stub(cpu) -> None:
+    """The power-on BIOS dummy IRQ handler (F000:FF53): a bare IRET.
+
+    Native equivalent of the single 0xCF byte ``_init_bios_environment`` writes
+    there -- same one instruction, same cost, so an interpreted and a VMless
+    run keep the same instruction timeline.
+    """
+    s = cpu.s
+    s.ip = cpu.pop()
+    s.cs = cpu.pop()
+    s.flags = cpu.pop() | 0x0002
+
+
 def create_runtime_from_image(
     memory_image: bytes | bytearray,
     state: CPUState,
@@ -67,6 +89,12 @@ def create_runtime_from_image(
     cpu.port_writer = dos.port_write
     cpu.replacement_hooks[BIOS_INT9_ENTRY] = dos.bios_int9_keyboard
     cpu.hook_names[BIOS_INT9_ENTRY] = "bios_int9_keyboard"
+    # The power-on BIOS environment must be reachable WITHOUT interpretation
+    # here: this runtime may be running behind the strict-VMless wall, where a
+    # game ISR chaining to the previous IRQ vector (-> the dummy IRET stub)
+    # would otherwise fail the wall on the first timer tick.
+    cpu.replacement_hooks[BIOS_IRET_ENTRY] = bios_iret_stub
+    cpu.hook_names[BIOS_IRET_ENTRY] = "bios_iret_stub"
     registry.install(cpu)
     program = LoadedProgram(
         exe=None,
