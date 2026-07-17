@@ -653,7 +653,10 @@ def _translate(inst, lines, flag_written, cs=0x1010):
         lines.append(f"{SEGS[(op >> 3) & 3]} = mem.rw(ss, sp)")
         lines.append("sp = (sp + 2) & 0xFFFF")
         return
-    if op == 0x8E and (inst.reg & 3) in (0, 3):           # mov es/ds, r/m
+    if op == 0x8E and (inst.reg & 3) in (0, 2, 3):        # mov es/ss/ds, r/m
+        # ss only reaches here for the sanctioned bootstrap stack switch
+        # (check_promotable refuses every other ss write); reassigning the ss
+        # LOCAL makes subsequent stack ops use the relocated stack segment.
         lines.append(f"{SEGS[inst.reg & 3]} = {_rm_read(inst, True)}")
         return
     if op == 0x8C:                                        # mov r/m, sreg
@@ -1024,6 +1027,15 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
         if i.kind == CALL_FAR and i.far_target in far_callees \
                 and far_callees[i.far_target].ret_kind != "far":
             raise Refusal("ret-kind-mismatch (far call to near callee)")
+    # A BOOTSTRAP (the C startup, marked by its sanctioned atomic stack switch)
+    # OWNS the (ss:sp) pair: it relocates the stack and computes a fresh sp as
+    # it sets the program's stack/heap up, then transfers to the game and
+    # terminates -- it never returns through a frame.  So its sp arithmetic is
+    # runtime-owned local data, not a composition contract; sp-as-data does not
+    # apply to it.  This is confined to the bootstrap (the ss-switch marker) --
+    # the general ABI keeps sp exact and ss immutable.
+    is_bootstrap = any(_is_bootstrap_ss_switch(scan, i)
+                       for i in scan.insts.values())
     for i in scan.insts.values():
         e = register_effects(i)
         if i.kind in (RET, RETF, IRET):
@@ -1034,8 +1046,12 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
                 and not e.frame_restore_to_base:
             raise Refusal("unresolved-stack-effect")
         if e.writes & frozenset({"cs", "ss"}):
+            if e.writes == frozenset({"ss"}) \
+                    and _is_bootstrap_ss_switch(scan, i):
+                continue    # sanctioned one-time bootstrap stack relocation
             raise Refusal("cs-or-ss-mutation")
-        if "sp" in (e.reads | e.writes) and not _is_stack_family(i):
+        if "sp" in (e.reads | e.writes) and not _is_stack_family(i) \
+                and not is_bootstrap:
             raise Refusal("sp-as-data")
     _check_frame_pointer(scan, callees, far_callees)
     sp_delta, ret_pop, sp_output, sp_deltas = _check_stack_depths(
@@ -1355,6 +1371,29 @@ def _is_game_int(i) -> bool:
     platform effect.  int3 (a debug trap in dead paths) rides the same
     mechanism: its runtime vector is the promoted BIOS dummy-IRET stub."""
     return i.kind == INT and i.int_no in (3, 0x60, 0x61)
+
+
+def _is_bootstrap_ss_switch(scan, i) -> bool:
+    """The Borland/Turbo C startup's atomic stack RELOCATION:
+    ``cli ; mov ss, reg ; <sp write> ; sti``.
+
+    This is the ONE sanctioned SS mutation.  It is not general mutable-ss: the
+    new (ss:sp) is a FRESH stack the bootstrap switches to once (nothing pushed
+    on the old stack is popped on the new one, and the bootstrap never returns
+    through the old frame -- it terminates via int 21/4C).  Recognised tightly
+    -- a bare `mov ss, reg` bracketed by the `cli`/sp-write pair -- so it cannot
+    admit an arbitrary segment-register write elsewhere in the program."""
+    if not (i.op == 0x8E and i.modrm is not None and (i.reg & 3) == 2):
+        return False                        # not `mov ss, r/m16`
+    insts = scan.insts
+    prev_cli = any(insts[a].op == 0xFA for a in insts
+                   if insts[a].next_ip == i.ip)
+    if not prev_cli:                        # must open the atomic switch
+        return False
+    nxt = insts.get(i.next_ip)
+    if nxt is None:                         # must be paired with an sp write
+        return False
+    return "sp" in register_effects(nxt).writes
 
 
 def _is_desmc_far_chain(i) -> bool:
