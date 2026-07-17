@@ -146,6 +146,71 @@ original binary → shared recovery IR → analyses/transformations → selected
 Literal generated files are regeneratable compiler artifacts and must not be
 hand-refactored.
 
+### Stage 2b — ABI-RECOVERED CPULESS
+
+Stage 2 removes the CPU *carrier*; its first (mechanical) form still exposes
+the historical machine **calling convention** in every public contract:
+
+```
+mechanical CPUless      func(mem, ax, bx, ds, si, ss, sp, plat, ...)
+ABI-recovered CPUless   func(mem, value, destination, object_index)
+DOS-layout-less         func(game_object, value)
+```
+
+ABI-recovered CPUless is the second form of stage 2 — a separate milestone
+BEFORE any state moves into authoritative native objects.  The recovered
+graph keeps the historical memory image authoritative (``mem`` and historical
+offsets may remain), but its **public contracts stop being register-shaped**:
+
+- real input parameters are inferred from register/stack live-ins;
+- return values are inferred from caller-observed outputs (never "every
+  modified register for compatibility");
+- stack arguments become ordinary Python parameters; callee-clean vs
+  caller-clean is proven, not assumed;
+- register pairs (DS:SI …) become pointer-like values or typed **memory
+  views** where their role is proven;
+- scratch registers become locals; caller-live condition results become
+  explicit booleans where meaningful;
+- recovered functions call each other through the recovered contracts —
+  historical return-address mechanics leave the public graph.
+
+Early **types are encouraged** when they describe contracts without
+transferring state authority (FarPointer, BufferView, Rect, view classes
+wrapping ``mem`` + historical address).  Every generated type is explicitly
+one of: *value type* | *historical memory view* | *native authoritative
+model* — and stage 2b may only produce the first two.  A view over ``mem``
+is still ABI-recovered CPUless, not DOS-layout-less: the historical image
+remains authoritative.
+
+Strict output taxonomy, per function: **semantic inputs/outputs** (the public
+recovered API) vs **machine-derived temporaries** (locals) vs **private
+compatibility metadata** (exit flags, virtual-time cost, return-address
+bytes, stack residue — allowed only in a private generated verification
+path).  There is ONE generated algorithmic core per function with two
+generated entrypoints: a private compatibility entry preserving the exact
+historical ABI for oracle verification, and the public ABI-recovered entry.
+No duplicate implementations — the later DOS-layout-less transformation must
+be able to swap views for native objects without rewriting the algorithm.
+
+Provenance: the original address is the permanent identity (``1010:4B68``);
+recovered names attach as metadata (``format_decimal [1010:4B68]``) through
+the naming/recovery-facts table, and are never a physical replacement for
+the numeric identity.  Names may start conservative and structural.
+
+The transformation is built over the recovery IR and the completed CPUless
+call graph — never by parsing generated Python.  Contract inference is
+promoted bottom-up to a fixpoint; conflicting call sites or uncertain
+contracts **fail loudly** (no silent fallback to a register-shaped
+signature).  The mechanical CPUless graph remains the generated reference:
+every promoted contract is differentially verified (returned values,
+observable memory effects, caller-live conditions, platform effects, virtual
+timing where still required, complete deterministic demo behavior), with the
+oracle bridge as final acceptance.
+
+The stage-2b hard wall: **the recovered program no longer exposes or depends
+on the historical CPU calling convention, even though its data may still
+live in the historical memory layout.**  Do not call this form memoryless.
+
 ### Stage 3 — DOS-LAYOUT-LESS NATIVE
 
 The historical DOS memory model is removed.  Game state is no longer a flat
@@ -653,9 +718,21 @@ the next major mechanical stage after the VMless graph converges.
   from the required reachable graph: every reachable function is a recovered
   CPUless implementation, verified byte-exact against the oracle standalone
   (§CPUless machinery).
+- **M3b — ABI-recovered CPUless graph.**  The mechanical CPUless graph's
+  public contracts stop being register-shaped (§Stage 2b): inferred real
+  parameters, caller-observed return values, stack args as normal
+  parameters, pointer/view types where proven, direct recovered-to-recovered
+  calls through recovered contracts, dual generated entrypoints (private
+  compat for verification, public ABI-recovered), provenance naming.  The
+  historical memory image stays authoritative; the canonical demo stays
+  oracle-clean.  Complete when no public recovered contract contains a CPU
+  object, register-named parameter, or return-address mechanics — and
+  unsupported ABI shapes fail loudly with evidence.
 - **M4 — DOS-layout dissolution.**  Historical memory structures are replaced
   with native objects, oracle verification retained through the generated
-  bridge.
+  bridge: historical memory views → authoritative native dataclasses and
+  object graph → generated bridge back to the original layout → memoryless
+  runtime.
 - **M5 — Semantic clean port.**  The recovered implementation is
   understandable, maintainable, machine-architecture-independent.
 - **M6 — Enhancements.**  Widescreen, smooth rendering, improved audio, modern
