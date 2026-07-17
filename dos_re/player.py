@@ -59,7 +59,7 @@ from dos_re.dos import ConsoleInputWouldBlock
 from dos_re.hooks import registry as hook_registry
 from dos_re.input_demo import InputDemoPlayback, InputDemoRecorder, mouse_sample
 from dos_re.interrupts import deliver_interrupt, deliver_scancode
-from dos_re.keyboard import KeyDispatcher
+from dos_re.keyboard import KeyDispatcher, scancode_table  # noqa: F401  (re-export)
 from dos_re.runtime_core import use_real_console_input
 # NOTE: the EXE loader (create_runtime) and the EXE-based load_snapshot are
 # imported LAZILY inside the default GameFrontend methods below, not at module
@@ -113,32 +113,11 @@ def decode_frame_default(rt):
     return pal[arr.reshape(HEIGHT, WIDTH)]
 
 
-# pygame key -> XT scan code (make). Break = make | 0x80.
-def scancode_table(pygame) -> dict[int, int]:
-    k = pygame
-    table = {
-        k.K_ESCAPE: 0x01, k.K_MINUS: 0x0C, k.K_EQUALS: 0x0D, k.K_BACKSPACE: 0x0E,
-        k.K_TAB: 0x0F, k.K_RETURN: 0x1C, k.K_LCTRL: 0x1D, k.K_RCTRL: 0x1D,
-        k.K_LSHIFT: 0x2A, k.K_RSHIFT: 0x36, k.K_LALT: 0x38, k.K_RALT: 0x38,
-        k.K_SPACE: 0x39, k.K_UP: 0x48, k.K_LEFT: 0x4B, k.K_RIGHT: 0x4D,
-        k.K_DOWN: 0x50, k.K_COMMA: 0x33, k.K_PERIOD: 0x34, k.K_SLASH: 0x35,
-        k.K_SEMICOLON: 0x27, k.K_QUOTE: 0x28, k.K_BACKQUOTE: 0x29,
-        k.K_LEFTBRACKET: 0x1A, k.K_RIGHTBRACKET: 0x1B, k.K_BACKSLASH: 0x2B,
-        k.K_HOME: 0x47, k.K_PAGEUP: 0x49, k.K_END: 0x4F, k.K_PAGEDOWN: 0x51,
-        k.K_INSERT: 0x52, k.K_DELETE: 0x53,
-    }
-    for i, key in enumerate((k.K_1, k.K_2, k.K_3, k.K_4, k.K_5, k.K_6, k.K_7,
-                             k.K_8, k.K_9, k.K_0)):
-        table[key] = 0x02 + i
-    for i, ch in enumerate("qwertyuiop"):
-        table[getattr(k, f"K_{ch}")] = 0x10 + i
-    for i, ch in enumerate("asdfghjkl"):
-        table[getattr(k, f"K_{ch}")] = 0x1E + i
-    for i, ch in enumerate("zxcvbnm"):
-        table[getattr(k, f"K_{ch}")] = 0x2C + i
-    for i in range(10):  # F1..F10
-        table[getattr(k, f"K_F{i + 1}")] = 0x3B + i
-    return table
+#: Re-exported from keyboard.py, where it must live: a strict-VMless
+#: viewer needs it and cannot import this module (the player reaches the
+#: loader). It is a pure lookup table -- it had no business behind the
+#: EXE loader, and being there meant the one runner that could not import
+#: it hand-rolled a 7-key subset instead.
 
 
 def _timestamp_dir(root: Path, prefix: str) -> Path:
