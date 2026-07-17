@@ -32,6 +32,39 @@ def _promoted_keys(recovered_dir: Path) -> set[str]:
     return keys
 
 
+def _promoted_ranges(ir: dict, promoted: set[str]):
+    """[(seg, start, end, key)] for each PROMOTED IR function -- the byte span
+    its recovered body covers, so a resume address inside it can be recognised."""
+    out = []
+    for key, fn in ir["functions"].items():
+        if key.upper() not in promoted:
+            continue
+        seg = int(key.split(":")[0], 16)
+        last = None
+        start = None
+        for blk in fn["blocks"]:
+            for i in blk["instructions"]:
+                off = int(i["ip"], 16)
+                start = off if start is None else min(start, off)
+                end = off + len(bytes.fromhex(i["bytes"]))
+                last = end if last is None else max(last, end)
+        if start is not None:
+            out.append((seg, start, last, key.upper()))
+    return out
+
+
+def _containing_promoted(key: str, prom_ranges) -> str | None:
+    """The promoted function whose byte span contains ``key`` (an arbitrary
+    CS:IP), or None. A resume/head address served by that function's recovered
+    body is covered, not a frontier gap."""
+    seg = int(key.split(":")[0], 16)
+    off = int(key.split(":")[1], 16)
+    for s, start, end, fkey in prom_ranges:
+        if s == seg and start <= off < end and fkey != key:
+            return fkey
+    return None
+
+
 def walk_closure(ir: dict, roots: list[str], promoted: set[str],
                  refusals: dict[str, str],
                  dyn_evidence: dict[str, list[str]] | None = None,
@@ -51,6 +84,13 @@ def walk_closure(ir: dict, roots: list[str], promoted: set[str],
     (replay coverage is not proof of deadness -- each still owes an explanation
     or a lift before the wall can call itself closed)."""
     dyn_evidence = dyn_evidence or {}
+    # A resume/head address (a boundary head, a snapshot entry, a dispatch
+    # arrival) is NOT its own IR function -- it is an offset INSIDE one. When
+    # that containing function is promoted, its recovered body serves the resume
+    # (the plat.boundary observer / dispatch registry fires there), so the
+    # address is COVERED, not a frontier gap. Without this, feeding resume points
+    # as roots reports every one as a spurious "not-in-ir" frontier item.
+    prom_ranges = _promoted_ranges(ir, promoted)
     reached: set[str] = set()
     frontier: dict[str, str] = {}
     work = list(roots)
@@ -61,12 +101,17 @@ def walk_closure(ir: dict, roots: list[str], promoted: set[str],
             continue
         reached.add(key)
         rec = ir["functions"].get(key)
-        if key not in promoted:
+        container = _containing_promoted(key, prom_ranges) if rec is None else None
+        if key not in promoted and container is None:
             # a frontier node -- record WHY, but still follow its statically
             # known near-call targets so the WHOLE reachable graph (and the
             # real frontier depth) is measured, not just the first gap.
             frontier[key] = refusals.get(key, "not-in-ir" if not rec else "not-promoted")
         if not rec:
+            if container is not None:
+                # covered by a promoted function's recovered body -- walk that
+                # function's graph so its own callees are measured too.
+                work.append(container)
             continue
         cs = int(key.split(":")[0], 16)
         for blk in rec["blocks"]:
