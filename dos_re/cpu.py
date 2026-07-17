@@ -30,44 +30,12 @@ _ALU_NAMES = ("add", "or", "adc", "sbb", "and", "sub", "xor", "cmp")
 
 # x86 FLAGS bits + control exceptions live in the shared leaf module so the
 # device model (dos_re.dos) need not import the interpreter (dos_re.x86).
+#: CPUState now lives in .x86 (the ISA leaf): a register record is a VALUE,
+#: and needing one must not drag this interpreter into the import graph -- the
+#: same reason the flag bits and control exceptions moved there.  Re-exported
+#: so every existing `from .cpu import CPUState` importer is unaffected.
 from .x86 import (CF, PF, AF, ZF, SF, TF, IF, DF, OF, PARITY as _PARITY,  # noqa: F401
-                  UnsupportedInstruction, HaltExecution)
-
-
-@dataclass(slots=True)
-class CPUState:
-    # slots=True: register fields are read/written on virtually every emulated
-    # instruction, and slotted attribute access is measurably faster than
-    # __dict__ lookup.  Consequence: no ad-hoc attributes, and clones use
-    # dataclasses.replace() instead of CPUState(**s.__dict__) (verification.py
-    # and repro_artifacts.py were the only such sites in the ecosystem).
-    ax: int = 0
-    bx: int = 0
-    cx: int = 0
-    dx: int = 0
-    sp: int = 0
-    bp: int = 0
-    si: int = 0
-    di: int = 0
-    cs: int = 0
-    ds: int = 0
-    es: int = 0
-    ss: int = 0
-    ip: int = 0
-    flags: int = 0x0202
-    # x87 state (added for Win16 inline-8087 code; doubles stand in for the
-    # 80-bit registers — the documented precision caveat lives in execute_fpu).
-    fst: list = field(default_factory=list)     # ST(0) is fst[-1]
-    fsw: int = 0
-    fcw: int = 0x037F
-
-    def snapshot(self) -> str:
-        return (
-            f"AX={self.ax:04X} BX={self.bx:04X} CX={self.cx:04X} DX={self.dx:04X} "
-            f"SI={self.si:04X} DI={self.di:04X} BP={self.bp:04X} SP={self.sp:04X} "
-            f"CS:IP={self.cs:04X}:{self.ip:04X} DS={self.ds:04X} ES={self.es:04X} SS={self.ss:04X} "
-            f"FLAGS={self.flags:04X}"
-        )
+                  UnsupportedInstruction, HaltExecution, CPUState)
 
 
 class EffectiveAddress:

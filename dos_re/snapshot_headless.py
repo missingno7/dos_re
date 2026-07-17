@@ -16,8 +16,19 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .runtime_core import Runtime
+if TYPE_CHECKING:
+    # ANNOTATION ONLY.  Importing Runtime at module level would drag
+    # runtime_core -> .cpu (CPU8086/CPUState) into every importer of this
+    # module, which defeats the split this file exists for: the CPUless runner
+    # imports _restore_dos_state and must not acquire a CPU carrier by doing
+    # so.  `from __future__ import annotations` keeps the signatures readable
+    # without the runtime edge.  load_snapshot_headless already imports the
+    # carrier lazily, inside the function -- so only a caller that actually
+    # builds a VM shell pays for it (measured: this edge was importing
+    # dos_re.cpu on every play_cpuless boot, 2026-07-17).
+    from .runtime_core import Runtime
 
 
 def load_snapshot_headless(

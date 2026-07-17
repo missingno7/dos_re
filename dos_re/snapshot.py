@@ -4,10 +4,20 @@ import json
 from collections import deque
 from dataclasses import asdict
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, TYPE_CHECKING
 
-from .cpu import HaltExecution, UnsupportedInstruction
-from .runtime_core import Runtime
+# These are DEFINED in .x86 and merely re-exported by .cpu; importing them
+# through the carrier dragged CPU8086 into every importer of this module --
+# including the CPUless runner, whose whole contract is that it never acquires
+# a CPU (measured 2026-07-17).  Import them from where they live.
+from .x86 import HaltExecution, UnsupportedInstruction
+if TYPE_CHECKING:
+    # ANNOTATION ONLY -- see the note in snapshot_headless.  Runtime pulls
+    # runtime_core -> .cpu, and write_snapshot is EXE-free and CPU-free by
+    # design: the CPUless runner serializes its boundary park through it and
+    # must not acquire an interpreter to do so.  load_snapshot (which really
+    # does build a VM shell) imports the carrier lazily, inside the function.
+    from .runtime_core import Runtime
 
 
 def parse_addr(text: str) -> tuple[int, int]:
