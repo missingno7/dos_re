@@ -203,14 +203,6 @@ class DOSMachine:
     kbd_ctrl: bool = False
     kbd_alt: bool = False
     kbd_caps: bool = False
-    # Microsoft mouse (INT 33h) state.  A front-end feeds it via set_mouse_norm;
-    # left at rest on the headless/deterministic path.  mouse_range is the
-    # program's own virtual coordinate box (set via AX=7/8), so the pointer stays
-    # proportional whatever box the game picks (VGA Lemmings uses 0..319 x 0..199).
-    mouse_x: int = 160
-    mouse_y: int = 100
-    mouse_buttons: int = 0
-    mouse_range: list = field(default_factory=lambda: [0, 639, 0, 199])
     # Unmodeled-I/O policy (docs/hardware_support.md): reads from ports the model
     # does not know return 0 — the proven default both source games ran under.
     # Every such read is recorded here (capped) so probes are auditable, and the
@@ -218,6 +210,41 @@ class DOSMachine:
     # audit sessions where a silently-wrong 0 could hide behind "working" runs.
     strict_ports: bool = False
     unmodeled_port_reads: list[tuple[int, int]] = field(default_factory=list)
+    # Microsoft mouse driver state (INT 33h).  ``mouse_range`` is the virtual
+    # coordinate box the program chose via AX=7/8 (the MS driver's own default,
+    # [0,639]x[0,199], until then); positions are reported inside it.  Fed by the
+    # front-end via ``set_mouse_norm``; left at rest for headless runs.  Mirrors
+    # the DOS/4GW core (dos4gw.py) so both answer the API identically.
+    #
+    # ``mouse_present`` gates whether a mouse is reported to the program at all,
+    # and DEFAULTS OFF -- deliberately, not for legacy reasons.  Detecting a
+    # mouse CHANGES A GAME'S CONTROL FLOW at startup (it enables pointer
+    # control), so a mouse that appears implicitly would silently diverge every
+    # recording made without one.  In a framework whose contract is byte-exact
+    # replay, that has to be an explicit opt-in, not an ambient default.  The
+    # front-end turns it on: the interactive viewer unconditionally, replay from
+    # the recording's own answer (input_demo.mouse_present_hint).  A mouse-driven
+    # game must opt in (its demos carry mouse events, so the hint says True).
+    mouse_present: bool = False
+    # Reset (fn 0) parks the pointer at the CENTRE OF THE DRIVER'S OWN RANGE,
+    # which fn 0 sets to [0,639]x[0,199] two lines below -- hence 320,100, not
+    # 160,100 (that would be the centre of a 320-wide box the driver never
+    # declares).
+    mouse_x: int = 320
+    mouse_y: int = 100
+    mouse_buttons: int = 0
+    mouse_range: list[int] = field(default_factory=lambda: [0, 639, 0, 199])
+    # Writable-file policy.  Program writes (INT 21h create/write) always land in
+    # an in-memory overlay keyed by resolved path and survive close -- so a
+    # program that re-reads a file it just wrote (e.g. a saved-progress .CFG)
+    # sees its own bytes, with ZERO disk I/O, keeping RE/demo/test replay
+    # bit-deterministic.  ``save_dir`` is the opt-in persistence sink: when set
+    # (the interactive/final product), close flushes the overlay there and open
+    # reads it back, so progress survives across runs.  Left None for
+    # demos/tests/headless so nothing touches disk and the original game
+    # directory is never mutated (the historical default).
+    save_dir: "Path | None" = None
+    file_overlay: dict[str, bytearray] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.vga_palette:
@@ -414,6 +441,55 @@ class DOSMachine:
             if p.name.upper() == Path(clean).name.upper():
                 return p
         return direct
+
+    # ---- writable-file overlay + opt-in persistence ------------------------
+    @staticmethod
+    def _overlay_key(path: Path) -> str:
+        # DOS is case-insensitive; key by resolved path so the same file opened
+        # under any spelling maps to one overlay slot.
+        return str(path).lower()
+
+    def _load_file_bytes(self, path: Path) -> "bytes | None":
+        """Bytes an open(3D) should serve, or None if the file does not exist.
+
+        The whole read-your-writes overlay is gated on persistence being ON
+        (``save_dir`` set).  When it is OFF (demos/tests/headless replay) this is
+        byte-for-byte the legacy behaviour: writes never survive close, so a
+        re-open always reads the pristine game file -- which is what every demo
+        was recorded under.  (Consulting the overlay unconditionally silently
+        diverged any demo where the game rewrites then re-reads a file, e.g.
+        Skyroads reloading SKYROADS.CFG after saving progress at a level break.)
+
+        With persistence ON: (1) the in-run overlay -- the freshest thing the
+        program wrote this run; (2) the ``save_dir`` sink -- progress saved by an
+        earlier run; (3) the pristine game file."""
+        if self.save_dir is not None:
+            buf = self.file_overlay.get(self._overlay_key(path))
+            if buf is not None:
+                return bytes(buf)
+            saved = self.save_dir / path.name
+            if saved.is_file():
+                return saved.read_bytes()
+        if path.is_file():
+            return path.read_bytes()
+        return None
+
+    def _persist_overlay(self, path: Path) -> None:
+        """Flush a written file's overlay bytes to ``save_dir`` (best effort).
+
+        No-op unless persistence is enabled, so the deterministic default never
+        touches disk.  A write failure is swallowed -- saving progress must
+        never crash the game."""
+        if self.save_dir is None:
+            return
+        buf = self.file_overlay.get(self._overlay_key(path))
+        if buf is None:
+            return
+        try:
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+            (self.save_dir / path.name).write_bytes(bytes(buf))
+        except OSError:
+            pass
 
 
     # PIT channel 0 (IRQ0/INT 08h) frequency the program itself programmed.
@@ -1002,26 +1078,36 @@ class DOSMachine:
             name = self.read_asciiz(cpu, cpu.s.ds, cpu.s.dx)
             path = self.resolve_game_path(name)
             handle = self._alloc_handle()
-            # Keep writes in-memory so RE runs are deterministic and do not
-            # mutate the user's original game directory.
-            self.files[handle] = FileHandle(path, bytearray(), pos=0, writable=True)
+            # Writes go to the handle's in-memory buffer (create truncates).
+            # ONLY when persistence is on (save_dir set) is that buffer also
+            # registered in the cross-close overlay so a later open of the same
+            # file reads what was written; with persistence off the buffer is
+            # dropped on close and a re-open reads the pristine file -- the
+            # legacy behaviour every demo was recorded under.
+            buf = bytearray()
+            if self.save_dir is not None:
+                self.file_overlay[self._overlay_key(path)] = buf
+            self.files[handle] = FileHandle(path, buf, pos=0, writable=True)
             cpu.s.ax = handle
             cpu.set_flag(CF, False)
             return
         if ah == 0x3D:  # open file
             name = self.read_asciiz(cpu, cpu.s.ds, cpu.s.dx)
             path = self.resolve_game_path(name)
-            if not path.is_file():        # missing, OR an empty/invalid name that resolved to a directory
+            data = self._load_file_bytes(path)
+            if data is None:              # missing, OR an empty/invalid name that resolved to a directory
                 cpu.s.ax = 2              # DOS "file not found" (CF=1) -> the game's open-fail path, not a crash
                 cpu.set_flag(CF, True)
                 return
             handle = self._alloc_handle()
-            self.files[handle] = FileHandle(path, bytearray(path.read_bytes()))
+            self.files[handle] = FileHandle(path, bytearray(data))
             cpu.s.ax = handle
             cpu.set_flag(CF, False)
             return
         if ah == 0x3E:  # close
-            self.files.pop(cpu.s.bx, None)
+            h = self.files.pop(cpu.s.bx, None)
+            if h is not None and getattr(h, "writable", False):
+                self._persist_overlay(h.path)   # opt-in save (no-op if save_dir is None)
             cpu.set_flag(CF, False)
             return
         if ah == 0x3F:  # read
@@ -1523,17 +1609,26 @@ class DOSMachine:
             self.mouse_buttons = buttons
 
     def int33(self, cpu: CPU8086) -> None:
-        # Minimal Microsoft mouse driver.  State is fed by the front-end via
+        # Microsoft mouse driver (real mode).  State is fed by the front-end via
         # set_mouse_norm; services are grown as games issue them.  Reporting the
-        # mouse PRESENT (AX=0 -> AX=FFFF) is what makes a mouse-driven game (VGA
-        # Lemmings) enable pointer control at all — the previous stub reported it
-        # absent, so the game gave up after its one reset/detect call.
+        # mouse PRESENT (AX=0 -> AX=FFFF) is what makes a mouse-driven game
+        # enable pointer control at all -- a stub reporting it absent makes the
+        # game give up after its one reset/detect call.
+        #
+        # Gated on `mouse_present` (default OFF, see the field): the mouse is an
+        # explicit opt-in because detecting one changes a game's startup control
+        # flow, which would silently diverge a recording made without it.
         ax = cpu.s.ax & 0xFFFF
+        if not self.mouse_present:
+            if ax == 0x0000:                     # legacy "absent" reply
+                cpu.s.ax = 0
+                cpu.s.bx = 0
+            return
         if ax == 0x0000:                         # reset/detect -> AX=FFFF, BX=#buttons
             cpu.s.ax = 0xFFFF
             cpu.s.bx = 2
-            self.mouse_x, self.mouse_y, self.mouse_buttons = 160, 100, 0
-            self.mouse_range = [0, 639, 0, 199]  # driver reset restores full ranges
+            self.mouse_range = [0, 639, 0, 199]  # driver reset restores its default box
+            self.mouse_x, self.mouse_y, self.mouse_buttons = 320, 100, 0  # ...centre of it
             return
         if ax in (0x0001, 0x0002):               # show / hide cursor (game draws its own)
             return
@@ -1547,6 +1642,12 @@ class DOSMachine:
             self.mouse_x = cpu.s.cx & 0xFFFF
             self.mouse_y = cpu.s.dx & 0xFFFF
             return
+        if ax in (0x0005, 0x0006):               # button press/release data
+            cpu.s.ax = self.mouse_buttons & 0xFFFF
+            cpu.s.bx = 0                          # count since last query
+            cpu.s.cx = self.mouse_x & 0xFFFF
+            cpu.s.dx = self.mouse_y & 0xFFFF
+            return
         if ax == 0x0007:                         # set horizontal range (CX..DX)
             self.mouse_range[0], self.mouse_range[1] = cpu.s.cx & 0xFFFF, cpu.s.dx & 0xFFFF
             return
@@ -1556,6 +1657,17 @@ class DOSMachine:
         if ax == 0x000B:                         # read motion counters -> CX/DX deltas
             cpu.s.cx = 0
             cpu.s.dx = 0
+            return
+        if ax == 0x0024:                         # get driver version/type/IRQ
+            cpu.s.bx = 0x0814                    # version 8.20 (MS MOUSE.COM convention)
+            cpu.s.cx = 0x0400                    # CH=4 (PS/2), CL=0 (no IRQ for PS/2)
+            return
+        if ax in (0x000C, 0x000F, 0x0010, 0x001A):  # set handler/ratio/region/sens.
+            return
+        if ax == 0x001B:                         # get sensitivity -> BX/CX/DX
+            cpu.s.bx = 50
+            cpu.s.cx = 50
+            cpu.s.dx = 50
             return
         # Unimplemented subfunction: no-op (grow when a game proves it needs it).
         return
