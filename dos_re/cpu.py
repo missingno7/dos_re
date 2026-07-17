@@ -222,6 +222,30 @@ class CPU8086:
     def parity(self, value: int) -> bool:
         return _PARITY[value & 0xFF]
 
+    def daa(self) -> None:
+        """DAA — decimal adjust AL after BCD addition (opcode 0x27).
+
+        The single source of truth for DAA semantics: the interpreter's op 0x27
+        calls this, and the VMless lifter emits ``cpu.daa()`` (the CPUless lifter
+        inlines the identical computation over its register/flag locals).  8086
+        defines SF/ZF/PF from the adjusted AL; OF is undefined and left unchanged.
+        """
+        old_al = self.get_reg8(0)
+        old_cf = self.get_flag(CF)
+        al = old_al
+        adjust_low = (al & 0x0F) > 9 or self.get_flag(AF)
+        if adjust_low:
+            al = (al + 0x06) & 0xFF
+        adjust_high = old_al > 0x99 or old_cf
+        if adjust_high:
+            al = (al + 0x60) & 0xFF
+        self.set_reg8(0, al)
+        self.set_flag(AF, adjust_low)
+        self.set_flag(CF, adjust_high)
+        self.set_flag(ZF, al == 0)
+        self.set_flag(SF, bool(al & 0x80))
+        self.set_flag(PF, self.parity(al))
+
     # The three flag helpers below are extremely hot.  They compute the whole
     # flags word in one assignment instead of 5-6 set_flag() calls each.  The bits
     # they touch (and the ones they preserve) match the original set_flag-based
@@ -1321,23 +1345,7 @@ class CPU8086:
             return T and f"xlat {seg_override or 'ds'}:[bx+al]"
 
         if op == 0x27:  # DAA - decimal adjust AL after BCD addition
-            old_al = self.get_reg8(0)
-            old_cf = self.get_flag(CF)
-            al = old_al
-            adjust_low = (al & 0x0F) > 9 or self.get_flag(AF)
-            if adjust_low:
-                al = (al + 0x06) & 0xFF
-            adjust_high = old_al > 0x99 or old_cf
-            if adjust_high:
-                al = (al + 0x60) & 0xFF
-            self.set_reg8(0, al)
-            self.set_flag(AF, adjust_low)
-            self.set_flag(CF, adjust_high)
-            # 8086 defines SF/ZF/PF from adjusted AL. OF is undefined; leave it
-            # unchanged so code that does not rely on undefined OF remains stable.
-            self.set_flag(ZF, al == 0)
-            self.set_flag(SF, bool(al & 0x80))
-            self.set_flag(PF, self.parity(al))
+            self.daa()
             return T and "daa"
 
         # (Shift/rotate group 2 is hoisted into the fast path above.)

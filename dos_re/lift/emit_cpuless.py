@@ -384,6 +384,22 @@ def _translate(inst, lines, flag_written):
             lines.append("    raise OverflowError('8-bit idiv quotient overflow')")
             lines.append("ax = ((_r & 0xFF) << 8) | (_q & 0xFF)")
         return
+    if op == 0x27:                                        # daa
+        # decimal-adjust AL after BCD add -- inline of CPU8086.daa over locals.
+        # both adjustments test the ORIGINAL AL; OF is left undefined (unchanged).
+        lines.append("_oal = ax & 0xFF")
+        lines.append("_alo = ((_oal & 0x0F) > 9) or af")
+        lines.append("_al = ((_oal + 6) & 0xFF) if _alo else _oal")
+        lines.append("_ahi = (_oal > 0x99) or cf")
+        lines.append("_al = ((_al + 0x60) & 0xFF) if _ahi else _al")
+        lines.append("ax = (ax & 0xFF00) | _al")
+        lines.append("af = _alo")
+        lines.append("cf = _ahi")
+        lines.append("zf = _al == 0")
+        lines.append("sf = (_al & 0x80) != 0")
+        lines.append("pf = _PARITY[_al]")
+        flags("cf", "af", "zf", "sf", "pf")
+        return
     if op == 0x98:                                        # cbw
         lines.append("ax = (ax & 0xFF) | (0xFF00 if ax & 0x80 else 0)")
         return
@@ -1379,6 +1395,8 @@ def _flag_pass(scan, callees, far_callees, alt_entries, *, seed):
                 if (i.kind == CALL_FAR and i.far_target in far_callees
                         and far_callees[i.far_target].df_livein):
                     df_consumed = True
+            if i.op == 0x27 and not ({"cf", "af"} <= set(defined[ip])):
+                fl_consumed = True                        # daa reads CF and AF
             if "cf" not in defined[ip]:
                 if i.op == 0xF5:                          # cmc
                     fl_consumed = True
@@ -1442,6 +1460,8 @@ def _flags_defined_by(i) -> frozenset:
         return _ALL_FLAGS
     if op == 0xF8 or op == 0xF9:
         return frozenset({"cf"})
+    if op == 0x27:              # daa: defines CF/AF/ZF/SF/PF (OF left undefined)
+        return frozenset({"cf", "af", "zf", "sf", "pf"})
     if op in (0xFC, 0xFD):
         return frozenset({"df"})
     if op in (0xFA, 0xFB):

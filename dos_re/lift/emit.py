@@ -441,6 +441,9 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str], *,
         return True
 
     # --- misc simple -------------------------------------------------------
+    if op == 0x27:                            # daa — decimal adjust after BCD add
+        out.append("cpu.daa()")               # single source of truth: CPU8086.daa
+        return True
     if op == 0x9F:                            # lahf — mirror CPU8086 op 0x9F
         out.append("s.ax = (s.ax & 0x00FF) | (((s.flags & 0xD5) | 0x02) << 8)")
         return True

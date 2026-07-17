@@ -489,6 +489,9 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         R.update({"ax", "dx"})
         return Effects(frozenset(R), frozenset(W), port_io=True)
 
+    if op == 0x27:                       # daa: decimal-adjust AL (preserves AH)
+        return Effects(reads=frozenset({"ax"}), writes=frozenset({"ax"}))
+
     return Effects(refusal=f"unanalyzed-opcode-{op:02X}")
 
 
