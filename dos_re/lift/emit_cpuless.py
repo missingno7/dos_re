@@ -912,7 +912,8 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
             continue    # the RET ABI (incl. a uniform ret N / the iret
                         # frame) is the adapter's job; the depth checker
                         # gates the rest
-        if e.stack_delta is None and not e.frame_restore:
+        if e.stack_delta is None and not e.frame_restore \
+                and not e.frame_restore_to_base:
             raise Refusal("unresolved-stack-effect")
         if e.writes & frozenset({"cs", "ss"}):
             raise Refusal("cs-or-ss-mutation")
@@ -1010,11 +1011,17 @@ def _check_frame_pointer(scan) -> None:
     would need dominance analysis to prove the restore precedes the leave; that
     still refuses, via the mov-bp write in the middle.)
     """
+    # the same invariant covers `leave` (fused) AND the hand-rolled `mov sp,bp`
+    # (split): both read bp as the frame base, so both need bp un-clobbered and a
+    # matching establish (`enter` / `mov bp,sp`).
     leaves = [i for i in scan.insts.values() if i.op == 0xC9]
-    if not leaves:
+    restores = [i for i in scan.insts.values() if _is_frame_restore(i)]
+    if not leaves and not restores:
         return
-    if not any(i.op == 0xC8 for i in scan.insts.values()):
+    if leaves and not any(i.op == 0xC8 for i in scan.insts.values()):
         raise Refusal("leave-without-enter")
+    if restores and not any(_is_frame_establish(i) for i in scan.insts.values()):
+        raise Refusal("frame-restore-without-establish")
     for i in scan.insts.values():
         # Only a SEQUENTIAL instruction can clobber bp as data. A transfer's
         # register writes are a CONSERVATIVE dataflow bundle, not a literal
@@ -1083,6 +1090,7 @@ def _is_stack_family(i) -> bool:
             or op in (0x68, 0x6A)
             or _is_sp_capture(i)                   # mov r16, sp: frame base into
                                                     # a GP reg (bp/bx frame ptr)
+            or _is_frame_restore(i)                # mov sp, bp: hand-rolled leave
             or (op in (0x81, 0x83) and i.mod == 3 and i.rm == 4
                 and i.reg in (0, 5))               # add/sub sp, imm: cdecl
                                                     # cleanup / frameless alloc
@@ -1112,6 +1120,22 @@ def _is_sp_capture(i) -> bool:
     return (i.mod == 3
             and ((i.op == 0x8B and i.rm == 4)       # mov r16, sp
                  or (i.op == 0x89 and i.reg == 4)))  # mov r/m16, sp
+
+
+def _is_frame_establish(i) -> bool:
+    """`mov bp, sp` -- the hand-rolled frame prologue (a `push bp` precedes it),
+    the bare form of `enter 0`. Sets bp to the frame base."""
+    return (i.mod == 3
+            and ((i.op == 0x8B and i.reg == 5 and i.rm == 4)     # mov bp, sp
+                 or (i.op == 0x89 and i.reg == 4 and i.rm == 5)))
+
+
+def _is_frame_restore(i) -> bool:
+    """`mov sp, bp` -- the hand-rolled frame epilogue (a `pop bp` follows it),
+    the un-fused half of `leave`. Restores sp to the frame base bp holds."""
+    return (i.mod == 3
+            and ((i.op == 0x8B and i.reg == 4 and i.rm == 5)     # mov sp, bp
+                 or (i.op == 0x89 and i.reg == 5 and i.rm == 4)))
 
 
 def _is_dyn(i) -> bool:
@@ -1180,10 +1204,18 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
         work.append((a, 0))
     exit_depths: set[int] = set()
     ret_pops: set[int] = set()
+    frame_base: int | None = None       # depth at `mov bp,sp` (hand-rolled enter)
     while work:
         ip, d = work.pop()
         i = scan.insts[ip]
         e = register_effects(i)
+        if e.frame_establish and d is not None:
+            # `mov bp,sp`: bp now holds the current sp -- the frame base a later
+            # `mov sp,bp` returns to. One frame per function (a second establish
+            # at a different depth would make the restore ambiguous).
+            if frame_base is not None and frame_base != d:
+                raise Refusal("multiple-frame-establish")
+            frame_base = d
         if i.kind in (RET, RETF, IRET):
             # ANY exit depth is legal: an unbalanced/varying exit makes sp a
             # runtime output, and both the adapter's frame pops and a
@@ -1220,6 +1252,14 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
             # discards it. That is what makes an enter/leave function composable
             # instead of an sp-output that blocks every caller.
             afters = [0]
+        elif e.frame_restore_to_base:
+            # `mov sp,bp` (leave un-fused from its `pop bp`): sp := bp returns to
+            # the frame base -- the depth recorded at the matching `mov bp,sp`,
+            # NOT entry depth (the saved bp is still stacked; the `pop bp` that
+            # follows does that -2). A reset, exact even when d is UNKNOWN.
+            if frame_base is None:
+                raise Refusal("frame-restore-before-establish")
+            afters = [frame_base]
         elif d is None:
             afters = [None]
         else:

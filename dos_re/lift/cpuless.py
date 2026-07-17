@@ -54,6 +54,15 @@ class Effects:
     #: function's entry depth. A consumer walking depth handles this by RESET,
     #: not by arithmetic (see emit_cpuless._check_stack_depths).
     frame_restore: bool = False
+    #: the HAND-ROLLED split of enter/leave a compiler emits as discrete
+    #: instructions: `mov bp,sp` (frame_establish) sets the frame base, `mov
+    #: sp,bp` (frame_restore_to_base) returns sp to it. Unlike `leave` -- which
+    #: also pops bp, so it resets to the ENTRY depth (0) -- the bare `mov sp,bp`
+    #: resets to the depth recorded at its matching `mov bp,sp`; the separate
+    #: `pop bp` after it does the rest. The walker tracks that base (see
+    #: emit_cpuless._check_stack_depths); the pairing is guarded like leave's.
+    frame_establish: bool = False
+    frame_restore_to_base: bool = False
     refusal: str | None = None         # non-None: not analyzable yet (why)
     port_io: bool = False              # a port in/out platform effect (needs plat)
     int_effect: int | None = None      # an INT n platform effect (needs plat)
@@ -260,6 +269,16 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         return Effects(frozenset(R), frozenset(W), mr, mw, sd)
     if op == 0x90:                       # nop
         return Effects()
+    if op in (0x89, 0x8B) and inst.mod == 3:
+        # the hand-rolled split of enter/leave. 0x89 (mov r/m,r): dst=rm, src=reg;
+        # 0x8B (mov r,r/m): dst=reg, src=rm.  W16 index sp=4, bp=5.
+        dst, src = (inst.rm, inst.reg) if op == 0x89 else (inst.reg, inst.rm)
+        if dst == 5 and src == 4:        # mov bp, sp -- frame ESTABLISH
+            return Effects(frozenset({"sp"}), frozenset({"bp"}), False, False, 0,
+                           frame_establish=True)
+        if dst == 4 and src == 5:        # mov sp, bp -- frame RESTORE (to base)
+            return Effects(frozenset({"bp"}), frozenset({"sp"}), False, False,
+                           None, frame_restore_to_base=True)
     if op in (0x88, 0x89):               # mov r/m, r
         R.add(_r8(inst.reg) if op == 0x88 else W16[inst.reg])
         modrm_rm(wide_write=True)

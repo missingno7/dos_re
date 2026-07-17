@@ -180,6 +180,35 @@ def test_bp_disp16_and_direct_disp16_stay_distinct() -> None:
     assert ns2["ax"] & 0xFFFF == 0x8877          # direct, ignores bp
 
 
+def test_hand_rolled_frame_round_trips_like_the_interpreter() -> None:
+    # The split enter/leave a compiler emits as discrete instructions:
+    #   push bp; mov bp,sp; sub sp,4; mov [bp-2],ax; mov cx,[bp-2]; mov sp,bp; pop bp
+    # sp and bp must return to their entry values and the local round-trips,
+    # byte-identical to stepping the same bytes through the VM.
+    ss = 0x3000
+    code = bytes.fromhex("55"        # push bp
+                         "8bec"      # mov bp, sp
+                         "83ec04"    # sub sp, 4
+                         "8946fe"    # mov [bp-2], ax
+                         "8b4efe"    # mov cx, [bp-2]
+                         "8be5"      # mov sp, bp
+                         "5d")       # pop bp
+    m1, m2 = Memory(), Memory()
+    ns = {"ss": ss, "ds": ss, "sp": 0x0100, "bp": 0x7777, "ax": 0x1234, "cx": 0,
+          "mem": m1, "_PARITY": [0] * 256}
+    exec("\n".join(_emit_seq(code)), {}, ns)
+    s = CPUState(cs=0x2000, ip=0, ss=ss, ds=ss, ax=0x1234, bp=0x7777)
+    s.sp = 0x0100
+    cpu = CPU8086(m2, s)
+    for k, b in enumerate(code):
+        m2.data[(0x2000 << 4) + k] = b
+    for _ in range(7):
+        cpu.step()
+    assert ns["cx"] & 0xFFFF == cpu.s.cx & 0xFFFF == 0x1234    # local round-tripped
+    assert ns["sp"] & 0xFFFF == cpu.s.sp & 0xFFFF == 0x0100    # frame balanced
+    assert ns["bp"] & 0xFFFF == cpu.s.bp & 0xFFFF == 0x7777    # caller bp restored
+
+
 def test_popa_discards_the_saved_sp() -> None:
     # 0x61 popa restores all but SP (the stacked sp word is skipped). Round-trip
     # a pusha frame: push then pop must return every register unchanged.

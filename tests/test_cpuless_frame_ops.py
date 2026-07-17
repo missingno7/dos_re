@@ -124,8 +124,28 @@ def test_sp_capture_recognises_both_encodings() -> None:
     assert not _is_sp_capture(_inst(bytes.fromhex("8bd8")))     # mov bx, ax
 
 
+def test_hand_rolled_frame_establish_and_restore_effects() -> None:
+    # mov bp, sp  (8b ec / 89 e5) -- ESTABLISH: bp := sp, depth unchanged.
+    for code in ("8bec", "89e5"):
+        e = _eff(bytes.fromhex(code))
+        assert e.refusal is None and e.frame_establish and not e.frame_restore_to_base
+        assert e.reads == frozenset({"sp"}) and e.writes == frozenset({"bp"})
+        assert e.stack_delta == 0
+    # mov sp, bp  (8b e5 / 89 ec) -- RESTORE to frame base: sp := bp.
+    for code in ("8be5", "89ec"):
+        e = _eff(bytes.fromhex(code))
+        assert e.refusal is None and e.frame_restore_to_base and not e.frame_establish
+        assert e.reads == frozenset({"bp"}) and e.writes == frozenset({"sp"})
+        assert e.stack_delta is None            # a reset, not a constant delta
+    # a plain reg move (mov bp, ax) is NEITHER.
+    n = _eff(bytes.fromhex("8be8"))             # mov bp, ax
+    assert not n.frame_establish and not n.frame_restore_to_base
+
+
 def test_stack_family_admits_the_sp_discipline_forms() -> None:
-    for code in ("83c408", "83ec04", "8bdc", "8bec", "89e3"):
+    # add/sub sp,imm ; mov r16,sp captures ; and the hand-rolled frame restore
+    # `mov sp,bp` (8be5 / 89ec) -- all sp-as-discipline, not sp-as-data.
+    for code in ("83c408", "83ec04", "8bdc", "8bec", "89e3", "8be5", "89ec"):
         assert _is_stack_family(_inst(bytes.fromhex(code))), code
-    # the frame RESTORE `mov sp,bp` is deliberately still refused (sp write).
-    assert not _is_stack_family(_inst(bytes.fromhex("8be5")))
+    # a genuine sp-as-data write (`mov sp, ax`) is still refused.
+    assert not _is_stack_family(_inst(bytes.fromhex("8be0")))    # mov sp, ax
