@@ -110,7 +110,89 @@ output differs (float sine vs ROM quantization, analytic envelopes, seeded
 noise instead of the LFSR).  Anything that needs sample-exactness uses the
 exact cores.
 
-## 3. If you change the interpreter itself: the equivalence gate
+## 3. The recovered (CPUless) program: a different cost model
+
+Everything above is about the **interpreter**. A CPUless port does not run one:
+it runs *emitted Python* (`lift/emit_cpuless.py` output) over the device model.
+Different hot path, different advice — and section 1's "the speedups are free,
+run PyPy" only half-applies here. Two reasons.
+
+**PyPy still wins big, because the emitted code is JIT-shaped.** Measured on
+VGA Lemmings' recovered program (2026-07-17, CPython 3.11 vs PyPy 3.11 v7.3.20,
+Windows; sim only, no render; boundaries/sec against the 73 Hz the game
+expects):
+
+| Screen | CPython | PyPy |
+|---|---|---|
+| front-end (mode 10h) | 30.8/s — **42% of real speed** | 161/s — 221% |
+| gameplay (mode 0Dh) | 247/s — 338% | 162/s — 223% |
+
+That **5.2x** on the front end *is* the emitter's overhead: the JIT erases it,
+CPython pays it. Which matters because **the one host that cannot have PyPy is
+the one that needs it** — an Android APK ships CPython (see
+lemmings_port/android/README.md; the same program runs ~53% of real speed on a
+Galaxy S24). For a shipped CPUless port, emitted-code quality *is* the
+performance story.
+
+**But under PyPy the standalone shell caps itself.** PyPy lands on ~6.2 ms per
+boundary in *both* screens above — an identical floor for opposite workloads,
+which is never the workload. Cause: a standalone shell parks its worker thread
+every boundary, and a `threading.Event` round trip costs **7.5 ms on PyPy vs
+0.012 ms on CPython** (Windows; `sys.setswitchinterval()` makes it *worse*, 9.5 ms
+at 50 µs). So PyPy's 162/s is the handoff cap, not its speed. A shell that
+drives the program from `boundary_cb` on one thread — the pygame event loop
+must own the main thread anyway — would remove the floor entirely. **Unimplemented.**
+
+### The open emitter work, in expected-value order
+
+Ranked by measured evidence, not intuition. All of it is one file,
+`lift/emit_cpuless.py`, so a change multiplies across a port's whole corpus
+(Lemmings: 284 modules). Every item below is gated by the same acceptance
+harness the corpus already passes, so a semantic slip fails loudly at a
+boundary index rather than shipping.
+
+1. **Dead-flag elimination.** The emitter computes CF/PF/AF/ZF/SF/OF eagerly
+   for every ALU op. Measured: an emitted 16-bit `ADD` with flags is **176 ns
+   vs 24 ns** without — flags cost **7.3x the operation**. In Lemmings' hottest
+   function: **2,375 flag assignments vs 277 lines that read a flag**, so ~90%
+   are dead stores. The machinery is half there — `lift/cfg.py` has the CFG,
+   and the emitter already knows which flags each `jcc` READS (its flag-live-in
+   refusal check). Constraint: the `_compat` contract reproduces exit flags for
+   the CPU-ABI adapter, so liveness must treat function exit as a USE.
+   *Highest ceiling.*
+2. **Block dispatch: linear chain → binary tree.** Emitted functions are
+   `while True:` + N independent `if bb == K:`. Fall-through costs one
+   comparison, but every *backward* jump — i.e. every loop in the original asm —
+   rescans the chain. Measured on a 327-block function: a full scan is **1.5 µs
+   vs 0.06 µs** for a binary dispatch tree (**23x**), and its inner loops spin
+   **5,722 while-iterations per boundary** ≈ **8.6 ms (~25%)** of a 35 ms
+   front-end boundary. Mechanical codegen change; the cheapest probe of whether
+   emitter work converts to wall-clock at all.
+3. **Memory access inlining.** `mem.rb`/`mem.wb` are Python calls per byte:
+   **15,033 reads + 9,662 writes per front-end boundary** (1,678 + 1,091 in
+   gameplay). Emitting a direct index for non-EGA segments would cut the call
+   overhead — but EGA latch/set-reset semantics live in `_ega_wb`, so the fast
+   path must be provably narrow.
+
+### Measuring it (two traps that cost real time)
+
+* **cProfile is per-thread.** A standalone shell runs the program on a worker
+  thread; profiling the shell shows nothing but `lock.acquire`. Enable the
+  profiler *inside* the worker (wrap `runtime.call`).
+* **cProfile lies about call-heavy code, in the direction you want to believe.**
+  It attributed **21%** of a gameplay boundary to the port-write fan-out; the
+  fix delivered **~6%** (A/B median, 3 runs each, ~10% run-to-run noise).
+  Per-call overhead is exactly what a deterministic profiler inflates. Always
+  A/B against a wall clock before believing a percentage — and land the
+  measurement, not the intuition.
+
+*Done so far:* `port_write` routes each OUT to its one owner instead of offering
+it to all four device trackers (~+6% gameplay). A port-side counterpart worth
+copying: decode planar pixels **once** and paint each palette band's rows once —
+re-decoding per band doubled a split-screen render (1.49 ms → 0.83 ms in
+lemmings_port; see docs/raster_effects.md).
+
+## 4. If you change the interpreter itself: the equivalence gate
 
 Every optimization to cpu/memory hot paths must be proven byte-exact before
 it lands. The working method (used for all of the 2026-07 rounds — bulk REP,

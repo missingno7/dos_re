@@ -112,6 +112,15 @@ never to guess.
 The port's rasterizer translates the historical hardware technique into a
 native operation: it overlays band palettes cumulatively in raster order and
 recolors ``frame[row:]`` per band (``lemmings/render.py _decode_banded``).
+
+> **Decode once, paint each row once.** Bands differ only in their palette, and
+> the planar decode does not depend on the palette at all -- so decode the
+> attribute INDICES once, then map each band's palette over its own row range.
+> The obvious first cut (re-decode the whole frame per band, keep the rows
+> below the split) does the expensive half twice and throws the first result
+> away: measured 1.49 ms -> 0.83 ms per frame once fixed, on a screen with a
+> single split. A faster renderer that changes a pixel is a broken one -- diff
+> it against the old output frame by frame.
 Row resolution is port knowledge: counted scan lines map 1:1 in mode 10h and
 2:1 in double-scanned mode 0Dh; a band with line None is placed by a declared
 port fact (Lemmings: the skill panel starts at y=160, GAME_RASTER_SPLIT_Y)
