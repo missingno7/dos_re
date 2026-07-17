@@ -60,6 +60,7 @@ from dos_re.hooks import registry as hook_registry
 from dos_re.input_demo import InputDemoPlayback, InputDemoRecorder, mouse_sample
 from dos_re.interrupts import deliver_interrupt, deliver_scancode
 from dos_re.keyboard import KeyDispatcher
+from dos_re.runtime_core import use_real_console_input
 # NOTE: the EXE loader (create_runtime) and the EXE-based load_snapshot are
 # imported LAZILY inside the default GameFrontend methods below, not at module
 # level.  A frontend that overrides create_runtime/load_snapshot_runtime (e.g.
@@ -811,23 +812,9 @@ def run_view(frontend: GameFrontend, rt, args,
 
 # --- entry point -----------------------------------------------------------------------------------
 
-def _use_real_console_input(rt) -> None:
-    """Make blocking DOS console reads (INT 21h AH=01h/07h/08h) wait for a real
-    key instead of synthesizing Esc.
-
-    DOSMachine defaults ``console_input_fallback`` to 0x011B (Esc) so a bare
-    headless ``cpu.run()`` with no driver loop can't hang on a blocking read.
-    But every player driver path (view, headless, replay) routes blocking reads
-    through ``_step_frame``, which already catches ``ConsoleInputWouldBlock``
-    and reports "waiting for DOS key" without hanging -- so the Esc synthesis
-    is not needed here and is actively harmful: a game that reads menu keys via
-    INT 21h AH=07h (SkyRoads does) receives a phantom Esc, interprets it as
-    "quit", and calls exit(0). That presented as a spurious "program halted" at
-    the main menu -- the game appearing to quit itself a few seconds in, with no
-    real keypress. Clearing the fallback makes the read block for a real key,
-    which the front-end (interactive) or demo/queue (headless/replay) supplies.
-    """
-    rt.dos.console_input_fallback = None
+#: Re-exported from runtime_core, where it must live: a strict-VMless runner
+#: needs it and cannot import this module (the player reaches the loader).
+_use_real_console_input = use_real_console_input
 
 
 def main(frontend: GameFrontend, argv: list[str] | None = None,

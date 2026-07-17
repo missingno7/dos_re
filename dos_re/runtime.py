@@ -10,8 +10,15 @@ from .hooks import registry
 # The Runtime shell + the EXE-FREE image constructor live in runtime_core so the
 # strict-VMless import graph can reach them without reaching this module's
 # load_mz_program loader edge (dos_re_2.0 §"The EXE-independence wall").
+# enable_sound_blaster lives in runtime_core (loader-free) and is re-exported
+# here: it attaches hardware to a Runtime and has no loader dependency, but
+# THIS module does (create_runtime -> load_mz_program), so a strict-VMless
+# runner importing it from here would drag the loader onto its import graph
+# and fail lint_independence. Same reason snapshot_headless is split out.
 from .runtime_core import (Runtime, create_runtime_from_image, BIOS_INT9_ENTRY,
                            _BIOS_IRET_STUB, _BIOS_INT9_LINEAR,
+                           enable_sound_blaster,  # noqa: F401  (re-export)
+                           use_real_console_input,  # noqa: F401  (re-export)
                            install_bios_environment_hooks,
                            _init_bios_environment)
 
@@ -117,40 +124,3 @@ def create_runtime(
     return Runtime(program, cpu, dos)
 
 
-def enable_sound_blaster(rt: Runtime, *, base: int = 0x220, irq: int = 7, dma: int = 1,
-                         detection_only: bool = False):
-    """Attach an emulated Sound Blaster + PIC so the program detects and uses it.
-
-    Opt-in (an interactive front-end calls this); the deterministic demo/test path
-    leaves the hardware absent so its timing is unchanged.  The front-end decides
-    *how* to deliver IRQs: at batch boundaries (``pic.acknowledge`` + a forced
-    ``deliver_interrupt``) to avoid interrupting the game mid-render, or inline via
-    ``rt.cpu.pending_irq`` for tight detection loops.
-
-    ``detection_only`` attaches a *detection stub* (see :class:`SoundBlaster`): the
-    program detects a digital device and emits its audio commands, but no PCM is
-    streamed and no playback IRQs fire — for front-ends that produce the audio with
-    their own (e.g. recovered/native) engine and only need the command stream.
-    """
-    from .pic import PIC8259
-    from .sblaster import SoundBlaster
-
-    pic = PIC8259(imr=0x00)  # nothing masked; only IRQ0/IRQ7 are ever raised here
-    sb = SoundBlaster(
-        base=base, irq=irq, dma=dma,
-        raise_irq=pic.raise_irq,
-        read_mem=lambda a: rt.cpu.mem.data[a & 0xFFFFF],
-        detection_only=detection_only,
-    )
-    rt.dos.pic = pic
-    rt.dos.sound_blaster = sb
-    # Resuming a snapshot taken mid-playback: restore the DSP/DMA programming and
-    # re-arm a block IRQ so the driver's refill ISR fires and streaming continues.
-    # (The PIC is left fresh — imr=0x00 is the proven cold-boot state and the game
-    # re-syncs its mask via port 0x21 at runtime.)
-    saved = getattr(rt.dos, "sound_blaster_snapshot", None)
-    if saved:
-        sb.restore_state(saved)
-        sb.rearm_after_restore()
-        rt.dos.sound_blaster_snapshot = None
-    return sb
