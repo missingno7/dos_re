@@ -79,5 +79,41 @@ def scan_from_ir_record(rec: dict) -> FunctionScan:
     return scan
 
 
+def desmc_operand_slots(rec: dict) -> dict | None:
+    """Per-instruction de-SMC patch slots ``{target_ip: (field, addr, size)}``.
+
+    Returns ``{}`` when the record is liftable as-is (nothing to de-SMC), a
+    populated dict for a ``desmc-candidate`` (refused ONLY for runtime code
+    patching, every write a supported operand slot), or ``None`` when the record
+    is genuinely not liftable. ``liftemit --desmc`` and ``cpuless_promote`` share
+    this so both apply the transform from the one source of truth."""
+    if rec.get("liftable", True):
+        return {}
+    reasons = {r["reason"] for r in rec.get("refusals", ())}
+    smc = rec.get("smc") or {}
+    if smc.get("status") != "desmc-candidate" \
+            or not (reasons <= {"self-modifying", "code-patched-at-runtime"}):
+        return None
+    return {int(s["target"].split(":")[1], 16):
+            (s["field"], int(s["field_addr"], 16), int(s["field_size"]))
+            for s in smc.get("slots", ())}
+
+
+def apply_desmc(scan, slots: dict):
+    """Attach the de-SMC patch slots to their target instructions and drop the
+    scan's runtime-code-write refusals (the transform models those exactly).
+    A consumer emitter reads each patched operand from live code memory instead
+    of freezing one snapshot's constant."""
+    from dataclasses import replace as _dc_replace
+    for t_ip, slot in slots.items():
+        if t_ip in scan.insts:
+            scan.insts[t_ip] = _dc_replace(scan.insts[t_ip], patched_slot=slot)
+    if slots:
+        scan.refusals = [r for r in scan.refusals
+                         if r.reason not in ("self-modifying",
+                                             "code-patched-at-runtime")]
+    return scan
+
+
 def record_signature(rec: dict) -> bytes:
     return bytes.fromhex(rec["signature"])

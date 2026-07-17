@@ -37,9 +37,26 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dos_re.lift.ir import scan_from_ir_record  # noqa: E402
+from dos_re.lift.ir import (apply_desmc, desmc_operand_slots,  # noqa: E402
+                            scan_from_ir_record)
 from dos_re.lift.cpuless import abi_scan  # noqa: E402
 from dos_re.lift import emit_cpuless  # noqa: E402
+
+
+def _scan_for(rec: dict, desmc: bool):
+    """The FunctionScan to promote from -- with the de-SMC transform applied for
+    a desmc-candidate when ``desmc`` is on. Refuses ``ir-not-liftable`` for a
+    genuinely unliftable record, and ``desmc-unsupported-field`` for a candidate
+    whose patch is not a CPUless-emittable immediate (e.g. a far-target)."""
+    slots = desmc_operand_slots(rec)
+    if slots is None or (slots and not desmc):
+        raise emit_cpuless.Refusal("ir-not-liftable")
+    if any(s[0] != "imm" for s in slots.values()):
+        raise emit_cpuless.Refusal("desmc-unsupported-field")
+    scan = scan_from_ir_record(rec)
+    if slots:
+        apply_desmc(scan, slots)
+    return scan
 
 
 def _gate_dyn_evidence(scan, cs, dyn_evidence, done, dispatch_owner,
@@ -163,6 +180,12 @@ def main(argv=None) -> int:
                     help="comma-separated CS:IP candidates (default: all)")
     ap.add_argument("--limit", type=int, default=0,
                     help="promote at most N functions (0 = no limit)")
+    ap.add_argument("--desmc", action="store_true",
+                    help="promote desmc-candidate functions (self-modifying / "
+                         "runtime-patched immediates), reading each patched "
+                         "operand from live code memory -- the same transform "
+                         "liftemit --desmc applies. Only imm fields are "
+                         "supported; a far-target patch stays not-liftable.")
     ap.add_argument("--apply", action="store_true",
                     help="write the generated files (default: dry-run census)")
     ap.add_argument("--census-out", default=None)
@@ -234,10 +257,8 @@ def main(argv=None) -> int:
             rec = ir["functions"][key]
             cs = int(key.split(":")[0], 16)
             try:
-                if not rec.get("liftable", True):
-                    raise emit_cpuless.Refusal("ir-not-liftable")
                 emit_cpuless.check_promotable(
-                    scan_from_ir_record(rec),
+                    _scan_for(rec, args.desmc),
                     excluded_addrs={ip for (xcs, ip) in excluded if xcs == cs},
                     callees=contracts_by_cs.setdefault(cs, {}),
                     far_callees=far_contracts,
@@ -259,9 +280,7 @@ def main(argv=None) -> int:
             contracts = contracts_by_cs.setdefault(cs, {})
             injected_self = None
             try:
-                if not rec.get("liftable", True):
-                    raise emit_cpuless.Refusal("ir-not-liftable")
-                scan = scan_from_ir_record(rec)
+                scan = _scan_for(rec, args.desmc)
                 # DIRECT SELF-RECURSION: compose the self-call with a
                 # conservative full-bundle contract (the inductive fixed
                 # point: assuming the callee balanced/side-effect-full, the

@@ -209,6 +209,41 @@ def test_hand_rolled_frame_round_trips_like_the_interpreter() -> None:
     assert ns["bp"] & 0xFFFF == cpu.s.bp & 0xFFFF == 0x7777    # caller bp restored
 
 
+def test_desmc_immediate_reads_patched_code_memory() -> None:
+    # De-SMC: a runtime-patched immediate is read from cs:[field], NOT frozen as
+    # the byte in the instruction. Emit `cmp al, <patched>` and `push <patched>`
+    # with the slot pointing at cs:0x41E9, seed a DIFFERENT value there, and
+    # require the emitted body to use the seeded value -- matching the VM once
+    # the patch has landed (byte immediate 0x99, patched memory 0x42).
+    from dataclasses import replace
+    from dos_re.lift.emit_cpuless import _translate
+    cs, field = 0x1010, 0x41E9
+    # cmp al, 0x99  (3c 99)  patched -> reads mem[cs:field]
+    inst = decode_one(lambda o: bytes.fromhex("3c99")[o] if o < 2 else 0x90, 0)
+    inst = replace(inst, patched_slot=("imm", field, 1))
+    lines: list[str] = []
+    _translate(inst, lines, set(), cs)
+    m = Memory()
+    m.data[(cs << 4) + field] = 0x42                 # the PATCHED value
+    ns = {"ax": 0x0042, "mem": m, "_PARITY": [0] * 256, "cs": cs}
+    exec("\n".join(lines), {}, ns)
+    assert ns["zf"] is True                          # 0x42 - 0x42 == 0, NOT vs 0x99
+    m.data[(cs << 4) + field] = 0x43
+    ns = {"ax": 0x0042, "mem": m, "_PARITY": [0] * 256, "cs": cs}
+    exec("\n".join(lines), {}, ns)
+    assert ns["zf"] is False                          # 0x42 - 0x43 != 0
+
+    # push 5 (6a 05) patched -> pushes mem[cs:field], sign-extended
+    inst = decode_one(lambda o: bytes.fromhex("6a05")[o] if o < 2 else 0x90, 0)
+    inst = replace(inst, patched_slot=("imm", field, 1))
+    lines = []
+    _translate(inst, lines, set(), cs)
+    m = Memory(); m.data[(cs << 4) + field] = 0x80    # patched, sign-extends
+    ns = {"sp": 0x100, "ss": 0x3000, "mem": m, "_PARITY": [0] * 256}
+    exec("\n".join(lines), {}, ns)
+    assert m.rw(0x3000, ns["sp"]) == 0xFF80           # 0x80 sign-extended to word
+
+
 def test_popa_discards_the_saved_sp() -> None:
     # 0x61 popa restores all but SP (the stacked sp word is skipped). Round-trip
     # a pusha frame: push then pop must return every register unchanged.

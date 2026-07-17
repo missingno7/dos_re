@@ -116,43 +116,27 @@ def emit_entry_from_ir(fn_rec: dict, emit_dir: Path, max_iterations,
     ``{stem}.py`` defining ``def {stem}(...)``, and the caller records the
     entry→stem mapping in the emit dir's ``graph_manifest.json`` so the
     link/install machinery can find it."""
-    from dos_re.lift.ir import record_signature, scan_from_ir_record
+    from dos_re.lift.ir import (apply_desmc, desmc_operand_slots,
+                                record_signature, scan_from_ir_record)
     entry = fn_rec["entry"]
     cs, ip = parse_addr(entry)
     name = stem or f"lifted_{cs:04x}_{ip:04x}"
-    smc_slots: dict[int, tuple[str, int, int]] = {}
-    if not fn_rec.get("liftable"):
+    # De-SMC path (dos_re.lift.smc, shared with cpuless_promote via
+    # ir.desmc_operand_slots): a function refused ONLY for runtime code patching,
+    # whose every incoming write is a supported operand slot, may be emitted with
+    # those operands read from live code memory. The module is banner-marked
+    # DESMC; the ordinary differential machinery (liftverify + the end-to-end demo
+    # gate) is the promotion decision.  Unlike cpuless_promote, the lifted emitter
+    # supports far-target patches too (the JMP_FAR/CALL_FAR path in emit.py).
+    slots = desmc_operand_slots(fn_rec)
+    if slots is None or (slots and not desmc):
         reasons = sorted({r["reason"] for r in fn_rec.get("refusals", ())})
-        smc = fn_rec.get("smc") or {}
-        # De-SMC path (dos_re.lift.smc): a function refused ONLY for runtime
-        # code patching, whose every incoming write is a supported operand
-        # slot, may be emitted with those operands read from live code memory
-        # (the analysis proved each write lands fully inside the field).  The
-        # module is banner-marked DESMC; the ordinary differential machinery
-        # (liftverify + the end-to-end demo gate) is the promotion decision.
-        if (desmc and smc.get("status") == "desmc-candidate"
-                and set(reasons) <= {"self-modifying", "code-patched-at-runtime"}):
-            for slot in smc["slots"]:
-                t_ip = int(slot["target"].split(":")[1], 16)
-                smc_slots[t_ip] = (slot["field"], int(slot["field_addr"], 16),
-                                   int(slot["field_size"]))
-        else:
-            return "not-liftable", ",".join(reasons)
+        return "not-liftable", ",".join(reasons)
     try:
         scan = scan_from_ir_record(fn_rec)
     except ValueError as exc:
         return "emit-unsupported", str(exc)
-    from dataclasses import replace as _dc_replace
-    for t_ip, slot in smc_slots.items():
-        if t_ip in scan.insts:                     # consumed by emit._patched_read
-            scan.insts[t_ip] = _dc_replace(scan.insts[t_ip], patched_slot=slot)
-    if smc_slots:
-        # the de-SMC transform models the patches; drop the scan's own
-        # code-write refusals so emit_function proceeds (everything else --
-        # e.g. region budget -- still refuses above).
-        scan.refusals = [r for r in scan.refusals
-                         if r.reason not in ("self-modifying",
-                                             "code-patched-at-runtime")]
+    apply_desmc(scan, slots)                        # consumed by emit._patched_read
     dead = frozenset()
     if drop_dead_flags:
         from dos_re.lift.analyze import dead_flag_sites

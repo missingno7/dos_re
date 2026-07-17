@@ -89,6 +89,13 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
     R, W = set(), set()
     mr = mw = False
     sd: int | None = 0
+    # de-SMC (dos_re.lift.smc): a runtime-patched immediate is READ from live
+    # code memory at emit time (cs:[field] -- a constant segment, so no register
+    # input), so the instruction gains a memory read the frozen constant did not
+    # have. The register reads/writes are otherwise its ordinary effect.
+    if getattr(inst, "patched_slot", None) is not None \
+            and inst.patched_slot[0] == "imm":
+        mr = True
     # 16-bit real mode: even opcode = byte form, odd = word form (the classic
     # encoding rule the families below follow; byte halves map to their word
     # register for ABI purposes).

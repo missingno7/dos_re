@@ -138,6 +138,19 @@ def _rm_write_lines(inst, wide, val):
     return [_mem_write(inst, wide, val)]
 
 
+def _patched_read(inst, cs):
+    """De-SMC (dos_re.lift.smc): a runtime-patched immediate is READ from live
+    code memory at ``cs:[field]`` instead of frozen as one snapshot's constant.
+    Returns the read expression, or ``None`` if this operand is not patched.
+    ``cs`` is the function's static code segment (a constant in the emitted
+    body), so the read needs no register input -- just the segment literal."""
+    slot = getattr(inst, "patched_slot", None)
+    if slot is None or slot[0] != "imm":
+        return None
+    _, addr, size = slot
+    return f"mem.{'rb' if size == 1 else 'rw'}(0x{cs:04X}, 0x{addr:04X})"
+
+
 def _flags_arith(lines, kind, wide, a, b, r):
     """Exact flag updates for add/sub/cmp family (pure expressions).
 
@@ -178,9 +191,11 @@ def _flags_incdec(lines, wide, a, r, inc):
 
 # --------------------------------------------------------------------------
 
-def _translate(inst, lines, flag_written):
+def _translate(inst, lines, flag_written, cs=0x1010):
     """Append pure-Python statements for one instruction; raise Refusal for
-    anything outside the exact-semantics subset."""
+    anything outside the exact-semantics subset.  ``cs`` is the function's static
+    code segment -- used only to read a de-SMC'd (runtime-patched) immediate from
+    live code memory."""
     op = inst.op
     wide = (op & 1) == 1
 
@@ -189,10 +204,12 @@ def _translate(inst, lines, flag_written):
 
     # mov -------------------------------------------------------------------
     if 0xB8 <= op <= 0xBF:
-        lines.append(f"{_reg16(op & 7)} = 0x{(inst.imm or 0) & 0xFFFF:X}")
+        val = _patched_read(inst, cs) or f"0x{(inst.imm or 0) & 0xFFFF:X}"
+        lines.append(f"{_reg16(op & 7)} = {val}")
         return
     if 0xB0 <= op <= 0xB7:
-        lines.append(_r8_write(op & 7, f"0x{(inst.imm or 0) & 0xFF:X}"))
+        val = _patched_read(inst, cs) or f"0x{(inst.imm or 0) & 0xFF:X}"
+        lines.append(_r8_write(op & 7, val))
         return
     if op in (0x88, 0x89):
         src = _reg16(inst.reg) if wide else _r8_read(inst.reg)
@@ -240,7 +257,7 @@ def _translate(inst, lines, flag_written):
         form = op & 7
         if form in (4, 5):                                # acc, imm
             a = "ax" if wide else "(ax & 0xFF)"
-            b = f"0x{(inst.imm or 0):X}"
+            b = _patched_read(inst, cs) or f"0x{(inst.imm or 0):X}"
             dst_rm = None; dst_acc = True
         elif form in (0, 1):                              # r/m, r
             a = _rm_read(inst, wide)
@@ -627,6 +644,17 @@ def _translate(inst, lines, flag_written):
         lines.extend(_rm_write_lines(inst, True, SEGS[inst.reg & 3]))
         return
     if op in (0x68, 0x6A):                                # push imm (186)
+        pr = _patched_read(inst, cs)
+        if pr is not None:
+            if op == 0x6A:                                # imm8 sign-extends
+                lines.append(f"_pi = {pr}")
+                lines.append("_pi = (_pi | 0xFF00) if (_pi & 0x80) else _pi")
+                src = "_pi"
+            else:
+                src = pr
+            lines.append("sp = (sp - 2) & 0xFFFF")
+            lines.append(f"mem.ww(ss, sp, ({src}) & 0xFFFF)")
+            return
         imm = (inst.imm or 0) & 0xFFFF
         if op == 0x6A and imm & 0x80:                     # imm8 sign-extends
             imm |= 0xFF00
@@ -1988,7 +2016,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                     break
                 ip = nxt
                 continue
-            _translate(i, blk, flag_written)
+            _translate(i, blk, flag_written, cs)
             if i.ip in heads:
                 # the observer's composed flags word must see this
                 # instruction's own flag writes: flush them into _fmask now
