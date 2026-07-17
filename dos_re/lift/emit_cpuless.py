@@ -963,7 +963,7 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
             raise Refusal("cs-or-ss-mutation")
         if "sp" in (e.reads | e.writes) and not _is_stack_family(i):
             raise Refusal("sp-as-data")
-    _check_frame_pointer(scan)
+    _check_frame_pointer(scan, callees, far_callees)
     sp_delta, ret_pop, sp_output, sp_deltas = _check_stack_depths(
         scan, alt_entries, callees, far_callees)
     if sp_output and any(_is_dyn(i) and i.kind == JMP_IND
@@ -1045,7 +1045,7 @@ def _func_needs_plat(scan, callees, far_callees=None) -> bool:
     return False
 
 
-def _check_frame_pointer(scan) -> None:
+def _check_frame_pointer(scan, callees=None, far_callees=None) -> None:
     """``leave`` restores sp FROM bp, so its depth effect is exact only while bp
     still holds the frame base its ``enter`` put there.
 
@@ -1076,19 +1076,87 @@ def _check_frame_pointer(scan) -> None:
         raise Refusal("leave-without-enter")
     if restores and not any(_is_frame_establish(i) for i in scan.insts.values()):
         raise Refusal("frame-restore-without-establish")
-    for i in scan.insts.values():
-        # Only a SEQUENTIAL instruction can clobber bp as data. A transfer's
-        # register writes are a CONSERVATIVE dataflow bundle, not a literal
-        # assignment: register_effects models a DOS/BIOS INT and a CALL as
-        # writing the whole bundle (bp included) for input/output inference, but
-        # neither destroys the frame pointer -- the callee restores it by ABI,
-        # the INT preserves it, and each is gated on its own terms elsewhere.
-        # Counting those as clobbers mislabels every INT/call function as
-        # "frame-pointer-clobbered" instead of its true reason.
-        if i.kind != SEQ or i.op in (0xC8, 0xC9) or _is_stack_family(i):
-            continue                       # transfers + frame ops + push/pop bp
-        if "bp" in register_effects(i).writes:
-            raise Refusal("frame-pointer-clobbered")
+    # Only a SEQUENTIAL instruction can clobber bp as data. A transfer's
+    # register writes are a CONSERVATIVE dataflow bundle, not a literal
+    # assignment: register_effects models a DOS/BIOS INT and a CALL as
+    # writing the whole bundle (bp included) for input/output inference, but
+    # neither destroys the frame pointer -- the callee restores it by ABI,
+    # the INT preserves it, and each is gated on its own terms elsewhere.
+    # Counting those as clobbers mislabels every INT/call function as
+    # "frame-pointer-clobbered" instead of its true reason.
+    clobbers = [i for i in scan.insts.values()
+                if i.kind == SEQ and i.op not in (0xC8, 0xC9)
+                and not _is_stack_family(i)
+                and "bp" in register_effects(i).writes]
+    if not clobbers:
+        return                             # bp is never repurposed: invariant holds
+    # bp IS used as scratch (a compiler's spare pointer -- skyroads' tile renderer
+    # 2D1F loads bp with the road[] base and indexes through it). That is fine
+    # PROVIDED bp is saved (`push bp`) and restored (`pop bp`) around the clobber,
+    # so it holds the frame base again at each teardown. Prove it.
+    _prove_bp_framebase_at_teardowns(scan, callees or {}, far_callees or {})
+
+
+def _prove_bp_framebase_at_teardowns(scan, callees, far_callees) -> None:
+    """Symbolic dataflow: bp holds the frame base at every `leave` / `mov sp,bp`
+    even when the body repurposes it, because it is saved and restored (LIFO,
+    the compiler convention) around the clobbers.
+
+    State is ``(bp_is_framebase, frame_saves)`` -- whether bp currently IS the
+    frame base, and how many saved copies of it are outstanding on the stack. A
+    frame establish makes bp the base; ``push bp`` while bp is the base pushes a
+    save; ``pop bp`` restores the base and consumes one; any other bp write
+    clobbers it. This deliberately does NOT track the exact stack DEPTH -- the
+    body has legitimately path-dependent depth (2D1F's inner render loops), and
+    the frame-base save lives below all of it, so the count is the invariant that
+    survives a join where the depth does not. The LIFO assumption (a `pop bp`
+    that sees a save is popping THAT save, not an intervening scratch push) is
+    what the compiler emits; the byte-exact demo oracle is the backstop that
+    would catch any function where it does not hold. Refuse on a join where the
+    frame state itself disagrees, or a `pop bp` with no save outstanding."""
+    entry = scan.entry
+    states = {entry: (False, 0)}           # bp caller-owned; no saves yet
+    work = [entry]
+    while work:
+        ip = work.pop()
+        bpfb, saves = states[ip]
+        i = scan.insts[ip]
+        op = i.op
+        if op == 0xC9 or _is_frame_restore(i):     # a teardown reads bp as base
+            if not bpfb:
+                raise Refusal("frame-pointer-clobbered")
+        # advance the frame state
+        if op == 0xC8 or _is_frame_establish(i):   # enter 0 / mov bp,sp
+            n_bpfb, n_saves = True, saves
+        elif op == 0xC9:                   # leave: frame torn down, then ret
+            n_bpfb, n_saves = False, 0
+        elif op == 0x55:                   # push bp -- save bp's current state
+            n_bpfb, n_saves = bpfb, saves + (1 if bpfb else 0)
+        elif op == 0x5D:                   # pop bp -- restore the last save
+            if saves <= 0:
+                raise Refusal("frame-pointer-pop-without-save")
+            n_bpfb, n_saves = True, saves - 1
+        elif i.kind == SEQ and "bp" in register_effects(i).writes:
+            n_bpfb, n_saves = False, saves         # a non-frame clobber
+        else:
+            n_bpfb, n_saves = bpfb, saves          # everything else: bp preserved
+        succ = []
+        if i.kind in (SEQ, CALL, CALL_FAR, CALL_IND):
+            succ = [i.next_ip]
+        elif i.kind == JCC:
+            succ = [i.next_ip, i.target]
+        elif i.kind == JMP:
+            succ = [i.target]
+        for s in succ:
+            if s is None or s not in scan.insts:
+                continue
+            ns = (n_bpfb, n_saves)
+            if s in states:
+                if states[s] != ns:
+                    raise Refusal("frame-pointer-join-mismatch")
+            else:
+                states[s] = ns
+                work.append(s)
 
 
 _OUTPUT_KEEP = frozenset(W16) | frozenset({"ds", "es"})

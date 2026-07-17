@@ -11,9 +11,12 @@ forms for all of these -- the corpus contains zero interp_one.
 """
 from __future__ import annotations
 
+import pytest
+
 from dos_re.lift.cfg import scan_function
 from dos_re.lift.cpuless import register_effects
-from dos_re.lift.emit_cpuless import _is_sp_capture, _is_stack_family
+from dos_re.lift.emit_cpuless import (Refusal, _check_frame_pointer,
+                                      _is_sp_capture, _is_stack_family)
 
 
 def _inst(code: bytes):
@@ -149,3 +152,23 @@ def test_stack_family_admits_the_sp_discipline_forms() -> None:
         assert _is_stack_family(_inst(bytes.fromhex(code))), code
     # a genuine sp-as-data write (`mov sp, ax`) is still refused.
     assert not _is_stack_family(_inst(bytes.fromhex("8be0")))    # mov sp, ax
+
+
+def _fn_scan(code: bytes):
+    return scan_function(lambda off: code[off] if off < len(code) else 0x90, 0)
+
+
+def test_bp_used_as_scratch_but_saved_and_restored_is_a_valid_frame() -> None:
+    # enter 0; push bp; mov bp,0x1000; add bp,ax; pop bp; leave; ret
+    # bp is repurposed as a data pointer, but saved (push bp) and restored
+    # (pop bp) so it holds the frame base at `leave`. The frame proof accepts it.
+    code = bytes.fromhex("c8000000" "55" "bd0010" "03e8" "5d" "c9" "c3")
+    _check_frame_pointer(_fn_scan(code), {}, {})     # must not raise
+
+
+def test_bp_clobbered_without_restore_still_refuses() -> None:
+    # enter 0; mov bp,0x1000; leave; ret -- bp clobbered and NOT restored, so
+    # `leave` would read a garbage frame base. Must refuse.
+    code = bytes.fromhex("c8000000" "bd0010" "c9" "c3")
+    with pytest.raises(Refusal):
+        _check_frame_pointer(_fn_scan(code), {}, {})
