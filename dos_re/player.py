@@ -624,14 +624,24 @@ def run_view(frontend: GameFrontend, rt, args,
     mouse_norm = [None]  # latest host (u, v); None until the mouse first moves/clicks
 
     def feed_mouse(pos) -> None:
-        # display.get_size() works for both the GPU-window and plain-surface
-        # backends (pygame.display.get_surface() is None under the GPU path, so
-        # relying on it would silently drop every click).
+        # Map through the LETTERBOX -- the rect the frame was actually drawn
+        # into -- not the window.  The two only agree while the window matches
+        # the frame's aspect; whenever they differ the frame is centred inside
+        # black bars, and a window-relative mapping both skews the pointer and
+        # offsets it by the bar size.  That is not an exotic case: this viewer
+        # sizes its window from the FIRST frame's dimensions, so any game whose
+        # video mode later changes shape (VGA Lemmings: 320x200 gameplay vs
+        # 640x350 menus) is letterboxed for the rest of the session -- and it
+        # is every fullscreen window and every phone screen.
+        # (Display owns the letterbox math, so it owns the inverse; before the
+        # first frame there is no rect yet -- fall back to the window.)
         if _set_mouse is None:
             return
-        w, h = display.get_size()
-        u = pos[0] / max(1, w - 1)
-        v = pos[1] / max(1, h - 1)
+        uv = display.window_to_frame_norm(pos)
+        if uv is None:
+            w, h = display.get_size()
+            uv = (pos[0] / max(1, w - 1), pos[1] / max(1, h - 1))
+        u, v = uv
         mouse_norm[0] = (u, v)
         if recorder["rec"] is None:
             # Live: apply immediately.  Quantized exactly like a recording, so
@@ -666,39 +676,7 @@ def run_view(frontend: GameFrontend, rt, args,
 
     dispatcher = KeyDispatcher(live_input)
 
-    # Mouse forwarding through the INT 33h driver (rt.dos.set_mouse_norm).  The
-    # viewer maps window-relative pointer coords onto the game's virtual range.
-    # pygame buttons 1/2/3 (L/M/R) map to MS-mouse bits 0/2/1.
-    #
-    # Input is BUFFERED and applied to the VM only at the frame boundary (never
-    # mid-frame), and the value APPLIED is exactly the value RECORDED (rounded to
-    # 4 decimals).  Both matter for record==replay: the game maps the normalized
-    # mouse onto a pixel and is sensitive to <1e-4 (~0.06 px) differences, so
-    # applying full precision while recording a rounded sample makes the replay
-    # land on a different pixel and diverge (the same trap fixed in pm_player).
-    _MOUSE_BIT = {1: 0x01, 2: 0x04, 3: 0x02}
     _VIEWER_HOTKEYS = {pygame.K_F10, pygame.K_F11, pygame.K_F12}
-    mouse = {"buttons": 0, "u": 0.5, "v": 0.5, "last_rec": None}
-
-    def _mouse_from_event(pos) -> None:
-        surf = pygame.display.get_surface()
-        ww, wh = surf.get_size() if surf is not None else (1, 1)
-        mouse["u"] = pos[0] / max(1, ww - 1)
-        mouse["v"] = pos[1] / max(1, wh - 1)
-
-    def _apply_and_record_mouse() -> None:
-        """At the frame boundary: apply the rounded sample to the VM and, while
-        recording, record that same sample when it changes."""
-        set_norm = getattr(rt.dos, "set_mouse_norm", None)
-        if set_norm is None:
-            return
-        sample = (round(mouse["u"], 4), round(mouse["v"], 4), mouse["buttons"])
-        set_norm(*sample)
-        rec = recorder["rec"]
-        if rec is not None and rec.active and sample != mouse["last_rec"]:
-            rec.record_mouse(boundary=frame_box["n"], u=sample[0],
-                             v=sample[1], buttons=sample[2])
-            mouse["last_rec"] = sample
 
     audio = frontend.create_audio_sink(pygame, rt, args)
     running = True

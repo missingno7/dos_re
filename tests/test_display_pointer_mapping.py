@@ -89,3 +89,24 @@ def test_window_mapping_would_be_wrong_here():
     naive_u = d._last_rect.x / (2000 - 1)
     assert naive_u > 0.09
     assert d.window_to_frame_norm((d._last_rect.x, 500))[0] == 0.0
+
+
+def test_a_mode_change_letterboxes_a_plain_desktop_window():
+    """The case that shipped broken, and why 'the desktop window matches the
+    frame' is not a safe assumption: the viewer sizes its window from the FIRST
+    frame, so a game that later changes video-mode shape is letterboxed for the
+    rest of the session.  VGA Lemmings does exactly that -- 320x200 gameplay
+    (window 640x400), then 640x350 menus -> 25px bars top and bottom.  The old
+    window-relative mapping cost ~22 of 350 rows at each edge: the pointer
+    could not reach the top or bottom of the menu at all, while the centre
+    looked fine (which is what made it easy to miss)."""
+    d = _drawn((640, 400), (640, 350))
+    assert d._last_rect.y == 25 and d._last_rect.h == 350
+    top_of_image = (0, 25)
+    assert d.window_to_frame_norm(top_of_image)[1] == 0.0          # row 0
+    naive_v = top_of_image[1] / (400 - 1)
+    assert round(naive_v * 349) == 22                              # the old bug
+    assert d.window_to_frame_norm((639, 374))[1] == 1.0            # last row
+    # the centre agreed all along -- the trap in "it looks right"
+    assert d.window_to_frame_norm((320, 200))[1] == pytest.approx(
+        200 / 399, abs=0.001)
