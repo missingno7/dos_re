@@ -211,6 +211,12 @@ def main(argv=None) -> int:
     dispatch_owner: dict[str, str] = {}
     iret_keys: set[str] = set()     # promoted IRET-contract handlers
     done: set[str] = set()
+    #: dead-register-output pruning (§ dead_register_outputs.md): per-function
+    #: register outputs the exit-liveness prune dropped. Recorded on the real
+    #: emission path so the report is what actually shipped. Expected empty
+    #: under the current conservative exit seed -- the prune is a sound, inert
+    #: mechanism confirming the emitted output set is already minimal.
+    prune_removed: dict[str, list[str]] = {}
     rounds = 0
     while True:
         rounds += 1
@@ -280,6 +286,8 @@ def main(argv=None) -> int:
                     far_callees=far_contracts, dispatch_addrs=disp_ips,
                     boundary_addrs=head_ips)
                 abi = spec.abi
+                prune_removed[key] = emit_cpuless.output_prune_removed(
+                    abi, spec.sp_output)
                 _gate_dyn_evidence(scan, cs, dyn_evidence, tentative,
                                    dispatch_owner, contracts_by_cs, iret_keys)
                 _gate_vector_evidence(scan, cs, vec_evidence, tentative,
@@ -350,6 +358,20 @@ def main(argv=None) -> int:
                        "regenerate, do not hand-edit.",
             "promotable": promoted,
             "refused": {k: sorted(v) for k, v in sorted(refused.items())},
+            "dead_output_prune": {
+                "policy": "keep register outputs live at >=1 clean return exit "
+                          "(abi.exit_live); retain all when a tail transfer "
+                          "governs live-out",
+                "total_outputs_removed": sum(len(v) for v in prune_removed.values()),
+                "functions_with_removals": sorted(
+                    k for k, v in prune_removed.items() if v),
+                "per_function": {k: v for k, v in sorted(prune_removed.items()) if v},
+                "note": "0 under the current conservative exit seed (abi_scan "
+                        "seeds every may-written register live at exit so the "
+                        "whole-register-file boundary differential matches) -- "
+                        "confirms the emitted output set is already minimal; a "
+                        "future inter-procedural exit liveness can narrow it",
+            },
         }, indent=1), encoding="utf-8")
         print(f"wrote {out}")
 

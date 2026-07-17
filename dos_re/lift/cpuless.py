@@ -463,6 +463,18 @@ class AbiReport:
     max_stack_use: int | None    # deepest net push depth seen (bytes), None=unknown
     refusals: dict = field(default_factory=dict)   # capability -> [ip, ...]
     tier: str = ""               # "leaf" | "calls-only" | "blocked"
+    #: Registers live at >=1 CLEAN return exit (RET/RETF/IRET), from the same
+    #: backward fixpoint as ``inputs``.  ``None`` when the function has any
+    #: NON-return terminal (a tail jmp_ind/jmp_far), whose live-out is governed
+    #: by the tail callee, not by this body -- the signal to the dead-output
+    #: pruner to retain everything.  Under the current conservative exit seed
+    #: (every may-written register is seeded live at exit, so the whole-register-
+    #: file boundary differential matches) this equals ``outputs`` minus ``sp``,
+    #: so the pruner is a NO-OP by construction: nothing is intra-procedurally
+    #: dead.  It is a first-class field so a future INTER-procedural exit
+    #: liveness (caller live-in-after-call, over the complete root set) can
+    #: narrow it without touching the emitter.
+    exit_live: frozenset | None = None
 
     def as_json(self) -> dict:
         return {"entry": f"{self.entry:04X}",
@@ -562,6 +574,18 @@ def abi_scan(scan, callee_effects=None, far_callee_effects=None) -> AbiReport:
     inputs = (live_out[entry] - e0.writes) | e0.reads
     outputs = frozenset().union(*(e.writes for e in effs.values())) if effs else frozenset()
 
+    # Exit liveness for dead-output pruning (§ dead_register_outputs.md). Only
+    # meaningful when EVERY terminal is a clean return: a tail jmp_ind/jmp_far
+    # exit's live-out is the callee's contract, not this body's, so pruning
+    # against a RET-only view would wrongly drop registers the tail path needs.
+    terminals = [ip for ip in effs if not succ[ip]]
+    if terminals and all(scan.insts[ip].kind in (RET, RETF, IRET)
+                         for ip in terminals):
+        exit_live: frozenset | None = frozenset().union(
+            *(live_out[ip] for ip in terminals))
+    else:
+        exit_live = None                 # externally governed -> retain all
+
     # Stack use: DFS over the CFG tracking net push depth in bytes (delta<0
     # grows the stack).  Unknown (None) when any reachable instruction has a
     # data-dependent delta or a refusal hides its stack behavior.
@@ -589,7 +613,8 @@ def abi_scan(scan, callee_effects=None, far_callee_effects=None) -> AbiReport:
     return AbiReport(entry=entry, inputs=inputs, outputs=outputs,
                      reads_mem=any(e.mem_read for e in effs.values()),
                      writes_mem=any(e.mem_write for e in effs.values()),
-                     max_stack_use=max_use, refusals=refusals, tier=tier)
+                     max_stack_use=max_use, refusals=refusals, tier=tier,
+                     exit_live=exit_live)
 
 
 def classify_corpus(ir: dict) -> dict:

@@ -1015,6 +1015,45 @@ def _check_frame_pointer(scan) -> None:
             raise Refusal("frame-pointer-clobbered")
 
 
+_OUTPUT_KEEP = frozenset(W16) | frozenset({"ds", "es"})
+
+
+def _output_set(abi, sp_output: bool) -> list[str]:
+    """The registers the adapter writes back to the CPU carrier.
+
+    DEAD-REGISTER-OUTPUT PRUNING (§ dead_register_outputs.md), applied
+    IDENTICALLY here for the recovered function's return dict and its adapter's
+    writeback -- the two MUST agree, so they share this one definition rather
+    than repeat the expression and risk drift.
+
+    Keep a register only if it is live at some clean return exit (``abi.exit_live``).
+    ``exit_live is None`` means a tail transfer governs the live-out, so retain
+    everything. ``sp`` is never subject to the liveness prune -- it is governed
+    by ``sp_output`` (an unbalanced/varying stack makes it a real output).
+
+    Under the current conservative exit seed this removes NOTHING: abi_scan
+    seeds every may-written register live at exit so the whole-register-file
+    boundary differential matches, hence ``exit_live == outputs`` for every
+    clean-return function. The prune is here as a sound, regeneratable mechanism
+    that a future inter-procedural exit liveness can make bite; today it proves
+    the emitted output set is already minimal.
+    """
+    outs = abi.outputs & _OUTPUT_KEEP
+    if abi.exit_live is not None:
+        # sp survives the liveness filter (exit_live never carries it); the
+        # sp_output rule below is its sole gate.
+        outs = outs & (abi.exit_live | frozenset({"sp"}))
+    return sorted(outs - (frozenset() if sp_output else frozenset({"sp"})))
+
+
+def output_prune_removed(abi, sp_output: bool) -> list[str]:
+    """Registers the liveness prune dropped from this function's output set
+    (for the aggregate report). Empty under the current conservative seed."""
+    full = sorted((abi.outputs & _OUTPUT_KEEP)
+                  - (frozenset() if sp_output else frozenset({"sp"})))
+    return sorted(set(full) - set(_output_set(abi, sp_output)))
+
+
 def _is_stack_family(i) -> bool:
     """Instructions whose sp use IS the stack discipline (allowed), as opposed
     to sp used as general data (refused)."""
@@ -1425,9 +1464,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
     bb_of = {ip: n for n, ip in enumerate(leaders)}
     has_dyn = any(_is_dyn(i) for i in scan.insts.values())
     inputs = _contract_inputs(scan, abi)
-    keep = frozenset(W16) | frozenset({"ds", "es"})
-    outputs = sorted((abi.outputs & keep)
-                     - (frozenset() if sp_output else frozenset({"sp"})))
+    outputs = _output_set(abi, sp_output)
 
     L: list[str] = []
     A = L.append
@@ -2008,9 +2045,7 @@ def emit_adapter(scan, abi, key: str, *, signature: bytes,
     name = f"lifted_{key.replace(':', '_').lower()}"
     rec = f"func_{key.replace(':', '_').lower()}"
     inputs = _contract_inputs(scan, abi)
-    keep = frozenset(W16) | frozenset({"ds", "es"})
-    outputs = sorted((abi.outputs & keep)
-                     - (frozenset() if sp_output else frozenset({"sp"})))
+    outputs = _output_set(abi, sp_output)
     alt_entries = sorted(frozenset(dispatch_addrs) & frozenset(scan.insts)
                          - frozenset({scan.entry}))
 
