@@ -192,6 +192,12 @@ class GameFrontend:
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Add game-specific flags.  Never rename or repurpose the standard set."""
 
+    def default_save_dir(self, args: argparse.Namespace) -> Path:
+        """Where the live product persists the game's own saved files (progress,
+        options, ...).  A sibling of the shipped assets so they stay pristine;
+        override per game if a platform save location is preferred."""
+        return self.root / "saves"
+
     # --- runtime construction ---------------------------------------------------
 
     def create_runtime(self, args: argparse.Namespace):
@@ -357,6 +363,19 @@ def build_arg_parser(frontend: GameFrontend,
                       help="viewer audio: 'adlib' = observer-only OPL3 + PC-speaker "
                            "sink (never affects game state); 'off'")
 
+    save = p.add_argument_group("persistence")
+    save.add_argument("--save-dir", default=None,
+                      help="directory for the game's own saved files (e.g. progress "
+                           "written via INT 21h); default: <root>/saves in the live "
+                           "viewer.  Reads prefer it over the shipped assets, which "
+                           "stay pristine.")
+    save.add_argument("--no-save", action="store_true",
+                      help="never persist the game's file writes (fully deterministic); "
+                           "the default for headless and demo replay regardless")
+    save.add_argument("--save", action="store_true",
+                      help="force-enable persistence even under demo replay "
+                           "(off by default while replaying, to stay deterministic)")
+
     frontend.add_arguments(p)
     return p
 
@@ -457,6 +476,9 @@ def _step_frame(frontend: GameFrontend, rt, args, frame: int) -> tuple[str | Non
 def run_replay_headless(frontend: GameFrontend, rt, args,
                         playback: InputDemoPlayback) -> int:
     """Fast deterministic demo replay: no pygame, no pacing, no presentation."""
+    # Report the mouse present only if the demo actually carries mouse input;
+    # a keyboard-only demo must replay with the mouse absent (as recorded).
+    rt.dos.mouse_present = playback.mouse_present_hint
     frame = 0
     status = "demo replay complete"
     while not playback.finished(frame):
@@ -521,6 +543,19 @@ def run_view(frontend: GameFrontend, rt, args,
     from dos_re.display import Display
 
     replaying = playback is not None
+
+    # Persistence policy: the live viewer saves the game's own file writes so
+    # progress survives; demo replay stays deterministic (off) unless --save is
+    # given; --no-save forces it off.  Reads still prefer save_dir over the
+    # shipped assets, which are never mutated.
+    if not getattr(args, "no_save", False) and (not replaying or getattr(args, "save", False)):
+        override = getattr(args, "save_dir", None)
+        rt.dos.save_dir = Path(override) if override else frontend.default_save_dir(args)
+
+    # Mouse present when playing live; when replaying, only if the demo carries
+    # mouse input (a keyboard-only demo must reproduce with the mouse absent).
+    rt.dos.mouse_present = playback.mouse_present_hint if replaying else True
+
     pygame.init()
     first = np.asarray(frontend.decode_frame(rt), np.uint8)
     fh, fw = first.shape[:2]
@@ -536,8 +571,13 @@ def run_view(frontend: GameFrontend, rt, args,
     last_rgb = [first]
 
     def start_recording(name: str) -> None:
-        rec = InputDemoRecorder(root=Path(args.demo_dir), name=name,
-                                metadata=frontend.demo_metadata(args))
+        # Pin the mouse-presence state into the demo so replay reproduces it
+        # exactly (a keyboard demo recorded with the mouse present must NOT
+        # replay it absent, and vice-versa) -- independent of whether the demo
+        # happens to carry any mouse motion.
+        meta = dict(frontend.demo_metadata(args))
+        meta["mouse_present"] = bool(getattr(rt.dos, "mouse_present", False))
+        rec = InputDemoRecorder(root=Path(args.demo_dir), name=name, metadata=meta)
         out = rec.start(rt, boundary=frame_box["n"])
         recorder["rec"] = rec
         print(f"recording demo -> {out}")
@@ -603,6 +643,41 @@ def run_view(frontend: GameFrontend, rt, args,
         print(f"screenshot: {out}")
 
     dispatcher = KeyDispatcher(live_input)
+
+    # Mouse forwarding through the INT 33h driver (rt.dos.set_mouse_norm).  The
+    # viewer maps window-relative pointer coords onto the game's virtual range.
+    # pygame buttons 1/2/3 (L/M/R) map to MS-mouse bits 0/2/1.
+    #
+    # Input is BUFFERED and applied to the VM only at the frame boundary (never
+    # mid-frame), and the value APPLIED is exactly the value RECORDED (rounded to
+    # 4 decimals).  Both matter for record==replay: the game maps the normalized
+    # mouse onto a pixel and is sensitive to <1e-4 (~0.06 px) differences, so
+    # applying full precision while recording a rounded sample makes the replay
+    # land on a different pixel and diverge (the same trap fixed in pm_player).
+    _MOUSE_BIT = {1: 0x01, 2: 0x04, 3: 0x02}
+    _VIEWER_HOTKEYS = {pygame.K_F10, pygame.K_F11, pygame.K_F12}
+    mouse = {"buttons": 0, "u": 0.5, "v": 0.5, "last_rec": None}
+
+    def _mouse_from_event(pos) -> None:
+        surf = pygame.display.get_surface()
+        ww, wh = surf.get_size() if surf is not None else (1, 1)
+        mouse["u"] = pos[0] / max(1, ww - 1)
+        mouse["v"] = pos[1] / max(1, wh - 1)
+
+    def _apply_and_record_mouse() -> None:
+        """At the frame boundary: apply the rounded sample to the VM and, while
+        recording, record that same sample when it changes."""
+        set_norm = getattr(rt.dos, "set_mouse_norm", None)
+        if set_norm is None:
+            return
+        sample = (round(mouse["u"], 4), round(mouse["v"], 4), mouse["buttons"])
+        set_norm(*sample)
+        rec = recorder["rec"]
+        if rec is not None and rec.active and sample != mouse["last_rec"]:
+            rec.record_mouse(boundary=frame_box["n"], u=sample[0],
+                             v=sample[1], buttons=sample[2])
+            mouse["last_rec"] = sample
+
     audio = frontend.create_audio_sink(pygame, rt, args)
     running = True
     status = "replaying" if replaying else "running"
@@ -643,6 +718,12 @@ def run_view(frontend: GameFrontend, rt, args,
                         start_recording(args.record_demo or frontend.name)
                     else:
                         stop_recording()
+                elif event.type in (pygame.KEYDOWN, pygame.KEYUP) and event.key in _VIEWER_HOTKEYS:
+                    # F10/F11/F12 are viewer hotkeys, not game keys.  F10's make
+                    # is consumed above, but its break would otherwise fall to the
+                    # generic KEYUP path and leak a stray break code into the game
+                    # (and the demo).  Swallow both edges. (pm_player parity.)
+                    continue
                 elif event.type == pygame.KEYDOWN:
                     sc = scancodes.get(event.key)
                     if sc is not None:
@@ -661,6 +742,17 @@ def run_view(frontend: GameFrontend, rt, args,
                         else:
                             mouse_btn[0] &= ~bit
                     feed_mouse(event.pos)
+                elif event.type == pygame.MOUSEWHEEL:
+                    # The game has no wheel of its own (its INT 33h use is
+                    # absolute position + buttons only); DOSBox maps the wheel to
+                    # the Up/Down cursor keys, which its menus navigate on.  Feed
+                    # one arrow tap per notch through the dispatcher so it records
+                    # as a normal scan event and replays deterministically.
+                    sc = scancodes.get(pygame.K_UP if event.y > 0 else pygame.K_DOWN)
+                    if sc is not None:
+                        for _ in range(max(1, abs(event.y))):
+                            dispatcher.post_down(sc)
+                            dispatcher.post_up(sc)
 
             if replaying:
                 playback.apply_to_runtime(frame_box["n"], rt,

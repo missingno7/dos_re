@@ -224,13 +224,19 @@ def test_ega_write_mode_1_respects_map_mask():
 
 
 def test_int33_mouse_driver_reports_present_and_tracks_position():
-    """INT 33h must report the mouse PRESENT on reset (AX=0 -> AX=FFFF) and
-    return the front-end-fed position/buttons via AX=0003, mapped through the
+    """Once opted IN, INT 33h reports the mouse PRESENT on reset (AX=0 -> AX=FFFF)
+    and returns the front-end-fed position/buttons via AX=0003, mapped through the
     program's own coordinate range (AX=7/8).  A mouse-driven game (VGA Lemmings)
-    only enables pointer control when detection succeeds."""
+    only enables pointer control when detection succeeds -- so its front-end must
+    set ``mouse_present`` (the interactive viewer does so unconditionally; replay
+    takes the recording's own answer via InputDemoPlayback.mouse_present_hint).
+
+    The mouse is opt-in rather than ambient because detecting one changes a game's
+    startup control flow, which would silently diverge any recording made without
+    it; see test_real_mode_mouse.py for the default-absent contract."""
     from dos_re.cpu import CPU8086, CPUState
     cpu = CPU8086(Memory(), CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))
-    dos = DOSMachine(root=Path('.'))
+    dos = DOSMachine(root=Path('.'), mouse_present=True)
 
     cpu.s.ax = 0x0000
     dos.int33(cpu)

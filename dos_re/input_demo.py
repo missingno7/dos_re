@@ -46,9 +46,20 @@ class InputDemoEvent:
             value=None if raw.get("value") is None else int(raw["value"]) & 0xFFFF,
             scancode=None if raw.get("scancode") is None else int(raw["scancode"]) & 0xFF,
             text=str(raw.get("text", "")),
-            u=None if raw.get("u") is None else float(raw["u"]),
-            v=None if raw.get("v") is None else float(raw["v"]),
-            buttons=None if raw.get("buttons") is None else int(raw["buttons"]) & 0xFF,
+            # `mx`/`my`/`value` are a LEGACY mouse encoding (a port that grew the
+            # channel before this schema existed).  Read them as u/v/buttons so
+            # those recordings still replay: the values pass through the same
+            # set_mouse_norm clamp they always did, so replay is byte-identical
+            # to what the recording was made under.  New demos only ever write
+            # u/v/buttons.
+            u=(None if raw.get("u") is None else float(raw["u"])) if raw.get("u") is not None
+              else (None if raw.get("mx") is None else float(raw["mx"])),
+            v=(None if raw.get("v") is None else float(raw["v"])) if raw.get("v") is not None
+              else (None if raw.get("my") is None else float(raw["my"])),
+            buttons=(int(raw["buttons"]) & 0xFF) if raw.get("buttons") is not None
+                    else (int(raw["value"]) & 0xFF
+                          if raw.get("kind") == "mouse" and raw.get("value") is not None
+                          else None),
         )
 
     def to_json(self) -> dict:
@@ -372,6 +383,28 @@ class InputDemoPlayback:
         raw = self.manifest.get("end_boundary")
         return None if raw is None else max(0, int(raw))
 
+    @property
+    def has_mouse_events(self) -> bool:
+        """Whether this recording carries any mouse input at all."""
+        return any(e.kind == "mouse" for e in self.events)
+
+    @property
+    def mouse_present_hint(self) -> bool:
+        """Whether INT 33h should report a mouse PRESENT when replaying this demo.
+
+        Detecting a mouse changes a game's startup control flow (it enables
+        pointer control), so replay must reproduce whatever the RECORDING was
+        made under or it silently diverges. The recorder pins the answer in the
+        manifest (``metadata.mouse_present``); demos predating that field fall
+        back to "did it record any mouse input" -- which is exactly right for a
+        keyboard-only recording, and conservative for a mouse one that happened
+        to sit still. Front-ends set ``rt.dos.mouse_present`` from this.
+        """
+        raw = self.manifest.get("metadata", {}).get("mouse_present")
+        if raw is not None:
+            return bool(raw)
+        return self.has_mouse_events
+
     def finished(self, boundary: int) -> bool:
         """Whether replay has reached the end of the recorded demo.
 
@@ -441,6 +474,17 @@ class InputDemoPlayback:
             if event.value is None:
                 raise ValueError("dos_key demo event missing value")
             rt.dos.key_queue.append(event.value & 0xFFFF)
+        elif event.kind == "mouse":
+            # Re-inject the recorded sample through the INT 33h driver, exactly
+            # as the recorder applied it (record_mouse returns the quantized
+            # sample the recorder feeds to set_mouse_norm), so replay reproduces
+            # the driver state bit-for-bit. A runtime whose DOS core has no mouse
+            # (an older/other platform adapter) simply ignores the channel.
+            if event.u is None or event.v is None:
+                raise ValueError("mouse demo event missing u/v")
+            set_mouse = getattr(rt.dos, "set_mouse_norm", None)
+            if set_mouse is not None:
+                set_mouse(event.u, event.v, event.buttons)
         else:
             raise ValueError(f"unknown input demo event kind: {event.kind!r}")
 
