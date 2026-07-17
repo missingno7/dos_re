@@ -186,6 +186,15 @@ def main(argv=None) -> int:
                          "operand from live code memory -- the same transform "
                          "liftemit --desmc applies. Only imm fields are "
                          "supported; a far-target patch stays not-liftable.")
+    ap.add_argument("--observed", default=None,
+                    help="observed.json (probe execution trace): a near call to "
+                         "a target that is NOT an IR function AND was never "
+                         "executed is a runtime-dead call (a never-taken branch, "
+                         "or a census gap in an untested path). Emit a FAIL-LOUD "
+                         "stub for it so a runtime-reached caller promotes; the "
+                         "stub raises only if the dead call is ever reached "
+                         "(hard wall, not a silent fallback). For a standalone "
+                         "CPUless corpus.")
     ap.add_argument("--apply", action="store_true",
                     help="write the generated files (default: dry-run census)")
     ap.add_argument("--census-out", default=None)
@@ -228,6 +237,33 @@ def main(argv=None) -> int:
     # caller's own cs); far-call contracts are keyed by the static (seg, off).
     contracts_by_cs: dict[int, dict[int, emit_cpuless.CalleeContract]] = {}
     far_contracts: dict[tuple[int, int], emit_cpuless.CalleeContract] = {}
+    # --observed: runtime-dead near calls (target not an IR function AND never
+    # executed) get a fail-loud stub -- see the arg help. Model each as an
+    # empty-effect, stack-balanced synthetic callee so the composition analysis
+    # (abi_scan, depth, flag) treats the call as sound on every LIVE path; the
+    # emitter (stub_targets) turns the call site itself into a `raise`.
+    stub_targets: dict[int, set[int]] = {}       # cs -> {dead near-call target ips}
+    if args.observed and Path(args.observed).is_file():
+        obs = {a.upper() for a in json.loads(
+            Path(args.observed).read_text(encoding="utf-8")).get("executed", ())
+            if isinstance(a, str)}
+        entry_ips = {k.upper() for k in ir["functions"]}
+        for key, rec in ir["functions"].items():
+            kcs = int(key.split(":")[0], 16)
+            for t in (rec.get("calls_near") or []):
+                tk = f"{kcs:04X}:{int(t, 16):04X}"
+                if tk not in entry_ips and tk not in obs:
+                    stub_targets.setdefault(kcs, set()).add(int(t, 16))
+        _STUB = emit_cpuless.CalleeContract(
+            name="<unrecovered>", inputs=(), outputs=(),
+            exit_flags=frozenset({"cf", "pf", "af", "zf", "sf", "of", "df",
+                                  "intf"}),
+            ret_kind="near", sp_delta=0, ret_pop=0, sp_output=False,
+            sp_deltas=(0,))
+        for kcs, ips in stub_targets.items():
+            slot = contracts_by_cs.setdefault(kcs, {})
+            for ip in ips:
+                slot[ip] = _STUB
     # dispatch-entry ownership: arrival "CS:IP" -> the promoted function key
     # whose recovered blocks serve it (first promoted container wins,
     # deterministically -- containing scans share the original instructions).
@@ -317,7 +353,8 @@ def main(argv=None) -> int:
                     recovered_import_base=args.import_base,
                     needs_plat=spec.needs_plat, dispatch_addrs=disp_ips,
                     df_livein=spec.df_livein, sp_output=spec.sp_output,
-                    flags_livein=spec.flags_livein, boundary_addrs=head_ips)
+                    flags_livein=spec.flags_livein, boundary_addrs=head_ips,
+                    stub_targets=stub_targets.get(cs, frozenset()))
                 adapter_src = emit_cpuless.emit_adapter(
                     scan, abi, key,
                     signature=bytes.fromhex(rec["signature"]),

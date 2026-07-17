@@ -1665,7 +1665,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                    recovered_import_base: str = "", needs_plat=False,
                    dispatch_addrs=frozenset(), df_livein=False,
                    sp_output=False, flags_livein=False,
-                   boundary_addrs=frozenset()) -> str:
+                   boundary_addrs=frozenset(), stub_targets=frozenset()) -> str:
     """Generate the recovered module source for one promotable function.
 
     ``callees`` (tier 4): CalleeContract per direct near-call target -- the
@@ -1702,9 +1702,11 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
     A('"""')
     used_names = sorted(
         ({callees[i.target].name for i in scan.insts.values()
-          if i.kind == CALL and i.target in callees}
+          if i.kind == CALL and i.target in callees
+          and i.target not in stub_targets}  # a stubbed call raises, imports nothing
          | {far_callees[i.far_target].name for i in scan.insts.values()
-            if i.kind == CALL_FAR and i.far_target in far_callees})
+            if i.kind == CALL_FAR and i.far_target in far_callees
+            and i.far_target not in stub_targets})
         - {name})    # direct self-recursion: the module-level name suffices
     if used_names:
         A("")
@@ -1940,6 +1942,21 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 break
             if i.kind in (CALL, CALL_FAR):
                 far = i.kind == CALL_FAR
+                _tgt = i.far_target if far else i.target
+                if _tgt in stub_targets:
+                    # A call to an unrecovered target the game never SELECTS at
+                    # runtime (a never-taken branch, or a census gap in an
+                    # untested code path). Rather than block this runtime-reached
+                    # function on dead code, emit a fail-loud stub: if the call
+                    # is ever reached, raise -- the hard wall, not a silent
+                    # fallback. The composition analysis modelled it as an
+                    # empty-effect balanced callee, so the depth/ABI are sound
+                    # for every path that does NOT reach here.
+                    blk.append(f"raise RuntimeError('CPUless: unrecovered call to "
+                               f"{cs:04X}:{_tgt:04X} reached -- frontier witness "
+                               f"(untested code path)')")
+                    terminated = True
+                    break
                 c = far_callees[i.far_target] if far else callees[i.target]
                 # the machine call: return-address bytes are observable
                 if far:
