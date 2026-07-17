@@ -74,7 +74,22 @@ class AdlibSpeakerSink:
                 return
         rate, _size, channels = pygame.mixer.get_init()
         self._rate, self._channels = int(rate), int(channels)
-        self._chunk = max(256, self._rate // max(1, present_hz))
+        # TWO different sizes, deliberately.  They used to be one value
+        # (rate // present_hz), which silently coupled the audio BUFFER DEPTH
+        # to the present rate: a port presenting at 73 Hz got a 13.7ms chunk
+        # and, since pygame's Channel holds only playing + ONE queued sound,
+        # a 27ms live buffer -- any frame that overran drained it, the channel
+        # went idle, and the sink re-accumulated its lead: an audible stutter
+        # plus a re-buffer.  Raising a port's present_hz must not shrink its
+        # audio safety margin.
+        #
+        # _gen   how much audio ONE pump() must produce to stay real-time.
+        #        This alone is what present_hz determines.
+        # _chunk the queue granularity = the live buffer depth (2 chunks are
+        #        in the channel: one playing, one queued).  Fixed in TIME.
+        self._gen = self._rate / float(max(1, present_hz))
+        self._gen_frac = 0.0
+        self._chunk = max(256, int(self._rate * 0.040))   # 40ms -> ~80ms live
         self._lead = int(self._rate * 0.10)
         self._buf = np.zeros((0, self._channels), dtype=np.int16)
         self._started = False
@@ -114,7 +129,13 @@ class AdlibSpeakerSink:
         if not self.available:
             return
         np = self._np
-        n = self._chunk
+        # ONE frame's worth, carrying the fraction so a present_hz that does
+        # not divide the sample rate (73 -> 604.1 samples) cannot drift.
+        want = self._gen + self._gen_frac
+        n = int(want)
+        self._gen_frac = want - n
+        if n <= 0:
+            return
         if self._opl is not None:
             pcm = np.frombuffer(self._opl.generate_stereo(n), dtype="<i2").reshape(-1, 2)
             out = pcm.astype(np.int32)
@@ -130,8 +151,8 @@ class AdlibSpeakerSink:
         # Bound latency: if the VM ran faster than real time (a heavy-then-fast
         # burst, or a pacing mismatch) the producer can outrun the mixer and the
         # backlog grows to seconds of delay.  Cap the queued audio at ~4 chunks
-        # (~one present-interval of lead + slack) by dropping the OLDEST samples
-        # — audio stays live at the cost of a tiny, one-off skip instead of an
+        # (~160ms: the lead plus slack) by dropping the OLDEST samples — audio
+        # stays live at the cost of a tiny, one-off skip instead of an
         # ever-growing delay.  Never trims below one chunk (avoids underrun).
         _max_backlog = max(self._chunk * 4, self._lead + self._chunk)
         if len(self._buf) > _max_backlog:
