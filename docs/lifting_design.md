@@ -531,3 +531,9 @@ The scanner refuses statically-visible code writes (`self-modifying` /
 the evidence-driven rehabilitation pass on top of that refusal --
 transforming supported operand patches into live-memory reads -- is
 [`desmc.md`](desmc.md).
+
+Mid-frame palette / raster effects (copper splits, raster blinks) are
+recovered on the DEVICE side, not by a lifter pass: the lifted port-effect
+stream already preserves the palette writes and their raster synchronization
+byte-exactly on every runtime, so `DOSMachine` journals them per displayed
+frame and renderers compose bands -- [`raster_effects.md`](raster_effects.md).

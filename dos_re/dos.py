@@ -99,6 +99,12 @@ class DOSMachine:
     _dac_read_index: int = 0
     _dac_component: int = 0
     _dac_latch: list[int] = field(default_factory=list)
+    # raster palette journal (see the raster section below): DAC writes of the
+    # last CLOSED display frame / of the currently OPEN frame, split at each
+    # observed vertical-retrace edge.  Transient; not snapshotted.
+    raster_late_dac: dict = field(default_factory=dict)
+    _raster_open_dac: dict = field(default_factory=dict)
+    _raster_last_ret: bool = False
     cursor_row: int = 0
     cursor_col: int = 0
     ticks: int = 0
@@ -538,6 +544,53 @@ class DOSMachine:
         # CRTC timing, not of any particular program.
         return 70.0
 
+    # ---- raster palette journal (generic mid-frame palette effects) --------
+    #
+    # DOS games with indexed video + a small hardware palette change palette
+    # STATE while the frame is being displayed, so different screen regions of
+    # ONE frame use different effective colors (copper-style splits, raster
+    # blinks, fade bands).  VGA Lemmings' gameplay does exactly this: late in
+    # each frame it loads DAC 16..23 with the control-bar palette, then at the
+    # observed vertical-retrace edge reloads 0..7 and 16..23 with the level
+    # palette -- attributes 8..15 mean DIFFERENT colors in the level area vs
+    # the panel.  A renderer that samples one palette per frame paints the
+    # panel with terrain colors.
+    #
+    # The recovery is DEVICE-side and fully generic: every runtime (interpreted
+    # oracle, VMless graph, standalone CPUless) routes port effects through
+    # this one model, in identical byte-exact order -- the lifting pipeline
+    # already preserves the raster synchronization (3DAh reads) and the palette
+    # writes with their virtual timestamps, so no lift-time analysis is needed.
+    # The journal splits DAC mutations into display frames at each OBSERVED
+    # vertical-retrace edge (a 3DAh read returning bit3=1 after one that
+    # returned bit3=0 -- the game's own synchronization event):
+    #
+    #   raster_late_dac   the closed (previous) frame's accumulated DAC writes:
+    #                     index -> (r, g, b).  Entries here that differ from
+    #                     the live palette are the LATE-FRAME palette state --
+    #                     what the bottom region of the displayed frame used.
+    #   _raster_open_dac  the current frame's writes, still accumulating.
+    #
+    # A renderer composes: top band = live palette, bottom band = live palette
+    # overlaid with raster_late_dac.  The split line is not derivable from
+    # this journal alone (the game syncs to "the retrace edge", not to a
+    # counted scanline); ports declare it as an evidence-backed fact, exactly
+    # like boundary heads.  V2 extension: count observed display-enable
+    # toggles between edge and write for games that DO count scan lines.
+    # Transient state: deliberately NOT snapshotted -- it rebuilds within one
+    # displayed frame after any resume.
+
+    def raster_split_palette(self) -> dict:
+        """DAC entries whose LATE-FRAME value differs from the live palette:
+        index -> (r, g, b).  Empty when the last frame had no mid-frame
+        palette discipline (most screens)."""
+        out = {}
+        pal = self.vga_palette
+        for idx, rgb in self.raster_late_dac.items():
+            if idx < len(pal) and tuple(pal[idx]) != rgb:
+                out[idx] = rgb
+        return out
+
     def _vga_status(self, retrace_bit: int) -> int:
         # Reading the input-status register resets the attribute-controller flip-flop to
         # index mode (the real hardware behaviour PRE2 relies on before writing the pel pan).
@@ -560,6 +613,13 @@ class DOSMachine:
         else:
             phase = (ts() * self.display_refresh_hz()) % 1.0
             retrace = retrace_bit if phase >= (1.0 - self.vga_retrace_active_fraction) else 0x00
+        # raster journal: an observed 0->1 transition of the retrace bit is the
+        # game's frame-synchronization event -- close the open palette frame.
+        in_ret = bool(retrace)
+        if in_ret and not self._raster_last_ret:
+            self.raster_late_dac = self._raster_open_dac
+            self._raster_open_dac = {}
+        self._raster_last_ret = in_ret
         return retrace | display_enable
 
     def port_read(self, cpu: CPU8086, port: int, bits: int) -> int:
@@ -704,6 +764,7 @@ class DOSMachine:
             if len(self.vga_palette) < 256:
                 self.__post_init__()
             self.vga_palette[idx] = (r, g, b)
+            self._raster_open_dac[idx] = (r, g, b)   # raster journal
             self._dac_write_index = (idx + 1) & 0xFF
             self._dac_component = 0
             self._dac_latch = []
