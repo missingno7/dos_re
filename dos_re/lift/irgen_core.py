@@ -158,10 +158,37 @@ def build_document(entries, *,
     keep = set(keep_interpreted)
     functions: dict[str, dict] = {}
     unsupported: list[dict] = []
+
+    # Phase 1: scan everything first, so runtime CODE PATCHING can be
+    # adjudicated with the whole census in view.  A CS-override direct store
+    # (cfg.cs_store_target) landing inside a DIFFERENT censused function means
+    # that function's bytes are retuned at runtime -- lifting the snapshot's
+    # copy would silently freeze one moment's operands (see cfg.py's
+    # self-modifying refusal for the single-function case and the observed
+    # SkyRoads LZS-decoder instance).  The PATCHED function is refused, loud,
+    # naming its patcher.
+    scans: list[tuple[int, int, "object"]] = []
     for cs, ip in entries:
         fetch = fetch_for(cs)
         probe = probe_for(cs) if probe_for is not None else None
-        scan = scan_function(fetch, ip, probe=probe)
+        scans.append((cs, ip, scan_function(fetch, ip, probe=probe)))
+
+    from .cfg import Refusal, inst_byte_offsets
+    byte_sets = {(cs, ip): inst_byte_offsets(scan) for cs, ip, scan in scans}
+    for w_cs, w_ip, w_scan in scans:
+        for site, target in w_scan.cs_store_targets:
+            for (v_cs, v_ip), owned in byte_sets.items():
+                if v_cs == w_cs and target in owned and (v_cs, v_ip) != (w_cs, w_ip):
+                    v_scan = next(s for c, i, s in scans if (c, i) == (v_cs, v_ip))
+                    if not any(r.reason == "code-patched-at-runtime"
+                               for r in v_scan.refusals):
+                        v_scan.refusals.append(Refusal(
+                            v_ip, "code-patched-at-runtime",
+                            f"cs:[{target:04X}] is written by {w_cs:04X}:{site:04X}"))
+
+    # Phase 2: build the records from the (possibly refusal-augmented) scans.
+    for cs, ip, scan in scans:
+        fetch = fetch_for(cs)
         rec = function_record(scan, cs, ip, fetch, keep,
                               boundary_heads=boundary_heads,
                               dispatch_entries=dispatch_entries,
