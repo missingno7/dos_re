@@ -11,6 +11,18 @@ THE CONTRACT (duck-typed -- a recovered module names only these methods):
     plat.inp(port, width, cost) -> int          # port read  (width 1 or 2)
     plat.outp(port, value, width, cost) -> None  # port write
     plat.intr(num, regs, cost) -> regs           # INT: explicit reg bundle in/out
+    plat.farcall(seg, off, regs, argbytes, cost) -> regs
+        # a PLATFORM/API far-call: a static ``call far seg:off`` into a declared
+        # platform-boundary segment (a Win16 import thunk, a DOS API gateway).
+        # It is the far-call analogue of ``plat.intr`` -- the recovered body has
+        # already written the pascal arguments and the far return frame onto the
+        # emulated stack (ss:sp), so the service reads its args from there,
+        # performs its effect (memory + the platform object graph), and returns
+        # the register bundle it left (AX/DX + any convention clobbers) plus the
+        # flags word.  ``argbytes`` is the pascal callee-cleanup (the thunk's
+        # ``retf N``); the recovered body owns the stack arithmetic (SP += 4 +
+        # argbytes), so the backend must NOT let its own return mechanics leak
+        # the recovered body's registers/stack.
     plat.boundary(head_cs, head_ip, resume_ip, regs, cost)
         -> (regs, flags_word, extra_cost)        # boundary-head observer (t13)
 
@@ -88,6 +100,54 @@ class VMlessPlatformAdapter:
         for r in INT_REGS:                 # restore VM regs (recovered owns them)
             setattr(cpu.s, r, saved[r])
         cpu.s.flags = saved_flags
+        return out
+
+    def farcall(self, seg: int, off: int, regs: dict, argbytes: int,
+                cost: int) -> dict:
+        # Verification binding: apply the recovered body's reg bundle + the
+        # stack pointer (the args + far frame it already pushed live in the
+        # shared VM memory), then run the real API replacement hook (the
+        # interpreted oracle's own service) -- it reads its pascal args off
+        # ss:sp, does its effect, and far-returns with AX/DX.  Read the bundle
+        # + flags back; RESTORE the VM regs/stack/flags/cs:ip (the recovered
+        # body owns them, exactly as with plat.intr): the body's own SP
+        # arithmetic (SP += 4 + argbytes) is the historical pascal cleanup, so
+        # the hook's ret_far pop must not leak into the recovered timeline.
+        cpu = self.cpu
+        key = (seg & 0xFFFF, off & 0xFFFF)
+        hook = cpu.replacement_hooks.get(key)
+        if hook is None:
+            raise UnsupportedPlatformEffect(
+                f"platform far-call {seg & 0xFFFF:04X}:{off & 0xFFFF:04X} has no "
+                f"replacement hook (no API service bound at this thunk slot)")
+        s = cpu.s
+        saved = {r: getattr(s, r) for r in INT_REGS}
+        saved_stack = (s.sp, s.ss, s.flags, s.cs, s.ip)
+        base = self.entry + cost
+        cpu.instruction_count = base
+        for r in INT_REGS:
+            setattr(s, r, regs.get(r, 0) & 0xFFFF)
+        s.ss = regs.get("ss", s.ss) & 0xFFFF
+        s.sp = regs.get("sp", s.sp) & 0xFFFF
+        s.flags = regs.get("_flags", s.flags)
+        s.cs, s.ip = seg & 0xFFFF, off & 0xFFFF
+        hook(cpu)                              # the real API dispatch (ret_far)
+        out = {r: getattr(s, r) & 0xFFFF for r in INT_REGS}
+        out["flags"] = s.flags & 0xFFFF
+        out["halted"] = bool(getattr(cpu, "halted", False))
+        # VIRTUAL-TIME cost of the platform dispatch: one VM step for the thunk
+        # itself (the interpreter charges the hook +1, not owns_time) PLUS any
+        # nested guest execution the service re-entered (a Win16 callback -- a
+        # window/enum/dialog proc -- runs guest code through the VM, and the
+        # interpreter counts every instruction of it).  The recovered body owns
+        # its own timeline, so the cost is DYNAMIC here (an INT service never
+        # re-enters guest code, so plat.intr had no analogue).  hook() runs the
+        # handler directly (not through step()), so instruction_count advanced
+        # ONLY by the nested guest steps; add the +1 the thunk dispatch costs.
+        out["cost"] = 1 + (cpu.instruction_count - base)
+        for r in INT_REGS:                     # restore -- recovered owns them
+            setattr(s, r, saved[r])
+        s.sp, s.ss, s.flags, s.cs, s.ip = saved_stack
         return out
 
     def boundary(self, head_cs, head_ip, resume_ip, regs, cost):
@@ -263,6 +323,20 @@ class CPUlessPlatformRuntime:
             raise UnsupportedPlatformEffect(
                 f"INT {num & 0xFF:02X} not implemented by the CPUless runtime "
                 f"(unset vector or game-installed handler): {e}") from e
+
+    def farcall(self, seg: int, off: int, regs: dict, argbytes: int,
+                cost: int) -> dict:
+        # The standalone backend does not yet own a platform-API device model
+        # for import-thunk far-calls (the play_cpuless analogue of the DOS INT
+        # services): fail loud with a witness until a real platform adapter is
+        # bound, exactly as an unmodelled INT does above.  The VMless
+        # verification binding routes these through the live API registry, so
+        # the byte-exact differential runs today; the standalone runner needs a
+        # bound API adapter to reach them.
+        raise UnsupportedPlatformEffect(
+            f"platform far-call {seg & 0xFFFF:04X}:{off & 0xFFFF:04X} "
+            f"(argbytes {argbytes}) not implemented by the standalone CPUless "
+            f"runtime: bind a platform-API adapter to service import thunks")
 
     def boundary(self, head_cs, head_ip, resume_ip, regs, cost):
         """Boundary-head observer (standalone owner): advance the clock to

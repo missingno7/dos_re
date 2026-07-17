@@ -143,6 +143,25 @@ def _read_addr_file(path: Path) -> set[tuple[int, int]]:
     return out
 
 
+def _read_plat_farcalls(path: Path):
+    """Load the platform far-call contracts a consumer supplies: a JSON map
+    "SEG:OFF" -> {"argbytes": N[, "cost": C][, "name": S]}.  Keyed by the
+    static (seg, off) far target (a Win16 import thunk slot, a DOS API
+    gateway).  Returns {(seg, off): PlatformFarCall}."""
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    entries = doc.get("contracts", doc)     # allow a bare map or a wrapped one
+    out: dict[tuple[int, int], emit_cpuless.PlatformFarCall] = {}
+    for key, spec in entries.items():
+        if key.startswith("_"):
+            continue                        # a "_notice" or metadata field
+        seg_s, off_s = key.split(":")
+        out[(int(seg_s, 16), int(off_s, 16))] = emit_cpuless.PlatformFarCall(
+            argbytes=int(spec["argbytes"]),
+            cost=int(spec.get("cost", 1)),
+            name=str(spec.get("name", "api")))
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ir", required=True)
@@ -176,6 +195,19 @@ def main(argv=None) -> int:
                          "evidence): a function with INT 60/61 sites "
                          "promotes only when every OBSERVED runtime vector "
                          "resolves to a promoted IRET-contract handler")
+    ap.add_argument("--plat-far-segs", default="",
+                    help="comma-separated hex segment values that are the "
+                         "PLATFORM/API boundary (Win16 import thunks, DOS API "
+                         "gateways): a `call far` into one is a plat.farcall "
+                         "platform effect, not a game call.  Consumer "
+                         "configuration -- dos_re hardcodes no segment.")
+    ap.add_argument("--plat-farcalls", default=None,
+                    help="@FILE (JSON) of per-target platform far-call "
+                         "contracts: {\"SEG:OFF\": {\"argbytes\": N, ...}} -- "
+                         "the pascal callee-cleanup for each boundary thunk "
+                         "slot.  A far-call into a boundary segment with no "
+                         "contract refuses `platform-farcall-contract-unknown` "
+                         "(never guesses the arg count).")
     ap.add_argument("--entries", default="",
                     help="comma-separated CS:IP candidates (default: all)")
     ap.add_argument("--limit", type=int, default=0,
@@ -223,6 +255,11 @@ def main(argv=None) -> int:
         for site in doc.get("sites", []):
             vec_evidence[site["site"].upper()] = \
                 sorted(k.upper() for k in site.get("vectors", {}))
+    plat_far_segs = frozenset(
+        int(s.strip(), 16) for s in args.plat_far_segs.split(",") if s.strip())
+    plat_farcalls: dict[tuple[int, int], emit_cpuless.PlatformFarCall] = {}
+    if args.plat_farcalls:
+        plat_farcalls = _read_plat_farcalls(Path(args.plat_farcalls.lstrip("@")))
 
     wanted = ([e.strip().upper() for e in args.entries.split(",") if e.strip()]
               or sorted(ir["functions"]))
@@ -301,7 +338,8 @@ def main(argv=None) -> int:
                     dispatch_addrs={ip for (xcs, ip) in dispatch_addrs
                                     if xcs == cs},
                     boundary_addrs={ip for (xcs, ip) in boundary_addrs
-                                    if xcs == cs})
+                                    if xcs == cs},
+                    plat_far_segs=plat_far_segs, plat_farcalls=plat_farcalls)
                 tentative.add(key)
             except emit_cpuless.Refusal:
                 pass
@@ -339,7 +377,8 @@ def main(argv=None) -> int:
                 spec = emit_cpuless.check_promotable(
                     scan, excluded_addrs=excl_ips, callees=contracts,
                     far_callees=far_contracts, dispatch_addrs=disp_ips,
-                    boundary_addrs=head_ips)
+                    boundary_addrs=head_ips, plat_far_segs=plat_far_segs,
+                    plat_farcalls=plat_farcalls)
                 abi = spec.abi
                 prune_removed[key] = emit_cpuless.output_prune_removed(
                     abi, spec.sp_output)
@@ -354,7 +393,8 @@ def main(argv=None) -> int:
                     needs_plat=spec.needs_plat, dispatch_addrs=disp_ips,
                     df_livein=spec.df_livein, sp_output=spec.sp_output,
                     flags_livein=spec.flags_livein, boundary_addrs=head_ips,
-                    stub_targets=stub_targets.get(cs, frozenset()))
+                    stub_targets=stub_targets.get(cs, frozenset()),
+                    plat_farcalls=plat_farcalls)
                 adapter_src = emit_cpuless.emit_adapter(
                     scan, abi, key,
                     signature=bytes.fromhex(rec["signature"]),

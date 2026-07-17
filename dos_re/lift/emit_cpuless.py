@@ -857,6 +857,34 @@ class CalleeContract:
 
 
 @dataclass
+class PlatformFarCall:
+    """The contract of a static ``call far seg:off`` into a declared
+    platform-boundary segment (a Win16 import thunk, a DOS API gateway): the
+    far-call analogue of ``plat.intr``.
+
+    The recovered body has already pushed the pascal arguments and the far
+    return frame; the emitter routes the call to ``plat.farcall`` -- the
+    platform reads its args off the emulated stack, performs its effect, and
+    returns the API register bundle it left (AX/DX + convention clobbers) plus
+    flags.  This is a PLATFORM SERVICE, not a recovered game function -- there
+    is no body to compose, so the contract is small:
+
+      * ``argbytes`` -- the callee-cleanup ``retf N`` (the pascal stack pop).
+        The whole ``push args; call far; retf argbytes`` sequence is
+        stack-balanced, so the site's net depth effect is ``+argbytes`` (the
+        4-byte far frame push and the 4+argbytes callee pop combined).  Where
+        it is not statically derivable it is a consumer-supplied fact -- an
+        unknown one REFUSES loudly, never guesses.
+      * ``cost`` -- the virtual-time the platform dispatch costs (``owns_time``
+        metadata).  A pure-Python API replacement hook is dispatched as one VM
+        step (not ``owns_time``) after the ``call far``, so its cost is 1.
+    """
+    argbytes: int                   # pascal callee-cleanup (retf N); SP += 4+N
+    cost: int = 1                   # virtual-time cost of the thunk dispatch
+    name: str = "api"               # a label for the generated comment
+
+
+@dataclass
 class PromotionSpec:
     """Everything check_promotable proves about one promotable function."""
     abi: object
@@ -874,7 +902,8 @@ class PromotionSpec:
 
 def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
                      far_callees=None, dispatch_addrs=frozenset(),
-                     boundary_addrs=frozenset()):
+                     boundary_addrs=frozenset(), plat_far_segs=frozenset(),
+                     plat_farcalls=None):
     """The strict promotion gate.  Returns a :class:`PromotionSpec` or
     raises :class:`Refusal` with the census reason.
 
@@ -884,6 +913,15 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     target.  A CALL/CALL FAR whose target is present composes; any other
     call still refuses.
 
+    ``plat_far_segs`` (platform far-call composition): the set of segment
+    values that are the PLATFORM/API boundary (Win16 import thunks, DOS API
+    gateways) -- consumer configuration, NOT hardcoded here.  A ``call far``
+    into one of these is a platform effect (``plat.farcall``), not a game call.
+    ``plat_farcalls`` maps each such (seg, off) target to its
+    :class:`PlatformFarCall` contract (argbytes/cost).  A far-call into a
+    boundary segment with NO contract entry REFUSES ``platform-farcall-
+    contract-unknown`` -- fail loud, never guess the arg count.
+
     ``dispatch_addrs`` (tier 9): recorded dynamic-arrival addresses in this
     segment.  One that falls inside this scan becomes an ALTERNATE ENTRY of
     the recovered function (a generated ``_entry_ip`` compatibility channel;
@@ -892,11 +930,22 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     conditions of a dynamic arrival (no flags defined, depth 0)."""
     callees = callees or {}
     far_callees = far_callees or {}
+    plat_farcalls = plat_farcalls or {}
     # a dispatch entry inside the scan is FORCED as a block leader by the
     # emitter (same rule as the VMless emitter) -- it need only be a decoded
     # instruction start, which membership in scan.insts guarantees.
     alt_entries = frozenset(dispatch_addrs) & frozenset(scan.insts) \
         - frozenset({scan.entry})
+    # a far-call into a declared platform-boundary segment that has NO contract
+    # is a KNOWN platform call whose arg cleanup we cannot derive -- refuse
+    # loudly rather than mis-model it as a game far-call or guess the argbytes.
+    for i in scan.insts.values():
+        if (i.kind == CALL_FAR and i.far_target is not None
+                and i.far_target[0] in plat_far_segs
+                and i.far_target not in plat_farcalls
+                and i.far_target not in far_callees):
+            raise Refusal("platform-farcall-contract-unknown")
+    plat_argbytes = {tgt: c.argbytes for tgt, c in plat_farcalls.items()}
     callee_effects = {ip: (frozenset(c.inputs) - frozenset({"sp", "ss"}),
                            frozenset(c.outputs))
                       for ip, c in callees.items()}
@@ -904,7 +953,8 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
                          frozenset(c.outputs))
                    for tgt, c in far_callees.items()}
     abi = abi_scan(scan, callee_effects=callee_effects,
-                   far_callee_effects=far_effects)
+                   far_callee_effects=far_effects,
+                   plat_farcalls=plat_argbytes)
     heads = frozenset(boundary_addrs) & frozenset(scan.insts)
     for h in heads:
         hk = scan.insts[h].kind
@@ -918,7 +968,9 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
         if hk == SEQ:
             continue
         composed = (hk == CALL and scan.insts[h].target in callees) or \
-                   (hk == CALL_FAR and scan.insts[h].far_target in far_callees)
+                   (hk == CALL_FAR and
+                    (scan.insts[h].far_target in far_callees
+                     or scan.insts[h].far_target in plat_farcalls))
         if not composed:
             raise Refusal("boundary-head-on-transfer")
     if alt_entries or heads:
@@ -933,7 +985,8 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
                                                i.target not in callees))
                        or (i.kind == CALL_FAR and
                            (i.far_target is None or
-                            i.far_target not in far_callees))]
+                            (i.far_target not in far_callees and
+                             i.far_target not in plat_farcalls)))]
             if not missing:
                 continue            # every call target composes
             raise Refusal("contains-call")
@@ -981,7 +1034,7 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
             raise Refusal("sp-as-data")
     _check_frame_pointer(scan, callees, far_callees)
     sp_delta, ret_pop, sp_output, sp_deltas = _check_stack_depths(
-        scan, alt_entries, callees, far_callees)
+        scan, alt_entries, callees, far_callees, plat_farcalls)
     if sp_output and any(_is_dyn(i) and i.kind == JMP_IND
                          for i in scan.insts.values()):
         # a tail dispatch assumes the caller frame is next on the stack;
@@ -994,8 +1047,8 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     # FLAGS word the _flags_in compat input, and every flag local
     # initializes from it -- machine-correct caller values (tier 13).
     exit_flags, df_livein, fl_needed = _check_flag_liveins(
-        scan, callees, far_callees, alt_entries)
-    needs_plat = _func_needs_plat(scan, callees, far_callees)
+        scan, callees, far_callees, alt_entries, plat_farcalls)
+    needs_plat = _func_needs_plat(scan, callees, far_callees, plat_farcalls)
     # the full FLAGS word is ALSO a compat input when a game-INT frame or
     # pushf writes it here (untracked bits ride the caller word) or a
     # composed callee needs it -- transitive, like _df (tier 12).
@@ -1014,9 +1067,14 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     # seed from _flags_in -- without it a serviced INT clobbers the caller's
     # preserved flags to the zero default (i.kind == INT subsumes the game
     # subset _is_game_int).
+    # A PLATFORM far-call routes the caller's full FLAGS word to the API
+    # service and reloads the tracked flags from what it left (a register API
+    # may return status in CF -- e.g. a KERNEL DOS gateway), so it needs
+    # _flags_in for the untracked bits, exactly like an INT (i.kind == INT).
     flags_livein = fl_needed or bool(heads) \
         or any(_is_dyn(i) or i.kind == INT or _is_isr_chain(i)
                or i.op == 0x9C
+               or (i.kind == CALL_FAR and i.far_target in plat_farcalls)
                for i in scan.insts.values()) \
         or any(i.kind == CALL and i.target in callees
                and callees[i.target].flags_livein
@@ -1042,9 +1100,10 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
                          parks=parks)
 
 
-def _func_needs_plat(scan, callees, far_callees=None) -> bool:
-    """A function needs the platform interface if it does port I/O or
-    interrupts directly, or composes a call to a callee that needs it."""
+def _func_needs_plat(scan, callees, far_callees=None, plat_farcalls=None) -> bool:
+    """A function needs the platform interface if it does port I/O, interrupts,
+    or a platform far-call directly, or composes a call to a callee that needs
+    it."""
     from .cpuless import register_effects
     for i in scan.insts.values():
         e = register_effects(i)
@@ -1052,6 +1111,8 @@ def _func_needs_plat(scan, callees, far_callees=None) -> bool:
             return True
         if _is_dyn(i) or _is_game_int(i) or _is_isr_chain(i):
             return True     # a dynamic/vectored callee may need the platform
+        if (i.kind == CALL_FAR and i.far_target in (plat_farcalls or {})):
+            return True     # a platform/API far-call (plat.farcall)
         if (i.kind == CALL and i.target in (callees or {})
                 and callees[i.target].needs_plat):
             return True
@@ -1300,7 +1361,7 @@ def _is_isr_chain(i) -> bool:
 
 
 def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
-                        far_callees=None) -> tuple:
+                        far_callees=None, plat_farcalls=None) -> tuple:
     """Static stack-discipline verification (tiers 2 + 11): every address has
     ONE net push depth (bytes) from entry, consistent at every join.
 
@@ -1335,6 +1396,7 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
       sp_deltas -- every possible exit delta, or None when unknown."""
     callees = callees or {}
     far_callees = far_callees or {}
+    plat_farcalls = plat_farcalls or {}
     depths: dict[int, set[int]] = {scan.entry: {0}}
     work = [(scan.entry, 0)]
     for a in alt_entries:
@@ -1412,6 +1474,13 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
             if i.kind == CALL_FAR and i.far_target in far_callees:
                 ds = far_callees[i.far_target].sp_deltas
                 afters = [None] if ds is None else [d + x for x in ds]
+            if i.kind == CALL_FAR and i.far_target in plat_farcalls:
+                # a PLATFORM far-call: the whole `push args; call far; retf
+                # argbytes` sequence is stack-balanced, so from the call site
+                # (args already pushed) the net effect is a `+argbytes` pop --
+                # the 4-byte far frame push and the 4+argbytes pascal cleanup
+                # combined.  Depth (bytes pushed) drops by argbytes.
+                afters = [d - plat_farcalls[i.far_target].argbytes]
         succs = []
         if i.kind in (SEQ, CALL, CALL_FAR, CALL_IND):
             succs = [i.next_ip]
@@ -1448,7 +1517,7 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
 
 
 def _check_flag_liveins(scan, callees=None, far_callees=None,
-                        alt_entries=frozenset()) -> tuple:
+                        alt_entries=frozenset(), plat_farcalls=None) -> tuple:
     """Must-defined flag analysis over the CFG (meet = intersection).
 
     Refuses when a jcc reads a flag not DEFINITELY defined on every path from
@@ -1464,28 +1533,31 @@ def _check_flag_liveins(scan, callees=None, far_callees=None,
     every df-live-in chain).  Any OTHER flag live-in still refuses.
 
     Returns (exit_flags, df_livein)."""
+    plat_farcalls = plat_farcalls or {}
     exit_flags, df_c, fl_c = _flag_pass(scan, callees or {}, far_callees or {},
-                                        alt_entries, seed="none")
+                                        alt_entries, plat_farcalls, seed="none")
     if fl_c:
         # some flag is a live-in beyond DF: the whole FLAGS word becomes the
         # _flags_in compat input and EVERY flag local initializes from it
         # (machine-correct caller values), so nothing is ever undefined.
         exit_flags, _, _ = _flag_pass(scan, callees or {}, far_callees or {},
-                                      alt_entries, seed="all")
+                                      alt_entries, plat_farcalls, seed="all")
         return exit_flags, df_c, True
     if not df_c:
         return exit_flags, False, False
     # DF alone is a live-in: rerun with DF defined at every entry (the _df
     # input supplies it), which settles the downstream sets exactly.
     exit_flags, _, _ = _flag_pass(scan, callees or {}, far_callees or {},
-                                  alt_entries, seed="df")
+                                  alt_entries, plat_farcalls, seed="df")
     return exit_flags, True, False
 
 
-def _flag_pass(scan, callees, far_callees, alt_entries, *, seed):
+def _flag_pass(scan, callees, far_callees, alt_entries, plat_farcalls=None,
+               *, seed):
     """One must-defined fixpoint.  Returns (exit_flags, df_consumed,
     flags_consumed) -- whether DF (resp. any other flag) was read while
     undefined (making it a live-in via _df / the full _flags_in word)."""
+    plat_farcalls = plat_farcalls or {}
     seed0 = (_ALL_FLAGS if seed == "all"
              else frozenset({"df"}) if seed == "df" else frozenset())
     defined: dict[int, frozenset] = {scan.entry: seed0}
@@ -1517,6 +1589,8 @@ def _flag_pass(scan, callees, far_callees, alt_entries, *, seed):
                 if (i.kind == CALL_FAR and i.far_target in far_callees
                         and far_callees[i.far_target].df_livein):
                     df_consumed = True
+                if i.kind == CALL_FAR and i.far_target in plat_farcalls:
+                    df_consumed = True     # the API sees the caller DF (flags word)
             if i.op == 0x27 and not ({"cf", "af"} <= set(defined[ip])):
                 fl_consumed = True                        # daa reads CF and AF
             if "cf" not in defined[ip]:
@@ -1537,6 +1611,9 @@ def _flag_pass(scan, callees, far_callees, alt_entries, *, seed):
             if (i.kind == CALL_FAR and i.far_target is not None
                     and i.far_target in far_callees):
                 new = defined[ip] | far_callees[i.far_target].exit_flags
+            if (i.kind == CALL_FAR and i.far_target is not None
+                    and i.far_target in plat_farcalls):
+                new = defined[ip] | _ALL_FLAGS   # the farcall reloads all flags
             if i.kind in (RET, RETF, IRET):
                 exit_sets[ip] = defined[ip]
             if i.kind == JMP_IND:
@@ -1665,7 +1742,8 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                    recovered_import_base: str = "", needs_plat=False,
                    dispatch_addrs=frozenset(), df_livein=False,
                    sp_output=False, flags_livein=False,
-                   boundary_addrs=frozenset(), stub_targets=frozenset()) -> str:
+                   boundary_addrs=frozenset(), stub_targets=frozenset(),
+                   plat_farcalls=None) -> str:
     """Generate the recovered module source for one promotable function.
 
     ``callees`` (tier 4): CalleeContract per direct near-call target -- the
@@ -1674,9 +1752,14 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
     literally (observable stack residue), the callee's exit flags merge
     through the compat mask, and its virtual-time cost accumulates.
     ``far_callees`` (tier 9): the same per static far-call (seg, off) target;
-    the 4-byte far frame (static CS + return offset) is written literally."""
+    the 4-byte far frame (static CS + return offset) is written literally.
+    ``plat_farcalls``: (seg, off) -> :class:`PlatformFarCall` for a far-call
+    into a platform-boundary segment -- emitted as a ``plat.farcall`` platform
+    effect (the API service reads the pushed pascal args, returns AX/DX + the
+    convention bundle), NOT a recovered game callee."""
     callees = callees or {}
     far_callees = far_callees or {}
+    plat_farcalls = plat_farcalls or {}
     cs = int(key.split(":")[0], 16)
     name = f"func_{key.replace(':', '_').lower()}"
     alt_entries = sorted(frozenset(dispatch_addrs) & frozenset(scan.insts)
@@ -1940,6 +2023,62 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 blk.append("break")
                 terminated = True
                 break
+            if i.kind == CALL_FAR and i.far_target in plat_farcalls:
+                # PLATFORM far-call (plat.farcall): the far-call analogue of
+                # plat.intr.  Write the far return frame literally (observable
+                # residue), then hand the API service the register bundle + the
+                # composed FLAGS word; it reads the pushed pascal args off the
+                # emulated stack (ss:sp), performs its effect on shared memory
+                # + the platform object graph, and returns AX/DX + the bundle
+                # it left plus flags.  The recovered body owns the stack: the
+                # `push args; call far; retf argbytes` sequence is balanced, so
+                # after the call SP += 4 + argbytes (the far frame + pascal
+                # cleanup).  The dispatch costs one VM step of virtual time.
+                pf = plat_farcalls[i.far_target]
+                pseg, poff = i.far_target
+                blk.append("sp = (sp - 2) & 0xFFFF")
+                blk.append(f"mem.ww(ss, sp, 0x{cs:04X})")     # return CS
+                blk.append("sp = (sp - 2) & 0xFFFF")
+                blk.append(f"mem.ww(ss, sp, 0x{i.next_ip:04X})")   # return off
+                fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
+                                for f in ("cf", "pf", "af", "zf", "sf", "of",
+                                          "df", "intf"))
+                blk.append(f"_ff = (_flags_in & ~_fmask) | (({fw}) & _fmask)")
+                bundle = ", ".join(f"'{r}': {r}"
+                                   for r in _INT_REGS + ("ss", "sp")) \
+                    + ", '_flags': _ff"
+                blk.append(f"_fo = plat.farcall(0x{pseg:04X}, 0x{poff:04X}, "
+                           f"{{{bundle}}}, {pf.argbytes}, "
+                           f"_base + _cost + {count})")
+                for r in _INT_REGS:
+                    blk.append(f"{r} = _fo['{r}']")
+                blk.append("_pf = _fo['flags']")
+                for fname, fbit in (("cf", 0x01), ("pf", 0x04), ("af", 0x10),
+                                    ("zf", 0x40), ("sf", 0x80), ("of", 0x800),
+                                    ("intf", 0x200), ("df", 0x400)):
+                    blk.append(f"{fname} = (_pf & 0x{fbit:X}) != 0")
+                blk.append("_fmask |= 0xED5")
+                # the platform dispatch cost is DYNAMIC (the thunk step plus any
+                # nested Win16 callback the API re-entered), so the backend
+                # reports it -- a fixed +1 would undercount callback-bearing
+                # APIs (EnumFonts, a WndProc reached through DispatchMessage).
+                blk.append("_cost += _fo['cost']")
+                # pascal cleanup: pop the 4-byte far frame + argbytes of args
+                blk.append(f"sp = (sp + {4 + pf.argbytes}) & 0xFFFF")
+                if i.ip in heads:
+                    _emit_boundary_observer(blk, cs, i, count)
+                ip = i.next_ip
+                if ip in bb_of:
+                    blk.append(f"_cost += {count}")
+                    if flag_written:
+                        bits = " | ".join(f"0x{_FLAG_BITS[f]:X}"
+                                          for f in sorted(flag_written))
+                        blk.append(f"_fmask |= {bits}")
+                    blk.append(f"bb = {bb_of[ip]}")
+                    blk.append("continue")
+                    terminated = True
+                    break
+                continue
             if i.kind in (CALL, CALL_FAR):
                 far = i.kind == CALL_FAR
                 _tgt = i.far_target if far else i.target

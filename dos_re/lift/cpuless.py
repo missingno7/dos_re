@@ -40,6 +40,15 @@ ALL_REGS = frozenset(W16) | frozenset(SEGS)
 _EA_REGS = ({"bx", "si"}, {"bx", "di"}, {"bp", "si"}, {"bp", "di"},
             {"si"}, {"di"}, {"bp"}, {"bx"})
 
+#: The register bundle a PLATFORM/API far-call reads and writes (the far-call
+#: analogue of the INT service bundle): the general + buffer-segment registers a
+#: pascal/register API may consume or clobber.  Conservative and fixed (like the
+#: INT bundle): a preserved register reads back unchanged, so echoing the whole
+#: bundle is byte-exact and needs no per-API clobber list.  ss/sp are added at
+#: the call site (the args + far frame live on the emulated stack).
+PLAT_FARCALL_REGS = frozenset({"ax", "bx", "cx", "dx", "si", "di", "bp",
+                               "ds", "es"})
+
 
 @dataclass
 class Effects:
@@ -569,7 +578,8 @@ def _successors(scan) -> dict[int, list[int]]:
     return succ
 
 
-def abi_scan(scan, callee_effects=None, far_callee_effects=None) -> AbiReport:
+def abi_scan(scan, callee_effects=None, far_callee_effects=None,
+             plat_farcalls=None) -> AbiReport:
     """Infer the CPU ABI of one scanned function from its instruction list.
 
     Register INPUTS = live-in at entry by backward may-liveness over the
@@ -584,8 +594,25 @@ def abi_scan(scan, callee_effects=None, far_callee_effects=None) -> AbiReport:
     callee's reads/writes (plus the machine call's own sp/ss traffic) to the
     dataflow, so the caller's inferred contract is interprocedurally exact.
     ``far_callee_effects`` is the same map for direct FAR calls, keyed by the
-    static (seg, off) target."""
+    static (seg, off) target.
+
+    ``plat_farcalls`` (platform far-call composition): maps a direct FAR-call
+    (seg, off) target that lands in a declared platform-boundary segment to its
+    pascal ``argbytes`` (the callee-cleanup ``retf N``).  Such a CALL_FAR stops
+    being a refusal and becomes a ``plat.farcall`` platform effect -- the
+    far-call analogue of an INT: the fixed API bundle reads/writes plus the
+    stack traffic to locate the args and clean them (net ``+argbytes`` pop, the
+    frame push and pascal cleanup combined)."""
     effs = {i.ip: register_effects(i) for i in scan.insts.values()}
+    if plat_farcalls:
+        for i in scan.insts.values():
+            if (i.kind == CALL_FAR and i.far_target is not None
+                    and i.far_target in plat_farcalls):
+                argbytes = plat_farcalls[i.far_target]
+                effs[i.ip] = Effects(
+                    reads=PLAT_FARCALL_REGS | frozenset({"ss", "sp"}),
+                    writes=PLAT_FARCALL_REGS | frozenset({"sp"}),
+                    mem_read=True, mem_write=True, stack_delta=argbytes)
     if callee_effects:
         for i in scan.insts.values():
             if (i.kind == CALL and i.target is not None
