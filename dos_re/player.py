@@ -501,8 +501,15 @@ def run_headless(frontend: GameFrontend, rt, args) -> int:
 # --- the viewer -----------------------------------------------------------------------------------
 
 def run_view(frontend: GameFrontend, rt, args,
-             playback: InputDemoPlayback | None = None) -> int:
-    """The live pygame viewer: hybrid play, demo record/replay, F10/F11/F12."""
+             playback: InputDemoPlayback | None = None,
+             cold_boot: bool = False) -> int:
+    """The live pygame viewer: hybrid play, demo record/replay, F10/F11/F12.
+
+    ``cold_boot`` says this session began at power-on (``create_runtime``, not
+    a resumed snapshot).  Recording from boundary 0 of such a session captures
+    a COLD-START demo -- input-only, no start snapshot -- which every runtime
+    can replay by booting fresh.  See ``start_recording``.
+    """
     try:
         import numpy as np
         import pygame
@@ -538,9 +545,22 @@ def run_view(frontend: GameFrontend, rt, args,
     def start_recording(name: str) -> None:
         rec = InputDemoRecorder(root=Path(args.demo_dir), name=name,
                                 metadata=frontend.demo_metadata(args))
-        out = rec.start(rt, boundary=frame_box["n"])
+        # A recording that begins at boundary 0 of a POWER-ON session needs no
+        # start snapshot: replay boots a fresh runtime and applies the inputs
+        # from boundary 0.  Writing one anyway is not merely redundant -- it is
+        # actively harmful on the strict runtimes.  The snapshot pins playback
+        # to the recorder's exact park CS:IP, and only registered heads /
+        # resume entries are re-enterable there, so a snapshot resume can trip
+        # the VMless wall on frame 0 while the identical demo replays clean
+        # from a fresh boot (lemmings F2 code-screen demo, 2026-07-17).
+        # frame_box["n"] alone cannot answer this: it is the VIEWER's counter
+        # and reads 0 for a resumed snapshot too -- hence cold_boot.
+        cold = cold_boot and frame_box["n"] == 0
+        out = rec.start(rt, boundary=frame_box["n"],
+                        write_start_snapshot=not cold)
         recorder["rec"] = rec
-        print(f"recording demo -> {out}")
+        kind = "cold-start (input-only)" if cold else "snapshot-anchored"
+        print(f"recording demo [{kind}] -> {out}")
 
     def stop_recording() -> None:
         rec = recorder["rec"]
@@ -739,7 +759,8 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
         _use_real_console_input(rt)
         if args.headless:
             return run_replay_headless(frontend, rt, args, playback)
-        return run_view(frontend, rt, args, playback=playback)
+        return run_view(frontend, rt, args, playback=playback,
+                        cold_boot=playback.is_cold_start)
 
     if args.snapshot:
         rt = frontend.load_snapshot_runtime(args, args.snapshot)
@@ -749,4 +770,4 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
     _use_real_console_input(rt)
     if args.headless:
         return run_headless(frontend, rt, args)
-    return run_view(frontend, rt, args)
+    return run_view(frontend, rt, args, cold_boot=not args.snapshot)

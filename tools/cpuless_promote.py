@@ -379,6 +379,17 @@ def main(argv=None) -> int:
         # generated alternate entry.  Regenerated every apply (tier 9).
         registry: dict[str, tuple] = {}
         handlers: dict[str, tuple] = {}
+        # Why a PROMOTED function is still not dynamically dispatchable.  This
+        # is the CPUless-vs-VMless reachability gap made measurable: a VM can
+        # enter any lifted function through its hook (an indirect jump simply
+        # walks there), but the standalone program has no CPU and must resolve
+        # every indirect transfer through this registry.  A recovered function
+        # missing from it is reachable ONLY by static call composition -- so an
+        # indirect jump to it raises UnknownDispatchTarget in live play while
+        # VMless sails through.  The exclusions below are CONTRACT limits of
+        # the near-dyn bundle, not missing evidence; each reason names the
+        # bundle capability that would close it.
+        dispatch_excluded: dict[str, str] = {}
         for key in promoted:
             kcs, kip = (int(x, 16) for x in key.split(":"))
             c = contracts_by_cs[kcs][kip]
@@ -391,8 +402,19 @@ def main(argv=None) -> int:
                                  None, tuple(c.inputs), c.needs_plat,
                                  c.df_livein, c.flags_livein)
                 continue
-            if c.ret_kind != "near" or c.sp_output or c.ret_pop \
-                    or c.sp_delta != 0 or c.flags_livein:
+            reason = None
+            if c.ret_kind != "near":
+                reason = f"ret-kind-{c.ret_kind}"   # needs a far-dyn bundle
+            elif c.sp_output:
+                reason = "sp-output"                # needs sp threading
+            elif c.ret_pop:
+                reason = "ret-pop"                  # callee-pops stack args
+            elif c.sp_delta != 0:
+                reason = "sp-delta"                 # unbalanced exit
+            elif c.flags_livein:
+                reason = "flags-livein"             # bundle carries no FLAGS
+            if reason is not None:
+                dispatch_excluded[key] = reason
                 continue    # only balanced near-return functions dispatch
             registry[key] = (f"{args.import_base}.{c.name}", c.name, None,
                              tuple(c.inputs), c.needs_plat, c.df_livein,
@@ -413,6 +435,31 @@ def main(argv=None) -> int:
               f"adapters occupy their lifted slots in {ad_dir}; dispatch "
               f"registry: {len(registry)} selectors "
               f"({len(dispatch_owner)} alternate entries).")
+        # The reachability gap, reported every apply -- never discovered as a
+        # live-play UnknownDispatchTarget crash.
+        if dispatch_excluded:
+            by_reason: dict[str, list[str]] = {}
+            for k, r in sorted(dispatch_excluded.items()):
+                by_reason.setdefault(r, []).append(k)
+            print(f"NOT DYNAMICALLY DISPATCHABLE: {len(dispatch_excluded)} of "
+                  f"{len(promoted)} promoted function(s) -- static-call "
+                  f"reachable only; an indirect jump to one raises "
+                  f"UnknownDispatchTarget:")
+            for r, ks in sorted(by_reason.items(),
+                                key=lambda kv: (-len(kv[1]), kv[0])):
+                print(f"    {r:16s} {len(ks):3d}  {', '.join(ks[:6])}"
+                      f"{' ...' if len(ks) > 6 else ''}")
+        if args.census_out:
+            cpath = Path(args.census_out)
+            if cpath.is_file():
+                doc = json.loads(cpath.read_text(encoding="utf-8"))
+                doc["dispatch"] = {
+                    "selectors": sorted(registry),
+                    "handlers": sorted(handlers),
+                    "alternate_entries": sorted(dispatch_owner),
+                    "excluded": dispatch_excluded,
+                }
+                cpath.write_text(json.dumps(doc, indent=1), encoding="utf-8")
     elif args.apply:
         print("APPLIED: nothing promotable.")
     return 0
