@@ -68,49 +68,13 @@ from dos_re.runtime_core import use_real_console_input
 # (scripts/lint_vmless_independence.py).  write_snapshot is EXE-free.
 from dos_re.snapshot import write_snapshot
 
-WIDTH, HEIGHT = 320, 200
-PLANAR_ROW_BYTES = 40
-
-
-# --- default framebuffer decode (text modes + VGA mode 13h linear + EGA/VGA 16-colour planar) ----
-
-def decode_frame_default(rt):
-    """Return an HxWx3 uint8 array of the current screen (numpy imported lazily).
-
-    Game-agnostic and therefore approximate: no pel-pan/split-screen refinements —
-    it shows whatever the interpreted original draws.  BIOS text modes (0-3, 7)
-    render through :mod:`dos_re.textmode` (so DOS-era text boot menus/setup
-    screens are visible out of the box); ports with fancier video (CGA/Tandy)
-    override ``GameFrontend.decode_frame``.
-    """
-    import numpy as np
-
-    from dos_re.memory import EGA_APERTURE, EGA_PLANE_STRIDE
-    from dos_re.textmode import decode_text_frame, is_text_display
-
-    if is_text_display(rt.dos):
-        return decode_text_frame(rt)
-
-    mem = rt.cpu.mem
-    pal = list(getattr(rt.dos, "vga_palette", ()) or ())
-    while len(pal) < 256:
-        i = len(pal)
-        pal.append((i, i, i))
-    pal = np.asarray(pal[:256], dtype=np.uint8)
-    if mem.ega_planar or (rt.dos.video_mode & 0x7F) == 0x0D:
-        start = mem.ega_display_start & 0xFFFF
-        offs = (start + np.arange(HEIGHT)[:, None] * PLANAR_ROW_BYTES
-                + np.arange(PLANAR_ROW_BYTES)[None, :]) & 0xFFFF
-        idx = np.zeros((HEIGHT, PLANAR_ROW_BYTES, 8), dtype=np.uint8)
-        for plane in range(4):
-            base = EGA_APERTURE + plane * EGA_PLANE_STRIDE
-            plane_bytes = np.frombuffer(mem.data, np.uint8, count=0x10000, offset=base)
-            bits = np.unpackbits(plane_bytes[offs].reshape(HEIGHT, PLANAR_ROW_BYTES, 1), axis=2)
-            idx |= bits << plane
-        return pal[idx.reshape(HEIGHT, WIDTH)]
-    # Linear VGA mode 13h (also the harmless default for anything else).
-    arr = np.frombuffer(mem.data, np.uint8, count=WIDTH * HEIGHT, offset=0xA0000)
-    return pal[arr.reshape(HEIGHT, WIDTH)]
+# The default framebuffer decoder is a LEAF (dos_re.framebuffer): decoding video
+# memory needs no CPU, and this module imports the interpreter at module level --
+# a CPU-free consumer (a port rasterizer's fallback for modes it does not
+# implement, reached from the standalone CPUless runtime) must not pull the VM in
+# behind it.  Re-exported here so existing callers keep working.
+from dos_re.framebuffer import (WIDTH, HEIGHT, PLANAR_ROW_BYTES,  # noqa: F401
+                                decode_frame_default)
 
 
 #: Re-exported from keyboard.py, where it must live: a strict-VMless

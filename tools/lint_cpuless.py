@@ -218,7 +218,14 @@ def walk_runner(roots: list[Path], repo_root: Path,
                 package_dirs: dict[str, Path] | None = None):
     """RUNNER CLOSURE: follow the runner's own imports (lazy ones too -- they
     execute), then module-level edges transitively.  ``seen`` is returned so
-    the caller can report the graph size."""
+    the caller can report the graph size.
+
+    NOTE for packaging: ``seen`` is a WALL-PROOF closure, not a shipping list.
+    It deliberately stops following function-local imports below the roots, so
+    a module a reached library lazily imports (lemmings.tick_clock._heads ->
+    lemmings.input_waits) is absent from it.  Use :func:`runtime_payload` to
+    decide what a release package must carry -- an APK built from ``seen``
+    died with ModuleNotFoundError on the first device it ran on."""
     seen: set[Path] = set()
     # (path, follow_lazy): only the runner roots' lazy imports are real
     # dependencies; a library module's lazy import is a deferred capability.
@@ -277,6 +284,81 @@ def walk_runner(roots: list[Path], repo_root: Path,
     return seen, unresolved
 
 
+def runtime_payload(roots: list[Path], repo_root: Path,
+                    forbidden: tuple[str, ...], prefixes: tuple[str, ...],
+                    package_dirs: dict[str, Path] | None = None) -> list:
+    """Every repo module the standalone runtime can IMPORT, as sorted
+    repo-relative POSIX paths: the shipping list for a release package.
+
+    A different question from :func:`walk_runner`'s, and it needs a different
+    walk -- getting this wrong breaks a release in one of two ways:
+
+      * follow only module-level edges below the roots (the wall walk's rule)
+        and you MISS what a reached module lazily imports and then calls:
+        lemmings.tick_clock._heads() imports lemmings.input_waits inside the
+        function, and an APK packaged from that closure crashed on device.
+        So: follow function-local imports at every level.
+      * follow them into FORBIDDEN modules and you would ship the interpreter
+        itself -- dos_re.snapshot's load path lazily imports dos_re.cpu, for
+        the VM callers it also serves.  Those paths cannot execute in a
+        release (the runner never calls them, and the import guard would fire
+        if it did), so: prune at the wall.  The package therefore contains a
+        module whose unexecuted branch names an absent one -- that is the
+        wall being real, not a packaging defect.
+
+    Package ``__init__.py`` files are part of the WALK, not an afterthought:
+    importing a module executes its packages' ``__init__`` first, so they are
+    both required on disk AND edges in the graph -- ``dos_re.lift.__init__``
+    imports ``.decode``, and a payload that merely appended the __init__ paths
+    without following them shipped an APK that died on device with
+    ``ModuleNotFoundError: dos_re.lift.decode``.
+    """
+    seen: set[Path] = set()
+    work: list[Path] = list(roots)
+    fpaths = forbidden_paths(forbidden, repo_root, prefixes, package_dirs)
+    while work:
+        path = work.pop()
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        # the packages this module lives in: their __init__ runs on import
+        try:
+            d = path.resolve().parent
+            while d != repo_root and repo_root in d.parents:
+                init = d / "__init__.py"
+                if init.is_file() and init not in seen:
+                    work.append(init)
+                d = d.parent
+        except (ValueError, OSError):
+            pass
+        for mod, sym, _module_level, relative in _imports(path, repo_root):
+            targets = []
+            if relative is not False:
+                if isinstance(relative, Path):
+                    targets.append(relative)
+            elif mod.split(".")[0] in prefixes:
+                p = _module_to_path(mod, repo_root, prefixes, package_dirs)
+                if p is not None:
+                    targets.append(p)
+                if sym is not None:
+                    sp = _module_to_path(f"{mod}.{sym}", repo_root, prefixes,
+                                         package_dirs)
+                    if sp is not None:
+                        targets.append(sp)
+            for tgt in targets:
+                if _under_forbidden(tgt, fpaths) is not None:
+                    continue                      # prune at the wall
+                if tgt not in seen:
+                    work.append(tgt)
+    out = set()
+    for p in seen:
+        try:
+            out.add(Path(p).resolve().relative_to(repo_root).as_posix())
+        except ValueError:
+            continue                              # outside the repo
+    return sorted(out)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--repo-root", default=".")
@@ -291,6 +373,10 @@ def main(argv=None) -> int:
     ap.add_argument("--local-prefix", action="append", default=[])
     ap.add_argument("--package-dir", action="append", default=[],
                     help="PREFIX=DIR")
+    ap.add_argument("--print-payload", action="store_true",
+                    help="also print the RELEASE PAYLOAD (runtime_payload): "
+                         "every repo module the runtime can import, one path "
+                         "per line -- what a release package must carry")
     args = ap.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
@@ -321,6 +407,11 @@ def main(argv=None) -> int:
                                        offenders, pkg_dirs)
         print(f"  runner closure   : {len(seen)} module(s) reached from "
               f"{', '.join(args.root)} (function-local imports FOLLOWED)")
+        if args.print_payload:
+            print("PAYLOAD:")
+            for p in runtime_payload(roots, repo_root, forbidden, prefixes,
+                                     pkg_dirs):
+                print(p)
 
     if unresolved:
         print(f"FAIL -- {len(unresolved)} local module(s) not resolvable to "
