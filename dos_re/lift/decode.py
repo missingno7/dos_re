@@ -60,6 +60,10 @@ class Inst:
     modrm: int | None = None
     disp: int | None = None              # sign-extended displacement, when present
     imm: int | None = None               # immediate, as encoded (emitter sign-extends)
+    #: de-SMC transform marker (dos_re.lift.smc): ``(kind, field_addr, size)``
+    #: when this instruction's operand field is RUNTIME-PATCHED code -- the
+    #: emitter reads it from live memory instead of freezing the constant.
+    patched_slot: tuple | None = None
 
     @property
     def next_ip(self) -> int:

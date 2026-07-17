@@ -103,7 +103,7 @@ def emit_entry_from_ir(fn_rec: dict, emit_dir: Path, max_iterations,
                        coverage: bool = False, drop_dead_flags: bool = False,
                        boundary_heads: frozenset = frozenset(),
                        dispatch_entries: frozenset = frozenset(),
-                       stem: str | None = None):
+                       stem: str | None = None, desmc: bool = False):
     """Emit one entry FROM THE RECOVERY IR (docs/recovery_ir.md §3).
 
     The record is re-elaborated by the shared consumer (``dos_re.lift.ir``):
@@ -120,13 +120,39 @@ def emit_entry_from_ir(fn_rec: dict, emit_dir: Path, max_iterations,
     entry = fn_rec["entry"]
     cs, ip = parse_addr(entry)
     name = stem or f"lifted_{cs:04x}_{ip:04x}"
+    smc_slots: dict[int, tuple[str, int, int]] = {}
     if not fn_rec.get("liftable"):
-        reasons = ",".join(sorted({r["reason"] for r in fn_rec.get("refusals", ())}))
-        return "not-liftable", reasons
+        reasons = sorted({r["reason"] for r in fn_rec.get("refusals", ())})
+        smc = fn_rec.get("smc") or {}
+        # De-SMC path (dos_re.lift.smc): a function refused ONLY for runtime
+        # code patching, whose every incoming write is a supported operand
+        # slot, may be emitted with those operands read from live code memory
+        # (the analysis proved each write lands fully inside the field).  The
+        # module is banner-marked DESMC; the ordinary differential machinery
+        # (liftverify + the end-to-end demo gate) is the promotion decision.
+        if (desmc and smc.get("status") == "desmc-candidate"
+                and set(reasons) <= {"self-modifying", "code-patched-at-runtime"}):
+            for slot in smc["slots"]:
+                t_ip = int(slot["target"].split(":")[1], 16)
+                smc_slots[t_ip] = (slot["field"], int(slot["field_addr"], 16),
+                                   int(slot["field_size"]))
+        else:
+            return "not-liftable", ",".join(reasons)
     try:
         scan = scan_from_ir_record(fn_rec)
     except ValueError as exc:
         return "emit-unsupported", str(exc)
+    from dataclasses import replace as _dc_replace
+    for t_ip, slot in smc_slots.items():
+        if t_ip in scan.insts:                     # consumed by emit._patched_read
+            scan.insts[t_ip] = _dc_replace(scan.insts[t_ip], patched_slot=slot)
+    if smc_slots:
+        # the de-SMC transform models the patches; drop the scan's own
+        # code-write refusals so emit_function proceeds (everything else --
+        # e.g. region budget -- still refuses above).
+        scan.refusals = [r for r in scan.refusals
+                         if r.reason not in ("self-modifying",
+                                             "code-patched-at-runtime")]
     dead = frozenset()
     if drop_dead_flags:
         from dos_re.lift.analyze import dead_flag_sites
@@ -203,6 +229,12 @@ def main(argv=None) -> int:
                          "exported so the installer registers a re-entry hook "
                          "into the CONTAINING function -- sharing its "
                          "recovered blocks, not cloning them into a module.")
+    ap.add_argument("--desmc", action="store_true",
+                    help="emit desmc-candidate functions (the IR's smc "
+                         "verdicts, dos_re.lift.smc) with their runtime-"
+                         "patched operands read from live code memory "
+                         "instead of refusing them; emitted modules are "
+                         "CANDIDATES until the differential gate passes")
     ap.add_argument("--drop-dead-flags", action="store_true",
                     help="de-carrier pass 1: elide flag writes proven "
                          "unobservable by analyze.dead_flag_sites "
@@ -254,7 +286,8 @@ def main(argv=None) -> int:
                 coverage=args.coverage,
                 drop_dead_flags=args.drop_dead_flags,
                 boundary_heads=heads, dispatch_entries=dispatch,
-                stem=naming.stem_of(entry) if naming else None)
+                stem=naming.stem_of(entry) if naming else None,
+                desmc=args.desmc)
             counts[status] += 1
             if status != "ok":
                 skipped.append((entry, status, detail))

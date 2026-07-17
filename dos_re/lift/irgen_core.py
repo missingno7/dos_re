@@ -67,10 +67,17 @@ def function_record(scan: FunctionScan, cs: int, ip: int,
                     keep_interpreted: set[str],
                     boundary_heads: frozenset = frozenset(),
                     dispatch_entries: frozenset = frozenset(),
-                    effect_tagger: Callable = dos_effect_tag) -> dict:
+                    effect_tagger: Callable = dos_effect_tag,
+                    embed_blocks: bool | None = None) -> dict:
     entry_key = f"{cs:04X}:{ip:04X}"
     blocks = []
-    leaders = scan.block_leaders() if scan.liftable else []
+    # ``embed_blocks`` override: a desmc-candidate (dos_re.lift.smc) is
+    # refused for the ORDINARY lift but its blocks must still be pinned in
+    # the IR so ``liftemit --desmc`` can emit the transformed module from the
+    # same single source of truth.
+    if embed_blocks is None:
+        embed_blocks = scan.liftable
+    leaders = scan.block_leaders() if embed_blocks else []
     leader_set = set(leaders)
     for leader in leaders:
         insts = []
@@ -124,7 +131,7 @@ def function_record(scan: FunctionScan, cs: int, ip: int,
         "ints": sorted({f"{i.int_no:02X}" for i in scan.insts.values()
                         if i.kind == "int" and i.int_no is not None}),
     }
-    if scan.liftable:
+    if embed_blocks:
         rec["signature"] = signature_for(fetch, ip, scan).hex()
     if entry_key in keep_interpreted:
         rec["platform_effect"] = "env_wait"
@@ -186,13 +193,28 @@ def build_document(entries, *,
                             v_ip, "code-patched-at-runtime",
                             f"cs:[{target:04X}] is written by {w_cs:04X}:{site:04X}"))
 
+    # De-SMC analysis (dos_re.lift.smc): classify every code write against the
+    # decoded target instruction.  The refusals above STAY -- an ordinary
+    # frozen lift of mutable code is never acceptable -- but a function whose
+    # every incoming write is a supported operand-field patch is additionally
+    # marked ``desmc-candidate``, and ``liftemit --desmc`` may emit it with
+    # the patched operands read from live code memory instead of baked in.
+    from .smc import analyze_smc
+    smc_verdicts = analyze_smc(scans)
+
     # Phase 2: build the records from the (possibly refusal-augmented) scans.
     for cs, ip, scan in scans:
         fetch = fetch_for(cs)
+        verdict = smc_verdicts.get((cs, ip))
         rec = function_record(scan, cs, ip, fetch, keep,
                               boundary_heads=boundary_heads,
                               dispatch_entries=dispatch_entries,
-                              effect_tagger=effect_tagger)
+                              effect_tagger=effect_tagger,
+                              embed_blocks=(scan.liftable or (
+                                  verdict is not None
+                                  and verdict.status == "desmc-candidate")))
+        if verdict is not None:
+            rec["smc"] = verdict.report()
         identity = identity_for(cs, ip) if identity_for is not None else {}
         for key in identity:
             if key in rec:

@@ -81,6 +81,25 @@ def audit(boot_dir: Path, ir_path: Path) -> int:
         keep: set[int] = set()
         for start, length in manifest.get("code_as_data", {}).get("ranges", []):
             keep.update(range(start, start + length))
+        # De-SMC patch slots are DECLARED data cells (runtime-patched operand
+        # fields the transformed corpus reads from memory -- dos_re.lift.smc).
+        # The audit accepts them only when the IR agrees: each manifest slot
+        # must be a candidate slot in the IR, so a hand-edited manifest cannot
+        # smuggle code through this exemption.
+        ir_slots: set[tuple[int, int]] = set()
+        _ir_doc = json.loads(ir_path.read_text(encoding="utf-8"))
+        for key, fn in _ir_doc.get("functions", {}).items():
+            seg = int(key.split(":", 1)[0], 16)
+            for slot in (fn.get("smc") or {}).get("slots", ()):
+                if slot.get("status") == "candidate":
+                    ir_slots.add(((seg << 4) + int(slot["field_addr"], 16),
+                                  int(slot["field_size"])))
+        for start, length in manifest.get("smc_slots", {}).get("ranges", []):
+            if (start, length) not in ir_slots:
+                fails.append(f"manifest smc_slot [{start:#x}+{length}] is not a "
+                             f"candidate slot in the recovery IR")
+            else:
+                keep.update(range(start, start + length))
         ir = json.loads(ir_path.read_text(encoding="utf-8"))
         present = 0
         offenders: list[int] = []
@@ -97,7 +116,7 @@ def audit(boot_dir: Path, ir_path: Path) -> int:
                 f"{present} recovered code byte(s) present (non-zero) and NOT "
                 f"declared code_as_data -- first at "
                 f"{', '.join(hex(o) for o in offenders)}")
-        if poison.get("code_bytes_present_after", 0) != 0 and not keep:
+        if poison.get("code_bytes_present_after", 0) != 0:
             fails.append("manifest records code_bytes_present_after != 0")
 
     print(f"boot image audit: {boot_dir}")

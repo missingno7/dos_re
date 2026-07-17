@@ -499,3 +499,12 @@ proven artifact."
 3. M0 first (census before emitter) — or straight to M1 on one port?
 4. Whether `instruction_count` preservation should be mandatory (my
    recommendation: yes in literal mode; it makes installs demo-transparent).
+
+
+## Self-modifying code
+
+The scanner refuses statically-visible code writes (`self-modifying` /
+`code-patched-at-runtime`) so a frozen lift of mutable code is impossible;
+the evidence-driven rehabilitation pass on top of that refusal --
+transforming supported operand patches into live-memory reads -- is
+[`desmc.md`](desmc.md).

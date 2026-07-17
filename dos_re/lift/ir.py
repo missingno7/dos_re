@@ -44,17 +44,28 @@ def scan_from_ir_record(rec: dict) -> FunctionScan:
     serves as the probe, so ambiguous-length sites resolve exactly as they
     did when the IR was generated.  Raises if the record is not liftable —
     callers check ``rec["liftable"]`` first (the IR's refusals list is the
-    authority for that case).
+    authority for that case).  The one exception is a ``desmc-candidate``
+    (dos_re.lift.smc): refused for the ORDINARY lift, but its blocks are
+    pinned in the IR precisely so ``liftemit --desmc`` can re-elaborate and
+    emit the transformed module from the same single source of truth.
     """
-    if not rec.get("liftable"):
+    if not rec.get("liftable") and (rec.get("smc") or {}).get("status") != "desmc-candidate":
         raise ValueError(f"IR record {rec.get('entry')} is not liftable")
     code, lengths = code_map_from_record(rec)
     cs, ip = (int(x, 16) for x in rec["entry"].split(":"))
     scan = scan_function(lambda off: code.get(off & 0xFFFF, 0x90), ip,
                          probe=lambda p: lengths.get(p & 0xFFFF))
     if not scan.liftable:
-        reasons = ",".join(sorted({r.reason for r in scan.refusals}))
-        raise ValueError(f"IR record {rec['entry']} re-scan refused: {reasons}")
+        reasons = sorted({r.reason for r in scan.refusals})
+        # A desmc-candidate legitimately re-scans as self-modifying (the code
+        # writes are exactly what the smc verdict modeled); every OTHER
+        # refusal still fails loud.  The de-SMC emit path strips these two
+        # after attaching the patch slots -- see tools/liftemit.py.
+        smc_ok = ((rec.get("smc") or {}).get("status") == "desmc-candidate"
+                  and set(reasons) <= {"self-modifying", "code-patched-at-runtime"})
+        if not smc_ok:
+            raise ValueError(f"IR record {rec['entry']} re-scan refused: "
+                             + ",".join(reasons))
     return scan
 
 

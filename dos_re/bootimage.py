@@ -119,6 +119,19 @@ def poison_snapshot_to_boot_image(
     keep_offsets: set[int] = set()
     for start, length in keep_code_as_data:
         keep_offsets.update(range(start, start + length))
+    # De-SMC patch slots (dos_re.lift.smc): operand fields the program patches
+    # at runtime and the transformed corpus READS FROM MEMORY.  They are data
+    # cells now -- poisoning them would zero the initial operand values, so
+    # they are preserved automatically from the IR's smc verdicts (and land in
+    # the manifest's code_as_data accounting like any declared range).
+    smc_slots: list[tuple[int, int]] = []
+    for rec in ir.get("functions", {}).values():
+        for slot in (rec.get("smc") or {}).get("slots", ()):
+            if slot.get("status") == "candidate":
+                lin = (code_seg << 4) + int(slot["field_addr"], 16)
+                smc_slots.append((lin, int(slot["field_size"])))
+    for start, length in smc_slots:
+        keep_offsets.update(range(start, start + length))
     poison_offsets -= keep_offsets
 
     code_bytes_present_before = sum(1 for off in poison_offsets if image[off] != 0)
@@ -165,6 +178,12 @@ def poison_snapshot_to_boot_image(
             "policy": "instruction ranges the game reads as data; preserved "
                       "(not poisoned) and declared here",
             "ranges": [[start, length] for start, length in keep_code_as_data],
+        },
+        "smc_slots": {
+            "policy": "runtime-patched operand fields the de-SMC corpus reads "
+                      "from live memory (dos_re.lift.smc); preserved from the "
+                      "IR's smc verdicts automatically",
+            "ranges": [[start, length] for start, length in smc_slots],
         },
         "regions": classify_regions(code_seg << 4),
         "artifacts": {"memory": "memory_1mb.bin", "state": "state.json"},

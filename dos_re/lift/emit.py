@@ -147,6 +147,28 @@ def _alu_lines(group: int, bits: int, a: str, b: str, dst: Operand | None,
         out.extend(dst.write(f"_r & 0x{mask:X}"))
 
 
+def _patched_read(inst: Inst) -> str | None:
+    """The live-memory read expression for a de-SMC'd operand, or ``None``.
+
+    ``inst.patched_slot = (kind, field_addr, field_size)`` is attached by the
+    de-SMC emit path (``liftemit --desmc``, from the IR's ``smc`` verdicts --
+    dos_re.lift.smc): the operand field's bytes are RUNTIME-PATCHED code, so
+    the emitted line reads them from memory -- exactly what the real CPU
+    decodes at that moment -- instead of freezing one snapshot's constant."""
+    slot = getattr(inst, "patched_slot", None)
+    if slot is None or slot[0] != "imm":
+        return None
+    _, addr, size = slot
+    return (f"mem.rb(s.cs, 0x{addr:04X})" if size == 1
+            else f"mem.rw(s.cs, 0x{addr:04X})")
+
+
+def _imm_txt(inst: Inst) -> str:
+    """The immediate operand as emitted text: the constant, or the de-SMC
+    live-memory read when this instruction's imm field is runtime-patched."""
+    return _patched_read(inst) or f"0x{inst.imm:X}"
+
+
 def _emit_instruction(inst: Inst, cs: int, out: list[str], *,
                       drop_flags: bool = False) -> bool:
     """Append the native Python for ``inst``. Return False to request the
@@ -178,7 +200,7 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str], *,
         group = (op >> 3) & 7
         bits = 8 if (op & 1) == 0 else 16
         acc = Operand(True, bits, "", reg_idx=0)
-        _alu_lines(group, bits, acc.read(), f"0x{inst.imm:X}", acc, out,
+        _alu_lines(group, bits, acc.read(), _imm_txt(inst), acc, out,
                    emit_flags=ef)
         return True
 
@@ -225,10 +247,10 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str], *,
             out.append(f"mem.ww({seg}, {off}, s.ax)")
         return True
     if 0xB0 <= op <= 0xB7:
-        out.append(f"cpu.set_reg8({op - 0xB0}, 0x{inst.imm:02X})")
+        out.append(f"cpu.set_reg8({op - 0xB0}, {_imm_txt(inst)})")
         return True
     if 0xB8 <= op <= 0xBF:
-        out.append(f"s.{REG16[op - 0xB8]} = 0x{inst.imm:04X}")
+        out.append(f"s.{REG16[op - 0xB8]} = {_imm_txt(inst)}")
         return True
     if op in (0xC6, 0xC7):
         bits = 8 if op == 0xC6 else 16
@@ -293,9 +315,15 @@ def _emit_instruction(inst: Inst, cs: int, out: list[str], *,
         out.append(f"cpu.set_sreg({(op >> 3) & 3}, cpu.pop())")
         return True
     if op == 0x68:
-        out.append(f"cpu.push(0x{inst.imm:04X})")
+        out.append(f"cpu.push({_imm_txt(inst)})")
         return True
     if op == 0x6A:
+        pr = _patched_read(inst)
+        if pr is not None:
+            # push imm8 sign-extends to 16 -- at RUNTIME for a patched operand.
+            out.append(f"_pi = {pr}")
+            out.append("cpu.push((_pi | 0xFF00) if _pi & 0x80 else _pi)")
+            return True
         imm = inst.imm - 0x100 if inst.imm & 0x80 else inst.imm
         out.append(f"cpu.push(0x{imm & 0xFFFF:04X})")
         return True
@@ -622,9 +650,20 @@ def _terminator_lines(inst: Inst, cs: int, bb_of: dict[int, int], out: list[str]
         out.append(f"{indent}s.flags = cpu.pop() | 0x0002")
         out.append(f"{indent}return")
     elif kind == JMP_FAR:
-        seg, off = inst.far_target
-        out.append(f"{indent}s.cs, s.ip = 0x{seg:04X}, 0x{off:04X}")
-        out.append(f"{indent}return")
+        slot = getattr(inst, "patched_slot", None)
+        if slot is not None and slot[0] == "far-target":
+            # The ptr16:16 is RUNTIME-PATCHED code (de-SMC, dos_re.lift.smc):
+            # read the live target words -- through the OLD cs, before any
+            # assignment -- exactly as the CPU would decode them.
+            _, addr, _size = slot
+            out.append(f"{indent}_ti = mem.rw(s.cs, 0x{addr:04X})")
+            out.append(f"{indent}_ts = mem.rw(s.cs, 0x{(addr + 2) & 0xFFFF:04X})")
+            out.append(f"{indent}s.cs, s.ip = _ts, _ti")
+            out.append(f"{indent}return")
+        else:
+            seg, off = inst.far_target
+            out.append(f"{indent}s.cs, s.ip = 0x{seg:04X}, 0x{off:04X}")
+            out.append(f"{indent}return")
     elif kind == JMP_IND:
         # Tail exit (the 32-bit pipeline's treatment): compute the runtime
         # target, set CS:IP, hand control back to the VM.  A dispatcher lifts
