@@ -85,6 +85,13 @@ def test_int_effect_and_vectored_int_and_indirect():
     assert ev.refusal is None
     assert {"ax", "bx", "ds", "es", "ss"} <= set(ev.reads)
     assert "ss" not in ev.writes and "ax" in ev.writes
+    # INT 13h (disk BIOS) is a PLATFORM effect, not a refusal: a function whose
+    # disk int is on a dead/guarded path (copy protection) promotes on its live
+    # paths; plat.intr(0x13) fails loud if ever reached (the interpreter can't run
+    # it either).
+    e13 = register_effects(Inst(ip=0, length=2, kind="int", mnemonic="int",
+                                raw=b"\xcd\x13", op=0xCD, int_no=0x13))
+    assert e13.refusal is None and e13.int_effect == 0x13
     # Any OTHER installed vector still refuses honestly.
     ev2 = register_effects(Inst(ip=0, length=2, kind="int", mnemonic="int",
                                 raw=b"\xcd\x62", op=0xCD, int_no=0x62))

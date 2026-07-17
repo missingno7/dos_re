@@ -456,7 +456,14 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         return Effects(refusal="indirect-or-far-transfer")
     if inst.kind == INT:
         n = inst.int_no
-        PLATFORM_INT = {0x21, 0x10, 0x11, 0x12, 0x15, 0x16, 0x1A, 0x2F, 0x33, 0x67}
+        # DOS/BIOS SERVICE ints, modelled as an explicit platform effect (int_effect
+        # -> plat.intr).  0x13 (disk BIOS) belongs here even when no disk adapter
+        # exists yet: a function whose disk int sits on a dead/guarded path (copy
+        # protection, absent-media save) then promotes on its live paths, and
+        # plat.intr(0x13) FAILS LOUD (UnsupportedPlatformEffect) if ever reached --
+        # exactly what the interpreter does (it cannot run 0x13 either), so any path
+        # that would hit it already crashes the oracle.  Not silent emulation.
+        PLATFORM_INT = {0x21, 0x10, 0x11, 0x12, 0x13, 0x15, 0x16, 0x1A, 0x2F, 0x33, 0x67}
         _INT_REGS = frozenset({"ax", "bx", "cx", "dx", "si", "di", "bp", "ds", "es"})
         if n in PLATFORM_INT:
             # a DOS/BIOS service: reads + may clobber the whole reg bundle,
