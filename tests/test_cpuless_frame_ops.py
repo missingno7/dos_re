@@ -16,7 +16,8 @@ import pytest
 from dos_re.lift.cfg import scan_function
 from dos_re.lift.cpuless import register_effects
 from dos_re.lift.emit_cpuless import (Refusal, _check_frame_pointer,
-                                      _is_sp_capture, _is_stack_family)
+                                      _is_sp_capture, _is_stack_family,
+                                      check_promotable, emit_recovered)
 
 
 def _inst(code: bytes):
@@ -85,6 +86,48 @@ def test_imul_three_operand_invents_no_ax_dx() -> None:
     assert "si" in e.reads
     assert "dx" not in e.writes              # the F7 cousin writes dx; this does not
     assert e.stack_delta == 0
+
+
+def test_imul_three_operand_emits_a_native_form() -> None:
+    """The ABI models `imul r16, r/m16, imm8` (above); the CPUless emitter must
+    also have a native form, or the containing function refuses at emit time
+    (`emitter-unsupported-op-6B-grp0`) -- the last runtime frontier blocker.
+    dst := r/m16 * sign-extended-imm, low word; CF=OF on 16-bit overflow; no
+    implicit ax/dx (unlike the F7/5 cousin)."""
+    # imul ax, si, 10 ; ret  -- 6b c6 0a is the exact form skyroads 4591 uses.
+    scan = scan_function(
+        lambda off: bytes.fromhex("6bc60ac3")[off]
+        if off < 4 else 0x90, 0)
+    spec = check_promotable(scan)
+    src = emit_recovered(scan, spec.abi, "1010:4591",
+                         recovered_import_base="x", needs_plat=spec.needs_plat,
+                         df_livein=spec.df_livein, sp_output=spec.sp_output,
+                         flags_livein=spec.flags_livein)
+    assert "_b = si" in src
+    assert "_sb = _b - 0x10000 if _b & 0x8000 else _b" in src
+    assert "_t = _sb * (10)" in src
+    assert "ax = _t & 0xFFFF" in src
+    assert "cf = of = not (-32768 <= _t <= 32767)" in src
+    assert "dx =" not in src                 # the three-operand form leaves dx alone
+    # exec the body: ax := si * 10 (positive, no overflow).
+    ns = {}
+    exec(compile(src, "<imul>", "exec"), ns)
+    fn = next(v for k, v in ns.items() if k.startswith("func_"))
+    out, _compat = fn(mem=None, si=7)
+    assert out["ax"] == 70
+
+
+def test_imul_three_operand_negative_immediate_sign_extends() -> None:
+    # imul ax, si, -2  (6b c6 fe): the imm8 0xFE sign-extends to -2, not +254.
+    scan = scan_function(
+        lambda off: bytes.fromhex("6bc6fec3")[off]
+        if off < 4 else 0x90, 0)
+    spec = check_promotable(scan)
+    src = emit_recovered(scan, spec.abi, "1010:1FD9",
+                         recovered_import_base="x", needs_plat=spec.needs_plat,
+                         df_livein=spec.df_livein, sp_output=spec.sp_output,
+                         flags_livein=spec.flags_livein)
+    assert "_t = _sb * (-2)" in src
 
 
 # --- the Borland stack-arg idiom (sp as maintained-exact quantity) -----------

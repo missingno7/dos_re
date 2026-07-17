@@ -358,6 +358,22 @@ def _translate(inst, lines, flag_written, cs=0x1010):
             lines.append("cf = of = not (-128 <= _t <= 127)")
         flags("cf", "of")
         return
+    if op in (0x69, 0x6B):                                # imul r16, r/m16, imm (186)
+        # Three-operand signed multiply: dst_reg := r/m16 * imm, low word.
+        # Touches NO ax/dx (unlike the F7/5 form); CF=OF set iff the signed
+        # product overflows 16 bits. Always 16-bit -- no byte form exists.
+        lines.append(f"_b = {_rm_read(inst, True)}")
+        raw = inst.imm or 0
+        if op == 0x6B:                                    # imm8 sign-extends
+            imm = raw - 0x100 if raw & 0x80 else raw
+        else:                                             # imm16
+            imm = raw - 0x10000 if raw & 0x8000 else raw
+        lines.append("_sb = _b - 0x10000 if _b & 0x8000 else _b")
+        lines.append(f"_t = _sb * ({imm})")
+        lines.append(f"{_reg16(inst.reg)} = _t & 0xFFFF")
+        lines.append("cf = of = not (-32768 <= _t <= 32767)")
+        flags("cf", "of")
+        return
     if op in (0xF6, 0xF7) and inst.reg == 6:              # div (unsigned)
         # fail-loud on zero/overflow exactly like the interpreter (a crash is
         # a crash on both sides; no flags are written by div)
@@ -1591,6 +1607,8 @@ def _flags_defined_by(i) -> frozenset:
         # (With repe/repne, cx may be 0 -- nothing is defined statically.)
         return frozenset({"cf", "pf", "af", "zf", "sf", "of"})
     if op in (0xF6, 0xF7) and i.reg in (4, 5):            # mul/imul: CF+OF only
+        return frozenset({"cf", "of"})
+    if op in (0x69, 0x6B):                                # imul r16,r/m,imm: CF+OF
         return frozenset({"cf", "of"})
     # D2/D3 (count from CL) define nothing statically (count may be 0).
     if (op <= 0x3D and (op & 7) <= 5 and (op & 0xC7) not in (0x06, 0x07, 0xC6, 0xC7)) \
