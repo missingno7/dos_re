@@ -13,84 +13,130 @@ A native renderer has no such limitation -- it produces a full-RGB frame -- but
 a renderer that samples ONE palette per frame collapses the trick: every region
 gets the same palette, and whichever region the sampled state belonged to wins.
 
-Worked example (VGA Lemmings, machine type 2, measured from the port-effect
-stream): every gameplay tick performs
+Worked examples (VGA Lemmings, machine type 2, measured from the port-effect
+stream):
 
-    write DAC 16..23  <- CONTROL-BAR palette      (late in the display frame)
-    read  3DAh until vertical-retrace bit rises   (the sync event)
-    write DAC 0..7    <- level palette bank 0
-    write DAC 16..23  <- LEVEL/terrain palette    (top of the next frame)
+* **Gameplay** (mode 0Dh): each tick writes DAC 16..23 with the CONTROL-BAR
+  palette purely by code timing, syncs to the retrace, then reloads 0..7 +
+  16..23 with the LEVEL palette.  Attributes 8..15 map to DAC 16..23 in both
+  screen regions; the bank swap gives the level area and the skill panel the
+  same attribute indices but different colors.
+* **Level briefing** (mode 10h, routine at 1010:46B9): wait for the retrace
+  edge pair, write the BRIGHT logo palette, count 60 scan lines by polling
+  display-enable (``mov cx,3Ch`` / a test-loop pair per line), write the DARK
+  text palette.  Rows 0..59 show the fiery logo, rows 60..349 dark rock and
+  blue text.  A single-palette render shows the whole screen in whichever
+  palette it sampled -- the historical bug this design replaced twice.
 
-Attributes 8..15 map to DAC 16..23 in both screen regions; the game swaps the
-bank mid-frame so the level area and the skill panel share attribute indices
-but not colors.  A single-palette render paints the panel in terrain browns.
+## The architecture: layered evidence, classification only when justified
 
-## Where the recovery lives (and why it is NOT a lifter pass)
+    raw ordered hardware evidence          DOSMachine.video_journal
+        -> normalized palette operations   palette_effects (cycles: waits +
+                                           generations, virtual-time gaps)
+        -> semantic classification         palette_effects.classify -- ONLY
+           when justified                  when the evidence supports it;
+                                           otherwise an explicit 'unresolved'
+        -> native rendering                the port's rasterizer composes RGB
+                                           bands / applies palettes natively
 
-The tempting design is static: teach the lifter to recognize palette-write +
-raster-sync idioms and emit a semantic video-effect node.  That is the wrong
-layer.  Idioms vary per game, recognition would be fragile, and -- decisive --
-the information is already recovered: DOS_RE lifts port I/O as platform
-effects with exact ordering and virtual timestamps, and the acceptance gates
-prove the effect stream byte-exact across the interpreted oracle, the VMless
-graph and the standalone CPUless program.  The lifting pipeline's contribution
-to raster effects is already done the moment the corpus verifies.
+The raw journal survives even when the higher-level meaning is unresolved,
+and nothing above the device layer consumes or mutates it.  The doctrine:
+prefer a visible 'unresolved' over guessing visual intent from one game or
+one screen.
 
-The recovery therefore lives in the ONE place all three runtimes share: the
-device model (``dos_re.dos.DOSMachine``).  Every 3DAh read and every DAC write
-flows through it, in identical order, on every runtime -- so a journal there
-is automatically consistent with whatever runtime is driving, with zero
-game-specific and zero runtime-specific code.
+### Why the recovery is device-side, not a lifter pass
 
-## The journal (implemented, v1)
+Idioms vary per game and static recognition would be fragile -- and, decisive:
+the information is already recovered.  DOS_RE lifts port I/O as platform
+effects with exact ordering and virtual instruction counts, and the acceptance
+gates prove the effect stream byte-exact across the interpreted oracle, the
+VMless graph and the standalone CPUless program.  The one place all runtimes
+share is the device model, so the journal lives there and is automatically
+identical on every runtime -- including future memoryless generations, which
+still route port effects through the device.
 
-``DOSMachine`` splits DAC mutations into DISPLAY FRAMES at each OBSERVED
-vertical-retrace edge -- a 3DAh read returning bit3=1 after one returning
-bit3=0, i.e. the game's own synchronization event, which is meaningful under
-the deterministic (non-time-source) status model precisely because the game's
-perception is the ground truth there:
+### Layer 1: the raw journal (``DOSMachine.video_journal``)
 
-    _raster_open_dac    index -> (r,g,b): writes since the last observed edge
-    raster_late_dac     the previous frame's accumulated writes (closed at
-                        the edge)
-    raster_split_palette()
-                        the renderer contract: late-frame DAC values that
-                        DIFFER from the live palette (empty on screens with
-                        no mid-frame discipline)
+An append-only bounded deque of coalesced bus events:
 
-The renderer composes: top band = live palette (the post-retrace state),
-bottom band = live palette overlaid with ``raster_split_palette()``.  Screens
-without the discipline degrade to the plain single-palette render, and the
-journal is transient (rebuilds within one displayed frame after a snapshot
-resume), so it is deliberately not snapshotted.
+    ("st",  reads, t_first, t_last)              maximal run of input-status
+                                                 (3DAh/3BAh) reads; broken
+                                                 only by a DAC event
+    ("dac", start, (rgb, ...), t_first, t_last)  maximal run of completed DAC
+                                                 triples at contiguous
+                                                 ascending indices
 
-## What the journal cannot know: the split line
+Timestamps are virtual instruction counts -- deterministic machine state,
+byte-exact across runtimes -- so the journal never enters acceptance digests
+and never diverges.  It is transient presentation state (not snapshotted): it
+rebuilds within one displayed frame after any resume, during which
+classification reports 'static' and the renderer shows the live palette.
 
-The game syncs to "the retrace edge", not to a counted scanline; where the
-beam was when the late write landed is real-hardware timing that the
-deterministic status model does not carry.  The evidence hierarchy:
+Crucially the journal does NOT depend on interpreting the synthetic retrace
+bit's VALUE.  The previous design closed frames at each observed bit3 rising
+edge; under the deterministic per-read-toggle status model an "edge" occurs
+every second read, so a screen that polls heavily (the briefing's counting
+loop reads 3DAh ~260x per tick) shredded the frame into ~130 fragments.  Run
+LENGTHS and write ORDER are real evidence; fabricated bit transitions are not.
 
-1. **Observed scanline counting (v2, not yet needed):** a game that positions
-   a split precisely waits for display-enable toggles (3DAh bit 0) and counts
-   them -- each observed toggle pair is one perceived scanline.  The journal
-   can record the count at each write and hand the renderer an exact row.
-   (VGA Lemmings' front-end uses such loops for delays; its gameplay split
-   does not count -- it relies on tick/refresh phase.)
-2. **A display-locked time model (v3):** deriving beam position from virtual
-   time requires the synthetic 3DAh status to follow a free-running display
-   clock instead of toggling per read.  That changes observed port values,
-   i.e. the whole demo corpus' meaning -- it is a deliberate future tier, not
-   a patch.
-3. **A declared port fact (v1, in use):** when neither source exists, the
-   split row is game knowledge with evidence, exactly like a boundary head.
-   Lemmings: the level viewport is 160 rows; the panel starts at y=160
-   (``lemmings/render.py GAME_RASTER_SPLIT_Y``).
+### Layer 2+3: normalization and classification (``dos_re.palette_effects``)
+
+``classify`` slices the journal at frame syncs -- SHORT status runs
+(<= SYNC_MAX_READS): an edge wait exits within a couple of reads under the
+toggle model.  Within the most recent complete cycle:
+
+* a LONG status run is a **counting delay**: the game counts display-enable
+  cycles to reach a raster position.  The read count is the game-intended
+  count; the device exports STATUS_READS_PER_SCANLINE (2 under the toggle
+  model -- a test-loop pair per line) so ``line = reads / reads_per_line``.
+  This is how the briefing's ~121-read run becomes the evidence-backed split
+  line 60 with no game-specific code.
+* a DAC group separated from the previous event by a large virtual-time gap
+  (> LATE_GAP_STEPS) with no wait between is **code-timed**: it lands
+  mid-frame but carries no position.  Its band line is None -- honestly
+  unplaced.  (Gameplay's control-bar write: measured gap ~1100 instructions
+  vs <= 54 within bursts.)
+
+The result is a plain-data plan: ``{kind: static|split|unresolved, base,
+bands: [{line, values}], evidence}``.  Temporal effects need no special
+machinery: a blink shows up as successive cycles with different top palettes
+and a fade as a per-cycle drift -- applying each cycle's plan renders both
+faithfully (the briefing's fade-in composes with its spatial split for free).
+Evidence the classifier cannot attribute -- more than one unplaced band, an
+implausible counted line -- yields kind='unresolved', and the renderer is
+expected to fall back to the frame-top palette and SAY SO (one ASCII notice),
+never to guess.
+
+### Layer 4: native rendering (the port)
+
+The port's rasterizer translates the historical hardware technique into a
+native operation: it overlays band palettes cumulatively in raster order and
+recolors ``frame[row:]`` per band (``lemmings/render.py _decode_banded``).
+Row resolution is port knowledge: counted scan lines map 1:1 in mode 10h and
+2:1 in double-scanned mode 0Dh; a band with line None is placed by a declared
+port fact (Lemmings: the skill panel starts at y=160, GAME_RASTER_SPLIT_Y)
+or dropped visibly when no fact exists.
+
+## The split-line evidence hierarchy
+
+1. **Counted scan lines (implemented):** the game's own display-enable
+   counting, recovered from the run length.  Exact, zero configuration.
+2. **A declared port fact (implemented):** for code-timed writes the port
+   supplies the row with evidence, exactly like a boundary head.
+3. **A display-locked time model (future fidelity tier):** deriving beam
+   position from virtual time requires the synthetic 3DAh status to follow a
+   real display clock.  That changes observed port values -- the meaning of
+   the whole demo corpus -- so it is a deliberate future tier for oracle
+   fidelity/diagnostics, NOT a prerequisite: native rendering does not need
+   cycle-accurate CRT emulation when the visual meaning is recoverable and
+   representable directly.
 
 ## Reuse in another port
 
-Nothing to lift, nothing to configure in dos_re: if the game writes the DAC
-mid-frame with any retrace discipline, ``raster_split_palette()`` is already
-populated on every runtime.  The port's renderer decides where the split row
-lives (fact or, once v2 exists, the counted scanline) and composes bands.
-Attribute-controller (3C0h) journaling and multi-band timelines are the same
-mechanism extended -- add them when a game demands them.
+Nothing to lift, nothing to configure in dos_re: any game whose palette
+discipline flows through 3DAh waits and DAC writes journals and classifies
+identically on every runtime.  A new port implements only the last layer --
+mapping bands to rows (facts where evidence is silent) and composing RGB.
+Attribute-controller (3C0h) journaling, hsync-granular effects and per-band
+pel-panning are the same mechanism extended -- add journal event kinds when a
+game demands them, never renderer special cases.
