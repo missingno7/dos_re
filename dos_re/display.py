@@ -31,6 +31,7 @@ class Display:
         self._srcsurf = None
         self._texsize = None
         self._tex = None
+        self._last_rect = None             # where the last frame was drawn (see window_to_frame_norm)
         self._ov = {}                      # cached overlay textures keyed by id(surface)
         try:
             from pygame._sdl2 import video as sdl2
@@ -81,7 +82,28 @@ class Display:
             pygame.surfarray.blit_array(self._srcsurf, arr.swapaxes(0, 1))
             self.screen.fill((0, 0, 0))
             pygame.transform.scale(self._srcsurf, rect.size, self.screen.subsurface(rect))
+        self._last_rect = rect
         return rect
+
+    # --- input mapping --------------------------------------------------------------------------------
+    def window_to_frame_norm(self, pos):
+        """Window pixel -> normalized (u, v) within the GAME FRAME, clamped to it.
+
+        A pointer-driven game needs the position in the frame's own space, and the frame is
+        letterboxed: it does not fill the window whenever the window aspect differs from the
+        frame's (any fullscreen/maximized window, and every phone screen).  Mapping against the
+        window instead skews the cursor and offsets it by the bar size -- so this maps against
+        the rect the last ``draw_game`` actually drew into.
+
+        Returns None before the first frame is drawn (no rect to map against yet)."""
+        r = self._last_rect
+        if r is None:
+            return None
+        u = (pos[0] - r.x) / max(1, r.w - 1)
+        v = (pos[1] - r.y) / max(1, r.h - 1)
+        u = 0.0 if u < 0.0 else (1.0 if u > 1.0 else u)
+        v = 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
+        return round(u, 4), round(v, 4)
 
     def draw_overlay(self, surf, pos) -> None:
         """Composite a pygame Surface (fps readout / the F10 menu) on top at window pixel ``pos``, alpha-blended.
