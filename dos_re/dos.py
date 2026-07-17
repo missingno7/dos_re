@@ -131,6 +131,10 @@ class DOSMachine:
     _pit_channel0_latch: int = 0
     _pit_channel0_write_low: bool = True
     pit_channel0_reload: int = 0  # 0 => 0x10000, the BIOS default ~18.2 Hz
+    #: virtual-tick timestamp of the last completed channel-0 count write --
+    #: the 8254 (re)starts the countdown at the write, so direct reads return
+    #: the interval SINCE it (see _pit_channel0_live_value).  0 = power-on.
+    pit_channel0_anchor_ticks: int = 0
     # Pending bytes for a channel-0 "latch count value" readback (OUT 43h with
     # SC=00,RW=00), consumed low-byte-first by the next IN AL,40h reads. A
     # program that reads channel 0 directly (never through IRQ0) as a short
@@ -504,15 +508,30 @@ class DOSMachine:
     def pit_channel0_hz(self) -> float:
         return self.PIT_INPUT_HZ / (self.pit_channel0_reload or 0x10000)
 
-    def _pit_channel0_live_value(self, cpu: CPU8086) -> int:
-        """The channel-0 down-counter's current value (mode 3 free-running square wave)."""
-        reload = self.pit_channel0_reload or 0x10000
+    def _pit_elapsed_ticks(self, cpu: CPU8086) -> int:
         ts = self.time_source
         if ts is not None:
-            elapsed_ticks = int(ts() * self.PIT_INPUT_HZ)
-        else:
-            elapsed_ticks = int(cpu.instruction_count * self.PIT_TICKS_PER_INSTRUCTION_ESTIMATE)
-        return (reload - (elapsed_ticks % reload)) % reload
+            return int(ts() * self.PIT_INPUT_HZ)
+        return int(cpu.instruction_count * self.PIT_TICKS_PER_INSTRUCTION_ESTIMATE)
+
+    def _pit_channel0_live_value(self, cpu: CPU8086) -> int:
+        """The channel-0 down-counter's current value.
+
+        ANCHORED at the last reload write, as the 8253/8254 does: writing a
+        count (re)starts the countdown from that value, so a read returns the
+        time SINCE THE WRITE, not a function of absolute time.  Programs rely
+        on the anchor to measure intervals -- VGA Lemmings' High Performance PC
+        calibration loads 0xFFFF, waits N horizontal blanks, and reads back the
+        counter; deriving the value from absolute elapsed time made that
+        measurement depend on the total instruction count since power-on, which
+        no two runtimes (interpreter vs lifted graph, whose step counts are
+        host-asymmetric) agree on exactly.  Anchoring makes it a LOCAL
+        interval, which is both hardware-correct and runtime-invariant.
+        ``pit_channel0_anchor_ticks`` defaults to 0, so a snapshot predating
+        the field restores to the old absolute behaviour."""
+        reload = self.pit_channel0_reload or 0x10000
+        delta = self._pit_elapsed_ticks(cpu) - self.pit_channel0_anchor_ticks
+        return (reload - (delta % reload)) % reload
 
     def display_refresh_hz(self) -> float:
         # VGA 320x200 graphics and text modes refresh at ~70 Hz; a property of the
@@ -751,8 +770,10 @@ class DOSMachine:
             access = self._pit_channel0_access
             if access == 1:
                 self.pit_channel0_reload = (self.pit_channel0_reload & 0xFF00) | value
+                self.pit_channel0_anchor_ticks = self._pit_elapsed_ticks(cpu)
             elif access == 2:
                 self.pit_channel0_reload = (self.pit_channel0_reload & 0x00FF) | (value << 8)
+                self.pit_channel0_anchor_ticks = self._pit_elapsed_ticks(cpu)
             else:
                 if self._pit_channel0_write_low:
                     self._pit_channel0_latch = value
@@ -760,6 +781,9 @@ class DOSMachine:
                 else:
                     self.pit_channel0_reload = ((value << 8) | self._pit_channel0_latch) & 0xFFFF
                     self._pit_channel0_write_low = True
+                    # a completed count write (RE)STARTS the countdown -- the
+                    # 8254 anchor programs measure intervals against
+                    self.pit_channel0_anchor_ticks = self._pit_elapsed_ticks(cpu)
             return
         if port == 0x42:
             access = self._pit_channel2_access

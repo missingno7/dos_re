@@ -99,6 +99,7 @@ def write_snapshot(rt: Runtime, out_dir: str | Path, *, status: str, steps: int,
             "pit_channel0_latch": getattr(rt.dos, "_pit_channel0_latch", 0),
             "pit_channel0_write_low": getattr(rt.dos, "_pit_channel0_write_low", True),
             "pit_channel0_reload": getattr(rt.dos, "pit_channel0_reload", 0),
+            "pit_channel0_anchor_ticks": getattr(rt.dos, "pit_channel0_anchor_ticks", 0),
             "speaker_control": rt.dos.speaker_control,
             "opl_selected_register": rt.dos.opl_selected_register,
             "opl_status": rt.dos.opl_status,
@@ -160,6 +161,9 @@ def load_snapshot(exe_path: str | Path, snapshot_dir: str | Path, *, game_root: 
     rt.cpu.mem = rt.program.memory
     rt.cpu.s = CPUState(**meta["cpu"])
     _restore_dos_state(rt, meta.get("dos", {}))
+    # Virtual time is machine state (the PIT phase is derived from it) --
+    # restore it exactly as the headless loader does; see the note there.
+    rt.cpu.instruction_count = int(meta.get("steps") or 0)
     return rt
 
 

@@ -59,6 +59,16 @@ def load_snapshot_headless(
         psp_segment=meta.get("program", {}).get("psp_segment", 0),
         program_meta=meta.get("program"))
     _restore_dos_state(rt, meta.get("dos", {}))
+    # VIRTUAL TIME IS MACHINE STATE.  The PIT down-counter is derived from
+    # instruction_count (dos._pit_channel0_live_value), so the phase a program
+    # can MEASURE (latch port 43h, read port 40h) is part of the machine, the
+    # same way the DAC or the tick count is.  write_snapshot records it as
+    # "steps"; dropping it here restarted every restored runtime at t=0 while
+    # the interpreted oracle arrived with the loader's count -- invisible until
+    # a program measured absolute phase.  VGA Lemmings' High Performance PC
+    # timer calibration (1010:15AD/1602) does exactly that, and diverged by
+    # precisely (steps * 3) mod 0x10000 PIT ticks (2026-07-17).
+    rt.cpu.instruction_count = int(meta.get("steps") or 0)
     return rt
 
 
@@ -94,6 +104,8 @@ def _restore_dos_state(rt: Runtime, dos_meta: dict) -> Runtime:
     rt.dos._pit_channel0_latch = dos_meta.get("pit_channel0_latch", rt.dos._pit_channel0_latch)
     rt.dos._pit_channel0_write_low = dos_meta.get("pit_channel0_write_low", rt.dos._pit_channel0_write_low)
     rt.dos.pit_channel0_reload = dos_meta.get("pit_channel0_reload", rt.dos.pit_channel0_reload)
+    rt.dos.pit_channel0_anchor_ticks = dos_meta.get("pit_channel0_anchor_ticks",
+                                                    rt.dos.pit_channel0_anchor_ticks)
     rt.dos.speaker_control = dos_meta.get("speaker_control", rt.dos.speaker_control)
     rt.dos.opl_selected_register = dos_meta.get("opl_selected_register", rt.dos.opl_selected_register)
     rt.dos.opl_status = dos_meta.get("opl_status", rt.dos.opl_status)
