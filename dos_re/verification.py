@@ -59,6 +59,21 @@ class HookVerifyDivergence(RuntimeError):
         self.repro_metadata = dict(repro_metadata or {})
 
 
+class HookVerifyInconclusive(HookVerifyDivergence):
+    """The oracle could not be RUN to the hook's continuation -- not a mismatch.
+
+    A wall/step timeout while interpreting the original ASM means the verifier
+    gave up, which is evidence about the VERIFIER's budget, not about the
+    candidate.  Reporting it as a divergence actively misleads: a merely slow
+    or I/O-heavy routine (a decompressor re-reading a file it already consumed,
+    say) then looks exactly like broken recovery, and the reader goes hunting a
+    bug that is not there.  Subclasses HookVerifyDivergence so existing
+    ``except`` sites still stop the run -- an unverified hook must never be
+    treated as passing -- while letting reporters name it honestly.
+    """
+
+
+
 
 class HookVerifyLimitReached(RuntimeError):
     pass
@@ -571,14 +586,14 @@ class HookVerifier:
                 elapsed = time.monotonic() - started_at
                 if elapsed >= wall_timeout:
                     labels = ", ".join(f"{cs:04X}:{ip:04X}" for cs, ip in targets)
-                    raise HookVerifyDivergence(
+                    raise HookVerifyInconclusive(
                         "HOOK VERIFY ASM WALL TIMEOUT "
                         f"hook={context} target={labels} "
                         f"after_steps={steps + 1} elapsed={elapsed:.1f}s "
                         f"at={cpu.s.cs:04X}:{cpu.s.ip:04X}"
                     )
         labels = ", ".join(f"{cs:04X}:{ip:04X}" for cs, ip in targets)
-        raise HookVerifyDivergence(
+        raise HookVerifyInconclusive(
             f"HOOK VERIFY ASM TIMEOUT hook={context} target={labels} "
             f"at={cpu.s.cs:04X}:{cpu.s.ip:04X}"
         )

@@ -18,6 +18,11 @@ own proof ledger, kept separate from recovered-source islands):
                     still differ on an unsampled deeper path; for whole-run
                     assurance raise --samples/--steps or use the frame-verifier.
     DIVERGED        a call differed from the ASM oracle (details printed)
+    INCONCLUSIVE    the oracle could not be RUN to the hook's continuation in
+                    the budget (--verify-timeout) — UNPROVEN, not disproven.
+                    Never promotable; never evidence of a bug. Long/IO-heavy
+                    routines land here; raise --verify-timeout or verify them
+                    from a snapshot where the call is cheaper.
     NOT_REACHED     never executed in this run — pick a snapshot where it does
 
 Usage:
@@ -46,13 +51,16 @@ sys.path.insert(0, str(ROOT))
 
 from dos_re.cpu import HaltExecution, UnsupportedInstruction  # noqa: E402
 from dos_re.interrupts import deliver_interrupt  # noqa: E402
+from dataclasses import replace as _dc_replace  # noqa: E402
 from dos_re.lift import scan_function  # noqa: E402
+from dos_re.lift.smc import analyze_smc  # noqa: E402
 from dos_re.lift.emit import EmitUnsupported, emit_function  # noqa: E402
 from dos_re.lift.manifest import LiftManifest, LiftRecord  # noqa: E402
 from dos_re.lift.runtime import LiftRuntimeError  # noqa: E402
 from dos_re.repro_artifacts import clone_runtime_state  # noqa: E402
 from dos_re.snapshot import load_snapshot, parse_addr  # noqa: E402
 from dos_re.verification import (HookVerifierConfig, HookVerifyDivergence,  # noqa: E402
+                                 HookVerifyInconclusive,
                                  install_hook_verifier)
 
 
@@ -134,6 +142,12 @@ def main(argv=None) -> int:
                         "hand rewrite.")
     p.add_argument("--manifest", default=None,
                    help="lift proof ledger to update (default: <emit-dir>/manifest.json)")
+    p.add_argument("--desmc", action="store_true",
+                   help="also verify desmc-candidate functions (dos_re.lift.smc): "
+                        "emit them with their runtime-patched operands read from "
+                        "live code memory and put THAT through the same oracle "
+                        "differential. Without this they are skipped as "
+                        "not-liftable and stay unproven.")
     p.add_argument("--install-passing", action="store_true",
                    help="after the run, print the import line to install every "
                         "ORACLE_PASSING hook (does not modify game code itself)")
@@ -159,16 +173,43 @@ def main(argv=None) -> int:
     hooks: dict[tuple[int, int], object] = {}
     modules = {}
     records: dict[str, LiftRecord] = {}
-    for cs, ip in entries:
+
+    # Pass 1: scan every entry.  De-SMC analysis (dos_re.lift.smc) needs the
+    # WHOLE set in view -- a code write is only classifiable against the
+    # function whose bytes it lands in, which may be a different entry.
+    mem = rt.cpu.mem
+    scans = [(cs, ip, scan_function(lambda off, _cs=cs: mem.rb(_cs, off & 0xFFFF),
+                                    ip, probe=_probe(rt, cs)))
+             for cs, ip in entries]
+    smc_verdicts = analyze_smc(scans) if args.desmc else {}
+
+    # Pass 2: emit + install.
+    for cs, ip, scan in scans:
         entry = f"{cs:04X}:{ip:04X}"
         name = f"lifted_{cs:04x}_{ip:04x}"
         module_path = emit_dir / f"{name}.py"
-        mem = rt.cpu.mem
-        scan = scan_function(lambda off: mem.rb(cs, off & 0xFFFF), ip, probe=_probe(rt, cs))
+        smc_slots: dict[int, tuple] = {}
         if not scan.liftable:
-            reasons = ",".join(sorted({r.reason for r in scan.refusals}))
-            print(f"skip     {entry}: not liftable ({reasons})")
-            continue
+            reasons = sorted({r.reason for r in scan.refusals})
+            verdict = smc_verdicts.get((cs, ip))
+            # A desmc-candidate is refused for the ORDINARY lift but IS
+            # verifiable: emit the transform and let the oracle judge it --
+            # which is the whole point, since a transformed module is a
+            # CANDIDATE until a differential says otherwise.
+            if (verdict is not None and verdict.status == "desmc-candidate"
+                    and set(reasons) <= {"self-modifying", "code-patched-at-runtime"}):
+                smc_slots = verdict.patched_operands()
+                scan.refusals = [r for r in scan.refusals
+                                 if r.reason not in ("self-modifying",
+                                                     "code-patched-at-runtime")]
+                print(f"desmc    {entry}: {len(smc_slots)} patched operand(s) "
+                      f"read from live code memory")
+            else:
+                print(f"skip     {entry}: not liftable ({','.join(reasons)})")
+                continue
+        for t_ip, slot in smc_slots.items():
+            if t_ip in scan.insts:
+                scan.insts[t_ip] = _dc_replace(scan.insts[t_ip], patched_slot=slot)
         block_end = min((i.next_ip for i in scan.insts.values()
                          if i.kind != "seq" and i.ip >= ip), default=(ip + 8) & 0xFFFF)
         sig = bytes(mem.rb(cs, (ip + k) & 0xFFFF) for k in range(max(4, min(16, (block_end - ip) & 0xFFFF))))
@@ -210,6 +251,7 @@ def main(argv=None) -> int:
     # 3. Run the VM forward in chunks; between chunks, retire fully-sampled
     #    hooks from the verify set. The verifier reads config.hooks live.
     diverged: dict[tuple[int, int], str] = {}
+    inconclusive: dict[tuple[int, int], str] = {}
     runaway: dict[tuple[int, int], str] = {}
     name_to_key = {v: k for k, v in rt.cpu.hook_names.items() if k in hooks}
     status = "budget reached"
@@ -251,6 +293,16 @@ def main(argv=None) -> int:
             for key in list(to_verify):
                 if verifier.counts.get(key, 0) >= args.samples:
                     to_verify.discard(key)          # keep running it, stop verifying
+    except HookVerifyInconclusive as exc:
+        # NOT a mismatch: the verifier could not RUN the oracle to the hook's
+        # continuation inside its budget. Reporting this as DIVERGED would say
+        # the recovered code is wrong when the evidence says nothing of the
+        # kind -- and sends the reader hunting a bug that is not there.
+        status = "inconclusive"
+        print(f"\nINCONCLUSIVE (oracle not run to completion): {exc}")
+        for key in hooks:
+            if f"{key[0]:04X}:{key[1]:04X}" in str(exc):
+                inconclusive[key] = str(exc)
     except HookVerifyDivergence as exc:
         status = "divergence"
         print(f"\nDIVERGENCE: {exc}")
@@ -285,6 +337,11 @@ def main(argv=None) -> int:
             rec.divergences = 1
         elif (cs, ip) in diverged:
             rec.status, rec.divergences, rec.note = "DIVERGED", 1, diverged[(cs, ip)][:200]
+        elif (cs, ip) in inconclusive:
+            # The oracle timed out -- unproven, NOT disproven. Never counts as
+            # passing (an unverified hook must not be promotable), never counts
+            # as diverged (nothing showed a mismatch).
+            rec.status, rec.note = "INCONCLUSIVE", inconclusive[(cs, ip)][:200]
         elif verified > 0:
             rec.status = "ORACLE_PASSING"
             passing.append((entry, rec))
@@ -297,6 +354,7 @@ def main(argv=None) -> int:
         manifest.put(rec)
         cov = f"{seen}/{total} blk" if seen else "-"
         flag = {"ORACLE_PASSING": "PASS    ", "DIVERGED": "DIVERGED",
+                "INCONCLUSIVE": "INCONCL ",
                 "NOT_REACHED": "notreach", "LIFTED": "ran/uvf "}[rec.status]
         partial = "  (PARTIAL COVERAGE)" if rec.status == "ORACLE_PASSING" and not rec.fully_covered else ""
         # Verification retires the hook at the --samples cap; if it was hit, later
@@ -307,9 +365,9 @@ def main(argv=None) -> int:
               f"native={rec.native_pct:.0f}%{partial}{capped}")
 
     manifest.save(manifest_path)
-    npass, ndiv = len(passing), len(diverged)
-    print(f"\n{npass} ORACLE_PASSING, {ndiv} DIVERGED / {len(hooks)} lifted; "
-          f"manifest: {manifest_path}")
+    npass, ndiv, ninc = len(passing), len(diverged), len(inconclusive)
+    print(f"\n{npass} ORACLE_PASSING, {ndiv} DIVERGED, {ninc} INCONCLUSIVE "
+          f"/ {len(hooks)} lifted; manifest: {manifest_path}")
     if passing and args.install_passing:
         print("\nto install the passing hooks, register them in your adapter's hooks.py:")
         for entry, rec in passing:
