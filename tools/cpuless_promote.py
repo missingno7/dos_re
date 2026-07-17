@@ -398,6 +398,7 @@ def main(argv=None) -> int:
         rec_dir = Path(args.recovered_dir)
         ad_dir = Path(args.adapter_dir)
         rec_dir.mkdir(parents=True, exist_ok=True)
+        ad_dir.mkdir(parents=True, exist_ok=True)
         standalone_only: list[str] = []
         for key in promoted:
             rec_src, ad_src = outputs[key]

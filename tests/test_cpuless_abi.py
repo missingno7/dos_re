@@ -6,9 +6,10 @@ the emitter grows around them.
 """
 from __future__ import annotations
 
-from dos_re.lift.decode import Inst
+from dos_re.lift.decode import Inst, decode_one
 from dos_re.lift.cfg import FunctionScan
 from dos_re.lift.cpuless import abi_scan, register_effects
+from dos_re.lift.emit_cpuless import check_promotable, emit_recovered
 
 
 def _scan(insts):
@@ -16,6 +17,23 @@ def _scan(insts):
     for i in insts:
         s.insts[i.ip] = i
     return s
+
+
+def _scan_bytes(hexbytes, exits_at=()):
+    """Decode a straight-line function from hex bytes into a FunctionScan.
+    ``exits_at`` names the ip(s) whose decoded instruction is a return exit."""
+    raw = bytes.fromhex(hexbytes.replace(" ", ""))
+    scan = FunctionScan(entry=0)
+    ip = 0
+    while ip < len(raw):
+        inst = decode_one(lambda off, _r=raw: _r[off], ip)
+        scan.insts[ip] = inst
+        if inst.kind == "int":
+            scan.ints.add(inst.int_no)
+        if ip in exits_at:
+            scan.exits.append(inst)
+        ip += inst.length
+    return scan
 
 
 def test_mov_imm_then_push_pop_ret_abi():
@@ -117,3 +135,33 @@ def test_xlat_declares_the_segment_it_reads():
                                   prefixes=(prefix,)))
         assert seg in e.reads, f"xlat with {prefix:#04x} must declare {seg}"
         assert "ax" in e.writes
+
+
+def test_platform_int_forces_flags_livein():
+    """A PLATFORM INT (plat.intr) makes the function flags-live-in, so the
+    emitted body seeds the INT's flag word from the caller's FLAGS.
+
+    Regression (SimAnt _profstart 275F:003C = `mov ax,4503h; int 2Fh; retf`):
+    INT/IRET preserves FLAGS except where the handler edits the stacked copy,
+    so the INT 2Fh multiplex with no TSR is an IRET that returns FLAGS
+    unchanged.  The emitter models the INT's flag output via plat.intr, which
+    reads its `_flags` input back out -- so without flags_livein the body seeds
+    that input from the zero default and CLOBBERS the caller's preserved flags
+    (state divergence vs the interpreted oracle over the whole demo, bisected
+    to exactly this leaf).  A platform INT must trigger flags_livein just like
+    a game-vectored INT does.
+    """
+    scan = _scan_bytes("B8 03 45 CD 2F CB", exits_at=(5,))    # mov ax,4503; int 2F; retf
+    spec = check_promotable(scan)
+    assert spec.ret_kind == "far" and spec.flags_livein is True
+    src = emit_recovered(scan, spec.abi, "275F:003C",
+                         recovered_import_base="x", needs_plat=spec.needs_plat,
+                         df_livein=spec.df_livein, sp_output=spec.sp_output,
+                         flags_livein=spec.flags_livein)
+    # the flag locals seed from the caller word, and the INT bundle threads it
+    assert "_flags_in" in src and "cf = (_flags_in & 0x1) != 0" in src
+    assert "'_flags': (" in src            # plat.intr receives the live flags
+
+    # A leaf with NO interrupt stays flags-dead-in (the trigger is specific).
+    plain = _scan_bytes("B8 03 45 C3", exits_at=(3,))          # mov ax,4503; ret
+    assert check_promotable(plain).flags_livein is False

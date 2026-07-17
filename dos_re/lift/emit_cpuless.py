@@ -988,8 +988,18 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     # to hand the callee a full FLAGS word -- reconstructing it needs the
     # untracked bits, which only _flags_in carries.  Without this a
     # flags-livein function could not be a dispatch target at all.
+    # ANY interrupt makes the full FLAGS word a compat input.  INT/IRET
+    # preserves FLAGS except where the handler edits the stacked copy: a
+    # PLATFORM INT (plat.intr) whose service leaves a flag untouched restores
+    # the caller's value (e.g. the INT 2Fh multiplex with no TSR is an IRET
+    # that returns FLAGS unchanged), and a GAME-vectored INT reloads FLAGS
+    # from the (possibly handler-edited) stacked word.  Both model the INT's
+    # flag output as a function of the incoming flags, so the flag locals must
+    # seed from _flags_in -- without it a serviced INT clobbers the caller's
+    # preserved flags to the zero default (i.kind == INT subsumes the game
+    # subset _is_game_int).
     flags_livein = fl_needed or bool(heads) \
-        or any(_is_dyn(i) or _is_game_int(i) or _is_isr_chain(i)
+        or any(_is_dyn(i) or i.kind == INT or _is_isr_chain(i)
                or i.op == 0x9C
                for i in scan.insts.values()) \
         or any(i.kind == CALL and i.target in callees
