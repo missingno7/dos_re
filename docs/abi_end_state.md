@@ -318,6 +318,45 @@ Where the new representation *intentionally* differs from the mechanical one
 (the stack region), use a **semantic mask** — the shadow-stack overlay
 already in `abi_diff` — never a broadly weakened comparison.
 
+## 9a. Parked: the stack/data-shared tier, and a verifier-cost wall
+
+The last `stack-addressed-memory` functions use an explicit `ss:` override
+for DATA *and* have a real machine stack, so ONE segment carries both.  In
+the ABI form the ambiguity vanishes (push/pop become slot locals, calls
+write no return address), leaving `ss` used for data only — so the
+transformation is straightforward and reaches **113 → 149 cores** with the
+static wall still green.
+
+**It is parked on branch `abi-ss-stack-split`, unverified**, for a reason
+worth recording: the verification is not tractable as built.  The mechanical
+reference writes stack and data through the SAME segment, so neither a
+segment shadow nor an assumed offset window separates them.  The
+discriminator therefore MEASURES the split — drive the mechanical side twice
+with different initial `sp`; writes that move with `sp` are stack, writes
+identical under both are data — guarded so that a differing outcome, a
+differing result, or an excluded write outside the stack segment each fail
+loudly rather than silently splitting.
+
+That design is sound but doubles the mechanical work on exactly the
+loop-heavy functions (a `rep` with a seeded 16-bit `cx` runs up to 65535
+iterations).  The full run reached **50 GB RSS without finishing**; one
+function needed 84 s for 3 states.  Shipping the 36 new cores unproven would
+be precisely the wrong trade, since they are the stack/data-shared cases —
+the ones most likely to expose a flaw in the discriminator itself.
+
+**What it needs before landing:** a tractable verifier — bound the per-state
+write trace and iteration budget (reporting, never silently skipping), seed
+loop counters narrowly, or decide `sp`-dependence STATICALLY from the depth
+map instead of by re-execution.  The static route is most promising: the
+depth map already proves every stack slot's offset, so stack writes are
+identifiable without running anything twice.
+
+**Lesson for M4:** the memory-schema phase will face this same question as
+*region ownership*, and it will face it at whole-program scale.  A
+verification strategy that costs 2× execution on loop-heavy code does not
+survive that.  Prefer static ownership proofs, with re-execution reserved
+for spot-checking.
+
 ## 10. Remaining slice sequence
 
 Do the representation tightening **now, at 101 cores**, not later at 250 —

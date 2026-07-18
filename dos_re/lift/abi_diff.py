@@ -45,12 +45,38 @@ class TraceMem:
     the game never exhibits -- the same assumption the virtual stack
     makes."""
 
+    #: Hard cap on the RETAINED write trace.  The trace exists to compare
+    #: two runs, which a streaming digest does at O(1) memory -- the list is
+    #: only for readable diagnostics.  Without a cap a single pathological
+    #: function eats the machine: 1010:37C2 spins to the 20M-iteration cap
+    #: and, whenever its stack traffic is traced rather than shadowed,
+    #: appends ~20,000,000 tuples (~1.4 GB for ONE list, and a comparison
+    #: builds several).  A 50 GB process is a worse failure than a loud one.
+    MAX_TRACE = 200_000
+
     def __init__(self, seed: int, shadow_stack_seg: int | None = None) -> None:
         self.seed = seed & 0xFFFFFFFF
         self.data: dict[int, int] = {}
         self.shadow: dict[int, int] = {}
         self.shadow_seg = shadow_stack_seg
         self.writes: list[tuple[int, int, int, int]] = []
+        #: order-sensitive rolling digest of EVERY traced write, kept even
+        #: after the retained list is capped -- so a divergence past the cap
+        #: still fails the comparison instead of being silently equal.
+        self.write_digest = 0
+        self.write_count = 0
+        self.truncated = False
+
+    def _record(self, w) -> None:
+        self.write_count += 1
+        d = self.write_digest
+        for v in w:
+            d = (d * 1000003 + v) & 0xFFFFFFFFFFFF
+        self.write_digest = d
+        if len(self.writes) < self.MAX_TRACE:
+            self.writes.append(w)
+        else:
+            self.truncated = True
 
     def _byte(self, lin: int, store: dict) -> int:
         lin &= 0xFFFFF
@@ -76,7 +102,7 @@ class TraceMem:
         lin = ((seg << 4) + (off & 0xFFFF)) & 0xFFFFF
         st[lin] = val & 0xFF
         if st is self.data:
-            self.writes.append((seg, off & 0xFFFF, val & 0xFF, 1))
+            self._record((seg, off & 0xFFFF, val & 0xFF, 1))
 
     def ww(self, seg: int, off: int, val: int) -> None:
         st = self._store(seg)
@@ -84,7 +110,7 @@ class TraceMem:
         st[lin] = val & 0xFF
         st[(lin + 1) & 0xFFFFF] = (val >> 8) & 0xFF
         if st is self.data:
-            self.writes.append((seg, off & 0xFFFF, val & 0xFFFF, 2))
+            self._record((seg, off & 0xFFFF, val & 0xFFFF, 2))
 
 
 def _seeded_regs(params, state: int) -> dict[str, int]:
@@ -243,10 +269,18 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
                                   f"mech={mo.get(r)!r} abi={av!r}")
         if mc != ac:
             mismatches.append(f"state {s}: compat mech={mc} abi={ac}")
-        if mem_m.writes != mem_a.writes:
+        # Compare the STREAMING DIGEST + count, which stays sound past the
+        # retained-trace cap; the retained lists only make the message
+        # readable.  (Comparing the lists alone would silently pass once a
+        # pathological function truncated them.)
+        if (mem_m.write_digest, mem_m.write_count) != \
+                (mem_a.write_digest, mem_a.write_count):
             mismatches.append(
-                f"state {s}: writes mech(sem)={mem_m.writes[:6]}... "
-                f"abi={mem_a.writes[:6]}...")
+                f"state {s}: writes differ (mech {mem_m.write_count} vs "
+                f"abi {mem_a.write_count}) mech(sem)={mem_m.writes[:6]}... "
+                f"abi={mem_a.writes[:6]}..."
+                + ("  [trace truncated -- digest is the authority]"
+                   if mem_m.truncated or mem_a.truncated else ""))
         log_m = plat_m.log if plat_m else []
         log_a = plat_a.log if plat_a else []
         if log_m != log_a:
