@@ -2229,7 +2229,33 @@ def _contract_inputs(scan, abi, boundary_addrs=frozenset()) -> list[str]:
     return inputs
 
 
-def _emit_boundary_observer(blk, cs, i, count):
+def _flush_flag_writes(blk, flag_written) -> None:
+    """Record the flag bits written SO FAR IN THIS BLOCK into ``_fmask``.
+
+    ``_fmask`` says which FLAGS bits this body has authoritatively computed;
+    every bit outside it rides the caller's ``_flags_in`` word.  The mask is
+    normally written once at the end of a block (one ``|=`` instead of one per
+    instruction), which is fine for a block that just runs to its terminator --
+    but NOT for a site that composes an OUTGOING flags word mid-block (a
+    platform far-call or INT, a dynamic dispatch, a flags-livein callee, a
+    boundary observer).  Such a site reads ``_fmask`` to decide which bits are
+    its own, so any flag written earlier in the same block but not yet recorded
+    was silently discarded and the CALLER's stale bit handed out instead --
+    e.g. ``or cx,cx ; push args ; call far <API>`` gave the API the entry ZF
+    rather than the ZF the ``or`` had just computed, and the API's returned
+    flags word then carried that stale bit back into the recovered body.
+
+    Flushing at the site fixes that at the source: the bits are recorded as
+    soon as the instruction that wrote them has been emitted, which is exactly
+    when they become true.  Clearing afterwards keeps the end-of-block flush
+    from repeating them."""
+    if flag_written:
+        bits = " | ".join(f"0x{_FLAG_BITS[f]:X}" for f in sorted(flag_written))
+        blk.append(f"_fmask |= {bits}")
+        flag_written.clear()
+
+
+def _emit_boundary_observer(blk, cs, i, count, flag_written=None):
     """Emit the boundary-head observer AFTER the head instruction: pass the
     full live bundle + composed flags word + the absolute virtual time to
     plat.boundary; merge back the (possibly parked-and-resumed) bundle,
@@ -2237,6 +2263,8 @@ def _emit_boundary_observer(blk, cs, i, count):
     fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
                     for f in ("cf", "pf", "af", "zf", "sf", "of",
                               "df", "intf"))
+    if flag_written is not None:
+        _flush_flag_writes(blk, flag_written)
     blk.append(f"_bw = (_flags_in & ~_fmask) | (({fw}) & _fmask)")
     bundle = ", ".join(f"'{r}': {r}" for r in _DYN_REGS) \
         + f", 'cs': 0x{cs:04X}, '_df': (1 if df else 0), '_flags_in': _bw"
@@ -2483,6 +2511,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
                                 for f in ("cf", "pf", "af", "zf", "sf", "of",
                                           "df", "intf"))
+                _flush_flag_writes(blk, flag_written)
                 bundle = ", ".join(f"'{r}': {r}" for r in _DYN_REGS) \
                     + (", 'cs': _vs, '_df': (1 if df else 0), "
                        f"'_flags_in': ((_flags_in & ~_fmask) | (({fw}) & _fmask))")
@@ -2560,6 +2589,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
                                 for f in ("cf", "pf", "af", "zf", "sf", "of",
                                           "df", "intf"))
+                _flush_flag_writes(blk, flag_written)
                 bundle = ", ".join(f"'{r}': {r}" for r in _DYN_REGS) \
                     + (f", 'cs': 0x{cs:04X}, '_df': (1 if df else 0), "
                        f"'_flags_in': ((_flags_in & ~_fmask) "
@@ -2638,6 +2668,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 # cleanup).  The dispatch costs one VM step of virtual time.
                 pf = plat_farcalls[i.far_target]
                 pseg, poff = i.far_target
+                _flush_flag_writes(blk, flag_written)
                 blk.append("sp = (sp - 2) & 0xFFFF")
                 blk.append(f"mem.ww(ss, sp, 0x{cs:04X})")     # return CS
                 blk.append("sp = (sp - 2) & 0xFFFF")
@@ -2668,7 +2699,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 # pascal cleanup: pop the 4-byte far frame + argbytes of args
                 blk.append(f"sp = (sp + {4 + pf.argbytes}) & 0xFFFF")
                 if i.ip in heads:
-                    _emit_boundary_observer(blk, cs, i, count)
+                    _emit_boundary_observer(blk, cs, i, count, flag_written)
                 ip = i.next_ip
                 if ip in bb_of:
                     blk.append(f"_cost += {count}")
@@ -2714,6 +2745,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                     fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
                                     for f in ("cf", "pf", "af", "zf", "sf",
                                               "of", "df", "intf"))
+                    _flush_flag_writes(blk, flag_written)
                     kw = (f"_flags_in=((_flags_in & ~_fmask) | (({fw}) & _fmask))"
                           + (", " + kw if kw else ""))
                 if c.df_livein:
@@ -2760,7 +2792,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                     # already carries the callee's virtual time, so the observer
                     # fires at the post-call offset; registers/flags reflect the
                     # returned state and merge back any delivered-ISR effects.
-                    _emit_boundary_observer(blk, cs, i, count)
+                    _emit_boundary_observer(blk, cs, i, count, flag_written)
                 ip = i.next_ip
                 if ip in bb_of:
                     blk.append(f"_cost += {count}")
@@ -2785,6 +2817,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
                                 for f in ("cf", "pf", "af", "zf", "sf", "of",
                                           "df", "intf"))
+                _flush_flag_writes(blk, flag_written)
                 blk.append(f"_fw = (_flags_in & ~_fmask) | (({fw}) & _fmask)")
                 blk.append("sp = (sp - 2) & 0xFFFF")
                 blk.append("mem.ww(ss, sp, _fw)")
@@ -2873,7 +2906,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                     val = "ax" if width == 2 else "(ax & 0xFF)"
                     blk.append(f"plat.outp({port}, {val}, {width}, {cost})")
                 if i.ip in heads:
-                    _emit_boundary_observer(blk, cs, i, count)
+                    _emit_boundary_observer(blk, cs, i, count, flag_written)
                 nxt = i.next_ip
                 if nxt in bb_of and nxt != ip:
                     blk.append(f"_cost += {count}")
@@ -2896,7 +2929,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                                       for f in sorted(flag_written))
                     blk.append(f"_fmask |= {bits}")
                     flag_written.clear()
-                _emit_boundary_observer(blk, cs, i, count)
+                _emit_boundary_observer(blk, cs, i, count, flag_written)
             nxt = i.next_ip
             if nxt in bb_of and nxt != ip:     # falls into the next block
                 blk.append(f"_cost += {count}")
