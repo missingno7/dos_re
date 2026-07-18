@@ -234,7 +234,8 @@ def _vslot_delta(i) -> int | None:
     return None
 
 
-def check_composable(scan, *, callees=None, boundary_addrs=frozenset(),
+def check_composable(scan, *, callees=None, far_callees=None,
+                     boundary_addrs=frozenset(),
                      dispatch_addrs=frozenset()) -> dict[int, int]:
     """Prove one function's machine-stack use is PURELY LOCAL so its stack
     can become Python locals -- allowing direct NEAR calls to already-
@@ -261,6 +262,7 @@ def check_composable(scan, *, callees=None, boundary_addrs=frozenset(),
     from .contracts import ss_is_data_segment
 
     callees = callees or {}
+    far_callees = far_callees or {}
     # ss used PURELY as a data-segment selector (no push/pop traffic at all)
     # is an ordinary segment input, not the stack carrier -- the small-model
     # `mov ss:[0x0006], ax` idiom.  Its memory operands are then no more
@@ -276,6 +278,13 @@ def check_composable(scan, *, callees=None, boundary_addrs=frozenset(),
         k = i.kind
         if k == CALL and i.target is not None and i.target in callees:
             continue                          # composed near call (delta 0)
+        if k == CALL_FAR and i.far_target is not None \
+                and i.far_target in far_callees:
+            # a composed FAR call is identical to a near one in the ABI form:
+            # the machine difference is only the 4-byte frame (CS + return
+            # offset) the mechanical side writes, and the ABI form writes no
+            # return address at all.  Balanced, so delta 0.
+            continue
         if k == INT:
             if i.int_no in PLATFORM_INT:
                 continue                      # a DOS/BIOS service (plat.intr)
@@ -333,8 +342,8 @@ def check_composable(scan, *, callees=None, boundary_addrs=frozenset(),
                 raise Refusal("unbalanced-stack")
             continue
         succs = []
-        if i.kind in (SEQ, CALL, INT):
-            # SEQ, a composed near call (delta 0), and a serviced INT all
+        if i.kind in (SEQ, CALL, CALL_FAR, INT):
+            # SEQ, a composed near/far call (delta 0), and a serviced INT all
             # fall through.  INT must be here: without it the walk stopped at
             # the first interrupt, leaving the rest of the body un-depthed --
             # which both hid a possible post-INT imbalance from the gate and
@@ -356,9 +365,10 @@ def check_composable(scan, *, callees=None, boundary_addrs=frozenset(),
     return depth
 
 
-def _abi_needs_plat(scan, callees) -> bool:
+def _abi_needs_plat(scan, callees, far_callees=None) -> bool:
     """A core needs the platform interface if it does port I/O, a platform
-    INT, or composes a callee that needs it."""
+    INT, or composes a (near or far) callee that needs it."""
+    far_callees = far_callees or {}
     for i in scan.insts.values():
         if i.op in _PORT_IO:
             return True
@@ -366,6 +376,9 @@ def _abi_needs_plat(scan, callees) -> bool:
             return True
         if i.kind == CALL and i.target in callees \
                 and callees[i.target].needs_plat:
+            return True
+        if i.kind == CALL_FAR and i.far_target in far_callees \
+                and far_callees[i.far_target].needs_plat:
             return True
     return False
 
@@ -495,7 +508,7 @@ def _core_alias(stem: str) -> str:
 
 def emit_abi_core(scan, proposal: dict, key: str, *,
                   name: str | None = None,
-                  callees=None, abi_base: str = "",
+                  callees=None, far_callees=None, abi_base: str = "",
                   boundary_addrs=frozenset(),
                   dispatch_addrs=frozenset()) -> tuple[str, CoreContract]:
     """Generate the TRUE ABI-recovered core module for one composable
@@ -510,9 +523,10 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     callers.  Refuses (named capability) anything outside this tier -- the
     refusal census IS the next-tier work list."""
     callees = callees or {}
+    far_callees = far_callees or {}
     if proposal.get("refusals"):
         raise Refusal("contract-not-promotable")
-    vdepth = check_composable(scan, callees=callees,
+    vdepth = check_composable(scan, callees=callees, far_callees=far_callees,
                               boundary_addrs=boundary_addrs,
                               dispatch_addrs=dispatch_addrs)
     # flag liveness with the composed callees' exit-flag contributions, so a
@@ -522,7 +536,14 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
               exit_flags=c.exit_flags, needs_plat=c.needs_plat, ret_kind="near",
               df_livein=c.df_livein, flags_livein=c.flags_livein)
           for ip, c in callees.items()}
-    exit_flags, df_livein, fl_needed = _check_flag_liveins(scan, callees=cc)
+    fcc = {t: CalleeContract(
+               name=_core_alias(c.stem), inputs=c.inputs, outputs=c.returns,
+               exit_flags=c.exit_flags, needs_plat=c.needs_plat,
+               ret_kind="far", df_livein=c.df_livein,
+               flags_livein=c.flags_livein)
+           for t, c in far_callees.items()}
+    exit_flags, df_livein, fl_needed = _check_flag_liveins(
+        scan, callees=cc, far_callees=fcc)
     # flags_livein rule mirrors emit_cpuless.check_promotable: a serviced INT
     # (plat.intr) reads the caller's FLAGS word (its IF/DF bits, which no
     # arithmetic defines), and the property is transitive through a composed
@@ -532,8 +553,11 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
                     or any(i.kind == INT for i in scan.insts.values())
                     or any(i.kind == CALL and i.target in callees
                            and callees[i.target].flags_livein
+                           for i in scan.insts.values())
+                    or any(i.kind == CALL_FAR and i.far_target in far_callees
+                           and far_callees[i.far_target].flags_livein
                            for i in scan.insts.values()))
-    needs_plat = _abi_needs_plat(scan, callees)
+    needs_plat = _abi_needs_plat(scan, callees, far_callees)
 
     cs = int(key.split(":")[0], 16)
     stem = _stem(key)
@@ -547,11 +571,26 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
         raise Refusal("unsupported-machine-private: "
                       + ",".join(sorted(machine - {"sp", "ss", "cs"})))
 
+    # A callee whose contract takes `ss` as a SEMANTIC segment (slice 7:
+    # ss-as-data) can only be composed by a caller that itself carries ss --
+    # otherwise the emitted call would name a local this body never binds.
+    # The need is TRANSITIVE, but ss is stripped per-function as
+    # machine-private, so a caller with its own stack traffic does not get
+    # it.  Refuse by name rather than emit an unbound reference; promoting
+    # these needs transitive ss propagation in the census.
+    _callee_inputs = {r for c in list(callees.values())
+                      + list(far_callees.values()) for r in c.inputs}
+    if "ss" in _callee_inputs and "ss" not in params:
+        raise Refusal("callee-needs-ss-segment")
+
     leaders = sorted(set(scan.block_leaders()))
     bb_of = {ip: n for n, ip in enumerate(leaders)}
     # the ABI callees this body actually calls -> import aliases
     called = sorted({callees[i.target].stem for i in scan.insts.values()
-                     if i.kind == CALL and i.target in callees},
+                     if i.kind == CALL and i.target in callees}
+                    | {far_callees[i.far_target].stem
+                       for i in scan.insts.values()
+                       if i.kind == CALL_FAR and i.far_target in far_callees},
                     key=str)
 
     L: list[str] = []
@@ -694,6 +733,8 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
                 break
             if i.kind == CALL and i.target in callees:
                 _emit_composed_call(blk, callees[i.target], count)
+            elif i.kind == CALL_FAR and i.far_target in far_callees:
+                _emit_composed_call(blk, far_callees[i.far_target], count)
             elif i.kind == INT:
                 _emit_int(i, blk, count)
             elif i.op in _PORT_IO:

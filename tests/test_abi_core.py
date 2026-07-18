@@ -101,6 +101,23 @@ def test_contract_metadata_records_pointer_roles():
         f"arg_{k}" for k in range(len(meta["params"]))]
 
 
+def test_refuses_callee_needing_ss_when_caller_lacks_it():
+    """A callee whose contract takes ss as a SEMANTIC segment (ss-as-data)
+    cannot be composed by a caller that does not itself carry ss -- the call
+    would name a local the caller never binds.  The need is transitive, but
+    ss is stripped per-function as machine-private, so refuse by name."""
+    ir = _ir({"1010:0000": LEAF_PUSH})
+    scans, _ = build_scans(ir)
+    prop = infer_contracts(ir)["functions"]["1010:0000"]
+    ss_callee = emit_abi.CoreContract(
+        key="1010:0100", stem="1010_0100", inputs=("ss",), returns=("ax",),
+        df_livein=False, exit_flags=frozenset())
+    # the caller's params are (ax, bx) -- no ss
+    with pytest.raises(Refusal, match="callee-needs-ss-segment"):
+        emit_abi.emit_abi_core(scans["1010:0000"], prop, "1010:0000",
+                               callees={0x0100: ss_callee})
+
+
 def test_gate_refuses_stack_addressed_memory():
     # mov ax,[bp+2]; ret -- bp EA defaults to SS: stack used as memory
     ir = _ir({"1010:0000": "8B 46 02 C3"})

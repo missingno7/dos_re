@@ -70,15 +70,23 @@ def _fresh_mechanical(ir: dict, key: str, _cache: dict):
     if scan is None:
         raise RuntimeError(f"{key}: {why}")
     cs = int(key.split(":")[0], 16)
-    callees = {}
+    callees, far_callees = {}, {}
     for i in scan.insts.values():
         if i.kind == emit_cpuless.CALL and i.target is not None:
             tkey = f"{cs:04X}:{i.target:04X}"
             _, c = _fresh_mechanical(ir, tkey, _cache)
             callees[i.target] = c
-    spec = emit_cpuless.check_promotable(scan, callees=callees)
+        elif i.kind == emit_cpuless.CALL_FAR and i.far_target is not None:
+            # the closure must follow FAR edges too, or check_promotable
+            # refuses the caller with call-abi-composition and the reference
+            # cannot be built for a far-composed core.
+            fkey = "%04X:%04X" % i.far_target
+            _, c = _fresh_mechanical(ir, fkey, _cache)
+            far_callees[i.far_target] = c
+    spec = emit_cpuless.check_promotable(scan, callees=callees,
+                                         far_callees=far_callees)
     src = emit_cpuless.emit_recovered(
-        scan, spec.abi, key, callees=callees,
+        scan, spec.abi, key, callees=callees, far_callees=far_callees,
         recovered_import_base=_MECH_PKG, needs_plat=spec.needs_plat,
         df_livein=spec.df_livein, sp_output=spec.sp_output,
         flags_livein=spec.flags_livein)
