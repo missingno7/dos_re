@@ -124,7 +124,7 @@ def _interp_before_caller_ret(regs, mem, ss):
         cpu.step()
     else:
         raise AssertionError("caller did not reach its ret in budget")
-    return cpu.s
+    return cpu.s, cpu.instruction_count
 
 
 def test_far_retf_n_callee_composes_and_the_caller_stack_balances():
@@ -144,7 +144,16 @@ def test_far_retf_n_callee_composes_and_the_caller_stack_balances():
         _scan(_CALLER, CALLER_OFF), caller_spec.abi) if r not in ("sp", "ss")}
     out, _compat = caller_fn(mem=m_body, ss=ss, sp=sp0, **kw)
 
-    s = _interp_before_caller_ret({**inputs, "sp": sp0}, m_interp, ss)
+    s, interp_ic = _interp_before_caller_ret({**inputs, "sp": sp0}, m_interp, ss)
+
+    # VIRTUAL TIME: the composed body's cost must equal the interpreter's
+    # instruction count over the SAME span -- caller entry, through the composed
+    # callee (its own retf counted in _c['cost']), plus the caller's OWN terminal
+    # ret (the body counts it and the adapter performs the pop; the interp
+    # snapshot is taken one step earlier, before that ret).  A drift here skews
+    # every time-derived observable in a boot-image gate.
+    assert _compat["cost"] == interp_ic + 1, (
+        f"cost drift: body={_compat['cost']} interp+ret={interp_ic + 1}")
 
     # every register agrees; notably SP is balanced back to entry (the far frame
     # AND the two pascal args were popped -- pop_n = 4 + 4).
