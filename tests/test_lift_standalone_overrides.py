@@ -88,3 +88,28 @@ def test_uninstall_restores_rebound_references(corpus):
     S.install_overrides(PKG, {"1010:2000": lambda mem, **kw: ({}, {})})
     S.uninstall_overrides(PKG)
     assert caller.func_1010_2000 is real_callee
+
+
+def test_retro_patch_does_not_clobber_a_delegation_alias(corpus):
+    """The over-broad-rebind bug overkill hit, pinned here so the shared seam
+    cannot reintroduce it.
+
+    An override that DELEGATES needs a reference to the autolifted body. If the
+    retro-patch is keyed only on "holds the original function" it will rebind
+    that reference too -- and then the differential compares the override
+    against ITSELF and still passes, which is the worst possible outcome for a
+    proof mechanism. The rebind must be scoped to the callee's own name.
+    """
+    caller, _callee, _dyn, real_callee = corpus
+    # a port-style oracle alias holding the same function under a DIFFERENT name
+    alias = types.ModuleType(f"{PKG}.oracle_alias")
+    alias.func_1010_2000__generated = real_callee
+    sys.modules[f"{PKG}.oracle_alias"] = alias
+    try:
+        S.install_overrides(PKG, {"1010:2000": lambda mem, **kw: ({}, {})})
+        assert alias.func_1010_2000__generated is real_callee, (
+            "retro-patch clobbered the delegation alias -- an override would "
+            "then be differentialled against itself and still pass")
+        assert S.generated(PKG, "1010:2000") is real_callee
+    finally:
+        sys.modules.pop(f"{PKG}.oracle_alias", None)

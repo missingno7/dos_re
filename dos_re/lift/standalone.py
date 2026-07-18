@@ -296,7 +296,14 @@ def _rebind(package: str, name: str, original, impl) -> None:
 
     ``DISPATCH`` stores module/function NAMES so it resolves late (fine), but ``_dyncall`` memoises the
     resolved closure on first call -- an override installed after the first dynamic transfer to that
-    address would never be seen."""
+    address would never be seen.
+
+    SCOPED TO THE CALLEE'S OWN NAME, deliberately. A delegating override needs a live reference to the
+    autolifted body; a rebind keyed only on "holds the original function" would repoint that reference
+    too, and the differential would then compare the override against ITSELF and still pass -- the worst
+    outcome for a proof mechanism. Overkill hit exactly this when adding the same fix. Ports must reach
+    the original through :func:`generated` (which reads the saved module, never a live binding) rather
+    than caching a direct reference under the callee's own name."""
     import sys
 
     for mod in list(sys.modules.values()):
