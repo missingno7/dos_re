@@ -1482,6 +1482,14 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
     exit_depths: set[int] = set()
     ret_pops: set[int] = set()
     frame_base: int | None = None       # depth at `mov bp,sp` (hand-rolled enter)
+    # An established frame pointer (bp set by the atomic `enter`, or the
+    # hand-rolled `push bp; mov bp,sp`).  A shared-epilogue TAIL DISPATCH relies
+    # on it: the dispatch arm restores this frame with `leave` before its own
+    # return, so a nonzero-depth tail is still a balanced exit (below).  Mirrors
+    # `_check_frame_pointer`'s establish criteria exactly (enter, or push+mov).
+    has_frame = any(i.op == 0xC8 for i in scan.insts.values()) or (
+        any(register_effects(i).frame_establish for i in scan.insts.values())
+        and any(i.op == 0x55 for i in scan.insts.values()))
     while work:
         ip, d = work.pop()
         i = scan.insts[ip]
@@ -1524,7 +1532,21 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
                 exit_depths.add(d if d is not None else 0)
                 ret_pops.add(0)
                 continue
-            if d not in (0, None):  # unknown cannot prove the tail rule
+            # A tail dispatch exits by transferring to a dispatch ARM that runs
+            # its OWN return through THIS function's frame -- the shared-epilogue
+            # idiom a compiler emits for a switch (`jmp cs:[bx*2+table]`, each
+            # arm ending `leave; ret(f)`).  At depth 0 the arm's ret pops our
+            # caller's return frame directly (the balanced case).  At a NONZERO
+            # depth the extra bytes above entry are this function's own frame
+            # (the saved bp + the enter/sub locals): a shared-epilogue arm's
+            # `leave` (mov sp,bp; pop bp) discards EVERYTHING above the frame
+            # base and restores sp to entry before its return, so the exit is
+            # still balanced -- EXACTLY as a fused `leave; ret(f)` in this
+            # function would be.  That unwind needs an established frame pointer
+            # to restore to; without one, a nonzero-depth tail has no frame to
+            # unwind and the exit sp is genuinely unrepresentable -- refuse.  An
+            # UNKNOWN depth (None) likewise cannot prove the balance -- refuse.
+            if d is None or (d != 0 and not has_frame):
                 raise Refusal("tail-dispatch-at-nonzero-depth")
             exit_depths.add(0)
             ret_pops.add(0)
