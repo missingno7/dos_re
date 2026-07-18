@@ -12,7 +12,9 @@ Each edge below was a real one that had to be broken:
     branch), ``.interrupts`` (default deliver);
   * ``keyboard``    -> held BIOS_INT9_ENTRY only in CPU-carrying ``runtime_core``;
   * ``snapshot_headless.capture_dos_state`` -> the state capture used to live
-    inline in ``snapshot.write_snapshot``, which needs a CPU.
+    inline in ``snapshot.write_snapshot``, which needs a CPU;
+  * ``crash``       -> ``.snapshot`` at module level, so the ONE caller that most
+    needs to dump a crash (a runner with no CPU at all) could not import it.
 """
 from __future__ import annotations
 
@@ -23,6 +25,7 @@ CPU_FREE_MODULES = [
     "dos_re.input_demo",
     "dos_re.keyboard",
     "dos_re.snapshot_headless",
+    "dos_re.crash",
     "dos_re.framebuffer",
     "dos_re.memory",
     "dos_re.textmode",
