@@ -248,3 +248,94 @@ def test_fail_fast_raises_at_the_call_but_still_records(corpus):
     with pytest.raises(AssertionError, match="output ax differs"):
         _call()
     assert verdict() is Verdict.MISMATCH
+
+
+# --- the platform is withheld from the candidate ------------------------------
+#
+# Memory can be overlaid; a device write cannot. The generated body performs the
+# real effect, so a candidate that delegates to a platform-touching callee fires
+# it a SECOND time -- while every compared observable agrees, because outputs and
+# memory are identical. Measured in skyroads: 1010:1B49 reaches 1010:03C2, which
+# drives port 0x61, on the arm a real playthrough takes.
+
+PLAT_PKG = "shadow_corpus_plat"
+
+
+class _Speaker:
+    """A platform that RECORDS its effects, so double-firing is countable."""
+
+    def __init__(self):
+        self.ops = []
+
+    def inp(self, port, *a):
+        self.ops.append(("inp", port))
+        return 0
+
+    def outp(self, port, val, *a):
+        self.ops.append(("outp", port, val))
+
+
+def _gen_plat(mem, plat, *, ax=0, ss=0, sp=0, **kw):
+    """Generated-shaped, WITH a platform parameter, and it touches the device."""
+    plat.outp(0x61, 3)
+    mem.ww(ss, (sp - 2) & 0xFFFF, ax)
+    return ({"ax": ax & 0xFFFF}, {"flags": 0, "fmask": 0x8D5, "cost": 7})
+
+
+@pytest.fixture
+def plat_corpus():
+    mod = types.ModuleType(f"{PLAT_PKG}.func_1010_1b49")
+    mod.func_1010_1b49 = _gen_plat
+    pkg = types.ModuleType(PLAT_PKG)
+    sys.modules[PLAT_PKG] = pkg
+    sys.modules[f"{PLAT_PKG}.func_1010_1b49"] = mod
+    reset()
+    yield mod
+    S.uninstall_overrides(PLAT_PKG)
+    reset()
+    sys.modules.pop(PLAT_PKG, None)
+    sys.modules.pop(f"{PLAT_PKG}.func_1010_1b49", None)
+
+
+def _call_plat(plat):
+    from shadow_corpus_plat.func_1010_1b49 import func_1010_1b49
+    return func_1010_1b49(Mem(), plat, ax=0x1234, ss=0x100, sp=0x40)
+
+
+def test_a_candidate_that_touches_the_platform_is_a_mismatch(plat_corpus):
+    """The whole point: this candidate is otherwise PERFECT -- it delegates to the
+    generated body, so every output, flag, cost and memory write agrees -- and it
+    must still be rejected, because it fired the speaker twice."""
+    plat = _Speaker()
+    install_shadows(PLAT_PKG, {"1010:1B49": _gen_plat}, fail_fast=False)
+    _call_plat(plat)
+    rec = record_for("1010:1B49")
+    assert rec.verdict is Verdict.MISMATCH, report()
+    assert "plat.outp" in rec.mismatches[0]
+    assert "not shadowable" in rec.mismatches[0]
+    assert plat.ops == [("outp", 0x61, 3)], (
+        "the generated body's effect must still happen exactly ONCE -- the "
+        "candidate's copy is refused, not merely detected after the fact")
+
+
+def test_a_candidate_that_ignores_the_platform_still_verifies(plat_corpus):
+    """Withholding the platform must not penalise a candidate that never needed
+    it -- otherwise no body of a plat-carrying signature could ever be proven."""
+    def candidate(mem, plat, *, ax=0, ss=0, sp=0, **kw):
+        mem.ww(ss, (sp - 2) & 0xFFFF, ax)
+        return ({"ax": ax & 0xFFFF}, {"flags": 0, "fmask": 0x8D5, "cost": 7})
+
+    plat = _Speaker()
+    install_shadows(PLAT_PKG, {"1010:1B49": candidate})
+    _call_plat(plat)
+    assert verdict() is Verdict.VERIFIED, report()
+    assert plat.ops == [("outp", 0x61, 3)]
+
+
+def test_a_body_with_no_plat_parameter_gets_no_phantom_one(corpus):
+    """_plat_position reads the signature; it must not substitute an argument
+    into a body that never declared one."""
+    from dos_re.lift.shadow import _plat_position
+
+    assert _plat_position(_gen) == -1
+    assert _plat_position(_gen_plat) == 0

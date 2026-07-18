@@ -13,7 +13,7 @@ untouched -- while the candidate runs beside it on the same pre-state and every
 observable is compared. Run a cold-start differential with shadows installed and
 a full playthrough becomes a per-call proof of the candidate.
 
-THREE DESIGN DECISIONS, each paid for by a false green somewhere in this
+FOUR DESIGN DECISIONS, each paid for by a false green somewhere in this
 ecosystem:
 
 1. **The candidate is a DROP-IN, not a checker callback.** Ports previously
@@ -35,6 +35,16 @@ ecosystem:
    "this never happened", and that exact ambiguity has produced wrong
    conclusions here twice. Zero calls is an absence of evidence and must report
    as one.
+
+4. **The candidate does NOT get the platform** (:class:`_NoEffectPlat`). Memory
+   can be overlaid; a device write cannot, and the generated body performs the
+   real one regardless. So a candidate that delegates to a platform-touching
+   callee fires the effect TWICE per call while the comparison agrees perfectly.
+   Measured, not imagined: skyroads' ``1010:1B49`` reaches ``1010:03C2``, which
+   drives port 0x61, on the arm a real playthrough takes. Every ``plat``
+   attribute now raises, so "this address is not shadowable" surfaces as an
+   error on the first call instead of as a perturbed run nobody attributes to
+   the shadow.
 
 Memory is compared as an ORDERED byte-write log. The candidate runs FIRST, on a
 proxy whose reads pass through to the still-untouched machine and whose writes
@@ -242,6 +252,44 @@ class _RecordMem:
         return getattr(self._mem, name)
 
 
+class _NoEffectPlat:
+    """The platform as the CANDIDATE may see it: not at all.
+
+    Memory can be overlaid, so the candidate observes the pre-state and writes
+    nowhere real. A PLATFORM EFFECT cannot be -- ``plat.outp`` reaches a device,
+    not a byte -- and the generated body is going to perform the real one a
+    moment later. A candidate that delegates to a platform-touching callee
+    therefore fires the effect TWICE per call, silently, and the second copy is
+    indistinguishable from the game doing it.
+
+    That is not hypothetical: skyroads' ``1010:1B49`` reaches ``1010:03C2``,
+    which does ``inp(0x61)``/``outp(0x61, 3)`` on the PC speaker, on the arm a
+    real playthrough actually takes. Nothing in the comparison would have shown
+    it -- the outputs would agree perfectly while the run had been perturbed.
+
+    So every attribute is a refusal. An address whose body performs platform
+    effects is simply not shadowable by this instrument, and finding that out is
+    an ERROR at the first call rather than a difference nobody looks for.
+    """
+
+    __slots__ = ("_key",)
+
+    def __init__(self, key: str):
+        self._key = key
+
+    def __getattr__(self, name):
+        def _refuse(*_a, **_k):
+            raise AssertionError(
+                f"shadow {self._key}: the candidate called plat.{name}(...). A "
+                f"shadowed candidate runs BESIDE the generated body, which "
+                f"performs the real effect -- so this would fire it twice and "
+                f"perturb the run the shadow exists to leave untouched. Memory "
+                f"is overlaid; platform effects cannot be. An address whose body "
+                f"performs platform I/O is not shadowable: prove it another way.")
+
+        return _refuse
+
+
 def _diff_memory(want: list, got: list) -> "str | None":
     """First divergence in the ordered byte-write logs, or None."""
     for i, (w, g) in enumerate(zip(want, got)):
@@ -317,14 +365,45 @@ def install_shadows(package: str, candidates: "dict", *, exemptions: "dict" = No
     return install_overrides(package, wrapped)
 
 
+def _plat_position(gen) -> int:
+    """Index in ``*args`` of the generated body's ``plat``, or -1 if it has none.
+
+    The corpus convention is ``func(mem, plat, *, regs...)``, but this reads the
+    signature rather than assuming position: a body with no platform parameter
+    must not have a phantom one substituted.
+    """
+    import inspect
+
+    try:
+        params = list(inspect.signature(gen).parameters.values())
+    except (TypeError, ValueError):                  # builtins, C wrappers
+        return -1
+    positional = [p for p in params
+                  if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    for i, p in enumerate(positional[1:]):           # [0] is mem
+        if p.name == "plat":
+            return i
+    return -1
+
+
 def _make_shadow(package: str, key: str, candidate, rec: ShadowRecord, fail_fast: bool):
     gen = generated(package, key)                    # resolved BEFORE the shadow lands
+    plat_at = _plat_position(gen)
 
     def shadowed(mem, *args, **kw):
-        # Candidate FIRST, on the untouched pre-state, writing only to an overlay.
+        # Candidate FIRST, on the untouched pre-state, writing only to an overlay
+        # -- and with the PLATFORM withheld, because an effect cannot be overlaid
+        # and the generated body is about to perform the real one.
         cand_mem = _OverlayMem(mem)
+        cand_args, cand_kw = args, kw
+        if plat_at >= 0:
+            if len(args) > plat_at:
+                cand_args = (args[:plat_at] + (_NoEffectPlat(key),)
+                             + args[plat_at + 1:])
+            elif "plat" in kw:                       # passed by name, not position
+                cand_kw = dict(kw, plat=_NoEffectPlat(key))
         try:
-            got_o, got_c = candidate(cand_mem, *args, **kw)
+            got_o, got_c = candidate(cand_mem, *cand_args, **cand_kw)
         except Exception as exc:                     # noqa: BLE001 -- classified, not swallowed
             rec.mismatches.append(
                 f"candidate raised {type(exc).__name__}: {exc} where the generated "
