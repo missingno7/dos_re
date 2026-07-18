@@ -206,6 +206,15 @@ def main(argv=None) -> int:
                          "spreading them is the wall-clock lever once the "
                          "cache has removed the redundant work.  Default 1 "
                          "(sequential) -- identical verdicts either way.")
+    ap.add_argument("--include-inconclusive", action="store_true",
+                    help="re-run cores a previous ledger recorded as "
+                         "INCONCLUSIVE.  By default they are skipped and "
+                         "CARRIED FORWARD into the report: a spin-wait core "
+                         "establishes nothing per state, so 64 samples of "
+                         "nothing cost 64x one sample of nothing, and they "
+                         "dominate the corpus runtime.  Skipping never "
+                         "improves the count -- they stay INCONCLUSIVE in the "
+                         "summary, the ledger and the exit status.")
     ap.add_argument("--ledger", default=None,
                     help="always-written per-core verdict ledger (verified / "
                          "inconclusive / mismatch / internal_error).  Distinct "
@@ -335,11 +344,37 @@ def main(argv=None) -> int:
     keys = sorted(keys, key=lambda k: -prev_cost.get(k, 0))
     cost_ms: dict[str, int] = {}
 
+    # CARRY FORWARD known-inconclusive cores instead of re-grinding them.
+    #
+    # These are the spin-waits: every state burns the full iteration cap to
+    # establish nothing, and they dominate wall-clock (one core was 70s of a
+    # 19-minute run).  Re-proving "still unprovable" every cycle buys no
+    # information -- what would change the answer is event modelling, not
+    # another 64 samples.
+    #
+    # They are SKIPPED, never dropped: each is re-reported as inconclusive so
+    # the summary, ledger and exit status are exactly what a full run would
+    # give.  A faster run must not be a rosier one.
+    carried = {}
+    if not args.include_inconclusive and args.ledger             and Path(args.ledger).is_file():
+        try:
+            prev = json.loads(Path(args.ledger).read_text(encoding="utf-8"))
+            carried = dict(prev.get("inconclusive", {}))
+        except Exception:                                    # noqa: BLE001
+            carried = {}
+    if carried:
+        print(f"  carrying forward {len(carried)} INCONCLUSIVE core(s) "
+              f"(pass --include-inconclusive to re-run them)")
+
     # split cached from must-run FIRST, so the parallel path only ever ships
     # real work to workers
     todo = []
     for key in keys:
         stem = key.replace(":", "_").lower()
+        if key in carried:
+            inconclusive[key] = (carried[key] + "  [carried forward; not "
+                                 "re-verified this run]")
+            continue
         sig = _core_sig(key, stem)
         if cache.get(key) == sig:
             cached += 1
