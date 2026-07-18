@@ -1440,6 +1440,83 @@ def _is_sp_snapshot_store(i) -> bool:
         and ((i.modrm >> 3) & 7) == 4 and (i.modrm >> 6) != 3
 
 
+#: general-register index -> name, for `push r16` / `mov r16, imm16` (opcode low 3 bits).
+_GPR16 = ("ax", "cx", "dx", "bx", "sp", "bp", "si", "di")
+
+
+def _manufactured_return(scan, jmp, leader) -> int | None:
+    """The MANUFACTURED-RETURN idiom: ``push <code addr> ; ... ; jmp <indirect>``.
+
+    Returns the pushed offset when this near indirect JMP is a computed CALL --
+    the block put a return address on the stack itself -- and ``None`` when it is
+    an ordinary tail transfer.
+
+    WHY THIS EXISTS.  A near indirect jmp is emitted as a TAIL dispatch: the
+    dispatched arm's ``ret`` is taken to be THIS function's exit, popping our
+    caller's frame.  That is only true when nothing of ours is on top of the
+    stack, i.e. at depth 0.  The arm's ``ret`` returns to WHATEVER IS ON TOP OF
+    THE STACK -- so if the block pushed a word first, the arm returns THERE, back
+    inside this function, and the tail assumption silently drops everything from
+    that address onward.  Silently: the push is emitted faithfully, the
+    continuation is simply never run.
+
+    This is a general x86 construct, not one game's quirk: it is how a compiler
+    (or hand-written dispatcher) emits a CALL whose target comes from a jump
+    table -- push the continuation, then jmp through the table, and let each arm's
+    own ``ret`` deliver control back.  ``0xE8``-style direct calls cannot express
+    a computed target, so the return address is manufactured by hand.
+
+    RECOGNISED TIGHTLY, in the manner of :func:`_is_bootstrap_ss_switch` -- a
+    positive match on the idiom, never an inference from depth alone.  Depth
+    cannot discriminate: the FRAMELESS STACK-ARG tail (a dispatcher that pushes
+    ARGUMENTS the arms pop before returning, see :func:`_check_stack_depths`) also
+    sits at nonzero depth and IS a genuine tail.  What separates them is the
+    pushed VALUE: a manufactured return address is a statically-known code offset
+    in this same function.  So the window from the block leader to the jmp must
+    contain EXACTLY ONE stack-affecting instruction, and it must be a push of a
+    value this function knows statically:
+
+      * ``push imm16``  (0x68), or
+      * ``push r16``    (0x50+r) whose register was last set by ``mov r16, imm16``
+        (0xB8+r) earlier in the same block and not written since.
+
+    Anything else -- more than one stack op, a push of a runtime value, a
+    register whose provenance is not a literal -- returns ``None`` and keeps the
+    existing behaviour, because it is NOT this idiom.  The caller decides what to
+    do with a recognised offset that is not a block of this function; it must not
+    fall through to the silent tail."""
+    if jmp.kind != JMP_IND:
+        return None                         # a CALL_IND pushes its own next_ip
+    insts = scan.insts
+    imm_regs: dict[int, int] = {}           # gpr index -> literal it holds
+    pushed: int | None = None
+    stack_ops = 0
+    ip = leader
+    while ip != jmp.ip:
+        i = insts.get(ip)
+        if i is None:                       # the block does not reach the jmp
+            return None
+        e = register_effects(i)
+        if e.stack_delta:
+            stack_ops += 1
+            if i.op == 0x68 and i.imm is not None:
+                pushed = i.imm & 0xFFFF
+            elif 0x50 <= i.op <= 0x57:
+                pushed = imm_regs.get(i.op - 0x50)
+            else:
+                pushed = None
+        if 0xB8 <= i.op <= 0xBF and i.imm is not None and i.modrm is None:
+            imm_regs[i.op - 0xB8] = i.imm & 0xFFFF   # `mov r16, imm16`
+        else:
+            for r in tuple(imm_regs):                # any other write kills it
+                if _GPR16[r] in e.writes:
+                    del imm_regs[r]
+        ip = i.next_ip
+    if stack_ops != 1:
+        return None
+    return pushed
+
+
 def _is_nonlocal_exit(scan, i) -> bool:
     """``mov sp, m16`` whose every forward path falls straight into a RET --
     a setjmp/longjmp RESTORE: the return happens on a stack frame this
@@ -1593,6 +1670,24 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
     callees = callees or {}
     far_callees = far_callees or {}
     plat_farcalls = plat_farcalls or {}
+    # Block leaders, computed exactly as the emitter does (dispatch arrivals are
+    # forced leaders), so the manufactured-return window below is the SAME basic
+    # block the emitter will scan.  A divergent leader set here would let the
+    # walk and the emitter disagree about whether a jmp is a computed call.
+    _leaders = set(scan.block_leaders()) | set(alt_entries)
+    leader_of: dict[int, int] = {}
+    for _lead in sorted(_leaders):
+        _p = _lead
+        while _p in scan.insts:
+            leader_of[_p] = _lead
+            _nxt = scan.insts[_p].next_ip
+            # a block ends at the next leader, at a non-fallthrough transfer,
+            # or at the end of the scan
+            if _nxt in _leaders or _nxt not in scan.insts \
+                    or scan.insts[_p].kind not in (SEQ, CALL, CALL_FAR,
+                                                   CALL_IND):
+                break
+            _p = _nxt
     depths: dict[int, set[int]] = {scan.entry: {0}}
     work = [(scan.entry, 0)]
     for a in alt_entries:
@@ -1681,6 +1776,21 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
             # and the arm (run via `_dyn`) returns its actual sp in the merged
             # bundle -- exact whether the arm balances or not.  An UNKNOWN depth
             # (None) has no runtime sp to defer to, so it still refuses.
+            # A MANUFACTURED RETURN (`push <addr> ; jmp <indirect>`) is not an
+            # exit at all: the arm's ret consumes the pushed word and control
+            # RESUMES at that address inside this function.  Walk through it as
+            # a call would -- depth drops by the popped word -- so the blocks
+            # reachable only via the resume point get depths and their exits
+            # reach the contract.  Recording it as an exit instead would both
+            # invent an exit depth and leave the whole continuation unwalked.
+            mret = _manufactured_return(scan, i, leader_of.get(i.ip))
+            if mret is not None and mret in scan.insts:
+                after = None if d is None else d - 2
+                seen = depths.setdefault(mret, set())
+                if after not in seen:
+                    seen.add(after)
+                    work.append((mret, after))
+                continue
             if d is None:
                 raise Refusal("tail-dispatch-at-nonzero-depth")
             exit_depths.add(0 if (d == 0 or has_frame) else d)
@@ -2265,10 +2375,23 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 # (jump table) becomes a direct block transfer; an unknown
                 # selector raises UnknownDispatchTarget -- never a fallback.
                 is_call = i.kind == CALL_IND
+                # A MANUFACTURED RETURN makes this jmp a computed CALL: the block
+                # pushed a continuation, so the arm's `ret` lands there, not on
+                # our caller's frame.  See _manufactured_return for why depth
+                # alone cannot decide this and why the tail form is only valid at
+                # depth 0.
+                mret = None if is_call else _manufactured_return(scan, i, leader)
+                if mret is not None and mret not in bb_of:
+                    # We KNOW a return address was manufactured and we know we
+                    # cannot resume at it: it is not a block of this function, so
+                    # there is no local continuation to transfer to.  REFUSE.
+                    # Falling through to the tail form here is precisely the
+                    # silent wrongness this recogniser exists to end.
+                    raise Refusal("manufactured-return-not-local")
                 off = count - 1
                 cost = "_base + _cost" if off == 0 else f"_base + _cost + {off}"
                 blk.append(f"_dt = ({_rm_read(i, True)}) & 0xFFFF")
-                if not is_call:
+                if not is_call and mret is None:
                     blk.append("if _dt in _LOCAL:")
                     blk.append(f"    _cost += {count}")
                     if flag_written:
@@ -2308,6 +2431,29 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                                f"{fname} = (_gf & 0x{fbit:X}) != 0")
                 blk.append("    _fmask |= _gm")
                 blk.append("_cost += _dc['cost']")
+                if mret is not None:
+                    # COMPUTED CALL: the arm's `ret` consumed the word this block
+                    # pushed, so sp rises by 2 exactly as it does after a
+                    # CALL_IND, and control RESUMES at the pushed offset inside
+                    # this function.  (The push itself was already emitted
+                    # literally as an ordinary instruction, so sp is already
+                    # down 2 here -- only the pop is owed.)  The _LOCAL fast path
+                    # is suppressed above on purpose: an intra-function block
+                    # goto cannot express "this arm's ret comes back to mret", so
+                    # every target goes through _dyn as a real callee.  A target
+                    # with no recovered implementation then raises
+                    # UnknownDispatchTarget -- a loud frontier witness, which is
+                    # the correct outcome and not a regression from a silent one.
+                    blk.append("sp = (sp + 2) & 0xFFFF")
+                    blk.append(f"_cost += {count}")
+                    if flag_written:
+                        bits = " | ".join(f"0x{_FLAG_BITS[f]:X}"
+                                          for f in sorted(flag_written))
+                        blk.append(f"_fmask |= {bits}")
+                    blk.append(f"bb = {bb_of[mret]}")
+                    blk.append("continue")
+                    terminated = True
+                    break
                 if is_call:
                     blk.append("sp = (sp + 2) & 0xFFFF")
                     ip = i.next_ip
