@@ -98,9 +98,14 @@ def test_all_states_spinning_is_also_inconclusive():
     assert rep["status"] == "inconclusive"
 
 
-def test_some_normal_states_make_it_verified():
-    """A core that spins on SOME states but compares normally on others does
-    have positive evidence, so it must not be demoted to inconclusive."""
+def test_mixed_spin_and_normal_states_stay_INCONCLUSIVE():
+    """UNIVERSAL aggregation: the worst state decides.
+
+    Positive evidence for one input does not resolve the inputs that
+    established nothing.  An earlier existential rule made one normal match
+    plus 63 matching faults a VERIFIED core -- and an earlier version of this
+    test asserted exactly that.  Second time a wrong policy was written INTO
+    a test, which is the worst place for one: it then defends itself."""
     n = {"i": 0}
 
     def mech(mem, *, _base=0, **kw):
@@ -115,8 +120,28 @@ def test_some_normal_states_make_it_verified():
         return (), {"flags": 0, "fmask": 0, "cost": 0}
 
     rep = diff_one(mech, abi, _PROPOSAL, states=8)
+    assert rep["status"] == "inconclusive"
+    assert rep["normal_states"] > 0, "some states DID compare"
+    assert rep["ok"] is False
+
+
+def test_all_states_normal_is_verified():
+    """The only route to verified: every state compared fully."""
+    rep = diff_one(_mech(), _abi(), _PROPOSAL, states=8)
     assert rep["status"] == "verified"
-    assert rep["normal_states"] > 0
+    assert rep["ok"] is True
+    assert rep["exit_code"] == 0
+
+
+def test_ok_is_derived_from_the_verdict_not_from_mismatches():
+    """`ok` used to be `not mismatches`, so an inconclusive core handed every
+    caller of the compatibility field the original false green."""
+    rep = diff_one(_mech(raise_with=_SPIN), _abi(raise_with=_SPIN),
+                   _PROPOSAL, states=4)
+    assert rep["mismatches"] == []
+    assert rep["status"] == "inconclusive"
+    assert rep["ok"] is False, "empty mismatches must not mean success"
+    assert rep["exit_code"] == 2
 
 
 def test_every_requested_state_is_driven():

@@ -110,7 +110,10 @@ def test_a_worker_error_is_reported_not_silently_dropped(corpus, capsys):
     rc = _run(corpus, "--jobs", "2")
     out = capsys.readouterr().out
     assert rc != 0
-    assert "MISMATCHED" in out and "verifier raised" in out
+    # a verifier crash is INTERNAL_ERROR (exit 3), not a divergence: the
+    # tooling failed, which proves nothing about the core either way
+    assert rc == 3, f"expected internal-error exit, got {rc}"
+    assert "VERIFIER ERRORS" in out and "verifier raised" in out
 
 
 def test_iter_cap_is_forwarded_to_the_pool(corpus):

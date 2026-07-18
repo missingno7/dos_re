@@ -36,7 +36,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path.cwd()))
 
 from dos_re.lift import emit_cpuless  # noqa: E402
-from dos_re.lift.abi_diff import diff_one  # noqa: E402
+from dos_re.lift.abi_diff import (  # noqa: E402
+    INCONCLUSIVE, INTERNAL_ERROR, MISMATCH, VERDICT_EXIT,
+    VERIFIED, aggregate, diff_one, verdict_name)
 from dos_re.lift.contracts import scan_for  # noqa: E402
 
 _MECH_PKG = "_abidiff_mech"       # temp package the fresh mechanical closure loads under
@@ -161,7 +163,7 @@ def _verify_one(key: str):
     except Exception as e:                                   # noqa: BLE001
         # a worker crash must be a REPORTED failure, never a silently
         # missing core -- that would look identical to a pass
-        return key, {"ok": False, "raised": 0,
+        return key, {"ok": False, "raised": 0, "status": "internal-error",
                      "mismatches": [f"verifier raised "
                                     f"{type(e).__name__}: {e}"]}, 0.0
     return key, rep, (_time.time() - t0) * 1000.0
@@ -294,6 +296,7 @@ def main(argv=None) -> int:
     slow: list[tuple[float, str]] = []
     failures: dict[str, list[str]] = {}
     inconclusive: dict[str, str] = {}
+    internal: dict[str, str] = {}
     mech_cache: dict = {}
     fresh_ok: dict[str, str] = {}
 
@@ -358,16 +361,18 @@ def main(argv=None) -> int:
                 raised_states += rep.get("raised", 0)
                 if rep.get("note"):
                     spin_notes.append(f"{key}: {rep['note']}")
-                if rep.get("status") == "verified":
+                st = rep.get("status")
+                if st == "internal-error":
+                    internal[key] = rep["mismatches"][0]
+                elif st == "verified":
                     passed += 1
                     fresh_ok[key] = sigs[key]
-                elif rep.get("status") == "inconclusive":
+                elif st == "inconclusive":
                     inconclusive[key] = rep.get("note", "inconclusive")
                 else:
                     failures[key] = rep["mismatches"][:3]
                 print(f"  [{done_n}/{len(futs)}] {key} "
-                      f"{'ok' if rep['ok'] else 'MISMATCH'} {dt/1000.0:.1f}s",
-                      flush=True)
+                      f"{st or 'mismatch'} {dt/1000.0:.1f}s", flush=True)
         except FutTimeout:
             timed_out = True
             # A budget breach is a REPORTED outcome, never a silent pass: the
@@ -432,7 +437,7 @@ def main(argv=None) -> int:
             # failure: the same corpus produced a crash or a verdict depending
             # only on how it was scheduled.  Scheduling must never change what
             # is concluded -- found by the test asserting exactly that.
-            rep = {"ok": False, "status": "mismatch", "raised": 0,
+            rep = {"ok": False, "status": "internal-error", "raised": 0,
                    "mismatches": [f"verifier raised {type(e).__name__}: {e}"]}
         dt = (time.time() - t0) * 1000.0
         cost_ms[key] = int(dt)
@@ -441,7 +446,12 @@ def main(argv=None) -> int:
         raised_states += rep["raised"]
         if rep.get("note"):
             spin_notes.append(f"{key}: {rep['note']}")
-        if rep.get("status") == "verified":
+        if rep.get("status") == "internal-error":
+            # NOT a mismatch: the verifier failed, which proves nothing about
+            # the core either way.  Collapsing the two would report a tooling
+            # bug as a recovery defect.
+            internal[key] = rep["mismatches"][0]
+        elif rep.get("status") == "verified":
             passed += 1
             fresh_ok[key] = sig
         elif rep.get("status") == "inconclusive":
@@ -467,7 +477,7 @@ def main(argv=None) -> int:
         # Reported prominently: these are NOT verified, and a reader who sees
         # only a green line would otherwise count them as such.
         print(f"  INCONCLUSIVE             {len(inconclusive):4d}"
-              f"   (every state raised; no return/compat ever compared)")
+              f"   (some state established nothing -- NOT proven equivalent)")
         for key, note in sorted(inconclusive.items())[:8]:
             print(f"    {key}: {note}")
     if failures:
@@ -476,7 +486,6 @@ def main(argv=None) -> int:
             print(f"    {key}:")
             for m in ms:
                 print(f"      {m}")
-        return 1
     # STALENESS: a long run is a run the tree can move underneath.  These
     # verdicts describe the sources as they were when the run STARTED; if an
     # emitter edit or a re-emission landed since, they describe a tree that no
@@ -487,10 +496,39 @@ def main(argv=None) -> int:
               "(emitter edit or re-emission).  The verdicts above describe "
               "the tree as it was at START and are NOT published.  Re-run "
               "against the settled tree.")
-        return 2
-    if cache_path is not None:
-        # Only a fully GREEN run may publish a cache: otherwise a core that
-        # failed here could be recorded as verified and skipped next time.
+        # distinct from the verdict codes (0/1/2/3): staleness is not a
+        # statement about the corpus at all
+        return 4
+    # ONE verdict decides the exit status, the summary AND cache publication.
+    # Previously each was derived independently: an inconclusive run printed a
+    # caveat, returned 0, and still published a cache -- so `subprocess.run(
+    # ..., check=True)`, CI and any shell chain read it as success.
+    if internal:
+        print(f"  VERIFIER ERRORS          {len(internal):4d}"
+              f"   (tooling failed; proves nothing about these cores)")
+        for k, msg in sorted(internal.items())[:5]:
+            print(f"    {k}: {msg}")
+    run_verdict = aggregate(
+        [INTERNAL_ERROR] * bool(internal)
+        + [MISMATCH] * bool(failures)
+        + [INCONCLUSIVE] * bool(inconclusive)
+        + [VERIFIED])
+    if run_verdict == VERIFIED:
+        print("ABI-CORE DIFFERENTIAL PASSED: every de-stacked core IS its "
+              "mechanical function on every driven state.")
+    elif run_verdict == INCONCLUSIVE:
+        print(f"ABI-CORE DIFFERENTIAL INCONCLUSIVE: {passed} verified, "
+              f"{len(inconclusive)} established nothing.  No core diverged, "
+              f"but this run does NOT prove the corpus equivalent.")
+    elif run_verdict == MISMATCH:
+        print(f"ABI-CORE DIFFERENTIAL FAILED: {len(failures)} core(s) "
+              f"diverged.")
+    else:
+        print(f"ABI-CORE DIFFERENTIAL ERRORED: the verifier failed on "
+              f"{len(internal)} core(s); no conclusion about the corpus.")
+    # Only a fully VERIFIED run may publish -- the invariant the adjacent
+    # comment already claimed while the code published partial results.
+    if cache_path is not None and run_verdict == VERIFIED:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(
             {"_notice": "GENERATED by dos_re tools/abi_core_verify.py -- "
@@ -498,20 +536,13 @@ def main(argv=None) -> int:
                         "--full via scripts/abi_build.py) to force a full "
                         "re-verification.",
              "tool_sig": tool_sig, "states": args.states,
-             # per-core wall-clock, so the next run can start with the long
-             # poles instead of discovering them last
-             "cost_ms": {**prev_cost, **{k: v for k, v in cost_ms.items()}},
+             "cost_ms": {**prev_cost, **cost_ms},
              "verified": dict(sorted(fresh_ok.items()))},
             indent=1) + "\n", encoding="utf-8")
         print(f"  cache: {len(fresh_ok)} verified entries -> {cache_path}")
-    if inconclusive:
-        print(f"ABI-CORE DIFFERENTIAL: {passed} verified, "
-              f"{len(inconclusive)} INCONCLUSIVE (not established as "
-              f"equivalent, not cached).  No core diverged.")
-    else:
-        print("ABI-CORE DIFFERENTIAL PASSED: every de-stacked core IS its "
-              "mechanical function on every driven state.")
-    return 0
+    elif cache_path is not None:
+        print(f"  cache NOT published ({verdict_name(run_verdict)} run)")
+    return VERDICT_EXIT[run_verdict]
 
 
 if __name__ == "__main__":
