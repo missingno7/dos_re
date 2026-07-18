@@ -509,6 +509,7 @@ def _core_alias(stem: str) -> str:
 def emit_abi_core(scan, proposal: dict, key: str, *,
                   name: str | None = None,
                   callees=None, far_callees=None, abi_base: str = "",
+                  mech_shape=None,
                   boundary_addrs=frozenset(),
                   dispatch_addrs=frozenset()) -> tuple[str, CoreContract]:
     """Generate the TRUE ABI-recovered core module for one composable
@@ -799,6 +800,11 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
                             returns=tuple(returns), df_livein=df_livein,
                             exit_flags=frozenset(exit_flags),
                             needs_plat=needs_plat, flags_livein=flags_livein)
+    if mech_shape is not None:
+        # INTEGRATION: a mechanical-shaped entry in the same module, so the
+        # still-mechanical graph can call this core through the proven
+        # sys.modules seam.
+        L.extend(emit_integration_adapter(key, contract, mech_shape))
     return "\n".join(L), contract
 
 
@@ -844,6 +850,144 @@ def _emit_composed_call(blk, c: CoreContract, count) -> None:
                    f"{fname} = (_gf & 0x{fbit:X}) != 0")
     blk.append("    _fmask |= _gm")
     blk.append("_cost += _c['cost']")
+
+
+@dataclass(frozen=True)
+class MechShape:
+    """The MECHANICAL contract an integration adapter must present, so the
+    still-mechanical rest of the graph can call a de-stacked core without
+    knowing it is one.  Sourced from emit_cpuless.check_promotable, never
+    guessed."""
+    inputs: tuple          # register kwargs the mechanical entry accepts
+    outputs: tuple         # registers the mechanical entry must return
+    needs_plat: bool
+    df_livein: bool
+    flags_livein: bool
+
+
+def emit_integration_adapter(key: str, contract: CoreContract,
+                             shape: MechShape) -> list[str]:
+    """A MECHANICAL-shaped entry (`func_CCCC_IIII`) over the de-stacked core.
+
+    Integration seam: the runtime graph is still mechanical, so a caller
+    passes register keywords and expects a register-keyed output dict.  This
+    adapter accepts exactly that, calls the core positionally, and rebuilds
+    the mechanical shape.  Substituting it through ``sys.modules`` is the
+    same seam the contract-proof shadows already proved end to end.
+
+    DROPPED OUTPUTS.  The mechanical contract returns registers the core
+    deliberately does not (the census proved no caller observes them).  The
+    adapter returns the ENTRY value for those -- a pass-through.  That is
+    exactly what the poison shadows validated: they XOR-perturbed the same
+    registers and the demo stayed oracle-clean over 964 boundaries, so no
+    observer exists to notice either substitution.
+
+    The adapter is MIGRATION SCAFFOLDING: it reintroduces the register-dict
+    surface at this boundary on purpose, and must be deleted when the whole
+    runtime closure is cores.  Its count is the metric that has to reach 0.
+    """
+    L: list[str] = []
+    A = L.append
+    mech = f"func_{_stem(key)}"
+    args = ["mem"] + (["plat"] if shape.needs_plat else [])
+    kw = (["_base=0"] if shape.needs_plat else []) \
+        + (["_df=0"] if shape.df_livein else []) \
+        + (["_flags_in=2"] if shape.flags_livein else []) \
+        + [f"{r}=0" for r in shape.inputs]
+    A('')
+    A('')
+    A(f"def {mech}({', '.join(args)}"
+      + (f", *, {', '.join(kw)}" if kw else "") + "):")
+    A(f'    """MECHANICAL-shaped entry over the de-stacked core [{key}].')
+    A('    Integration scaffolding -- delete when the closure is all cores.')
+    A('    Registers the core does not return are passed through: the census')
+    A('    proved no caller observes them, and the poison shadows confirmed')
+    A('    it end to end on the demo."""')
+    # forward only what the core actually takes
+    fwd = list(contract.inputs)
+    missing = [r for r in fwd if r not in shape.inputs]
+    if missing:
+        raise Refusal("adapter-missing-core-input: " + ",".join(missing))
+    call = ["mem, plat"] if contract.needs_plat else ["mem"]
+    call += list(fwd)
+    if contract.needs_plat:
+        call.append("_base=_base")
+    # The core may take flag/direction live-ins the MECHANICAL entry does not
+    # expose: the core's caller-set is wider than this one function's.  Where
+    # the shipped entry has no such parameter its body opens with every flag
+    # clear (`cf = pf = ... = False`), so the equivalent live-in is the
+    # all-clear encoding -- 2 for the flags word (bit 1 is the reserved
+    # always-set bit) and 0 for df.  Referencing the NAME instead emitted
+    # `_flags_in=_flags_in` against a signature that never declared it: a
+    # NameError on every call, swallowed by the runner's `except
+    # BaseException`, leaving park_state None.  All 8 integration culprits
+    # were this one line.
+    if contract.df_livein:
+        call.append("_df=_df" if shape.df_livein else "_df=0")
+    if contract.flags_livein:
+        call.append("_flags_in=_flags_in" if shape.flags_livein
+                    else "_flags_in=2")
+    A(f"    _o, _c = _abi_core({', '.join(call)})")
+    pairs = []
+    for r in shape.outputs:
+        if r in contract.returns:
+            pairs.append(f"'{r}': _o[{contract.returns.index(r)}]")
+        elif r in shape.inputs:
+            pairs.append(f"'{r}': {r} & 0xFFFF")   # unobserved: pass through
+        else:
+            pairs.append(f"'{r}': 0")              # unobserved and unbound
+    A("    return {" + ", ".join(pairs) + "}, _c")
+    return L
+
+
+def emit_core_loader(keys: list[str], *, abi_base: str,
+                     import_base: str) -> str:
+    """Loader that substitutes each de-stacked core's MECHANICAL adapter for
+    its mechanical module -- the integration switch.
+
+    Same two seams as the contract-proof shadow loader: a ``sys.modules``
+    alias for later imports, plus a retro-patch of already-materialised
+    module-level bindings (mechanical modules bind their callees at import,
+    so a core's own transitive imports would otherwise bypass later
+    substitutions).  A core's binding of ITSELF is left alone: its composed
+    ABI callees are already direct core-to-core calls."""
+    stems = ", ".join(f'"{_stem(k)}"' for k in sorted(keys))
+    return "\n".join([
+        '"""AUTOGENERATED by dos_re.lift.emit_abi -- INTEGRATION loader.',
+        '',
+        'Substitutes the de-stacked ABI cores for their mechanical modules so',
+        'the game actually RUNS on them.  Until this is installed the cores',
+        'are proven only in isolation.  DO NOT hand-edit; regenerate.',
+        '"""',
+        '',
+        'import importlib',
+        'import sys',
+        '',
+        f'STEMS = ({stems},)',
+        '',
+        '',
+        'def install_cores(stems=STEMS):',
+        '    """Substitute every de-stacked core. Returns (n, patched)."""',
+        '    cores = {}',
+        '    for s in stems:',
+        f'        cores[s] = importlib.import_module("{abi_base}.core_" + s)',
+        '    for s, mod in cores.items():',
+        f'        sys.modules["{import_base}.func_" + s] = mod',
+        '    spaces = []',
+        '    for name, m in list(sys.modules.items()):',
+        f'        if m is not None and name.startswith("{import_base}."):',
+        '            spaces.append((None, m.__dict__))',
+        '    patched = 0',
+        '    for owner, ns in spaces:',
+        '        for s, mod in cores.items():',
+        '            f = "func_" + s',
+        '            repl = getattr(mod, f, None)',
+        '            if repl is not None and f in ns and ns[f] is not repl:',
+        '                ns[f] = repl',
+        '                patched += 1',
+        '    return len(cores), patched',
+        '',
+    ])
 
 
 def emit_shadow_loader(keys: list[str], *, abi_base: str,
