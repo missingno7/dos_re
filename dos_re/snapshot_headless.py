@@ -72,6 +72,75 @@ def load_snapshot_headless(
     return rt
 
 
+def capture_dos_state(dos, memory) -> dict:
+    """Serialise the DOS/EGA/PIT/OPL/console machine state to a plain dict.
+
+    The exact inverse of :func:`_restore_dos_state`, and like it CPU-FREE: it
+    reads only the device model and the memory's EGA latch/mode state, never a
+    CPU.  :func:`dos_re.snapshot.write_snapshot` builds its ``"dos"`` section
+    from this, and a CPU-free backend (the CPUless runtime) can persist its own
+    machine state for a post-mortem without an interpreter existing.
+
+    Keep the key set in lockstep with ``_restore_dos_state``: a field captured
+    here but not restored there is silently lost on reload.
+    """
+    return {
+        "video_mode": dos.video_mode,
+        "video_page": dos.video_page,
+        "text_mode_active": dos.text_mode_active,
+        "cursor_row": dos.cursor_row,
+        "cursor_col": dos.cursor_col,
+        "ticks": dos.ticks,
+        "vga_status_reads": dos.vga_status_reads,
+        "vga_palette": [list(rgb) for rgb in getattr(dos, "vga_palette", [])],
+        "dac_write_index": getattr(dos, "_dac_write_index", 0),
+        "dac_read_index": getattr(dos, "_dac_read_index", 0),
+        "dac_component": getattr(dos, "_dac_component", 0),
+        "dac_latch": list(getattr(dos, "_dac_latch", [])),
+        "pit_channel2_access": dos._pit_channel2_access,
+        "pit_channel2_latch": dos._pit_channel2_latch,
+        "pit_channel2_write_low": dos._pit_channel2_write_low,
+        "pit_channel2_reload": dos.pit_channel2_reload,
+        "pit_channel0_access": getattr(dos, "_pit_channel0_access", 3),
+        "pit_channel0_latch": getattr(dos, "_pit_channel0_latch", 0),
+        "pit_channel0_write_low": getattr(dos, "_pit_channel0_write_low", True),
+        "pit_channel0_reload": getattr(dos, "pit_channel0_reload", 0),
+        "pit_channel0_anchor_ticks": getattr(dos, "pit_channel0_anchor_ticks", 0),
+        "speaker_control": dos.speaker_control,
+        "opl_selected_register": dos.opl_selected_register,
+        "opl_status": dos.opl_status,
+        "opl_registers": {f"{reg:02X}": value
+                          for reg, value in sorted(dos.opl_registers.items())},
+        "ega_planar": memory.ega_planar,
+        "ega_map_mask": memory.ega_map_mask,
+        "ega_read_plane": memory.ega_read_plane,
+        "ega_data_rotate": getattr(memory, "ega_data_rotate", 0),
+        "ega_logical_op": getattr(memory, "ega_logical_op", 0),
+        "ega_write_mode": getattr(memory, "ega_write_mode", 0),
+        "ega_set_reset": getattr(memory, "ega_set_reset", 0),
+        "ega_enable_set_reset": getattr(memory, "ega_enable_set_reset", 0),
+        "ega_bit_mask": getattr(memory, "ega_bit_mask", 0xFF),
+        "ega_latches": list(getattr(memory, "ega_latches", [0, 0, 0, 0])),
+        "ega_display_start": memory.ega_display_start,
+        "next_alloc_segment": dos.next_alloc_segment,
+        "allocation_limit_segment": dos.allocation_limit_segment,
+        "allocations": {f"{seg:04X}": size
+                        for seg, size in sorted(dos.allocations.items())},
+        "open_files": {
+            str(handle): {"path": str(f.path), "pos": f.pos, "size": len(f.data)}
+            for handle, f in dos.files.items()
+        },
+        # Console input state IS machine state: a demo recorded across a
+        # console-read boot (Lemmings' machine-type menu) replays from its
+        # start snapshot and blocks forever if the queued keys vanish.
+        "key_queue": list(getattr(dos, "key_queue", ())),
+        "pending_console_scancode": getattr(dos, "pending_console_scancode", None),
+        "console_input_fallback": getattr(dos, "console_input_fallback", None),
+        "stdout_tail": "".join(dos.stdout)[-4096:],
+        "port_log_tail": dos.port_log[-128:],
+    }
+
+
 def _restore_dos_state(rt: Runtime, dos_meta: dict) -> Runtime:
     """Apply the persisted DOS/EGA/PIT/OPL/console state onto a built runtime.
 

@@ -189,11 +189,12 @@ def create_runtime_from_image(
 # vector, or reading the CRTC base port at 0040:0063).  None of this is
 # program-specific — it is the power-on environment any DOS binary expects.
 _BIOS_IRET_STUB = 0xFFF53  # F000:FF53, the conventional BIOS dummy IRET
-# Dedicated power-on INT 09h (IRQ1) entry.  IVT[9] points here so a game that
-# saves and chains to "the previous keyboard ISR" reaches the native BIOS
-# keyboard handler installed at this address (create_runtime).  F000:E987 is the
-# classic IBM BIOS INT 9 entry point.
-BIOS_INT9_ENTRY = (0xF000, 0xE987)
+# The power-on INT 09h (IRQ1) entry IVT[9] points at (create_runtime installs the
+# native BIOS keyboard handler there, so a game that chains to "the previous
+# keyboard ISR" reaches it).  Defined in the CPU-FREE dos_re.keyboard leaf and
+# re-exported here: CPU-free front-ends need it to test whether a game installed
+# its own INT 09h, and must not import this CPU-carrying module to get it.
+from .keyboard import BIOS_INT9_ENTRY  # noqa: E402  (re-export)
 _BIOS_INT9_LINEAR = 0xFE987
 
 

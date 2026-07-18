@@ -13,9 +13,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
-from .interrupts import deliver_scancode
-from .runtime import Runtime
-from .snapshot import write_snapshot
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:                       # type-only: see the note below
+    from .runtime import Runtime
+
+# This module is a DATA layer -- it reads and writes demo JSON -- and is kept
+# CPU-FREE so a CPU-free backend can record and replay demos.  (The CPUless
+# runtime records every session so a crash can be reproduced; importing a
+# CPU-carrying module here would breach its hard wall.)  The three edges that
+# used to reach the interpreter are all avoidable and now resolve lazily:
+#   * ``Runtime``          -- type hints only, so TYPE_CHECKING above;
+#   * ``write_snapshot``   -- only on the branches that write a start snapshot;
+#   * ``deliver_scancode`` -- only the DEFAULT delivery, so it is resolved when
+#     a caller does not supply its own ``deliver`` (the CPU-free callers do).
+def _default_deliver(rt, scancode: int) -> None:
+    from .interrupts import deliver_scancode
+    deliver_scancode(rt, scancode)
 
 # v2 adds "mouse" events (normalized u/v position + Microsoft button mask,
 # applied via ``rt.dos.set_mouse_norm`` on replay).  v1 keyboard-only demos
@@ -151,6 +165,7 @@ class InputDemoRecorder:
         self._stopped_at = ""
         if write_start_snapshot:
             self.snapshot_dir = self.demo_dir / self.snapshot_name
+            from .snapshot import write_snapshot
             write_snapshot(rt, self.snapshot_dir, status="input demo start snapshot",
                            steps=rt.cpu.instruction_count, trace_tail=())
         else:
@@ -335,6 +350,7 @@ class InputDemoPlayback:
         out = root / f"demo_{_safe_demo_name(name)}_{stamp}"
         snapshot_dir = out / snapshot_name
         out.mkdir(parents=True, exist_ok=True)
+        from .snapshot import write_snapshot
         write_snapshot(rt, snapshot_dir, status=status, steps=rt.cpu.instruction_count, trace_tail=trace_tail)
 
         base_boundary = max(0, int(boundary))
@@ -417,10 +433,10 @@ class InputDemoPlayback:
             return boundary >= end
         return self.exhausted
 
-    def apply_to_runtime(self, boundary: int, rt: Runtime, *, deliver: Callable[[Runtime, int], None] = deliver_scancode, single: bool = False) -> int:
+    def apply_to_runtime(self, boundary: int, rt: Runtime, *, deliver: Callable[[Runtime, int], None] = _default_deliver, single: bool = False) -> int:
         return self.apply_to_runtimes(boundary, (rt,), deliver=deliver, single=single)
 
-    def apply_to_runtimes(self, boundary: int, runtimes: Sequence[Runtime], *, deliver: Callable[[Runtime, int], None] = deliver_scancode, single: bool = False) -> int:
+    def apply_to_runtimes(self, boundary: int, runtimes: Sequence[Runtime], *, deliver: Callable[[Runtime, int], None] = _default_deliver, single: bool = False) -> int:
         """Deliver due demo events (boundary <= ``boundary``) to each runtime.
 
         With ``single=True`` deliver **at most one** event this call.  Callers pass
