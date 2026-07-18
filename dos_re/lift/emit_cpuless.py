@@ -1933,6 +1933,12 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
         A(f"from {recovered_import_base}._dyncall import ivec_exec as _ivec")
     A("")
     A("_PARITY = tuple((1 - bin(v).count('1') % 2) == 1 for v in range(256))")
+    A("#: spin-detector cap.  Production keeps it high to catch a genuine")
+    A("#: unbounded wait; the seeded differential lowers it (both sides")
+    A("#: identically), because 'both hit the cap' is the same evidence")
+    A("#: at a fraction of the cost -- a 20M-iteration spin-wait ran the")
+    A("#: 143-core corpus past 15 minutes at only 4 states.")
+    A(f"_ITER_CAP = {_DISPATCH_ITER_CAP}")
     if alt_entries:
         A("")
         A("#: dynamic-arrival ALTERNATE ENTRIES (recovery-fact dispatch")
@@ -1984,7 +1990,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
     B("_iters = 0")
     B("while True:")
     B(f"    _iters += 1")
-    B(f"    if _iters > {_DISPATCH_ITER_CAP}:")
+    B(f"    if _iters > _ITER_CAP:")
     B(f"        raise RuntimeError('CPUless dispatch spin in {key} "
       f"(block %d, cost %d): loop exceeded {_DISPATCH_ITER_CAP} iterations "
       f"-- an unbounded wait (interrupt-updated flag, or a wrong port after "

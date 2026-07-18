@@ -85,6 +85,59 @@ _STACK_FAMILY_OPS = (frozenset(range(0x50, 0x60)) | frozenset({0x06, 0x0E,
                      0x9C, 0x9D, 0xC8, 0xC9}))
 
 
+#: Offsets below this in the stack segment are the program's own globals, not
+#: stack.  The small-model layout puts globals at the bottom of the segment and
+#: the stack at the top growing down; Lemmings boots sp = 0x4AF4 and every
+#: ss:-override in the corpus targets 0x00-0x10.  The same constant guards the
+#: dead-stack mask in scripts/acceptance_cpuless.py (STACK_DATA_FLOOR), where
+#: tests/test_dead_stack_mask.py asserts ss:[0x00,0x02,0x06,0x10] stay
+#: comparable -- i.e. that they are real data.
+SS_GLOBALS_FLOOR = 0x200
+
+
+def ss_globals_only(scan, floor: int = SS_GLOBALS_FLOOR):
+    """For a function that DOES use the machine stack: are all of its
+    ``ss:``-override accesses constant-offset globals below ``floor``?
+
+    Returns ``(True, offsets)`` when every explicit ``ss:`` access is a
+    constant displacement below the floor, else ``(False, reason)``.
+
+    Why this is sound for a DE-STACKED core.  ``ss_is_data_segment`` refuses a
+    function that does BOTH stack traffic and ss-addressed data, because in the
+    mechanical form the two genuinely share one segment and cannot be told
+    apart.  In the de-stacked form they can: the core's machine stack has
+    become Python locals and it writes NO stack memory at all, so the only
+    surviving ss accesses are these globals.  The two uses are disjoint by
+    construction -- the live stack sits near the top of the segment, these
+    offsets are at the bottom -- so ``ss`` is free to be an ordinary
+    data-segment parameter.
+
+    Refusal-first: a COMPUTED ss address (``ss:[bx]``, ``ss:[si]``) could reach
+    anywhere including the live frame, so it is refused rather than assumed
+    small.  That is a different capability from the constant-offset case and
+    deserves its own name -- ``stack-addressed-memory`` is a misnomer for the
+    globals and should not cover them.
+    """
+    offs = set()
+    for i in scan.insts.values():
+        if not any(p == 0x36 for p in i.prefixes):
+            continue
+        if 0xA0 <= i.op <= 0xA3:              # moffs: offset is the immediate
+            off = i.imm
+        elif i.modrm is not None and i.mod == 0 and i.rm == 6:
+            off = i.disp                      # [disp16]
+        else:
+            return False, "computed-ss-address"
+        if off is None:
+            return False, "computed-ss-address"
+        if off >= floor:
+            return False, f"ss-offset-above-globals-floor:{off:#06x}"
+        offs.add(off)
+    if not offs:
+        return False, "no-ss-globals"
+    return True, frozenset(offs)
+
+
 def ss_is_data_segment(scan) -> bool:
     """True when this function uses ``ss`` ONLY as an ordinary segment
     selector for memory operands, never as a stack.
@@ -527,9 +580,15 @@ class ContractProposal:
     pointer_pairs: tuple = ()     # (("ds","si",count), ...)
     notes: tuple = ()
     refusals: tuple = ()          # structured {reason, evidence}
+    #: slice 9: this function reaches globals through ss WHILE also using the
+    #: machine stack.  The differential needs this: with ss semantic it stops
+    #: shadowing stack traffic, and for these functions there IS stack traffic
+    #: to shadow.  None means ss is not an ss-globals selector.
+    ss_globals_floor: int | None = None
 
     def as_json(self) -> dict:
         d = {"key": self.key, "params": list(self.params),
+             "ss_globals_floor": self.ss_globals_floor,
              "returns": list(self.returns),
              "returns_status": self.returns_status,
              "dropped_outputs": list(self.dropped_outputs),
@@ -669,7 +728,13 @@ def infer_contracts(ir: dict, *, external: frozenset = frozenset(),
         # the emitter materialises it as a local.  ss is machine UNLESS this
         # function uses it purely as a data-segment selector (see
         # ss_is_data_segment), in which case it is an ordinary segment input.
-        machine_regs = (frozenset({"sp"}) if ss_is_data_segment(scan)
+        # ss is machine UNLESS this function uses it as a data selector: either
+        # purely (ss_is_data_segment) or -- slice 9 -- alongside real stack
+        # traffic but only at constant offsets below the globals floor, which a
+        # de-stacked core cannot confuse with its frame.
+        ss_globals_ok = ss_globals_only(scan)[0]
+        ss_semantic = ss_is_data_segment(scan) or ss_globals_ok
+        machine_regs = (frozenset({"sp"}) if ss_semantic
                         else MACHINE_REGS)
         machinery = sorted((inputs & (machine_regs | frozenset({"cs"})))
                            | ({"bp"} if stack.framed and "bp" in inputs
@@ -689,6 +754,7 @@ def infer_contracts(ir: dict, *, external: frozenset = frozenset(),
             pointer_pairs=tuple((s, r, n) for (s, r), n
                                 in sorted(pairs.items())),
             notes=tuple(klist),
+            ss_globals_floor=(SS_GLOBALS_FLOOR if ss_globals_ok else None),
             refusals=tuple(refusals))
 
     promotable = sorted(k for k, p in proposals.items() if not p.refusals)

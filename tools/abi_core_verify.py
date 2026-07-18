@@ -59,6 +59,17 @@ def _mech_contract(scan, spec, name):
         parks=spec.parks)
 
 
+def _promote_toolchain_sig():
+    """The emitter generation, as abi_promote computes it -- imported rather
+    than reimplemented, so the two can never drift apart."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from abi_promote import _toolchain_sig
+        return _toolchain_sig()
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
 def _fresh_mechanical(ir: dict, key: str, _cache: dict):
     """Emit + load the mechanical reference for one function -- and, bottom-up,
     every function it reaches by NEAR call -- from the IR with the CURRENT
@@ -104,6 +115,43 @@ def _fresh_mechanical(ir: dict, key: str, _cache: dict):
     return fn, contract
 
 
+
+#: worker-side state, populated once per process by _pool_init
+_W: dict = {}
+
+
+def _pool_init(ir, census, abi_base, states):
+    """Load the heavy inputs ONCE per worker, not once per core."""
+    _W["ir"] = ir
+    _W["census"] = census
+    _W["abi_base"] = abi_base
+    _W["states"] = states
+    _W["mech"] = {}
+
+
+def _verify_one(key: str):
+    """Differential for a single core, in a worker process.
+
+    The mechanical closure cache is per-process, so a worker that draws
+    several cores from one call graph still emits each callee once.
+    Returns a plain-data tuple -- no module objects cross the boundary.
+    """
+    import time as _time
+    stem = key.replace(":", "_").lower()
+    t0 = _time.time()
+    try:
+        mech_fn, _ = _fresh_mechanical(_W["ir"], key, _W["mech"])
+        core_mod = importlib.import_module(f"{_W['abi_base']}.core_{stem}")
+        rep = diff_one(mech_fn, core_mod._abi_core,
+                       _W["census"]["functions"][key], states=_W["states"])
+    except Exception as e:                                   # noqa: BLE001
+        # a worker crash must be a REPORTED failure, never a silently
+        # missing core -- that would look identical to a pass
+        return key, {"ok": False, "raised": 0,
+                     "mismatches": [f"verifier raised "
+                                    f"{type(e).__name__}: {e}"]}, 0.0
+    return key, rep, (_time.time() - t0) * 1000.0
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ir", required=True)
@@ -120,6 +168,27 @@ def main(argv=None) -> int:
                          "A typical slice touches a handful of cores, so this "
                          "turns a 10-minute corpus run into seconds -- without "
                          "ever skipping something that actually changed.")
+    ap.add_argument("--iter-cap", type=int, default=0,
+                    help="override the generated spin-detector cap on BOTH "
+                         "sides (0 = leave as emitted, 20M).  A spin-wait "
+                         "burns the full cap per state, so the corpus cost is "
+                         "dominated by loops whose ANSWER is just 'both sides "
+                         "spin identically' -- the same evidence a 100k cap "
+                         "gives 200x cheaper.  Both sides are lowered "
+                         "together, so the comparison stays exact.")
+    ap.add_argument("--budget-s", type=int, default=0,
+                    help="wall-clock budget for the parallel run (0 = none). "
+                         "On breach the unfinished cores are NAMED and marked "
+                         "unverified rather than the run hanging: an hour of "
+                         "silence buys no information, a named list does.")
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="verify this many cores in parallel (processes).  "
+                         "The differential is embarrassingly parallel across "
+                         "cores and cost is heavily concentrated, so a cold "
+                         "corpus run is dominated by a handful of long poles; "
+                         "spreading them is the wall-clock lever once the "
+                         "cache has removed the redundant work.  Default 1 "
+                         "(sequential) -- identical verdicts either way.")
     ap.add_argument("--only", default="",
                     help="comma-separated CS:IP subset (bisection aid)")
     ap.add_argument("--slow-ms", type=int, default=5000,
@@ -133,18 +202,62 @@ def main(argv=None) -> int:
     manifest = json.loads((Path(args.abi_dir) / "cores_manifest.json")
                           .read_text(encoding="utf-8"))
     keys = manifest["cores"]
+
+    # GENERATION CHECK.  Verifying a corpus is only meaningful if the corpus
+    # came from the emitter now on disk.  A long-running emission started
+    # against an older tree can land later and overwrite a newer corpus: the
+    # result is a perfectly valid manifest from the wrong generation, and the
+    # differential will happily verify it and publish a green cache.  That is
+    # exactly how a 143-core corpus became a 90-core one mid-session while
+    # every gate stayed green.
+    man_sig = manifest.get("toolchain_sig")
+    cur_sig = _promote_toolchain_sig()
+    if man_sig is not None and cur_sig is not None and man_sig != cur_sig:
+        print(f"REFUSING: cores_manifest.json was written by toolchain "
+              f"{man_sig}, but the emitter on disk is {cur_sig}.  The corpus "
+              f"and the code that must verify it are different generations "
+              f"-- re-emit before verifying.")
+        return 3
+    if man_sig is None:
+        print("  (manifest predates generation stamping -- cannot confirm "
+              "the corpus matches this emitter)")
+
     if args.only:
         want = {k.strip().upper() for k in args.only.split(",") if k.strip()}
         keys = [k for k in keys if k.upper() in want]
-    # The toolchain fingerprint: any change to the emitter, the differential,
-    # or the contract analysis invalidates EVERY cached result, because all
-    # three feed what the comparison actually executes.
+    # The toolchain fingerprint, deliberately NARROW.
+    #
+    # It used to include emit_abi.py and contracts.py, so every emitter slice
+    # invalidated all 143 cached results and a 45-minute re-verification stood
+    # between an edit and its answer -- long enough that the tree could move
+    # underneath the run.
+    #
+    # But those two are ALREADY captured downstream: the emitted core source is
+    # the output of emit_abi, and the census entry is the output of contracts,
+    # and _core_sig hashes both.  Hashing the inputs as well, when the outputs
+    # are in hand, buys nothing and costs the entire cache.  A slice that
+    # changes 30 cores should re-verify 30 cores.
+    #
+    # What genuinely stays global: emit_cpuless.py builds the MECHANICAL
+    # reference side (not covered by any per-core hash) and abi_diff.py defines
+    # what "equal" means (so it can flip any verdict).
     tool_h = hashlib.sha256()
-    for mod in ("dos_re/lift/emit_cpuless.py", "dos_re/lift/emit_abi.py",
-                "dos_re/lift/abi_diff.py", "dos_re/lift/contracts.py"):
+    for mod in ("dos_re/lift/emit_cpuless.py", "dos_re/lift/abi_diff.py"):
         pth = Path(__file__).resolve().parents[1] / mod
         tool_h.update(pth.read_bytes())
     tool_sig = tool_h.hexdigest()[:16]
+
+    def _tree_fingerprint() -> str:
+        """Hash of every source the verdict depends on, for staleness."""
+        h = hashlib.sha256()
+        for mod in ("dos_re/lift/emit_cpuless.py", "dos_re/lift/abi_diff.py",
+                    "dos_re/lift/emit_abi.py", "dos_re/lift/contracts.py"):
+            h.update((Path(__file__).resolve().parents[1] / mod).read_bytes())
+        for p in sorted(Path(args.abi_dir).glob("core_*.py")):
+            h.update(p.read_bytes())
+        return h.hexdigest()[:16]
+
+    tree_before = _tree_fingerprint()
 
     cache_path = Path(args.cache) if args.cache else None
     cache = {}
@@ -168,6 +281,25 @@ def main(argv=None) -> int:
     failures: dict[str, list[str]] = {}
     mech_cache: dict = {}
     fresh_ok: dict[str, str] = {}
+
+    # SLOWEST FIRST among the cores that must actually run.  Cost is heavily
+    # concentrated (1010:1B42 alone was 133s of 375s), so starting the long
+    # poles first is what decides wall-clock once the work is spread over
+    # workers; it also surfaces the expensive failures early instead of after
+    # a hundred cheap passes.
+    prev_cost = {}
+    if cache_path and cache_path.is_file():
+        try:
+            prev_cost = json.loads(
+                cache_path.read_text(encoding="utf-8")).get("cost_ms", {})
+        except Exception:                                    # noqa: BLE001
+            prev_cost = {}
+    keys = sorted(keys, key=lambda k: -prev_cost.get(k, 0))
+    cost_ms: dict[str, int] = {}
+
+    # split cached from must-run FIRST, so the parallel path only ever ships
+    # real work to workers
+    todo = []
     for key in keys:
         stem = key.replace(":", "_").lower()
         sig = _core_sig(key, stem)
@@ -176,12 +308,93 @@ def main(argv=None) -> int:
             passed += 1
             fresh_ok[key] = sig
             continue
+        todo.append((key, sig))
+
+    if args.jobs > 1 and todo:
+        # STREAM results as they land, and bound the whole run.
+        #
+        # ex.map yields in submission order, so one pathological core blocks
+        # every later result: a 143-core run produced ZERO output for an hour
+        # and had to be killed, buying no information at all -- the same
+        # silence failure the emitter's fixpoint had.  as_completed reports
+        # each core the moment it finishes, so the culprit is VISIBLE while
+        # the run is still going.
+        from concurrent.futures import (ProcessPoolExecutor, as_completed,
+                                        TimeoutError as FutTimeout)
+        sigs = dict(todo)
+        deadline = args.budget_s if args.budget_s > 0 else None
+        started = time.time()
+        ex = ProcessPoolExecutor(max_workers=args.jobs, initializer=_pool_init,
+                                 initargs=(ir, census, args.abi_base,
+                                           args.states))
+        futs = {ex.submit(_verify_one, k): k for k, _ in todo}
+        done_n = 0
+        try:
+            for fut in as_completed(
+                    futs, timeout=(None if deadline is None
+                                   else max(1.0, deadline -
+                                            (time.time() - started)))):
+                key, rep, dt = fut.result()
+                done_n += 1
+                cost_ms[key] = int(dt)
+                if dt >= args.slow_ms:
+                    slow.append((dt, key))
+                raised_states += rep.get("raised", 0)
+                if rep.get("note"):
+                    spin_notes.append(f"{key}: {rep['note']}")
+                if rep["ok"]:
+                    passed += 1
+                    fresh_ok[key] = sigs[key]
+                else:
+                    failures[key] = rep["mismatches"][:3]
+                print(f"  [{done_n}/{len(futs)}] {key} "
+                      f"{'ok' if rep['ok'] else 'MISMATCH'} {dt/1000.0:.1f}s",
+                      flush=True)
+        except FutTimeout:
+            # A budget breach is a REPORTED outcome, never a silent pass: the
+            # unfinished cores are named so the next run can target them.
+            stuck = [futs[f] for f in futs if not f.done()]
+            print(f"  BUDGET EXCEEDED after {args.budget_s}s -- "
+                  f"{len(stuck)} core(s) unfinished: "
+                  f"{', '.join(sorted(stuck)[:8])}"
+                  + (" ..." if len(stuck) > 8 else ""), flush=True)
+            for k in stuck:
+                failures[k] = [f"unverified: exceeded the {args.budget_s}s "
+                               f"run budget (re-run with --only {k} "
+                               f"--states 8 to characterise it)"]
+        finally:
+            # cancel_futures matters: without it the pool waits for the very
+            # core that blew the budget, and orphaned workers outlive the
+            # parent (two survived the last kill).
+            ex.shutdown(wait=False, cancel_futures=True)
+        todo = []
+
+    # sequential path -- the reference implementation; --jobs>1 above must
+    # produce identical verdicts, only sooner
+    def _apply_iter_cap():
+        """Lower the cap in every generated module currently loaded -- the
+        mechanical closure and the ABI cores alike.  Both sides must get the
+        SAME value or a spin-wait would stop at different iteration counts and
+        the cost channel would diverge (a false mismatch)."""
+        if not args.iter_cap:
+            return
+        for nm, m in list(sys.modules.items()):
+            if m is None:
+                continue
+            if nm.startswith(_MECH_PKG) or nm.startswith(args.abi_base):
+                if hasattr(m, "_ITER_CAP"):
+                    m._ITER_CAP = args.iter_cap
+
+    for key, sig in todo:
+        stem = key.replace(":", "_").lower()
         t0 = time.time()
         mech_fn, _ = _fresh_mechanical(ir, key, mech_cache)
         core_mod = importlib.import_module(f"{args.abi_base}.core_{stem}")
+        _apply_iter_cap()
         rep = diff_one(mech_fn, core_mod._abi_core,
                        census["functions"][key], states=args.states)
         dt = (time.time() - t0) * 1000.0
+        cost_ms[key] = int(dt)
         if dt >= args.slow_ms:
             slow.append((dt, key))
         raised_states += rep["raised"]
@@ -211,6 +424,17 @@ def main(argv=None) -> int:
             for m in ms:
                 print(f"      {m}")
         return 1
+    # STALENESS: a long run is a run the tree can move underneath.  These
+    # verdicts describe the sources as they were when the run STARTED; if an
+    # emitter edit or a re-emission landed since, they describe a tree that no
+    # longer exists and publishing them would record a verification of code
+    # nobody has.  Report loudly and refuse to publish rather than bless it.
+    if _tree_fingerprint() != tree_before:
+        print("  STALE: the sources changed while this run was in flight "
+              "(emitter edit or re-emission).  The verdicts above describe "
+              "the tree as it was at START and are NOT published.  Re-run "
+              "against the settled tree.")
+        return 2
     if cache_path is not None:
         # Only a fully GREEN run may publish a cache: otherwise a core that
         # failed here could be recorded as verified and skipped next time.
@@ -221,6 +445,9 @@ def main(argv=None) -> int:
                         "--full via scripts/abi_build.py) to force a full "
                         "re-verification.",
              "tool_sig": tool_sig, "states": args.states,
+             # per-core wall-clock, so the next run can start with the long
+             # poles instead of discovering them last
+             "cost_ms": {**prev_cost, **{k: v for k, v in cost_ms.items()}},
              "verified": dict(sorted(fresh_ok.items()))},
             indent=1) + "\n", encoding="utf-8")
         print(f"  cache: {len(fresh_ok)} verified entries -> {cache_path}")

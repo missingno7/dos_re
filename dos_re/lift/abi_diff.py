@@ -54,11 +54,22 @@ class TraceMem:
     #: builds several).  A 50 GB process is a worse failure than a loud one.
     MAX_TRACE = 200_000
 
-    def __init__(self, seed: int, shadow_stack_seg: int | None = None) -> None:
+    def __init__(self, seed: int, shadow_stack_seg: int | None = None,
+                 ss_seg: int | None = None,
+                 ss_globals_floor: int | None = None) -> None:
         self.seed = seed & 0xFFFFFFFF
         self.data: dict[int, int] = {}
         self.shadow: dict[int, int] = {}
         self.shadow_seg = shadow_stack_seg
+        # slice 9: ss is a SEMANTIC selector for globals in a function that
+        # ALSO uses the machine stack.  The shadow overlay is off (the globals
+        # must be compared), so the mechanical side's push/pop through this
+        # same segment would show up as semantic writes the de-stacked side
+        # never makes -- a guaranteed false divergence.  Writes at or above
+        # the floor are the machine stack; below it are the globals.  Same
+        # split as STACK_DATA_FLOOR in scripts/acceptance_cpuless.py.
+        self.ss_seg = ss_seg
+        self.ss_globals_floor = ss_globals_floor
         self.writes: list[tuple[int, int, int, int]] = []
         #: order-sensitive rolling digest of EVERY traced write, kept even
         #: after the retained list is capped -- so a divergence past the cap
@@ -66,6 +77,11 @@ class TraceMem:
         self.write_digest = 0
         self.write_count = 0
         self.truncated = False
+
+    def _is_machine_stack(self, seg: int, off: int) -> bool:
+        return (self.ss_globals_floor is not None
+                and seg == self.ss_seg
+                and off >= self.ss_globals_floor)
 
     def _record(self, w) -> None:
         self.write_count += 1
@@ -101,7 +117,7 @@ class TraceMem:
         st = self._store(seg)
         lin = ((seg << 4) + (off & 0xFFFF)) & 0xFFFFF
         st[lin] = val & 0xFF
-        if st is self.data:
+        if st is self.data and not self._is_machine_stack(seg, off & 0xFFFF):
             self._record((seg, off & 0xFFFF, val & 0xFF, 1))
 
     def ww(self, seg: int, off: int, val: int) -> None:
@@ -109,7 +125,7 @@ class TraceMem:
         lin = ((seg << 4) + (off & 0xFFFF)) & 0xFFFFF
         st[lin] = val & 0xFF
         st[(lin + 1) & 0xFFFFF] = (val >> 8) & 0xFF
-        if st is self.data:
+        if st is self.data and not self._is_machine_stack(seg, off & 0xFFFF):
             self._record((seg, off & 0xFFFF, val & 0xFFFF, 2))
 
 
@@ -133,17 +149,51 @@ class PlatStub:
     key, so the two sides read different values and the comparison fails
     loudly -- exactly the timing bug the compat channel exists to catch."""
 
+    #: Hard cap on the RETAINED call log, for exactly the reason TraceMem has
+    #: one.  A spin-wait that polls a port runs to the emitter's 20,000,000
+    #: iteration cap and appended a tuple EVERY time: ~1 GB per worker,
+    #: measured at 962 MB and 1028 MB in two parallel workers while the run
+    #: made no progress.  Capping the list while keeping an order-sensitive
+    #: digest means a divergence past the cap still FAILS -- the list is only
+    #: for readable diagnostics.
+    #:
+    #: This is the same defect as the 50 GB TraceMem.writes leak fixed earlier;
+    #: that fix capped one class and left its sibling unbounded.
+    MAX_LOG = 200_000
+
     def __init__(self, seed: int) -> None:
         self.seed = seed & 0xFFFFFFFF
         self.log: list = []
+        self.log_digest = 0
+        self.log_count = 0
+        self.truncated = False
+
+    def _rec(self, item) -> None:
+        self.log_count += 1
+        d = self.log_digest
+        for v in item:
+            if isinstance(v, tuple):
+                for w in v:
+                    d = (d * 1000003 + (w if isinstance(w, int)
+                                        else hash(str(w)) & 0xFFFF)) \
+                        & 0xFFFFFFFFFFFF
+            else:
+                d = (d * 1000003 + (v if isinstance(v, int)
+                                    else sum(ord(c) for c in str(v)))) \
+                    & 0xFFFFFFFFFFFF
+        self.log_digest = d
+        if len(self.log) < self.MAX_LOG:
+            self.log.append(item)
+        else:
+            self.truncated = True
 
     def inp(self, port, width, cost):
-        self.log.append(("in", port, width, cost))
+        self._rec(("in", port, width, cost))
         h = (port * 2246822519 ^ cost * 3266489917 ^ self.seed) & 0xFFFFFFFF
         return (h >> 11) & (0xFFFF if width == 2 else 0xFF)
 
     def outp(self, port, val, width, cost):
-        self.log.append(("out", port, val & 0xFFFF, width, cost))
+        self._rec(("out", port, val & 0xFFFF, width, cost))
 
     #: registers a DOS/BIOS service returns (mirrors emit_abi._INT_REGS).
     _INT_REGS = ("ax", "bx", "cx", "dx", "si", "di", "bp", "ds", "es")
@@ -153,7 +203,7 @@ class PlatStub:
         # string hashing is per-process randomized): a wrong reg or flags
         # word in, or a cost drift, diverges the log AND the returned values.
         items = tuple(sorted((k, v) for k, v in ib.items()))
-        self.log.append(("int", n, cost, items))
+        self._rec(("int", n, cost, items))
         base = (n * 40503 + cost * 2654435761 + self.seed) & 0xFFFFFFFF
         for idx, (k, v) in enumerate(items):
             base = (base * 16777619 + v + idx) & 0xFFFFFFFF
@@ -204,18 +254,34 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
                                f"by the mechanical signature"]}
     mismatches: list[str] = []
     raises = 0
-    # When ss is a SEMANTIC parameter (a data-segment selector, proven by
-    # contracts.ss_is_data_segment), the mechanical side's ss traffic is real
-    # program data, not stack residue: seed ss identically on both sides and
-    # DISABLE the shadow overlay, so those writes are compared instead of
-    # being hidden.  Such a function has no stack traffic at all, so the
-    # overlay has nothing legitimate left to hide.
+    # When ss is a SEMANTIC parameter (a data-segment selector), the
+    # mechanical side's ss traffic is real program data, not stack residue:
+    # seed ss identically on both sides and DISABLE the shadow overlay, so
+    # those writes are compared instead of being hidden.
+    #
+    # Slice 7 (ss_is_data_segment) has no stack traffic at all, so the overlay
+    # had nothing legitimate left to hide.  Slice 9 (ss_globals_floor) breaks
+    # that premise: those functions reach globals through ss AND use the
+    # machine stack.  With the overlay off, the mechanical side's push/pop
+    # through the same segment becomes visible semantic writes the de-stacked
+    # side never makes -- 30 cores failed with a constant ~167-write surplus
+    # at high offsets before this was modelled.  Split by the same floor the
+    # emitter uses: below it globals (compared), at/above it machine stack
+    # (ignored, on BOTH sides).
     ss_semantic = "ss" in params
+    ss_floor = proposal.get("ss_globals_floor")
     for s in range(states):
         regs = _seeded_regs(params, seed0 + s)
+        # An ss-globals function needs a KNOWN ss on both sides so the floor
+        # split has a segment to apply to; the seeded value is arbitrary.
+        if ss_floor is not None and "ss" in regs:
+            regs["ss"] = STACK_SEG
+        ss_val = regs.get("ss")
         mem_m = TraceMem(seed0 + s,
-                         shadow_stack_seg=None if ss_semantic else STACK_SEG)
-        mem_a = TraceMem(seed0 + s)
+                         shadow_stack_seg=None if ss_semantic else STACK_SEG,
+                         ss_seg=ss_val, ss_globals_floor=ss_floor)
+        mem_a = TraceMem(seed0 + s,
+                         ss_seg=ss_val, ss_globals_floor=ss_floor)
         plat_m = PlatStub(seed0 + s) if mech_plat else None
         plat_a = PlatStub(seed0 + s) if abi_plat else None
         mkw = dict(regs)
@@ -281,12 +347,18 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
                 f"abi={mem_a.writes[:6]}..."
                 + ("  [trace truncated -- digest is the authority]"
                    if mem_m.truncated or mem_a.truncated else ""))
-        log_m = plat_m.log if plat_m else []
-        log_a = plat_a.log if plat_a else []
-        if log_m != log_a:
+        # the DIGEST is the authority (the list may be capped); comparing
+        # the retained lists alone would silently pass a divergence past the
+        # cap, which is the failure the cap must not introduce
+        sig_m = ((plat_m.log_digest, plat_m.log_count) if plat_m else (0, 0))
+        sig_a = ((plat_a.log_digest, plat_a.log_count) if plat_a else (0, 0))
+        if sig_m != sig_a:
+            log_m = plat_m.log if plat_m else []
+            log_a = plat_a.log if plat_a else []
             mismatches.append(
-                f"state {s}: plat calls mech={log_m[:6]}... "
-                f"abi={log_a[:6]}...")
+                f"state {s}: plat calls differ "
+                f"(mech {sig_m[1]} calls vs abi {sig_a[1]}) "
+                f"mech={log_m[:6]}... abi={log_a[:6]}...")
         if len(mismatches) > 8:
             break
     return {"states": states, "raised": raises,

@@ -259,7 +259,7 @@ def check_composable(scan, *, callees=None, far_callees=None,
       * observer/alt-entry: park- or dispatch-carrying functions stay
         mechanical (their frames are externally observable)."""
     from .cpuless import register_effects
-    from .contracts import ss_is_data_segment
+    from .contracts import ss_is_data_segment, ss_globals_only
 
     callees = callees or {}
     far_callees = far_callees or {}
@@ -269,6 +269,17 @@ def check_composable(scan, *, callees=None, far_callees=None,
     # "stack-addressed" than a ds: access.  A function doing BOTH keeps the
     # refusal: there the stack and the data genuinely share one segment.
     ss_data = ss_is_data_segment(scan)
+    # slice 9: a function with real stack traffic may STILL address globals
+    # through ss (the small-model SS==DS idiom).  In the de-stacked form the
+    # frame is Python locals, so constant offsets below the globals floor are
+    # provably disjoint from it and ss becomes an ordinary segment parameter.
+    ss_globals = False
+    if not ss_data:
+        ok, why = ss_globals_only(scan)
+        if ok:
+            ss_globals = True
+        elif why == "computed-ss-address":
+            raise Refusal("computed-ss-address")
     cs_addrs = {ip for ip in scan.insts}
     if frozenset(boundary_addrs) & cs_addrs:
         raise Refusal("observer-in-function")
@@ -317,7 +328,7 @@ def check_composable(scan, *, callees=None, far_callees=None,
         if _vslot_delta(i) is None and ("sp" in e.reads or "sp" in e.writes) \
                 and k not in (RET, RETF):
             raise Refusal("frame-or-sp-data")   # sp as general data
-        if not ss_data:
+        if not ss_data and not ss_globals:
             if _ea_seg_of(i) == "ss":
                 raise Refusal("stack-addressed-memory")
             if i.op in _STRING_PAIRS or i.op == 0xD7 \
@@ -325,6 +336,14 @@ def check_composable(scan, *, callees=None, far_callees=None,
                 for p in i.prefixes:
                     if p == 0x36:
                         raise Refusal("stack-addressed-memory")
+        elif ss_globals:
+            # ss-globals tier: only the CONSTANT-offset accesses are proven
+            # disjoint from the frame.  A bp-shaped EA that merely defaults to
+            # SS is a frame access and still refuses -- ss_globals says nothing
+            # about it.
+            if _ea_seg_of(i) == "ss" \
+                    and not any(p == 0x36 for p in i.prefixes):
+                raise Refusal("stack-addressed-memory")
 
     # virtual-stack depth walk: every ip one provable slot depth
     depth: dict[int, int] = {scan.entry: 0}
@@ -612,6 +631,12 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
         A(f"from {base}core_{st} import _abi_core as {_core_alias(st)}")
     A('')
     A("_PARITY = tuple((1 - bin(v).count('1') % 2) == 1 for v in range(256))")
+    A("#: spin-detector cap.  Production keeps it high to catch a genuine")
+    A("#: unbounded wait; the seeded differential lowers it (both sides")
+    A("#: identically), because 'both hit the cap' is the same evidence")
+    A("#: at a fraction of the cost -- a 20M-iteration spin-wait ran the")
+    A("#: 143-core corpus past 15 minutes at only 4 states.")
+    A(f"_ITER_CAP = {_DISPATCH_ITER_CAP}")
     A('')
     # GENERATED CONTRACT METADATA (not API): the anonymous parameters' proven
     # roles, so the next stage gets pointer/segment structure explicitly
@@ -677,7 +702,7 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     B("_iters = 0")
     B("while True:")
     B("    _iters += 1")
-    B(f"    if _iters > {_DISPATCH_ITER_CAP}:")
+    B(f"    if _iters > _ITER_CAP:")
     # the same wording as the mechanical emitter, so a spin-wait raises
     # IDENTICALLY on both sides of the differential
     B(f"        raise RuntimeError('CPUless dispatch spin in {key} "
@@ -945,47 +970,58 @@ def emit_core_loader(keys: list[str], *, abi_base: str,
     """Loader that substitutes each de-stacked core's MECHANICAL adapter for
     its mechanical module -- the integration switch.
 
-    Same two seams as the contract-proof shadow loader: a ``sys.modules``
-    alias for later imports, plus a retro-patch of already-materialised
-    module-level bindings (mechanical modules bind their callees at import,
-    so a core's own transitive imports would otherwise bypass later
-    substitutions).  A core's binding of ITSELF is left alone: its composed
-    ABI callees are already direct core-to-core calls."""
-    stems = ", ".join(f'"{_stem(k)}"' for k in sorted(keys))
+    Delegates to :func:`dos_re.lift.standalone.install_overrides` rather than
+    hand-rolling the stitch.  An earlier version of this loader rolled its own
+    ``sys.modules`` alias plus retro-patch and got the seam subtly wrong in two
+    ways the shared implementation already handles:
+
+      * its retro-patch rebound ANY value bound under the callee's name, not
+        only the original function.  A delegating override -- e.g. a native
+        override holding a live reference to the autolifted body -- would be
+        clobbered, silently disabling it.  ``_rebind`` is scoped to the
+        callee's own name AND checks identity against the original.
+      * it never cleared the ``_dyncall`` memo.  ``_dyncall`` caches the
+        resolved closure on first call, so any core reached through dynamic
+        dispatch BEFORE installation would keep running mechanically -- an
+        anti-vacuity hole: the entry counter would simply report fewer
+        entries, never an error.
+
+    Both are the same class of bug two other ports hit independently, which is
+    the argument for one shared seam instead of a copy per port.  A core with
+    no generated counterpart FAILS LOUD there rather than quietly not
+    applying."""
+    pairs = ", ".join(f'"{k}"' for k in sorted(keys))
     return "\n".join([
         '"""AUTOGENERATED by dos_re.lift.emit_abi -- INTEGRATION loader.',
         '',
         'Substitutes the de-stacked ABI cores for their mechanical modules so',
         'the game actually RUNS on them.  Until this is installed the cores',
         'are proven only in isolation.  DO NOT hand-edit; regenerate.',
+        '',
+        'The stitch itself lives in dos_re.lift.standalone.install_overrides:',
+        'shadow + name-scoped identity-checked retro-patch + dispatch-memo',
+        'clear, with installation order made irrelevant.  Rolling a private',
+        'copy of that seam is how both other ports acquired the same two bugs.',
         '"""',
         '',
         'import importlib',
-        'import sys',
         '',
-        f'STEMS = ({stems},)',
+        'from dos_re.lift.standalone import install_overrides',
+        '',
+        f'KEYS = ({pairs},)',
+        '#: mechanical-shaped stems, for callers that count core entries',
+        f'STEMS = tuple(k.replace(":", "_").lower() for k in KEYS)',
         '',
         '',
-        'def install_cores(stems=STEMS):',
-        '    """Substitute every de-stacked core. Returns (n, patched)."""',
-        '    cores = {}',
-        '    for s in stems:',
-        f'        cores[s] = importlib.import_module("{abi_base}.core_" + s)',
-        '    for s, mod in cores.items():',
-        f'        sys.modules["{import_base}.func_" + s] = mod',
-        '    spaces = []',
-        '    for name, m in list(sys.modules.items()):',
-        f'        if m is not None and name.startswith("{import_base}."):',
-        '            spaces.append((None, m.__dict__))',
-        '    patched = 0',
-        '    for owner, ns in spaces:',
-        '        for s, mod in cores.items():',
-        '            f = "func_" + s',
-        '            repl = getattr(mod, f, None)',
-        '            if repl is not None and f in ns and ns[f] is not repl:',
-        '                ns[f] = repl',
-        '                patched += 1',
-        '    return len(cores), patched',
+        'def install_cores(keys=KEYS):',
+        '    """Substitute every de-stacked core. Returns (n, installed)."""',
+        '    overrides = {}',
+        '    for k in keys:',
+        '        stem = k.replace(":", "_").lower()',
+        f'        mod = importlib.import_module("{abi_base}.core_" + stem)',
+        '        overrides[k] = getattr(mod, "func_" + stem)',
+        f'    installed = install_overrides("{import_base}", overrides)',
+        '    return len(overrides), len(installed)',
         '',
     ])
 
