@@ -954,7 +954,8 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     # target set into dispatchable arms.  Composing here (before abi_scan) is
     # what removes the site from the refusal set -- the same shape as a direct
     # call whose target contract is supplied.
-    far_arms = far_dyn_arms(scan, far_dyn_sites, far_callees, plat_farcalls)
+    far_arms = far_dyn_arms(scan, far_dyn_sites, far_callees, plat_farcalls,
+                            plat_far_segs)
     far_pops = {ip: pop for ip, (_a, pop) in far_arms.items()}
     callee_effects = {ip: (frozenset(c.inputs) - frozenset({"sp", "ss"}),
                            frozenset(c.outputs))
@@ -1567,7 +1568,8 @@ def _parse_far_key(t):
     return int(t[0]) & 0xFFFF, int(t[1]) & 0xFFFF
 
 
-def far_dyn_arms(scan, far_dyn_sites, far_callees, plat_farcalls):
+def far_dyn_arms(scan, far_dyn_sites, far_callees, plat_farcalls,
+                 plat_far_segs=frozenset()):
     """Resolve every FAR indirect call site in ``scan`` against its OBSERVED
     target evidence, returning ``{site ip: ([(seg, off, kind)], net_pop)}``.
 
@@ -1592,8 +1594,14 @@ def far_dyn_arms(scan, far_dyn_sites, far_callees, plat_farcalls):
       * ``far-dispatch-no-evidence`` -- the site has no observed target: there
         is nothing to dispatch to and a guard alone would be a body that can
         only raise.
-      * ``far-dispatch-target-uncomposable`` -- an observed target is neither a
-        contracted platform boundary nor a recovered far-return body.
+      * ``far-dispatch-platform-contract-unknown`` -- an observed target lands
+        in a declared platform-boundary segment but has no contract, so its arg
+        cleanup is unknown.  The indirect analogue of
+        ``platform-farcall-contract-unknown``: the boundary is known, the
+        contract is not, and the argbytes are never guessed.
+      * ``far-dispatch-target-unpromoted`` -- an observed target is game code
+        with no recovered far-return body (yet).  Retried every fixpoint round,
+        exactly like the near-dyn gate's ``dyn-target-unpromoted``.
       * ``far-dispatch-target-sp-escape`` -- an observed recovered arm does not
         return stack-balanced, so the site's continuation depth is arm-
         dependent (the same rule the near-dyn evidence gate applies).
@@ -1630,8 +1638,10 @@ def far_dyn_arms(scan, far_dyn_sites, far_callees, plat_farcalls):
                     raise Refusal("far-dispatch-target-sp-escape")
                 arms.append((tgt[0], tgt[1], _ARM_BODY))
                 pops.add(0)
+            elif tgt[0] in plat_far_segs:
+                raise Refusal("far-dispatch-platform-contract-unknown")
             else:
-                raise Refusal("far-dispatch-target-uncomposable")
+                raise Refusal("far-dispatch-target-unpromoted")
         if len(pops) > 1:
             raise Refusal("far-dispatch-nonuniform-stack")
         out[i.ip] = (arms, next(iter(pops)))

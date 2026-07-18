@@ -330,13 +330,25 @@ def test_empty_evidence_for_a_site_refuses_loud():
 def test_an_observed_target_with_no_contract_or_body_refuses_loud():
     """Evidence naming a target that is neither a contracted platform boundary
     nor a recovered far-return body cannot be composed -- the arm would have to
-    be guessed."""
+    be guessed.  The two ways that happens get their own names, mirroring the
+    direct-call vocabulary: a KNOWN boundary whose contract is missing (never
+    guess the arg cleanup), and game code with no recovered body yet (retried
+    each fixpoint round)."""
     with pytest.raises(Refusal) as e:
         check_promotable(_scan(_FRAME_LOCAL),
                          plat_far_segs=frozenset({THUNK_SEG}),
                          plat_farcalls=_PLAT,
                          far_dyn_sites={_FRAME_SITE_IP: ["1234:5678"]})
-    assert "far-dispatch-target-uncomposable" in str(e.value)
+    assert "far-dispatch-target-unpromoted" in str(e.value)
+
+    # the same site pointed at an uncontracted slot of the DECLARED boundary
+    with pytest.raises(Refusal) as e2:
+        check_promotable(_scan(_FRAME_LOCAL),
+                         plat_far_segs=frozenset({THUNK_SEG}),
+                         plat_farcalls=_PLAT,
+                         far_dyn_sites={_FRAME_SITE_IP:
+                                        [f"{THUNK_SEG:04X}:0040"]})
+    assert "far-dispatch-platform-contract-unknown" in str(e2.value)
 
 
 def test_arms_that_disagree_on_the_stack_effect_refuse_loud():
