@@ -307,6 +307,15 @@ class CPUlessPlatformRuntime:
         #: recovered HANDLERS, and returns the post-IRQ state.  Without a
         #: callback the observer is inert (free-running).
         self.boundary_cb = None
+        #: the BLOCKING-READ seam: a console read (INT 21h AH=01/07/08, INT 16h)
+        #: with an empty type-ahead buffer must WAIT for input.  A flat CPU
+        #: rewinds its IP and re-runs the instruction next frame; the CPUless
+        #: backend cannot rewind a Python call stack, so a driver installs a
+        #: callback that advances ONE frame in place (capture + demo input +
+        #: timer IRQs) so awaited input can arrive, after which ``intr`` retries
+        #: the read.  Without a callback a blocking read fails loud (the runner
+        #: has no input source), never synthesising a phantom key.
+        self.blocking_read_cb = None
         if dos is not None:
             self.dos = dos                 # reuse a prepared device model
         else:
@@ -341,19 +350,34 @@ class CPUlessPlatformRuntime:
 
     def intr(self, num: int, regs: dict, cost: int) -> dict:
         from dos_re.x86 import HaltExecution
+        from dos_re.dos import ConsoleInputWouldBlock
         if not hasattr(self, "_int_carrier"):
             self._int_carrier = _IntCarrier(self.mem)
-        try:
-            return _run_int(self.dos, self._int_carrier, num, regs,
-                            self._entry + cost, regs.get("_flags", 0))
-        except UnsupportedPlatformEffect:
-            raise
-        except HaltExecution:
-            raise               # the program ended (int 21/4C): a real exit
-        except Exception as e:  # noqa: BLE001 -- unset vector / unmodelled INT
-            raise UnsupportedPlatformEffect(
-                f"INT {num & 0xFF:02X} not implemented by the CPUless runtime "
-                f"(unset vector or game-installed handler): {e}") from e
+        while True:
+            try:
+                return _run_int(self.dos, self._int_carrier, num, regs,
+                                self._entry + cost, regs.get("_flags", 0))
+            except ConsoleInputWouldBlock:
+                # A console read found the type-ahead buffer empty.  On a flat
+                # CPU the DOS handler rewinds IP and the read re-runs next frame;
+                # here the driver advances one frame in place (delivering demo
+                # input + timer IRQs) so the awaited key can arrive, then we
+                # retry the SAME read.  No driver -> fail loud (never a phantom).
+                if self.blocking_read_cb is None:
+                    raise UnsupportedPlatformEffect(
+                        f"INT {num & 0xFF:02X} console read would block with no "
+                        f"input source: install blocking_read_cb or set "
+                        f"dos.console_input_fallback") from None
+                self.blocking_read_cb(regs)
+                continue
+            except UnsupportedPlatformEffect:
+                raise
+            except HaltExecution:
+                raise           # the program ended (int 21/4C): a real exit
+            except Exception as e:  # noqa: BLE001 -- unset vector / unmodelled INT
+                raise UnsupportedPlatformEffect(
+                    f"INT {num & 0xFF:02X} not implemented by the CPUless runtime "
+                    f"(unset vector or game-installed handler): {e}") from e
 
     def chain_interrupt(self, vec_seg: int, vec_off: int, regs: dict,
                         cost: int) -> tuple:
