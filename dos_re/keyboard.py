@@ -16,6 +16,15 @@ from __future__ import annotations
 import collections
 from typing import Callable
 
+#: Dedicated power-on INT 09h (IRQ1) entry.  IVT[9] points here so a game that
+#: saves and chains to "the previous keyboard ISR" reaches the native BIOS
+#: keyboard handler installed at this address; F000:E987 is the classic IBM BIOS
+#: INT 9 entry point.  It lives in this CPU-FREE leaf (and is re-exported by
+#: ``runtime_core``) because deciding whether a game installed its OWN INT 09h --
+#: ``read IVT[9] != BIOS_INT9_ENTRY`` -- is exactly what a keyboard front-end must
+#: do, including the CPUless backend, which cannot import a CPU-carrying module.
+BIOS_INT9_ENTRY = (0xF000, 0xE987)
+
 
 class KeyDispatcher:
     def __init__(self, deliver: Callable[[int], None]) -> None:
