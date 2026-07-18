@@ -125,3 +125,39 @@ def test_promoted_offsets_are_all_below_the_floor(off):
     (0x1FE..0x1FF); 0x1FF would straddle it."""
     ok, offs = _ss(_Scan([_moffs(off)]))
     assert ok and all(o + 2 <= SS_GLOBALS_FLOOR for o in offs)
+
+
+# --- width comes from decoded semantics, not opcode parity -----------------
+
+def test_segment_move_at_the_boundary_is_refused():
+    """0x8C (`mov r/m16, Sreg`) is EVEN-opcoded but 2 bytes wide.  The parity
+    heuristic called it one byte and accepted it at floor-1."""
+    s = _Scan([_I(0x8C, prefixes=(0x36,), modrm=0x06, mod=0, rm=6,
+                  disp=SS_GLOBALS_FLOOR - 1)])
+    ok, why = _ss(s)
+    assert not ok
+    assert why.startswith("ss-access-crosses-globals-floor")
+
+
+def test_les_far_pointer_load_is_refused():
+    """0xC4 (`LES r16, m16:16`) reads FOUR bytes.  Parity called it one."""
+    s = _Scan([_I(0xC4, prefixes=(0x36,), modrm=0x06, mod=0, rm=6,
+                  disp=SS_GLOBALS_FLOOR - 3)])
+    ok, why = _ss(s)
+    assert not ok
+    # LES is not in the accepted-width table at all: refuse, never guess
+    assert why.startswith("ss-access-width-unknown")
+
+
+def test_an_unknown_opcode_refuses_rather_than_guessing():
+    ok, why = _ss(_Scan([_I(0x0F, prefixes=(0x36,), modrm=0x06, mod=0, rm=6,
+                            disp=0x10)]))
+    assert not ok
+    assert why.startswith("ss-access-width-unknown")
+
+
+@pytest.mark.parametrize("floor", [0, -1, 0x10001, 0x20000])
+def test_a_nonsensical_floor_is_rejected(floor):
+    """A typo like 0x20000 would qualify every 16-bit offset as a global."""
+    with pytest.raises(ValueError, match="segment address space"):
+        _ss(_Scan([_moffs(0x10)]), floor)

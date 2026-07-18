@@ -343,6 +343,7 @@ def main(argv=None) -> int:
                                            args.states, args.iter_cap))
         futs = {ex.submit(_verify_one, k): k for k, _ in todo}
         done_n = 0
+        timed_out = False
         try:
             for fut in as_completed(
                     futs, timeout=(None if deadline is None
@@ -365,6 +366,7 @@ def main(argv=None) -> int:
                       f"{'ok' if rep['ok'] else 'MISMATCH'} {dt/1000.0:.1f}s",
                       flush=True)
         except FutTimeout:
+            timed_out = True
             # A budget breach is a REPORTED outcome, never a silent pass: the
             # unfinished cores are named so the next run can target them.
             stuck = [futs[f] for f in futs if not f.done()]
@@ -377,14 +379,23 @@ def main(argv=None) -> int:
                                f"run budget (re-run with --only {k} "
                                f"--states 8 to characterise it)"]
         finally:
-            # cancel_futures drops QUEUED work but cannot stop a worker that
-            # is already inside a pathological core -- those keep burning CPU
-            # and interpreter shutdown may still join them.  Terminate the
-            # processes so a budget breach actually ends the run.
-            ex.shutdown(wait=False, cancel_futures=True)
-            for pr in list(getattr(ex, "_processes", {}).values()):
-                if pr.is_alive():
-                    pr.terminate()
+            # CAPTURE THE PROCESSES FIRST: shutdown() sets _processes to None,
+            # so reading it afterwards raised AttributeError -- in a `finally`,
+            # which meant it broke every parallel run, not just a budget
+            # breach.  (Shipped without ever running --jobs once.)
+            procs = list((getattr(ex, "_processes", None) or {}).values())
+            if timed_out:
+                # cancel_futures drops QUEUED work but cannot stop a worker
+                # already inside a pathological core; terminate so a budget
+                # breach actually ends the run, then join with a bound.
+                ex.shutdown(wait=False, cancel_futures=True)
+                for pr in procs:
+                    if pr.is_alive():
+                        pr.terminate()
+                for pr in procs:
+                    pr.join(timeout=5)
+            else:
+                ex.shutdown(wait=True)      # ordinary completion: let them end
         todo = []
 
     # sequential path -- the reference implementation; --jobs>1 above must

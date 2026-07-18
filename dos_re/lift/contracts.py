@@ -98,6 +98,29 @@ _STACK_FAMILY_OPS = (frozenset(range(0x50, 0x60)) | frozenset({0x06, 0x0E,
 #: dos_re owns the mechanism; the game owns the number.
 _NO_FLOOR = object()
 
+#: Access width, in bytes, for the ss-override forms this tier accepts.
+#: EXPLICIT rather than derived from opcode parity, which is not a width rule:
+#: 0x8C (`mov r/m16, Sreg`) and 0xC4 (`LES r16, m16:16`) are both even-opcoded
+#: yet 2 and 4 bytes wide.  Anything absent here REFUSES -- an unknown width
+#: at the boundary would silently classify machine stack as a global.
+_SS_ACCESS_WIDTH = {
+    0xA0: 1, 0xA2: 1,          # mov al, moffs8 / mov moffs8, al
+    0xA1: 2, 0xA3: 2,          # mov ax, moffs16 / mov moffs16, ax
+    0x88: 1, 0x8A: 1,          # mov r/m8, r8 / mov r8, r/m8
+    0x89: 2, 0x8B: 2,          # mov r/m16, r16 / mov r16, r/m16
+    0x8C: 2, 0x8E: 2,          # mov r/m16, Sreg / mov Sreg, r/m16
+    0xC6: 1, 0xC7: 2,          # mov r/m8, imm8 / mov r/m16, imm16
+    0x80: 1, 0x81: 2, 0x83: 2,  # grp1 r/m, imm
+    0x38: 1, 0x39: 2, 0x3A: 1, 0x3B: 2,   # cmp
+    0x00: 1, 0x01: 2, 0x02: 1, 0x03: 2,   # add
+    0x28: 1, 0x29: 2, 0x2A: 1, 0x2B: 2,   # sub
+    0x20: 1, 0x21: 2, 0x22: 1, 0x23: 2,   # and
+    0x08: 1, 0x09: 2, 0x0A: 1, 0x0B: 2,   # or
+    0x30: 1, 0x31: 2, 0x32: 1, 0x33: 2,   # xor
+    0x84: 1, 0x85: 2,          # test
+    0xFE: 1, 0xFF: 2,          # inc/dec/push r/m
+}
+
 
 def ss_globals_only(scan, floor=_NO_FLOOR):
     """For a function that DOES use the machine stack: are all of its
@@ -122,6 +145,13 @@ def ss_globals_only(scan, floor=_NO_FLOOR):
     deserves its own name -- ``stack-addressed-memory`` is a misnomer for the
     globals and should not cover them.
     """
+    if floor is not _NO_FLOOR and not (0 < floor <= 0x10000):
+        # A typo such as 0x20000 would qualify EVERY 16-bit offset as a
+        # global, silently promoting the whole stack.  The floor is an offset
+        # inside one 64K segment; anything outside that is not a boundary.
+        raise ValueError(
+            f"ss globals floor {floor!r} is outside the segment address "
+            f"space (expected 0 < floor <= 0x10000)")
     if floor is _NO_FLOOR:
         raise ValueError(
             "ss_globals_only() needs an explicit globals floor: it is a "
@@ -141,13 +171,21 @@ def ss_globals_only(scan, floor=_NO_FLOOR):
             return False, "computed-ss-address"
         if off is None:
             return False, "computed-ss-address"
-        # WIDTH MATTERS: a word access at floor-1 spans floor-1..floor, so it
-        # straddles the globals/stack boundary.  Checking only the START
-        # offset accepted 0x1FF as a global while its high byte is already
-        # machine stack -- and a test asserted that acceptance.  Use the
-        # widest access this instruction can make (2 bytes) unless it is
-        # provably byte-wide.
-        width = 1 if (i.op in (0xA0, 0xA2) or (i.op & 1) == 0) else 2
+        # WIDTH MATTERS: an access at floor-1 that is 2 bytes wide spans
+        # floor-1..floor, so its high byte is already machine stack.
+        #
+        # Opcode PARITY is not a width rule -- that was a guess dressed up as
+        # one, and it misclassified real instructions the lifter supports:
+        # 0x8C (`mov r/m16, Sreg`) is even yet 2 bytes, and 0xC4 (`LES
+        # r16, m16:16`) is even yet FOUR.  Both would have been accepted at
+        # the boundary as if single-byte.
+        #
+        # So: an explicit table of the forms this tier handles, and a REFUSAL
+        # for anything else.  Guessing a width here silently promotes machine
+        # stack to "globals"; refusing merely keeps a function mechanical.
+        width = _SS_ACCESS_WIDTH.get(i.op)
+        if width is None:
+            return False, f"ss-access-width-unknown:op={i.op:#04x}"
         if off + width > floor:
             return False, (f"ss-access-crosses-globals-floor:"
                            f"{off:#06x}+{width}")

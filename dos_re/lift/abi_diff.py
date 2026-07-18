@@ -22,6 +22,8 @@ the acceptance authority for the composed graph.
 """
 from __future__ import annotations
 
+import hashlib
+
 #: the stack segment handed to the MECHANICAL side; its writes there are
 #: the virtualised residue.  Register seeds deliberately never collide with
 #: it, so filtering by segment never hides a semantic write.
@@ -74,9 +76,13 @@ class TraceMem:
         #: order-sensitive rolling digest of EVERY traced write, kept even
         #: after the retained list is capped -- so a divergence past the cap
         #: still fails the comparison instead of being silently equal.
-        self.write_digest = 0
+        self._wh = hashlib.sha256()
         self.write_count = 0
         self.truncated = False
+
+    @property
+    def write_digest(self) -> str:
+        return self._wh.hexdigest()
 
     def _is_machine_stack(self, seg: int, off: int) -> bool:
         return (self.ss_globals_floor is not None
@@ -108,10 +114,12 @@ class TraceMem:
 
     def _record(self, w) -> None:
         self.write_count += 1
-        d = self.write_digest
-        for v in w:
-            d = (d * 1000003 + v) & 0xFFFFFFFFFFFF
-        self.write_digest = d
+        # SHA-256 over a LENGTH-DELIMITED serialization.  A 48-bit polynomial
+        # was cheap telemetry, but the gate's claim is an EXACT differential
+        # and two different streams can collide in 48 bits.  Delimiting also
+        # removes the ambiguity a plain concatenation has, where different
+        # field splits produce the same byte string.
+        self._wh.update(b"|".join(b"%d" % v for v in w) + b";")
         if len(self.writes) < self.MAX_TRACE:
             self.writes.append(w)
         else:
@@ -164,6 +172,29 @@ def _seeded_regs(params, state: int) -> dict[str, int]:
     return out
 
 
+def _ser(v) -> bytes:
+    """Length-delimited, deterministic serialization of a logged value.
+
+    Unambiguous by construction: every scalar carries its own length, so no
+    two distinct structures serialize to the same bytes.  Feeds an incremental
+    SHA-256 rather than a 48-bit polynomial, because the gate claims an EXACT
+    differential and a short non-cryptographic digest can collide.
+    """
+    if isinstance(v, bool):
+        return b"b1" if v else b"b0"
+    if isinstance(v, int):
+        body = b"%d" % v
+        return b"i%d:%s" % (len(body), body)
+    if isinstance(v, (tuple, list)):
+        parts = b"".join(_ser(w) for w in v)
+        return b"l%d:%s" % (len(parts), parts)
+    if isinstance(v, dict):
+        parts = b"".join(_ser(k) + _ser(v[k]) for k in sorted(v))
+        return b"d%d:%s" % (len(parts), parts)
+    body = str(v).encode("utf-8", "replace")
+    return b"s%d:%s" % (len(body), body)
+
+
 def _fold(v) -> int:
     """Deterministic fold of one logged value, nested containers included.
 
@@ -212,16 +243,17 @@ class PlatStub:
     def __init__(self, seed: int) -> None:
         self.seed = seed & 0xFFFFFFFF
         self.log: list = []
-        self.log_digest = 0
+        self._lh = hashlib.sha256()
         self.log_count = 0
         self.truncated = False
 
+    @property
+    def log_digest(self) -> str:
+        return self._lh.hexdigest()
+
     def _rec(self, item) -> None:
         self.log_count += 1
-        d = self.log_digest
-        for v in item:
-            d = (d * 1000003 + _fold(v)) & 0xFFFFFFFFFFFF
-        self.log_digest = d
+        self._lh.update(_ser(item) + b";")
         if len(self.log) < self.MAX_LOG:
             self.log.append(item)
         else:
@@ -281,6 +313,40 @@ _SPIN_MARKER = "CPUless dispatch spin"
 
 def _is_spin_raise(payload) -> bool:
     return isinstance(payload, str) and _SPIN_MARKER in payload
+
+
+def _cmp_effects(s, mem_m, mem_a, plat_m, plat_a, mismatches) -> None:
+    """Compare the OBSERVABLE EFFECTS of one state: semantic memory writes and
+    platform calls.
+
+    Shared by the normal-return path and the RAISED path.  A raised state has
+    no return or compat values to compare, but everything it did before
+    raising is real behaviour and must still agree -- skipping it let a core
+    that wrote 0xAA and one that wrote nothing compare equal so long as both
+    raised the same error.  Keeping the comparison in ONE function is what
+    stops the two paths drifting apart again.
+
+    The streaming DIGEST + count is the authority; the retained lists only
+    make the message readable, and comparing lists alone would silently pass a
+    divergence past the retained-trace cap.
+    """
+    if (mem_m.write_digest, mem_m.write_count) != \
+            (mem_a.write_digest, mem_a.write_count):
+        mismatches.append(
+            f"state {s}: writes differ (mech {mem_m.write_count} vs "
+            f"abi {mem_a.write_count}) mech(sem)={mem_m.writes[:6]}... "
+            f"abi={mem_a.writes[:6]}..."
+            + ("  [trace truncated -- digest is the authority]"
+               if mem_m.truncated or mem_a.truncated else ""))
+    sig_m = ((plat_m.log_digest, plat_m.log_count) if plat_m else (0, 0))
+    sig_a = ((plat_a.log_digest, plat_a.log_count) if plat_a else (0, 0))
+    if sig_m != sig_a:
+        log_m = plat_m.log if plat_m else []
+        log_a = plat_a.log if plat_a else []
+        mismatches.append(
+            f"state {s}: plat calls differ "
+            f"(mech {sig_m[1]} calls vs abi {sig_a[1]}) "
+            f"mech={log_m[:6]}... abi={log_a[:6]}...")
 
 
 def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
@@ -383,6 +449,14 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
                 # it unnecessary: every requested state now runs, at a cap
                 # cheap enough to afford.
                 spin_states += 1
+            # FALL THROUGH to the effect comparison.  Only the RETURN and
+            # compat values are unavailable when a side raises; every memory
+            # write and platform call made BEFORE the exception is real
+            # observable behaviour and must still agree.  `continue` here let
+            # a core that wrote 0xAA and one that wrote nothing compare equal
+            # as long as both raised the same spin error -- a false green with
+            # the divergence sitting in plain view.
+            _cmp_effects(s, mem_m, mem_a, plat_m, plat_a, mismatches)
             continue
         mo, mc = mp
         ao, ac = ap
@@ -395,30 +469,7 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
                                   f"mech={mo.get(r)!r} abi={av!r}")
         if mc != ac:
             mismatches.append(f"state {s}: compat mech={mc} abi={ac}")
-        # Compare the STREAMING DIGEST + count, which stays sound past the
-        # retained-trace cap; the retained lists only make the message
-        # readable.  (Comparing the lists alone would silently pass once a
-        # pathological function truncated them.)
-        if (mem_m.write_digest, mem_m.write_count) != \
-                (mem_a.write_digest, mem_a.write_count):
-            mismatches.append(
-                f"state {s}: writes differ (mech {mem_m.write_count} vs "
-                f"abi {mem_a.write_count}) mech(sem)={mem_m.writes[:6]}... "
-                f"abi={mem_a.writes[:6]}..."
-                + ("  [trace truncated -- digest is the authority]"
-                   if mem_m.truncated or mem_a.truncated else ""))
-        # the DIGEST is the authority (the list may be capped); comparing
-        # the retained lists alone would silently pass a divergence past the
-        # cap, which is the failure the cap must not introduce
-        sig_m = ((plat_m.log_digest, plat_m.log_count) if plat_m else (0, 0))
-        sig_a = ((plat_a.log_digest, plat_a.log_count) if plat_a else (0, 0))
-        if sig_m != sig_a:
-            log_m = plat_m.log if plat_m else []
-            log_a = plat_a.log if plat_a else []
-            mismatches.append(
-                f"state {s}: plat calls differ "
-                f"(mech {sig_m[1]} calls vs abi {sig_a[1]}) "
-                f"mech={log_m[:6]}... abi={log_a[:6]}...")
+        _cmp_effects(s, mem_m, mem_a, plat_m, plat_a, mismatches)
         if len(mismatches) > 8:
             break
     rep = {"states": states, "raised": raises,
