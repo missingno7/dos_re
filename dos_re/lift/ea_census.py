@@ -225,3 +225,41 @@ def build(ir: dict, scan_for) -> Census:
             (c.sites if isinstance(item, AddressExpr)
              else c.blockers).append(item)
     return c
+
+
+#: segment-register loads: where a function BINDS es/ds (memory_schema
+#: section 9 pointer provenance).  0x8E /r = mov Sreg, r/m16 (reg field
+#: selects the segment register); 0xC4/0xC5 = les/lds; 0x07/0x1F/0x17 =
+#: pop seg.  A load from a STATIC address means the segment value lives in
+#: a global -- readable from the image, so the region a cluster addresses
+#: becomes a decidable fact instead of a runtime mystery.
+_SREG_NAMES = {0: "es", 1: "cs", 2: "ss", 3: "ds"}
+
+
+def seg_loads_of(scan, key: str) -> list:
+    """(sreg, source) per segment-register load site.  source is
+    ('global', seg, disp) for a static load, ('reg', name) for a register
+    move, ('pop'|'les'|'lds', detail) otherwise."""
+    out = []
+    for ip, i in sorted(scan.insts.items()):
+        if i.op == 0x8E and i.modrm is not None:
+            sreg = _SREG_NAMES.get(i.reg & 3)
+            if i.mod == 3:
+                src = ("reg", i.rm)
+            elif i.mod == 0 and i.rm == 6:
+                src = ("global", _segment_of(i), i.disp)
+            else:
+                base, idx = _RM16.get(i.rm, (None, None))
+                src = ("indexed", base, idx, i.disp)
+            out.append((key, ip, sreg, src))
+        elif i.op in (0xC4, 0xC5):
+            which = "les" if i.op == 0xC4 else "lds"
+            sreg = "es" if i.op == 0xC4 else "ds"
+            if i.modrm is not None and i.mod == 0 and i.rm == 6:
+                out.append((key, ip, sreg, (which, "global", i.disp)))
+            else:
+                out.append((key, ip, sreg, (which, "dynamic")))
+        elif i.op in (0x07, 0x17, 0x1F):
+            sreg = {0x07: "es", 0x17: "ss", 0x1F: "ds"}[i.op]
+            out.append((key, ip, sreg, ("pop",)))
+    return out
