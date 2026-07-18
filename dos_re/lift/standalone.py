@@ -229,3 +229,99 @@ def run_deep(fn, *args, stack_bytes: int = DEEP_STACK_BYTES,
     if "error" in box:
         raise box["error"]
     return box.get("value")
+
+
+# --- THE STITCH: hand-recovered overrides patched over the generated corpus -------------------------
+
+#: package -> {module basename: original module}, so :func:`uninstall_overrides` can restore.
+_SHADOWED: "dict[str, dict[str, object]]" = {}
+
+
+def generated(package: str, key: str):
+    """The GENERATED body for ``key``, even while an override shadows it.
+
+    An override that only needs to ADD an effect should DELEGATE to this rather than reimplement, so the
+    outputs, flags and virtual-time cost stay the generated ones and cannot drift."""
+    name = module_name(key)
+    real = _SHADOWED.get(package, {}).get(name)
+    if real is not None:
+        return getattr(real, name)
+    return load_recovered(package, key)
+
+
+def install_overrides(package: str, overrides: "dict") -> "list[str]":
+    """Make each ``{'CS:IP': callable}`` the running implementation inside ``package``.
+
+    The generated corpus is the SKELETON -- it holds the program's real control flow, lifted from the
+    original's own code -- and an override is SKIN: it replaces what ONE address means, never the flow.
+    Every address without an override is served by the generated body, so the composite always runs.
+
+    Installation must reach callers that ALREADY imported the callee, and that is the whole difficulty.
+    A generated module binds its callees at import time (``from pkg.func_1010_XXXX import
+    func_1010_XXXX``), so shadowing ``sys.modules`` alone only affects imports that have not happened
+    yet; any earlier caller keeps a direct reference and the override silently does nothing for every
+    call through it. Worse, resolving the original (via :func:`generated`) IMPORTS the module, which
+    eagerly binds THAT module's callees -- so installing several overrides along one call chain
+    guarantees the later ones miss. Found in skyroads: a counter built that way reported ZERO calls for
+    functions a traceback proved were executing.
+
+    So this also RETRO-PATCHES already-bound references and clears the dynamic-dispatch memo. With both,
+    installation order stops mattering.
+
+    An address with no generated counterpart FAILS LOUD: a stale entry must break the build as the
+    corpus is regenerated, never quietly stop applying.
+    """
+    import sys
+    import types
+
+    shadowed = _SHADOWED.setdefault(package, {})
+    installed = []
+    for key, impl in overrides.items():
+        name = module_name(key)
+        full = f"{package}.{name}"
+        real = importlib.import_module(full)          # raises CpuStandaloneWitness via load_recovered
+        original = getattr(real, name)
+        shadow = types.ModuleType(full)
+        shadow.__dict__.update(real.__dict__)
+        setattr(shadow, name, impl)
+        shadowed[name] = real
+        sys.modules[full] = shadow
+        _rebind(package, name, original, impl)
+        installed.append(key)
+    return installed
+
+
+def _rebind(package: str, name: str, original, impl) -> None:
+    """Repoint every already-imported binding of ``name`` in ``package``, and drop the dispatch memo.
+
+    ``DISPATCH`` stores module/function NAMES so it resolves late (fine), but ``_dyncall`` memoises the
+    resolved closure on first call -- an override installed after the first dynamic transfer to that
+    address would never be seen."""
+    import sys
+
+    for mod in list(sys.modules.values()):
+        if mod is None or not getattr(mod, "__name__", "").startswith(package):
+            continue
+        if getattr(mod, name, None) is original:
+            setattr(mod, name, impl)
+    dyn = sys.modules.get(f"{package}._dyncall")
+    if dyn is not None and hasattr(dyn, "_cache"):
+        dyn._cache.clear()
+
+
+def uninstall_overrides(package: str) -> None:
+    """Restore the generated bodies and every rebound reference (tests needing a pristine corpus)."""
+    import sys
+
+    for name, real in _SHADOWED.get(package, {}).items():
+        sys.modules[f"{package}.{name}"] = real
+        original = getattr(real, name)
+        for mod in list(sys.modules.values()):
+            if mod is None or not getattr(mod, "__name__", "").startswith(package):
+                continue
+            if getattr(mod, name, None) is not None and mod is not real:
+                setattr(mod, name, original)
+    dyn = sys.modules.get(f"{package}._dyncall")
+    if dyn is not None and hasattr(dyn, "_cache"):
+        dyn._cache.clear()
+    _SHADOWED.pop(package, None)
