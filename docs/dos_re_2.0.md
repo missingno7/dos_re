@@ -732,7 +732,14 @@ the next major mechanical stage after the VMless graph converges.
   with native objects, oracle verification retained through the generated
   bridge: historical memory views → authoritative native dataclasses and
   object graph → generated bridge back to the original layout → memoryless
-  runtime.
+  runtime.  **Design: `docs/memory_schema.md`** — a generated Memory Schema
+  IR is the single layout authority; native dataclasses hold ORDINARY
+  DETACHED VALUES (a field that secretly re-reads flat memory is the
+  anti-pattern, not the goal); import/export bridges and field-level diffs
+  are generated from the schema and exist only in the verification/migration
+  environment; each promoted region is protected by a fail-loud wall.  The
+  machine stack was already promoted this way in M3b slice 2 (virtual stack +
+  proven no-alias), which is the pattern in miniature.
 - **M5 — Semantic clean port.**  The recovered implementation is
   understandable, maintainable, machine-architecture-independent.
 - **M6 — Enhancements.**  Widescreen, smooth rendering, improved audio, modern
