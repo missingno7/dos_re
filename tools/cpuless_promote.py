@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -170,10 +171,60 @@ def _read_plat_farcalls(path: Path):
     return out
 
 
+#: the virtual-time contract kinds an override may declare (see
+#: :func:`_read_virtual_time`).  Only an EXACT kind is gate-admissible to an
+#: instruction-count-keyed differential.
+_VT_EXACT = ("static", "model")
+_VT_KINDS = _VT_EXACT + ("island",)
+
+
+def _read_virtual_time(key: str, spec: dict) -> dict:
+    """The override's VIRTUAL-TIME contract -- what its body promises to return
+    in the compat channel's ``cost``.
+
+    A composed callee's ``cost`` accumulates into its caller's ``_cost``, which
+    anchors every downstream platform effect and, for a consumer whose gate is
+    instruction-count-keyed, WHERE demo input lands.  A GENERATED body is
+    instruction-exact by construction; a hand-recovered OVERRIDE is not -- it
+    does not execute the original control flow -- so it must DECLARE what its
+    cost means:
+
+      ``{"kind": "static", "cost": N}``  the original's per-invocation
+          instruction count is a constant N (a single-path body, or one whose
+          every entry->ret path has equal length).  The body returns ``N``;
+          composition is virtual-time-exact.
+      ``{"kind": "model"}``  the body computes its exact per-invocation cost
+          itself (a path-dependent cost model) and returns it.  Exact; the
+          consumer owns the derivation and its evidence.
+      ``{"kind": "island"}``  the ISLAND convention -- one dispatch step,
+          semantically right but NOT virtual-time-exact.  Default when the key
+          is absent (every pre-contract override).
+
+    Missing/unknown shapes fail loud: a guessed cost is worse than none.
+    """
+    vt = spec.get("virtual_time")
+    if vt is None:
+        return {"kind": "island", "cost": 1}
+    if not isinstance(vt, dict) or vt.get("kind") not in _VT_KINDS:
+        raise SystemExit(f"cpuless_promote: override {key}: virtual_time must "
+                         f"be a dict with kind in {_VT_KINDS}, got {vt!r}")
+    kind = vt["kind"]
+    if kind == "static":
+        cost = vt.get("cost")
+        if not isinstance(cost, int) or isinstance(cost, bool) or cost < 1:
+            raise SystemExit(f"cpuless_promote: override {key}: virtual_time "
+                             f"kind 'static' needs an integer cost >= 1, got "
+                             f"{cost!r}")
+        return {"kind": "static", "cost": cost,
+                "evidence": vt.get("evidence", "")}
+    return {"kind": kind, "evidence": vt.get("evidence", "")}
+
+
 def _read_overrides(path: Path):
     """Load the authoritative-override contracts a consumer supplies.
 
-    Returns {key: CalleeContract} keyed by paragraph "CS:IP".  Each override is
+    Returns ``({key: CalleeContract}, {key: virtual_time})`` keyed by paragraph
+    "CS:IP" (see :func:`_read_virtual_time`).  Each override is
     the consumer's hand-recovered body; dos_re only seeds its contract (so
     callers compose it) and bridges the CPU ABI around it -- the body itself is
     imported from ``import_base.<name>``.  Missing scalar fields default to a
@@ -181,9 +232,11 @@ def _read_overrides(path: Path):
     doc = json.loads(path.read_text(encoding="utf-8"))
     entries = doc.get("overrides", doc)
     out: dict[str, emit_cpuless.CalleeContract] = {}
+    vtimes: dict[str, dict] = {}
     for key, spec in entries.items():
         if key.startswith("_"):
             continue
+        vtimes[key.upper()] = _read_virtual_time(key, spec)
         ret_kind = spec.get("ret_kind", "near")
         ret_pop = int(spec.get("ret_pop", 0))
         sp_deltas = tuple(spec.get("sp_deltas", (spec.get("sp_delta", 0),)))
@@ -200,7 +253,7 @@ def _read_overrides(path: Path):
             sp_output=bool(spec.get("sp_output", False)),
             sp_deltas=sp_deltas,
             flags_livein=bool(spec.get("flags_livein", False)))
-    return out
+    return out, vtimes
 
 
 def main(argv=None) -> int:
@@ -264,7 +317,21 @@ def main(argv=None) -> int:
                          "The tool emits only the identity-preserving CPU-ABI "
                          "adapter (the body is the consumer's), seeds the "
                          "callee contract so callers compose, and registers a "
-                         "balanced near-return override for dynamic dispatch.")
+                         "balanced near-return override for dynamic dispatch.  "
+                         "Each entry may declare a VIRTUAL-TIME contract "
+                         "(virtual_time: {kind: static|model|island[, cost]}) "
+                         "-- see --overrides-time-exact-only.")
+    ap.add_argument("--overrides-time-exact-only", action="store_true",
+                    help="seed ONLY the overrides that declare an EXACT "
+                         "virtual-time contract (virtual_time kind static or "
+                         "model).  An 'island' override (one dispatch step) is "
+                         "semantically right but does not reproduce the "
+                         "original's per-invocation instruction count, so it "
+                         "shifts every downstream platform effect and desyncs "
+                         "an instruction-count-keyed differential; under this "
+                         "flag such an address falls back to its GENERATED "
+                         "body (which is instruction-exact), keeping the whole "
+                         "graph gate-admissible.")
     ap.add_argument("--entries", default="",
                     help="comma-separated CS:IP candidates (default: all)")
     ap.add_argument("--limit", type=int, default=0,
@@ -382,8 +449,20 @@ def main(argv=None) -> int:
     # its authoritative body is the consumer's (import_base.<name>), and only
     # its identity-preserving CPU-ABI adapter is emitted here (in --apply).
     overrides: dict[str, emit_cpuless.CalleeContract] = {}
+    override_vtime: dict[str, dict] = {}
+    #: overrides DROPPED because they carry no exact virtual-time contract
+    #: (--overrides-time-exact-only): {key: kind}.  They are not seeded, so the
+    #: address keeps its instruction-exact GENERATED body.
+    override_time_inexact: dict[str, str] = {}
     if args.overrides:
-        overrides = _read_overrides(Path(args.overrides.lstrip("@")))
+        overrides, override_vtime = _read_overrides(
+            Path(args.overrides.lstrip("@")))
+        if args.overrides_time_exact_only:
+            for okey in sorted(overrides):
+                kind = override_vtime.get(okey, {}).get("kind", "island")
+                if kind not in _VT_EXACT:
+                    override_time_inexact[okey] = kind
+                    del overrides[okey]
         for okey, oc in overrides.items():
             ocs, oip = (int(x, 16) for x in okey.split(":"))
             contracts_by_cs.setdefault(ocs, {})[oip] = oc
@@ -527,8 +606,18 @@ def main(argv=None) -> int:
     print(f"cpuless promotion census ({len(wanted)} candidates):")
     print(f"  promotable                     {len(promoted):4d}")
     if overrides:
+        _vt = Counter(override_vtime.get(k, {}).get("kind", "island")
+                      for k in overrides)
         print(f"  authoritative overrides        {len(overrides):4d} "
-              f"(seeded contracts; callers compose them)")
+              f"(seeded contracts; callers compose them) "
+              f"[virtual time: "
+              + ", ".join(f"{k} {n}" for k, n in sorted(_vt.items())) + "]")
+    if override_time_inexact:
+        _vt = Counter(override_time_inexact.values())
+        print(f"  overrides NOT seeded (inexact virtual time) "
+              f"{len(override_time_inexact):4d} "
+              + ", ".join(f"{k} {n}" for k, n in sorted(_vt.items()))
+              + " -- kept on the instruction-exact GENERATED body")
     for reason, keys in sorted(refused.items(), key=lambda kv: -len(kv[1])):
         print(f"  refused: {reason:<28} {len(keys):4d}")
     if promoted:
@@ -543,6 +632,10 @@ def main(argv=None) -> int:
                        "regenerate, do not hand-edit.",
             "promotable": promoted,
             "overrides": sorted(overrides),
+            "override_virtual_time": {k: override_vtime[k]
+                                      for k in sorted(overrides)
+                                      if k in override_vtime},
+            "override_time_inexact": dict(sorted(override_time_inexact.items())),
             "refused": {k: sorted(v) for k, v in sorted(refused.items())},
             "dead_output_prune": {
                 "policy": "keep register outputs live at >=1 clean return exit "
