@@ -37,13 +37,23 @@ from .decode import (CALL, CALL_FAR, CALL_IND, HLT, INT, IRET, JCC, JMP,
 from .cpuless import SEGS
 from .contracts import _STRING_PAIRS
 from .emit_cpuless import (CalleeContract, Refusal, _check_flag_liveins,
-                           _DISPATCH_ITER_CAP, _FLAG_BITS, _JCC_EXPR,
-                           _patched_read, _r8_write, _reg16, _rm_read,
-                           _rm_write_lines, _translate)
+                           _DISPATCH_ITER_CAP, _FLAG_BITS, _INT_REGS,
+                           _JCC_EXPR, _patched_read, _r8_write, _reg16,
+                           _rm_read, _rm_write_lines, _translate)
 
 #: XOR perturbation for proven-unobserved outputs: guaranteed to differ
 #: from the mechanical value if anything observes it.
 POISON_XOR = 0xA5A5
+
+#: DOS/BIOS SERVICE interrupts modelled as an explicit platform effect
+#: (plat.intr) -- mirrors dos_re.lift.cpuless.register_effects' PLATFORM_INT.
+#: A game-vectored INT (3/60/61) is a call into recovered handler code
+#: (needs the _ivec dispatch) and stays mechanical this tier; INT 20h
+#: terminates; anything else is an unmodelled installed vector.
+PLATFORM_INT = frozenset({0x21, 0x10, 0x11, 0x12, 0x13, 0x15, 0x16, 0x1A,
+                          0x2F, 0x33, 0x67})
+#: the flag bits an INT service reproduces (CF PF AF ZF SF OF IF DF).
+_INT_FMASK = 0xED5
 
 
 @dataclass(frozen=True)
@@ -67,6 +77,7 @@ class CoreContract:
     df_livein: bool
     exit_flags: frozenset
     needs_plat: bool = False
+    flags_livein: bool = False
 
 
 def _stem(key: str) -> str:
@@ -258,7 +269,15 @@ def check_composable(scan, *, callees=None, boundary_addrs=frozenset(),
         k = i.kind
         if k == CALL and i.target is not None and i.target in callees:
             continue                          # composed near call (delta 0)
-        if k in (CALL, CALL_FAR, CALL_IND, JMP_IND, JMP_FAR, INT, HLT):
+        if k == INT:
+            if i.int_no in PLATFORM_INT:
+                continue                      # a DOS/BIOS service (plat.intr)
+            if i.int_no in (3, 0x60, 0x61):
+                raise Refusal("game-vectored-int")
+            if i.int_no == 0x20:
+                raise Refusal("program-terminate")
+            raise Refusal("vectored-int-call")
+        if k in (CALL, CALL_FAR, CALL_IND, JMP_IND, JMP_FAR, HLT):
             raise Refusal(f"leaf-only:{k}")
         if k == IRET:
             raise Refusal("iret-contract")
@@ -325,13 +344,40 @@ def check_composable(scan, *, callees=None, boundary_addrs=frozenset(),
 
 
 def _abi_needs_plat(scan, callees) -> bool:
-    """A core needs the platform interface if it does port I/O directly or
-    composes a callee that needs it."""
-    if any(i.op in _PORT_IO for i in scan.insts.values()):
-        return True
-    return any(i.kind == CALL and i.target in callees
-               and callees[i.target].needs_plat
-               for i in scan.insts.values())
+    """A core needs the platform interface if it does port I/O, a platform
+    INT, or composes a callee that needs it."""
+    for i in scan.insts.values():
+        if i.op in _PORT_IO:
+            return True
+        if i.kind == INT and i.int_no in PLATFORM_INT:
+            return True
+        if i.kind == CALL and i.target in callees \
+                and callees[i.target].needs_plat:
+            return True
+    return False
+
+
+def _emit_int(i, blk, count) -> None:
+    """Emit a DOS/BIOS service INT as a platform effect (``plat.intr``) at
+    the same absolute virtual time the mechanical emitter passes: the whole
+    register bundle + composed flags word go in, the returned bundle + flags
+    come back.  Byte-identical to emit_cpuless's INT branch."""
+    off = count - 1
+    cost = "_base + _cost" if off == 0 else f"_base + _cost + {off}"
+    fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
+                    for f in ("cf", "pf", "af", "zf", "sf", "of", "df",
+                              "intf"))
+    regd = ", ".join("'%s': %s" % (r, r) for r in _INT_REGS)
+    blk.append("_ib = {%s, '_flags': (%s)}" % (regd, fw))
+    blk.append(f"_ir = plat.intr(0x{i.int_no:02X}, _ib, {cost})")
+    for r in _INT_REGS:
+        blk.append(f"{r} = _ir['{r}']")
+    blk.append("_if = _ir['flags']")
+    for fname, fbit in (("cf", 0x01), ("pf", 0x04), ("af", 0x10),
+                        ("zf", 0x40), ("sf", 0x80), ("of", 0x800),
+                        ("intf", 0x200), ("df", 0x400)):
+        blk.append(f"{fname} = (_if & 0x{fbit:X}) != 0")
+    blk.append(f"_fmask |= 0x{_INT_FMASK:X}")
 
 
 def _emit_portio(i, blk, count) -> None:
@@ -448,11 +494,19 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     cc = {ip: CalleeContract(
               name=_core_alias(c.stem), inputs=c.inputs, outputs=c.returns,
               exit_flags=c.exit_flags, needs_plat=c.needs_plat, ret_kind="near",
-              df_livein=c.df_livein)
+              df_livein=c.df_livein, flags_livein=c.flags_livein)
           for ip, c in callees.items()}
-    exit_flags, df_livein, flags_livein = _check_flag_liveins(scan, callees=cc)
-    if flags_livein:
-        raise Refusal("flags-livein")
+    exit_flags, df_livein, fl_needed = _check_flag_liveins(scan, callees=cc)
+    # flags_livein rule mirrors emit_cpuless.check_promotable: a serviced INT
+    # (plat.intr) reads the caller's FLAGS word (its IF/DF bits, which no
+    # arithmetic defines), and the property is transitive through a composed
+    # callee.  The other mechanical triggers (dynamic/ISR/far-plat/pushf) are
+    # already refused, so they cannot arise here.
+    flags_livein = (fl_needed
+                    or any(i.kind == INT for i in scan.insts.values())
+                    or any(i.kind == CALL and i.target in callees
+                           and callees[i.target].flags_livein
+                           for i in scan.insts.values()))
     needs_plat = _abi_needs_plat(scan, callees)
 
     cs = int(key.split(":")[0], 16)
@@ -495,7 +549,9 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     A('')
     A('')
     argl = (["_base=0"] if needs_plat else []) \
-        + (["_df=0"] if df_livein else []) + [f"{r}=0" for r in params]
+        + (["_df=0"] if df_livein else []) \
+        + (["_flags_in=2"] if flags_livein else []) \
+        + [f"{r}=0" for r in params]
     args = ", ".join(argl)
     _head = "mem, plat" if needs_plat else "mem"
     A(f"def _abi_core({_head}, *, {args}):" if args
@@ -504,6 +560,11 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     B = body.append
     B("_cost = 0")
     B("cf = pf = af = zf = sf = of = df = intf = False")
+    if flags_livein:
+        # every flag local starts MACHINE-CORRECT from the caller word, so a
+        # serviced INT sees the caller's IF/DF (nothing is ever undefined).
+        for fname, fbit in sorted(_FLAG_BITS.items()):
+            B(f"{fname} = (_flags_in & 0x{fbit:X}) != 0")
     if df_livein:
         B("df = _df != 0    # caller DF (hidden compat input)")
     B("_fmask = 0")
@@ -570,6 +631,8 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
                 break
             if i.kind == CALL and i.target in callees:
                 _emit_composed_call(blk, callees[i.target], count)
+            elif i.kind == INT:
+                _emit_int(i, blk, count)
             elif i.op in _PORT_IO:
                 _emit_portio(i, blk, count)
             elif not _emit_vstack(i, blk, cs):
@@ -626,7 +689,7 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     contract = CoreContract(key=key, stem=stem, inputs=tuple(params),
                             returns=tuple(returns), df_livein=df_livein,
                             exit_flags=frozenset(exit_flags),
-                            needs_plat=needs_plat)
+                            needs_plat=needs_plat, flags_livein=flags_livein)
     return "\n".join(L), contract
 
 
@@ -646,6 +709,14 @@ def _emit_composed_call(blk, c: CoreContract, count) -> None:
                   else f"_base=_base + _cost + {off}")
     if c.df_livein:
         kw.append("_df=(1 if df else 0)")
+    if c.flags_livein:
+        # reconstruct the callee's full FLAGS word: bits this function has
+        # defined (in _fmask) from the live locals, the rest from the
+        # caller's own word -- byte-identical to the mechanical composition.
+        fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
+                        for f in ("cf", "pf", "af", "zf", "sf", "of",
+                                  "df", "intf"))
+        kw.append(f"_flags_in=((_flags_in & ~_fmask) | (({fw}) & _fmask))")
     kw += [f"{r}={r}" for r in c.inputs]
     blk.append(f"_o, _c = {_core_alias(c.stem)}({', '.join(kw)})")
     for r in c.returns:

@@ -119,6 +119,24 @@ class PlatStub:
     def outp(self, port, val, width, cost):
         self.log.append(("out", port, val & 0xFFFF, width, cost))
 
+    #: registers a DOS/BIOS service returns (mirrors emit_abi._INT_REGS).
+    _INT_REGS = ("ax", "bx", "cx", "dx", "si", "di", "bp", "ds", "es")
+
+    def intr(self, n, ib, cost):
+        # fold the FULL input bundle deterministically (no built-in hash --
+        # string hashing is per-process randomized): a wrong reg or flags
+        # word in, or a cost drift, diverges the log AND the returned values.
+        items = tuple(sorted((k, v) for k, v in ib.items()))
+        self.log.append(("int", n, cost, items))
+        base = (n * 40503 + cost * 2654435761 + self.seed) & 0xFFFFFFFF
+        for idx, (k, v) in enumerate(items):
+            base = (base * 16777619 + v + idx) & 0xFFFFFFFF
+        out = {}
+        for k, r in enumerate(self._INT_REGS):
+            out[r] = ((base * 2654435761) >> (3 + k)) & 0xFFFF
+        out["flags"] = (base >> 7) & 0xED5
+        return out
+
 
 def _run(fn, mem, kwargs, plat=None):
     """(outcome_kind, payload): a normal result or the raised error text."""
@@ -173,6 +191,14 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
             akw["_df"] = dfv
             if "_df" in mech_kd:
                 mkw["_df"] = dfv
+        if "_flags_in" in abi_kd:
+            # a flags-livein core takes the caller's full FLAGS word; seed a
+            # varied one (with the reserved bit 0x2 always set, as the CPU
+            # keeps it) so IF/DF and the arithmetic bits are exercised.
+            fw = (((seed0 + s) * 2654435761) & 0xED5) | 0x2
+            akw["_flags_in"] = fw
+            if "_flags_in" in mech_kd:
+                mkw["_flags_in"] = fw
         mk, mp = _run(mech_fn, mem_m, mkw, plat_m)
         ak, ap = _run(abi_core_fn, mem_a, akw, plat_a)
         if mk == "raise" or ak == "raise":

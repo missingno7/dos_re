@@ -121,6 +121,24 @@ def scans_for(key, hexbytes):
     return build_scans(ir)[0][key]
 
 
+def test_platform_int_core_matches_mechanical():
+    # mov ah,0x2c; int 0x21; ret -- DOS get-time service
+    mech, core, prop, mod = _emit_pair("1010:0600", "B4 2C CD 21 C3")
+    rep = diff_one(mech, core, prop, states=32)
+    assert rep["ok"], rep["mismatches"][:3]
+    src = emit_abi.emit_abi_core(scans_for("1010:0600", "B4 2C CD 21 C3"),
+                                 prop, "1010:0600")[0]
+    assert "plat.intr(0x21" in src
+
+
+def test_game_vectored_int_stays_mechanical():
+    # int 0x61 (sound driver) -- not a platform service, needs _ivec dispatch
+    ir = _ir({"1010:0000": "CD 61 C3"})
+    scans, _ = build_scans(ir)
+    with pytest.raises(Refusal, match="game-vectored-int"):
+        emit_abi.check_composable(scans["1010:0000"])
+
+
 #: callee 1010:0100 -- push bx; mov bx,3; add ax,bx; pop bx; ret (adds 3 to ax)
 _C_CALLEE = "53 BB 03 00 01 D8 5B C3"
 #: caller 1010:0000 -- mov ax,10; call 0100; add ax,1; ret (-> ax = 14)
