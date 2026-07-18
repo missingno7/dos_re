@@ -1059,9 +1059,10 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
             if _is_sp_snapshot_store(i) or _is_nonlocal_exit(scan, i):
                 continue
             raise Refusal("sp-as-data")
-    _check_frame_pointer(scan, callees, far_callees)
+    bp_bias = _check_frame_pointer(scan, callees, far_callees)
     sp_delta, ret_pop, sp_output, sp_deltas = _check_stack_depths(
-        scan, alt_entries, callees, far_callees, plat_farcalls, dead_exits)
+        scan, alt_entries, callees, far_callees, plat_farcalls, dead_exits,
+        bp_bias)
     # NOTE: a sp_output (unbalanced/varying exit) tail dispatch used to refuse
     # here -- "an unbalanced body would hand the callee a shifted frame".  That
     # is exactly the FRAMELESS STACK-ARG idiom (push args; jmp cs:[table]; each
@@ -1179,7 +1180,7 @@ def _check_frame_pointer(scan, callees=None, far_callees=None) -> None:
     leaves = [i for i in scan.insts.values() if i.op == 0xC9]
     restores = [i for i in scan.insts.values() if _is_frame_restore(i)]
     if not leaves and not restores:
-        return
+        return {}
     # A fused `leave` (`mov sp,bp; pop bp`) tears the frame down to the ENTRY
     # depth, so it needs a PUSHED frame base in bp -- established either by
     # `enter` (the atomic push+set) or the hand-rolled equivalent
@@ -1213,12 +1214,13 @@ def _check_frame_pointer(scan, callees=None, far_callees=None) -> None:
                 and not _is_stack_family(i)
                 and "bp" in register_effects(i).writes]
     if not clobbers:
-        return                             # bp is never repurposed: invariant holds
+        return {}                          # bp is never repurposed: invariant holds
     # bp IS used as scratch (a compiler's spare pointer -- skyroads' tile renderer
     # 2D1F loads bp with the road[] base and indexes through it). That is fine
     # PROVIDED bp is saved (`push bp`) and restored (`pop bp`) around the clobber,
     # so it holds the frame base again at each teardown. Prove it.
-    _prove_bp_framebase_at_teardowns(scan, callees or {}, far_callees or {})
+    return _prove_bp_framebase_at_teardowns(scan, callees or {},
+                                            far_callees or {})
 
 
 def _prove_bp_framebase_at_teardowns(scan, callees, far_callees) -> None:
@@ -1226,44 +1228,92 @@ def _prove_bp_framebase_at_teardowns(scan, callees, far_callees) -> None:
     even when the body repurposes it, because it is saved and restored (LIFO,
     the compiler convention) around the clobbers.
 
-    State is ``(bp_is_framebase, frame_saves)`` -- whether bp currently IS the
-    frame base, and how many saved copies of it are outstanding on the stack. A
-    frame establish makes bp the base; ``push bp`` while bp is the base pushes a
-    save; ``pop bp`` restores the base and consumes one; any other bp write
-    clobbers it. This deliberately does NOT track the exact stack DEPTH -- the
-    body has legitimately path-dependent depth (2D1F's inner render loops), and
-    the frame-base save lives below all of it, so the count is the invariant that
-    survives a join where the depth does not. The LIFO assumption (a `pop bp`
-    that sees a save is popping THAT save, not an intervening scratch push) is
-    what the compiler emits; the byte-exact demo oracle is the backstop that
-    would catch any function where it does not hold. Refuse on a join where the
-    frame state itself disagrees, or a `pop bp` with no save outstanding."""
+    State is ``(bp_bias, saved, frame_depth)`` -- bp's offset from this frame's
+    base (``0`` = bp IS the base, ``None`` = bp is not frame-derived at all; see
+    :func:`_bp_const_bias`), the LIFO of what each outstanding ``push bp`` put on
+    the stack (each entry is the pushed value's own bias, or ``None``), and how
+    deep that LIFO was when the frame was established (``None`` = not
+    established here).
+
+    Returns ``{teardown_ip: bias}`` -- what bp's offset from the frame base is at
+    each ``leave`` / ``mov sp,bp``.  The depth walk needs it: a teardown lands sp
+    at ``frame_base - bias``, and only a bias of 0 lands it exactly on the base.
+
+    A LIFO OF VALUES, NOT A COUNT.  The count-only predecessor of this analysis
+    could only credit a ``push bp`` that happened while bp ALREADY held the frame
+    base -- but the universal prologue pushes the CALLER's bp *before*
+    ``mov bp,sp`` makes bp the base, so the frame's own save was never counted
+    and the matching ``pop bp`` refused ``frame-pointer-pop-without-save``.  That
+    stayed hidden while the analysis ran only for bodies that clobber bp, and
+    surfaced on the far-procedure prologue ``inc bp ; push bp ; mov bp,sp`` /
+    epilogue ``mov sp,bp ; pop bp ; dec bp`` (the marker a stack walker uses to
+    tell a far frame from a near one), whose ``inc bp`` IS such a clobber.
+    Tracking what each push actually saved models both shapes with one rule and
+    needs no special case for either.
+
+    A teardown (``leave`` / ``mov sp,bp``) resets sp to the frame base, so it
+    DISCARDS everything pushed above that base: the LIFO is truncated back to
+    ``frame_depth`` rather than cleared, which is what lets the frame's own saved
+    word survive for the ``pop bp`` that follows.  Between establish and
+    teardown the tracked depth is exact, and the deliberate imprecision of the
+    old model is not needed: the body's legitimately path-dependent depth
+    (2D1F's inner render loops) is pushed and popped by non-bp instructions,
+    which this LIFO does not track at all.
+
+    Refuse on a join where the frame state disagrees, a ``pop bp`` with nothing
+    saved, or a teardown reached with bp not holding the frame base."""
     entry = scan.entry
-    states = {entry: (False, 0)}           # bp caller-owned; no saves yet
+    states = {entry: (None, (), None)}     # bp caller-owned; nothing saved
+    bias_at: dict[int, int] = {}           # teardown ip -> bp's bias there
     work = [entry]
     while work:
         ip = work.pop()
-        bpfb, saves = states[ip]
+        bpfb, saved, depth = states[ip]
         i = scan.insts[ip]
         op = i.op
         if op == 0xC9 or _is_frame_restore(i):     # a teardown reads bp as base
-            if not bpfb:
+            if bpfb is None:
                 raise Refusal("frame-pointer-clobbered")
+            if depth is None or len(saved) < depth:
+                raise Refusal("frame-restore-without-establish")
+            # A fused `leave` pops from the address bp names, so a BIASED bp
+            # would read a slot that is not the saved base.  The split form
+            # (`mov sp,bp` + an explicit `pop`) names the slot deliberately and
+            # is exact at any constant bias.
+            if op == 0xC9 and bpfb != 0:
+                raise Refusal("frame-pointer-biased-leave")
+            if bpfb < 0 and len(saved) > depth:
+                raise Refusal("frame-restore-biased-over-saves")
+            if bias_at.setdefault(ip, bpfb) != bpfb:
+                raise Refusal("frame-pointer-bias-join-mismatch")
         # advance the frame state
-        if op == 0xC8 or _is_frame_establish(i):   # enter 0 / mov bp,sp
-            n_bpfb, n_saves = True, saves
-        elif op == 0xC9:                   # leave: frame torn down, then ret
-            n_bpfb, n_saves = False, 0
-        elif op == 0x55:                   # push bp -- save bp's current state
-            n_bpfb, n_saves = bpfb, saves + (1 if bpfb else 0)
-        elif op == 0x5D:                   # pop bp -- restore the last save
-            if saves <= 0:
+        bias = _bp_const_bias(i)
+        if op == 0xC8:                     # enter: pushes the old bp, then sets
+            n_bpfb, n_saved = 0, saved + (bpfb,)
+            n_depth = len(n_saved)
+        elif _is_frame_establish(i):       # mov bp,sp -- its `push bp` preceded
+            n_bpfb, n_saved, n_depth = 0, saved, len(saved)
+        elif op == 0xC9:                   # leave = mov sp,bp; pop bp
+            n_saved = saved[:depth]                # sp reset discards the rest
+            if not n_saved:
                 raise Refusal("frame-pointer-pop-without-save")
-            n_bpfb, n_saves = True, saves - 1
+            n_bpfb, n_saved = n_saved[-1], n_saved[:-1]
+            n_depth = None
+        elif _is_frame_restore(i):         # mov sp,bp -- the un-fused half
+            n_bpfb, n_saved, n_depth = bpfb, saved[:depth], depth
+        elif op == 0x55:                   # push bp -- save bp's current state
+            n_bpfb, n_saved, n_depth = bpfb, saved + (bpfb,), depth
+        elif op == 0x5D:                   # pop bp -- restore what was saved
+            if not saved:
+                raise Refusal("frame-pointer-pop-without-save")
+            n_bpfb, n_saved, n_depth = saved[-1], saved[:-1], depth
+        elif bias is not None and bpfb is not None:
+            # a CONSTANT bp adjustment: bp stays frame-derived, just biased.
+            n_bpfb, n_saved, n_depth = bpfb + bias, saved, depth
         elif i.kind == SEQ and "bp" in register_effects(i).writes:
-            n_bpfb, n_saves = False, saves         # a non-frame clobber
+            n_bpfb, n_saved, n_depth = None, saved, depth    # a non-frame clobber
         else:
-            n_bpfb, n_saves = bpfb, saves          # everything else: bp preserved
+            n_bpfb, n_saved, n_depth = bpfb, saved, depth    # bp preserved
         succ = []
         if i.kind in (SEQ, CALL, CALL_FAR, CALL_IND):
             succ = [i.next_ip]
@@ -1274,13 +1324,14 @@ def _prove_bp_framebase_at_teardowns(scan, callees, far_callees) -> None:
         for s in succ:
             if s is None or s not in scan.insts:
                 continue
-            ns = (n_bpfb, n_saves)
+            ns = (n_bpfb, n_saved, n_depth)
             if s in states:
                 if states[s] != ns:
                     raise Refusal("frame-pointer-join-mismatch")
             else:
                 states[s] = ns
                 work.append(s)
+    return bias_at
 
 
 _OUTPUT_KEEP = frozenset(W16) | frozenset({"ds", "es"})
@@ -1366,6 +1417,39 @@ def _is_sp_capture(i) -> bool:
     return (i.mod == 3
             and ((i.op == 0x8B and i.rm == 4)       # mov r16, sp
                  or (i.op == 0x89 and i.reg == 4)))  # mov r/m16, sp
+
+
+def _bp_const_bias(i) -> "int | None":
+    """The COMPILE-TIME CONSTANT this instruction adds to bp, or ``None`` if it
+    is not a constant bp adjustment.
+
+    A frame pointer is not always used raw: a compiler may carry it BIASED by a
+    constant and undo the bias at the teardown, so bp holds ``framebase + k``
+    for a statically known ``k`` rather than the base itself.  Two real shapes
+    motivate this, and both fall out of the one rule:
+
+    * a prologue that biases bp before saving it, so the saved word is TAGGED --
+      a stack walker reads the tag to classify the frame, and the epilogue
+      removes it symmetrically (``inc bp ; push bp ; mov bp,sp`` ... ``pop bp ;
+      dec bp``);
+    * an epilogue that biases bp to name a slot BELOW the frame base, so the one
+      ``mov sp,bp`` lands on a register saved inside the frame rather than on
+      the base itself (``dec bp ; dec bp ; mov sp,bp ; pop ds ; pop bp``).
+
+    Modelling the bias as a number keeps bp frame-DERIVED across it, so the
+    teardown depth stays exactly computable (``frame_base - bias``) instead of
+    collapsing to "clobbered".  Recognising the arithmetic -- not a fixed byte
+    sequence -- is what makes this a compiler pattern rather than a peephole:
+    any convention built from constant bp arithmetic is covered.
+    """
+    if i.op in (0x45, 0x4D):                       # inc bp / dec bp
+        return 1 if i.op == 0x45 else -1
+    if i.op in (0x81, 0x83) and i.mod == 3 and i.rm == 5 and i.reg in (0, 5):
+        imm = i.imm or 0                           # add/sub bp, imm
+        if i.op == 0x83 and imm > 0x7F:            # imm8 is sign-extended
+            imm -= 0x100
+        return imm if i.reg == 0 else -imm
+    return None
 
 
 def _is_frame_establish(i) -> bool:
@@ -1634,7 +1718,7 @@ def _is_isr_chain(i) -> bool:
 
 def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
                         far_callees=None, plat_farcalls=None,
-                        dead_exits=frozenset()) -> tuple:
+                        dead_exits=frozenset(), bp_bias=None) -> tuple:
     """Static stack-discipline verification (tiers 2 + 11): every address has
     ONE net push depth (bytes) from entry, consistent at every join.
 
@@ -1799,9 +1883,15 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
             # the frame base -- the depth recorded at the matching `mov bp,sp`,
             # NOT entry depth (the saved bp is still stacked; the `pop bp` that
             # follows does that -2). A reset, exact even when d is UNKNOWN.
+            #
+            # bp may be carried BIASED by a compile-time constant
+            # (:func:`_bp_const_bias`), in which case sp lands that many bytes
+            # off the base: depth `frame_base - bias`. The bias comes from the
+            # frame proof, which resolved it per teardown; absent (bias 0) this
+            # is the plain reset.
             if frame_base is None:
                 raise Refusal("frame-restore-before-establish")
-            afters = [frame_base]
+            afters = [frame_base - (bp_bias or {}).get(ip, 0)]
         elif d is None:
             afters = [None]
         else:
