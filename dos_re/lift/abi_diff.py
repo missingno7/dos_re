@@ -98,10 +98,35 @@ def _seeded_regs(params, state: int) -> dict[str, int]:
     return out
 
 
-def _run(fn, mem, kwargs):
+class PlatStub:
+    """A deterministic platform interface for the differential: ``inp``
+    returns a stable pseudo-random word keyed by (port, width, cost) -- the
+    SAME value on both sides, since both compute the same virtual time at
+    the same site -- and every call is recorded, so a divergence in port,
+    width, cost, or ORDER surfaces.  A cost or _base mismatch changes the
+    key, so the two sides read different values and the comparison fails
+    loudly -- exactly the timing bug the compat channel exists to catch."""
+
+    def __init__(self, seed: int) -> None:
+        self.seed = seed & 0xFFFFFFFF
+        self.log: list = []
+
+    def inp(self, port, width, cost):
+        self.log.append(("in", port, width, cost))
+        h = (port * 2246822519 ^ cost * 3266489917 ^ self.seed) & 0xFFFFFFFF
+        return (h >> 11) & (0xFFFF if width == 2 else 0xFF)
+
+    def outp(self, port, val, width, cost):
+        self.log.append(("out", port, val & 0xFFFF, width, cost))
+
+
+def _run(fn, mem, kwargs, plat=None):
     """(outcome_kind, payload): a normal result or the raised error text."""
     try:
-        out, compat = fn(mem, **kwargs)
+        if plat is not None:
+            out, compat = fn(mem, plat, **kwargs)
+        else:
+            out, compat = fn(mem, **kwargs)
         return "ok", (out, compat)
     except ZeroDivisionError:
         return "raise", "ZeroDivisionError"
@@ -119,6 +144,11 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
     returns = list(proposal["returns"])
     mech_kd = getattr(mech_fn, "__kwdefaults__", None) or {}
     abi_kd = getattr(abi_core_fn, "__kwdefaults__", None) or {}
+    # a needs_plat core takes plat as its 2nd positional (mem, plat, *, ...)
+    mech_pos = mech_fn.__code__.co_varnames[:mech_fn.__code__.co_argcount]
+    abi_pos = abi_core_fn.__code__.co_varnames[:abi_core_fn.__code__.co_argcount]
+    mech_plat = "plat" in mech_pos
+    abi_plat = "plat" in abi_pos
     missing = [r for r in params if r not in mech_kd]
     if missing:
         return {"states": 0, "raised": 0, "ok": False,
@@ -130,6 +160,8 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
         regs = _seeded_regs(params, seed0 + s)
         mem_m = TraceMem(seed0 + s, shadow_stack_seg=STACK_SEG)
         mem_a = TraceMem(seed0 + s)
+        plat_m = PlatStub(seed0 + s) if mech_plat else None
+        plat_a = PlatStub(seed0 + s) if abi_plat else None
         mkw = dict(regs)
         if "sp" in mech_kd:
             mkw["sp"] = STACK_SP
@@ -141,8 +173,8 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
             akw["_df"] = dfv
             if "_df" in mech_kd:
                 mkw["_df"] = dfv
-        mk, mp = _run(mech_fn, mem_m, mkw)
-        ak, ap = _run(abi_core_fn, mem_a, akw)
+        mk, mp = _run(mech_fn, mem_m, mkw, plat_m)
+        ak, ap = _run(abi_core_fn, mem_a, akw, plat_a)
         if mk == "raise" or ak == "raise":
             raises += 1
             if (mk, mp) != (ak, ap):
@@ -170,6 +202,12 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
             mismatches.append(
                 f"state {s}: writes mech(sem)={mem_m.writes[:6]}... "
                 f"abi={mem_a.writes[:6]}...")
+        log_m = plat_m.log if plat_m else []
+        log_a = plat_a.log if plat_a else []
+        if log_m != log_a:
+            mismatches.append(
+                f"state {s}: plat calls mech={log_m[:6]}... "
+                f"abi={log_a[:6]}...")
         if len(mismatches) > 8:
             break
     return {"states": states, "raised": raises,

@@ -102,6 +102,25 @@ def test_gate_refuses_calls():
         emit_abi.check_destackable(scans["1010:0000"])
 
 
+def test_portio_core_threads_plat_and_matches_mechanical():
+    # in al,0x60; out 0x61,al; ret -- reads the keyboard port, echoes it
+    mech, core, prop, mod = _emit_pair("1010:0500", "E4 60 E6 61 C3")
+    rep = diff_one(mech, core, prop, states=32)
+    assert rep["ok"], rep["mismatches"][:3]
+    # the core takes the platform interface (mem, plat) and routes the
+    # port access through it (no direct hardware in the recovered body)
+    import inspect
+    assert "plat" in inspect.signature(core).parameters
+    src = emit_abi.emit_abi_core(scans_for("1010:0500", "E4 60 E6 61 C3"),
+                                 prop, "1010:0500")[0]
+    assert "plat.inp(0x60" in src and "plat.outp(0x61" in src
+
+
+def scans_for(key, hexbytes):
+    ir = _ir({key: hexbytes})
+    return build_scans(ir)[0][key]
+
+
 #: callee 1010:0100 -- push bx; mov bx,3; add ax,bx; pop bx; ret (adds 3 to ax)
 _C_CALLEE = "53 BB 03 00 01 D8 5B C3"
 #: caller 1010:0000 -- mov ax,10; call 0100; add ax,1; ret (-> ax = 14)

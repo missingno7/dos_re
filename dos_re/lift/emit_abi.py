@@ -38,8 +38,8 @@ from .cpuless import SEGS
 from .contracts import _STRING_PAIRS
 from .emit_cpuless import (CalleeContract, Refusal, _check_flag_liveins,
                            _DISPATCH_ITER_CAP, _FLAG_BITS, _JCC_EXPR,
-                           _patched_read, _reg16, _rm_read, _rm_write_lines,
-                           _translate)
+                           _patched_read, _r8_write, _reg16, _rm_read,
+                           _rm_write_lines, _translate)
 
 #: XOR perturbation for proven-unobserved outputs: guaranteed to differ
 #: from the mechanical value if anything observes it.
@@ -53,17 +53,20 @@ class CoreContract:
     ``inputs`` are the callee's semantic parameters (sorted; no sp/ss/cs);
     ``returns`` its observed register returns; ``df_livein`` whether it
     takes the caller's DF; ``exit_flags`` the flags it definitely defines on
-    every exit (feeds the caller's flag-liveness).  An ABI core is never
-    needs_plat or flags_livein (those shapes stay mechanical this tier), so
-    the composed call passes only ``mem`` (+ optional ``_df``) and the
-    semantic inputs, and takes back ``(_o, _c)`` -- the SAME two-tuple the
-    mechanical composition consumes, so cost and flags merge identically."""
+    every exit (feeds the caller's flag-liveness).  A ``needs_plat`` core
+    also takes the platform interface and the absolute virtual-time base
+    (``plat``, ``_base``) so its port I/O reaches the device with correct
+    timing; a composed call threads those through.  The composed call always
+    takes back ``(_o, _c)`` -- the SAME two-tuple the mechanical composition
+    consumes, so cost and flags merge identically.  (flags_livein cores stay
+    mechanical this tier.)"""
     key: str
     stem: str
     inputs: tuple
     returns: tuple
     df_livein: bool
     exit_flags: frozenset
+    needs_plat: bool = False
 
 
 def _stem(key: str) -> str:
@@ -259,8 +262,6 @@ def check_composable(scan, *, callees=None, boundary_addrs=frozenset(),
             raise Refusal(f"leaf-only:{k}")
         if k == IRET:
             raise Refusal("iret-contract")
-        if i.op in _PORT_IO:
-            raise Refusal("platform-port-io")
         if i.op in (0x9C, 0x9D):
             raise Refusal("flags-word-stack")
         if i.op in (0xC8, 0xC9):
@@ -321,6 +322,39 @@ def check_composable(scan, *, callees=None, boundary_addrs=frozenset(),
                 depth[s] = nd
                 work.append(s)
     return depth
+
+
+def _abi_needs_plat(scan, callees) -> bool:
+    """A core needs the platform interface if it does port I/O directly or
+    composes a callee that needs it."""
+    if any(i.op in _PORT_IO for i in scan.insts.values()):
+        return True
+    return any(i.kind == CALL and i.target in callees
+               and callees[i.target].needs_plat
+               for i in scan.insts.values())
+
+
+def _emit_portio(i, blk, count) -> None:
+    """Emit a port I/O instruction as a platform effect, at the same
+    absolute virtual time the mechanical emitter passes (``_base + _cost +
+    offset-in-block``)."""
+    off = count - 1
+    cost = "_base + _cost" if off == 0 else f"_base + _cost + {off}"
+    width = 2 if (i.op & 1) else 1
+    if i.op in (0xE4, 0xE5):              # in acc, imm8
+        port, read = f"0x{(i.imm or 0) & 0xFF:X}", True
+    elif i.op in (0xEC, 0xED):            # in acc, dx
+        port, read = "dx", True
+    elif i.op in (0xE6, 0xE7):            # out imm8, acc
+        port, read = f"0x{(i.imm or 0) & 0xFF:X}", False
+    else:                                 # out dx, acc
+        port, read = "dx", False
+    if read:
+        blk.append(f"_pv = plat.inp({port}, {width}, {cost})")
+        blk.append("ax = _pv" if width == 2 else _r8_write(0, "_pv"))
+    else:
+        val = "ax" if width == 2 else "(ax & 0xFF)"
+        blk.append(f"plat.outp({port}, {val}, {width}, {cost})")
 
 
 def check_destackable(scan, *, boundary_addrs=frozenset(),
@@ -413,12 +447,13 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     # `call G; jnz` idiom is analysed exactly as the mechanical emitter does.
     cc = {ip: CalleeContract(
               name=_core_alias(c.stem), inputs=c.inputs, outputs=c.returns,
-              exit_flags=c.exit_flags, needs_plat=False, ret_kind="near",
+              exit_flags=c.exit_flags, needs_plat=c.needs_plat, ret_kind="near",
               df_livein=c.df_livein)
           for ip, c in callees.items()}
     exit_flags, df_livein, flags_livein = _check_flag_liveins(scan, callees=cc)
     if flags_livein:
         raise Refusal("flags-livein")
+    needs_plat = _abi_needs_plat(scan, callees)
 
     cs = int(key.split(":")[0], 16)
     stem = _stem(key)
@@ -459,9 +494,12 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     A("_PARITY = tuple((1 - bin(v).count('1') % 2) == 1 for v in range(256))")
     A('')
     A('')
-    argl = (["_df=0"] if df_livein else []) + [f"{r}=0" for r in params]
+    argl = (["_base=0"] if needs_plat else []) \
+        + (["_df=0"] if df_livein else []) + [f"{r}=0" for r in params]
     args = ", ".join(argl)
-    A(f"def _abi_core(mem, *, {args}):" if args else "def _abi_core(mem):")
+    _head = "mem, plat" if needs_plat else "mem"
+    A(f"def _abi_core({_head}, *, {args}):" if args
+      else f"def _abi_core({_head}):")
     body: list[str] = []
     B = body.append
     B("_cost = 0")
@@ -531,7 +569,9 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
                 terminated = True
                 break
             if i.kind == CALL and i.target in callees:
-                _emit_composed_call(blk, callees[i.target])
+                _emit_composed_call(blk, callees[i.target], count)
+            elif i.op in _PORT_IO:
+                _emit_portio(i, blk, count)
             elif not _emit_vstack(i, blk, cs):
                 _translate(i, blk, flag_written, cs)
             nxt = i.next_ip
@@ -569,27 +609,41 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
         ret_doc = "(" + ", ".join(returns) + ")"
         ret_line = ("    return ("
                     + ", ".join(f"_o['{r}']" for r in returns) + ")")
-    psig = ", ".join(["mem"] + (["*"] if argl else []) + argl)
-    fwd = ", ".join(f"{a.split('=')[0]}={a.split('=')[0]}" for a in argl)
+    # the public entry hides the compat channel; a needs_plat core still
+    # takes plat (the caller of the ABI graph supplies it) and starts the
+    # virtual clock at 0.
+    pub_head = "mem, plat" if needs_plat else "mem"
+    sem_argl = ([a for a in argl if not a.startswith("_base")])
+    psig = ", ".join([pub_head] + (["*"] if sem_argl else []) + sem_argl)
+    fwd = ", ".join(f"{a.split('=')[0]}={a.split('=')[0]}" for a in sem_argl)
+    core_call = "mem, plat" if needs_plat else "mem"
     A(f"def {public}({psig}):")
     A(f'    """Public ABI-recovered entry {prov}: semantic contract only.')
     A(f'    Returns {ret_doc}."""')
-    A(f"    _o, _c = _abi_core(mem{', ' + fwd if fwd else ''})")
+    A(f"    _o, _c = _abi_core({core_call}{', ' + fwd if fwd else ''})")
     A(ret_line)
     A('')
     contract = CoreContract(key=key, stem=stem, inputs=tuple(params),
                             returns=tuple(returns), df_livein=df_livein,
-                            exit_flags=frozenset(exit_flags))
+                            exit_flags=frozenset(exit_flags),
+                            needs_plat=needs_plat)
     return "\n".join(L), contract
 
 
-def _emit_composed_call(blk, c: CoreContract) -> None:
+def _emit_composed_call(blk, c: CoreContract, count) -> None:
     """A recovered-level near call: invoke the callee ABI core DIRECTLY
     (its _abi_core, imported as _core_<stem>), unpack its observed returns,
     merge its exit flags through the compat mask, and accumulate its
     virtual-time cost.  NO return-address bytes, NO sp traffic -- the whole
-    point of the de-stacked contract."""
-    kw = ["mem"]
+    point of the de-stacked contract.  A needs_plat callee also receives
+    ``plat`` and the absolute virtual time at the call site (``_base +
+    _cost + offset-in-block``), exactly as the mechanical composition."""
+    head = ["mem, plat"] if c.needs_plat else ["mem"]
+    kw = list(head)
+    if c.needs_plat:
+        off = count - 1
+        kw.append("_base=_base + _cost" if off == 0
+                  else f"_base=_base + _cost + {off}")
     if c.df_livein:
         kw.append("_df=(1 if df else 0)")
     kw += [f"{r}={r}" for r in c.inputs]
