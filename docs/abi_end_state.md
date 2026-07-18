@@ -89,6 +89,24 @@ carrier noise.
 **Verdict: eliminate before M4, poison-tested** — corrupt each elided flag
 and prove no observer notices, in the same spirit as dropped registers.
 
+**MEASURED (2026-07-18), and it revises the estimate down.**  Over the 101
+cores: 6437 flag-assignment lines, but `dead_flag_sites` proves only **355
+of 3961 instruction sites (~9%)** are flag-dead.  The reason is structural:
+the analysis is *seam-conservative* — flags are observable at every call,
+INT, and exit — and composed cores are seam-dense, so a flag write is
+rarely dead.  Two consequences:
+
+* the apparent "flag noise" is mostly **load-bearing**, not carrier debris;
+* eliding is provably compat-preserving (a dead write is by definition
+  overwritten before every seam and exit, so both the flag word and
+  `_fmask` are unchanged at every observation point) — meaning no semantic
+  mask would be needed — but the yield is ~9% for a change to the SHARED
+  translator that every port's mechanical emitter depends on.
+
+**Revised disposition: low-yield, deferred.**  Not architectural debt at
+the scale first assumed.  Revisit if a cheaper-to-prove liveness (e.g.
+per-flag rather than per-site) raises the yield materially.
+
 ### 2d. `_fmask` and exact flag serialization — NOT debt; must remain
 
 These are compatibility metadata and they are **already correctly
