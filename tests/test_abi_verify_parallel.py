@@ -126,3 +126,24 @@ def test_iter_cap_is_forwarded_to_the_pool(corpus):
     src = inspect.getsource(v.main)
     assert "args.iter_cap" in src.split("initargs=")[1][:120],         "main() must forward iter_cap to the pool initializer"
     assert "iter_cap" in inspect.signature(v._pool_init).parameters
+
+
+def test_a_typoed_only_selection_is_refused(corpus, capsys):
+    """An --only that matches nothing used to verify nothing and exit 0
+    announcing every core identical -- worst during bisection, which is
+    exactly when --only gets typed by hand."""
+    rc = _run(corpus, "--only", "1010:DEAD")
+    out = capsys.readouterr().out
+    assert rc == 3
+    assert "REFUSING" in out
+
+
+def test_an_empty_manifest_is_refused(tmp_path, corpus, capsys):
+    """Nothing compared is not proof."""
+    import json
+    (corpus["abi"] / "cores_manifest.json").write_text(
+        json.dumps({"cores": [], "refused": {}}))
+    rc = _run(corpus)
+    out = capsys.readouterr().out
+    assert rc == 3
+    assert "proves nothing" in out

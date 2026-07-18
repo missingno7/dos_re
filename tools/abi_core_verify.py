@@ -241,6 +241,17 @@ def main(argv=None) -> int:
     if args.only:
         want = {k.strip().upper() for k in args.only.split(",") if k.strip()}
         keys = [k for k in keys if k.upper() in want]
+        missing = sorted(want - {k.upper() for k in keys})
+        if missing:
+            # A typoed --only during bisection used to select nothing, verify
+            # nothing, and exit 0 announcing every core identical.
+            print(f"REFUSING: --only selected {len(missing)} key(s) not in "
+                  f"the manifest: {', '.join(missing[:8])}")
+            return VERDICT_EXIT[INTERNAL_ERROR]
+    if not keys:
+        print("REFUSING: no cores selected -- an empty corpus proves nothing "
+              "and must not report success.")
+        return VERDICT_EXIT[INTERNAL_ERROR]
     # The toolchain fingerprint, deliberately NARROW.
     #
     # It used to include emit_abi.py and contracts.py, so every emitter slice
@@ -383,9 +394,12 @@ def main(argv=None) -> int:
                   f"{', '.join(sorted(stuck)[:8])}"
                   + (" ..." if len(stuck) > 8 else ""), flush=True)
             for k in stuck:
-                failures[k] = [f"unverified: exceeded the {args.budget_s}s "
-                               f"run budget (re-run with --only {k} "
-                               f"--states 8 to characterise it)"]
+                # INCONCLUSIVE, not a mismatch: exceeding a wall-clock budget
+                # proves neither equivalence nor divergence.  Reporting it as
+                # "diverged" would blame the core for not finishing.
+                inconclusive[k] = (f"unverified: exceeded the "
+                                   f"{args.budget_s}s run budget (re-run with "
+                                   f"--only {k} --states 8 to characterise it)")
         finally:
             # CAPTURE THE PROCESSES FIRST: shutdown() sets _processes to None,
             # so reading it afterwards raised AttributeError -- in a `finally`,
@@ -508,11 +522,13 @@ def main(argv=None) -> int:
               f"   (tooling failed; proves nothing about these cores)")
         for k, msg in sorted(internal.items())[:5]:
             print(f"    {k}: {msg}")
+    # `passed` cores contribute VERIFIED; the baseline is NOT synthetic --
+    # with an empty corpus rejected above, every verdict here is earned.
     run_verdict = aggregate(
         [INTERNAL_ERROR] * bool(internal)
         + [MISMATCH] * bool(failures)
         + [INCONCLUSIVE] * bool(inconclusive)
-        + [VERIFIED])
+        + [VERIFIED] * bool(passed))
     if run_verdict == VERIFIED:
         print("ABI-CORE DIFFERENTIAL PASSED: every de-stacked core IS its "
               "mechanical function on every driven state.")

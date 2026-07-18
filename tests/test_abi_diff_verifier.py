@@ -196,3 +196,49 @@ def test_trace_mem_digest_survives_the_retained_cap():
     assert (a.write_digest, a.write_count) == (b.write_digest, b.write_count)
     b.ww(0x100, 0x40, 0xDEAD)
     assert (a.write_digest, a.write_count) != (b.write_digest, b.write_count)
+
+
+# --- the verdict is DERIVED from the evidence, never stored beside it -------
+
+def test_raise_vs_return_is_a_MISMATCH_not_inconclusive():
+    """One side raises, the other returns, but their effects agree.
+
+    The outcome mismatch was recorded, then the state verdict was computed
+    from a snapshot taken AFTER it -- so a genuine divergence was classified
+    inconclusive (exit 2) instead of mismatch (exit 1).  The snapshot is now
+    taken before any comparison for the state, and the verdict is derived in
+    one place from it."""
+    rep = diff_one(_mech(raise_with=_SPIN), _abi(), _PROPOSAL, states=4)
+    assert rep.status == "mismatch"
+    assert rep.exit_code == 1
+    assert rep.diagnostics, "the outcome divergence must be reported"
+
+
+def test_ok_status_and_exit_code_cannot_disagree():
+    """They are properties of one verdict, not independently stored fields --
+    which is how 'diagnostics say mismatch, verdict says inconclusive' became
+    representable in the first place."""
+    for mech, abi in ((_mech(), _abi()),
+                      (_mech(raise_with=_SPIN), _abi(raise_with=_SPIN)),
+                      (_mech(raise_with=_SPIN), _abi())):
+        rep = diff_one(mech, abi, _PROPOSAL, states=4)
+        assert rep.ok is (rep.status == "verified")
+        assert rep.exit_code == {"verified": 0, "mismatch": 1,
+                                 "inconclusive": 2,
+                                 "internal-error": 3}[rep.status]
+
+
+def test_an_empty_verdict_set_is_inconclusive_not_verified():
+    """Nothing compared means nothing proven.  An empty corpus (or a typoed
+    --only) previously rode a synthetic VERIFIED baseline to exit 0."""
+    from dos_re.lift.abi_diff import INCONCLUSIVE, aggregate
+    assert aggregate([]) is INCONCLUSIVE
+
+
+def test_a_missing_mechanical_param_is_an_internal_error():
+    """The harness cannot drive the pair at all -- that says nothing about the
+    core, and used to return a bare dict carrying no verdict."""
+    rep = diff_one(_mech(), _abi(), {"params": [{"reg": "zz"}], "returns": []},
+                   states=2)
+    assert rep.status == "internal-error"
+    assert rep.exit_code == 3

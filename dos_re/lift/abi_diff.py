@@ -23,6 +23,8 @@ the acceptance authority for the composed graph.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
+from enum import IntEnum
 
 #: the stack segment handed to the MECHANICAL side; its writes there are
 #: the virtualised residue.  Register seeds deliberately never collide with
@@ -31,48 +33,109 @@ STACK_SEG = 0x7000
 STACK_SP = 0x1000
 
 
-#: THE verdict lattice.  One typed model, consumed by every consumer --
-#: aggregation, cache membership, printed summary, CLI exit status.
+#: THE verdict lattice, and the ONE result type that carries it.
 #:
-#: Proof status used to be represented independently in SEVEN places
+#: Proof status used to live in seven independent representations
 #: (mismatches, ok, status, notes, cache membership, summary text, exit code)
-#: and those representations repeatedly disagreed: that disagreement, not any
-#: single bug, is what produced every false green in this component.  Nothing
-#: may re-derive "green" from an empty mismatch list or a boolean; there is
-#: one verdict and everything reads it.
+#: which repeatedly disagreed -- that disagreement, not any single bug, caused
+#: every false green here.  Centralising the CONSTANTS was not enough: while
+#: results stayed loose dicts with separately-maintained fields, a state's
+#: diagnostics and its verdict could still drift apart (they did: a
+#: raise-vs-return mismatch was recorded as a diagnostic and then classified
+#: INCONCLUSIVE because the snapshot was taken too late).
 #:
-#:   INTERNAL_ERROR  the verifier itself failed -- proves nothing
-#:   MISMATCH        outcomes or effects differ
-#:   INCONCLUSIVE    some state reached a spin/unsupported frontier, so that
-#:                   input established nothing
-#:   VERIFIED        every state compared returns, compat and effects
-#:
-#: Ordered WORST-FIRST: aggregating a set of verdicts takes the minimum, so a
-#: single inconclusive state cannot be outvoted by conclusive ones.
-INTERNAL_ERROR, MISMATCH, INCONCLUSIVE, VERIFIED = range(4)
+#: So the verdict is DERIVED, once, from the diagnostics -- never stored
+#: alongside them -- and ok/status/exit_code are properties, never fields.
+class Verdict(IntEnum):
+    """Ordered WORST-FIRST: aggregation takes the minimum, so one bad state
+    cannot be outvoted by good ones."""
 
-_VERDICT_NAME = {INTERNAL_ERROR: "internal-error", MISMATCH: "mismatch",
-                 INCONCLUSIVE: "inconclusive", VERIFIED: "verified"}
+    INTERNAL_ERROR = 0     # the verifier failed -- proves nothing
+    MISMATCH = 1           # outcomes or effects differ
+    INCONCLUSIVE = 2       # a spin/unsupported frontier: established nothing
+    VERIFIED = 3           # returns, compat and effects all compared and agreed
+
+
+INTERNAL_ERROR = Verdict.INTERNAL_ERROR
+MISMATCH = Verdict.MISMATCH
+INCONCLUSIVE = Verdict.INCONCLUSIVE
+VERIFIED = Verdict.VERIFIED
 
 #: process exit status per verdict -- distinct, so a shell chain or CI can
 #: tell "not proven" from "proven wrong" instead of collapsing both to 1.
-VERDICT_EXIT = {VERIFIED: 0, MISMATCH: 1, INCONCLUSIVE: 2, INTERNAL_ERROR: 3}
+VERDICT_EXIT = {Verdict.VERIFIED: 0, Verdict.MISMATCH: 1,
+                Verdict.INCONCLUSIVE: 2, Verdict.INTERNAL_ERROR: 3}
 
 
-def verdict_name(v: int) -> str:
-    return _VERDICT_NAME[v]
+def verdict_name(v) -> str:
+    return Verdict(v).name.lower().replace("_", "-")
 
 
-def aggregate(verdicts) -> int:
-    """UNIVERSAL aggregation: the worst state decides.
+def aggregate(verdicts) -> "Verdict":
+    """UNIVERSAL aggregation: the worst verdict decides.
 
     Positive evidence for one input does not resolve another input that
-    established nothing -- one normal match plus 63 matching unsupported
-    faults is not a verified function.  An earlier existential rule ("any
-    normal state => verified") said otherwise, and a test defended it.
+    established nothing.  An EMPTY set is INCONCLUSIVE, not verified: nothing
+    was compared, so nothing was proven -- an empty corpus or a typoed --only
+    used to exit 0 claiming every core identical.
     """
-    vs = list(verdicts)
-    return min(vs) if vs else INCONCLUSIVE
+    vs = [Verdict(v) for v in verdicts]
+    return min(vs) if vs else Verdict.INCONCLUSIVE
+
+
+@dataclass(frozen=True)
+class VerdictReport:
+    """One immutable result: a verdict plus the evidence it was derived from.
+
+    ``ok``, ``status`` and ``exit_code`` are PROPERTIES.  Storing them as
+    fields is exactly how "diagnostics say mismatch, verdict says
+    inconclusive, status string says something else, exit code derived
+    elsewhere" became possible.
+    """
+
+    verdict: Verdict
+    diagnostics: tuple = ()
+    states: int = 0
+    normal_states: int = 0
+    spin_states: int = 0
+    raised: int = 0
+    note: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.verdict is Verdict.VERIFIED
+
+    @property
+    def status(self) -> str:
+        return verdict_name(self.verdict)
+
+    @property
+    def exit_code(self) -> int:
+        return VERDICT_EXIT[self.verdict]
+
+    #: dict-style reads so existing call sites keep working; every key is
+    #: derived from the same verdict, so none of them can disagree.
+    def __getitem__(self, k):
+        if k == "mismatches":
+            return list(self.diagnostics)
+        return getattr(self, k)
+
+    def get(self, k, default=None):
+        try:
+            return self[k]
+        except AttributeError:
+            return default
+
+
+def state_verdict(diagnostics_added: bool, both_returned: bool) -> Verdict:
+    """The ONLY place a state's verdict is decided.
+
+    Derived from the two facts that matter, in one expression, so a diagnostic
+    can never be recorded while the verdict says otherwise.
+    """
+    if diagnostics_added:
+        return Verdict.MISMATCH
+    return Verdict.VERIFIED if both_returned else Verdict.INCONCLUSIVE
 
 
 class TraceMem:
@@ -399,9 +462,13 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
     abi_plat = "plat" in abi_pos
     missing = [r for r in params if r not in mech_kd]
     if missing:
-        return {"states": 0, "raised": 0, "ok": False,
-                "mismatches": [f"contract param(s) {missing} not accepted "
-                               f"by the mechanical signature"]}
+        # INTERNAL_ERROR: the harness cannot drive this pair at all, which
+        # says nothing about the core.  This used to return a bare dict with
+        # no verdict, so the tool reconstructed one from the string status.
+        return VerdictReport(
+            verdict=INTERNAL_ERROR,
+            diagnostics=(f"contract param(s) {missing} not accepted "
+                         f"by the mechanical signature",))
     mismatches: list[str] = []
     raises = 0
     spin_states = 0
@@ -466,6 +533,7 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
         akw = {k: v for k, v in akw.items() if k.startswith("_")}
         mk, mp = _run(mech_fn, mem_m, mkw, plat_m)
         ak, ap = _run(abi_core_fn, mem_a, akw, plat_a, apos)
+        _before = len(mismatches)          # BEFORE any comparison for s
         if mk == "raise" or ak == "raise":
             raises += 1
             if (mk, mp) != (ak, ap):
@@ -495,15 +563,17 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
             # a core that wrote 0xAA and one that wrote nothing compare equal
             # as long as both raised the same spin error -- a false green with
             # the divergence sitting in plain view.
-            before = len(mismatches)
             _cmp_effects(s, mem_m, mem_a, plat_m, plat_a, mismatches)
-            # a raised state establishes NOTHING about returns or compat,
-            # even when the effects agree: it is inconclusive, not verified
-            state_verdicts.append(MISMATCH if len(mismatches) > before
-                                  else INCONCLUSIVE)
+            # A raised state establishes nothing about returns or compat even
+            # when the effects agree -- but if one side RAISED while the other
+            # RETURNED, that outcome mismatch was already recorded above.  The
+            # snapshot is taken before BOTH comparisons so it cannot be
+            # missed: taking it after the outcome check classified a genuine
+            # raise-vs-return divergence as merely inconclusive.
+            state_verdicts.append(
+                state_verdict(len(mismatches) > _before, both_returned=False))
             continue
         normal_states += 1
-        _before = len(mismatches)
         mo, mc = mp
         ao, ac = ap
         # mechanical returns a register-keyed dict; the ABI core returns a
@@ -516,26 +586,21 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
         if mc != ac:
             mismatches.append(f"state {s}: compat mech={mc} abi={ac}")
         _cmp_effects(s, mem_m, mem_a, plat_m, plat_a, mismatches)
-        state_verdicts.append(MISMATCH if len(mismatches) > _before
-                              else VERIFIED)
+        state_verdicts.append(
+            state_verdict(len(mismatches) > _before, both_returned=True))
         if len(mismatches) > 8:
             break
-    # ONE verdict, aggregated universally: the worst state decides.  `ok`
-    # is DERIVED from it and means exactly "verified" -- it used to be
-    # `not mismatches`, so an inconclusive core still handed every caller of
-    # the compatibility field the original false green.
     verdict = aggregate(state_verdicts)
-    status = verdict_name(verdict)
-    rep = {"states": states, "raised": raises, "normal_states": normal_states,
-           "spin_states": spin_states, "mismatches": mismatches,
-           "verdict": verdict, "status": status,
-           "exit_code": VERDICT_EXIT[verdict],
-           "ok": verdict == VERIFIED}
-    if verdict == INCONCLUSIVE:
-        rep["note"] = (
-            f"INCONCLUSIVE: {normal_states}/{states} states compared fully; "
-            f"{states - normal_states} raised ({spin_states} at the spin cap) "
-            f"and established nothing.  Partial evidence is NOT equivalence.")
+    if verdict is INCONCLUSIVE:
+        note = (f"INCONCLUSIVE: {normal_states}/{states} states compared "
+                f"fully; {states - normal_states} raised ({spin_states} at "
+                f"the spin cap) and established nothing.  Partial evidence "
+                f"is NOT equivalence.")
     elif spin_states:
-        rep["note"] = f"spin-wait: {spin_states}/{states} states hit the cap"
+        note = f"spin-wait: {spin_states}/{states} states hit the cap"
+    else:
+        note = ""
+    rep = VerdictReport(verdict=verdict, diagnostics=tuple(mismatches),
+                        states=states, normal_states=normal_states,
+                        spin_states=spin_states, raised=raises, note=note)
     return rep
