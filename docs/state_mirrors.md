@@ -4,6 +4,14 @@
 > prevents raw offsets from becoming the language of the recovered game.*
 > This is the architectural center of the whole project.
 
+> **Milestone scope:** this document describes the historical-view bridge used
+> before M4 and as an oracle adapter.  A byte-backed view is not the final
+> DOS-layout-less/native-memory-model milestone: its backing byte image remains
+> authoritative.  M4 replaces it with ordinary detached values and a generated,
+> dependency-inverted verification bridge; see
+> [`memory_schema.md`](memory_schema.md).  The view machinery remains useful on
+> the historical side of that bridge.
+
 *(Generalized from the Prehistorik 2 port's proven `state_view_layer.md`. The
 generic machinery — backends, field descriptors, view bases — ships as
 [`dos_re/state_view.py`](../dos_re/state_view.py); your game's layout tables
@@ -69,12 +77,13 @@ no window where correctness is unprovable.
 - Leave genuinely union-typed offsets (read at different widths per entity
   type) as raw backend access with a comment; three aliases for one
   triple-typed offset add noise, not clarity.
-- Byte-backed ≠ VM-backed: a `bytearray` + an offset map is pure Python data.
-  A byte-backed native runtime is a legitimate release citizen — it is not the
-  EXE, not a VM, and not a silent ASM fallback.
-- The milestone that matters is that **gameplay logic stops knowing raw
-  offsets**; the storage representation underneath is a separate, optional
-  decision.
+- Byte-backed ≠ VM-backed: a `bytearray` + an offset map is pure Python data
+  and can be a legitimate intermediate release representation — it is not the
+  EXE, not a VM, and not a silent ASM fallback.  It nevertheless remains
+  historical-layout-backed and therefore does not satisfy M4.
+- Gameplay logic stopping its use of raw offsets is an important intermediate
+  boundary.  M4 additionally requires the storage authority itself to become
+  detached native state.
 - This layer is for clean *simulation* code. Presentation enhancements attach
   at a different seam (a render-intent model emitted by the faithful renderer)
   and must never fake data the recovered core doesn't expose.

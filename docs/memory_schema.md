@@ -6,6 +6,11 @@ architecture actually in the tree.  This document records the evaluation,
 what already exists, the one genuinely missing analysis, and the smallest
 safe first slice.  It is a design record, not an implementation.
 
+The schema *mechanism*, generators, walls, and proof machinery belong in
+`dos_re`.  A particular game's regions, offsets, inferred fields, and
+declarations belong in that port.  Worked game examples below are evidence,
+not framework defaults.
+
 ## 1. The requirement, restated
 
 The outcome M4 must deliver (owner, non-negotiable):
@@ -41,19 +46,26 @@ almost exact:
 The proposal is not a new paradigm; it is the existing one applied to data.
 That is the strongest argument for it.
 
-## 3. What already exists (verified in-tree, not assumed)
+## 3. What can be reused
 
-The proposal's infrastructure is substantially present:
+The proposal's infrastructure is substantially present, but it is split
+between this framework and the Lemmings reference port.  Do not mistake a
+port-side acceptance script for an in-tree framework facility:
 
-* **Masked differential.** `scripts/acceptance_cpuless.py` already digests
+* **Masked differential.** The Lemmings port's
+  `scripts/acceptance_cpuless.py` already digests
   `registers + POISON-MASKED memory` per boundary: `_poison_mask(manifest)`
   builds a byte mask from declared ranges, `_masked()` applies it before
   hashing.  Per-region STRICT/OPAQUE/ELIMINATED policies are a
-  *generalization of a mask that already exists*, not a new mechanism.
+  *generalization of a proven port-side mask*, not yet a reusable M4
+  framework mechanism.
 * **Boundary snapshots are sufficient for import/export.** The gate holds
   BOTH sides' full memory images at every boundary and reports differing
   ranges (`_mem_diff_ranges`).  The proposed cycle (oracle snapshot →
-  import → native tick → export → compare) consumes exactly these artifacts.
+  import → native tick → export → compare) consumes these byte artifacts.
+  This is sufficient only at a declared quiescent boundary and only when the
+  gate also compares all non-memory observable effects (platform events,
+  files/devices, return values, and virtual time where relevant).
 * **Field-level diagnostics are a strict upgrade of existing output.** The
   gate reports raw address ranges today; the schema supplies the
   address→field naming that turns `memory differs at DS:83AE` into
@@ -65,9 +77,10 @@ The proposal's infrastructure is substantially present:
   generated type to be classified *value type | historical memory view |
   native authoritative model*.  M4 is precisely the stage that is allowed to
   emit the third kind; the Memory Schema is what licenses the promotion.
-* **The substitution seam exists.** The M3b shadow loader swaps
-  implementations via `sys.modules` pre-registration (+ retro-patching of
-  already-bound module-level names).  The proposed runtime modes
+* **A substitution seam exists in the reference port.** The M3b shadow loader
+  swaps implementations via `sys.modules` pre-registration (+
+  retro-patching of already-bound module-level names).  The proposed runtime
+  modes
   (ATTACHED_DEBUG / IMPORT_EXPORT / SHADOW_VERIFY / DETACHED) should reuse
   this seam rather than invent a second one.
 
@@ -128,9 +141,12 @@ generation from that schema.
   Yes — it already consumes a poison mask (§3).  The change is generating
   the mask per-policy from the schema instead of from a manifest range list.
 * **Are boundary snapshots sufficient for import/export verification?**
-  Yes; the acceptance gate already materialises both full memory images per
-  boundary, which is exactly the import bridge's input and the export
-  bridge's comparison target.
+  They are byte-complete inputs and comparison targets, but are not by
+  themselves a complete semantic proof.  The boundary must be quiescent and
+  the gate must include non-memory effects.  It must also include a
+  continuation test that imports once and runs across several boundaries
+  without re-importing (§11); otherwise lost native state can be refreshed
+  from the oracle every tick and remain invisible.
 * **How should ownership work during partial migration?**  Exactly one
   authority per region, enforced by TOOLING, not convention.  The CPUless
   wall taught this the hard way: it needs three checks (static lint, runtime
@@ -146,12 +162,11 @@ generation from that schema.
   bank SEGMENT in `cx`, re-allocated per load), so a scheme that assumes
   pointers are always intra-region will fail on this corpus.
 * **Schema generation before or after recovered-to-recovered call emission?**
-  **After** — and this validates M3b as the prerequisite.  On a de-stacked
-  ABI core, a memory access is already `mem.rw(seg, <expression over named
-  semantic parameters>)`; the address expression is explicit at the Python
-  level instead of buried in register/stack juggling.  Extraction on the ABI
-  cores is both easier and more precise than on mechanical cores, and the
-  contract inputs give the expression its symbolic roots.
+  **After ABI contracts are established, but never by parsing the emitted
+  Python.**  M3b provides de-stacked parameters and contract roles as the
+  symbolic roots.  The M4 pass re-elaborates the pinned instruction bytes and
+  combines those address expressions with the ABI contracts in Recovery IR.
+  Emitted Python is an output and review artifact, not an analysis database.
 * **Smallest safe M4 slice?**  See §6.
 
 ## 6. The smallest safe first slice
@@ -167,14 +182,17 @@ no stride, no index, no aliasing question, and known widths.  Prove the whole
 loop end to end: schema → dataclass → import/export → rewrite the access
 sites → poison the range → oracle differential green.
 
-**Step 2 — the first array-of-structs: the lemming array.**  `ds:0x00B0`,
+**Step 2 — a candidate first array-of-structs: the lemming array.**  `ds:0x00B0`,
 45 records × 45 bytes, with `+0` anim frame (u8), `+1` action (u8), `+5`
 world-X (u16), `+7` world-Y (u16), `+9` dx (signed, `>=0x8000` = facing
 left).  This is the ideal first array because the base, stride, count, and
 five field offsets/widths/signednesses are independently established, and
-the ~40 remaining bytes per record exercise the **OPAQUE policy** (preserve
-unknown bytes rather than zero them) which is the single most important
-correctness rule for partial promotion.
+the ~40 remaining bytes per record exercise conservative preservation.
+However, it is promotable only if access-closure proves that the selected
+native logic neither reads nor writes those opaque bytes.  `OPAQUE` preserves
+historical bytes for bridge comparison; it does not make an unmodelled
+dependency memoryless.  If closure is broad, choose a smaller fully owned
+region instead.
 
 Explicitly deferred until those two are green: unions, dynamic bounds,
 pointer tables, linked structures, interrupt-shared memory, memory-mapped
@@ -216,3 +234,149 @@ M5  semantic clean port         game.enemies[i].x                      AI naming
 M3b is the enabling stage, exactly as the owner framed it: de-stacked cores
 with semantic signatures are the substrate the address-expression extraction
 runs on, and the stack is the first region already promoted and proven.
+
+## 9. What the Memory Schema must model
+
+A list of structs and fields is necessary, but not sufficient.  The schema is
+the machine-readable **ownership and identity boundary** between the
+historical layout and the detached runtime.  At minimum it must express:
+
+* region identity, address extent, element capacity, live-count source, and
+  initialization/lifetime rules;
+* canonical storage ownership and every overlapping or partial-width view;
+* field storage width and byte order separately from signed/unsigned use-site
+  interpretation;
+* native arithmetic normalization (for example 8/16-bit wrap) so an ordinary
+  Python `int += delta` cannot silently acquire different overflow semantics;
+* pointer provenance, null/equality semantics, target region, escape status,
+  and the stable native handle/index used after detachment;
+* all read/write sites and the ABI roots used to prove each address
+  expression;
+* the declared oracle boundary at which the field is observable;
+* proof obligations, evidence references, and the generator/schema digest.
+
+This means `SignedInt(bits=16)` must not be inferred merely because one use
+performs a signed comparison.  The stored bits may have mixed signed and
+unsigned interpretations.  Keep storage facts and use-site semantics separate
+until a single native meaning is proven.
+
+Likewise, replacing a far pointer with an arbitrary Python object reference is
+not automatically faithful.  Pointer equality, stable identity, null,
+serialization, and observed arithmetic may be behavior.  Use explicit stable
+handles, region indices, or retained `FarPointer` values until the stronger
+object-reference transformation is proven.
+
+The unit of promotion is therefore not merely an address interval or one
+dataclass.  It is an **ownership closure**:
+
+```
+region + all access sites + aliases + pointer sources/escapes
+       + relevant functions + boundary effects + lifetime rules
+```
+
+A small byte range with a large closure is not a small first slice.
+
+## 10. Separate ownership policy from comparison policy
+
+The proposal's single policy enum mixes different questions.  `OPAQUE`,
+`ALIAS_VIEW`, and `ELIMINATED` describe ownership/storage, while `STRICT`,
+`SEMANTIC`, and `VOLATILE` describe comparison.  Model these as orthogonal
+axes so impossible combinations can be refused explicitly.
+
+For example:
+
+| Axis | Example values | Question answered |
+|---|---|---|
+| ownership | `NATIVE`, `HISTORICAL_OPAQUE`, `ALIAS_VIEW`, `ELIMINATED` | who owns or materializes these bytes? |
+| comparison | `EXACT`, `NORMALIZED(rule)`, `NOT_OBSERVED(reason)` | how is the declared boundary judged? |
+
+Rules:
+
+* `ALIAS_VIEW` has exactly one canonical storage owner and never exports
+  independently.
+* `ELIMINATED` requires evidence that the bytes are unobservable carrier
+  state; exclusion from a digest is not that evidence.
+* `VOLATILE` is not a pass condition.  Prefer a deterministic model or an
+  explicit normalizer; otherwise the result is inconclusive for that
+  boundary.
+* `HISTORICAL_OPAQUE` may preserve bytes during migration, but promoted native
+  logic must be proven unable to depend on them.  Before final DETACHED mode,
+  each opaque range must become native-owned (possibly as an ordinary opaque
+  `bytes` value), proven eliminated, or proven outside the runtime state.
+
+## 11. Required proof matrix
+
+The proposed one-boundary cycle is valuable but not sufficient on its own.
+M4 acceptance should require all of these:
+
+1. **Codec law:** import then export preserves every owned/preserved historical
+   byte according to the schema, including padding, aliases, and partial
+   writes.
+2. **One-step equivalence:** import oracle boundary N, execute one detached
+   step, export, and compare boundary N+1 plus all observable effects.
+3. **Continuation equivalence:** import once, execute multiple deterministic
+   boundaries without refreshing from oracle memory, and compare at each
+   checkpoint.  This catches lost state, wrong object identity/lifetime, and
+   accidental dependence on per-tick import.
+4. **Access closure:** static analysis plus runtime poison proves no promoted
+   byte is reached through historical memory, aliases, interrupts, DMA/device
+   models, or escaped pointers.
+5. **Detached artifact test:** run the declared corpus with FlatMemory,
+   bridges, historical address tables, and original memory artifacts absent
+   from the import/runtime environment.
+6. **Freshness:** every generated type, bridge, mask, rewrite, and diagnostic
+   embeds the same schema/input digest; mixed or stale generations refuse.
+
+Comparison proves observational equivalence at the declared boundaries.  If
+transient effect ordering is observable, the gate must additionally compare
+the ordered event trace or introduce an intermediate checkpoint.
+
+## 12. Runtime modes and authority
+
+Multiple modes are useful only if each names one authority:
+
+| Mode | Authority | Allowed role of the other representation |
+|---|---|---|
+| `ATTACHED_DEBUG` | historical *or* native, declared per run | read-only diagnostics/shadow |
+| `IMPORT_EXPORT` | transfers once at explicit boundaries | codec input/output only |
+| `SHADOW_VERIFY` | native | historical representation is generated read-only evidence |
+| `DETACHED` | native | historical representation is absent |
+
+No mode permits two writable authorities.  Re-importing from historical memory
+inside a native tick is a proof failure, not synchronization.
+
+## 13. Implementation target
+
+The desired result is not literally “without memory”; it is
+**DOS-layout-less native state**:
+
+* ordinary detached values, collections, stable references/handles, and
+  explicit platform state are authoritative;
+* generated historical codecs and provenance remain available to the
+  verifier but are dependency-inverted away from gameplay;
+* deterministic recovery establishes anonymous structural truth first;
+* semantic naming and domain reshaping happen later in M5.
+
+The Memory Schema plus generated detachable bridge remains the right
+architecture.  The refinement is to treat it as a proven ownership graph with
+codecs—not as a convenient struct declaration language.
+
+## 14. Recommended implementation order
+
+1. Stabilize M3b's verifier and ABI-contract ledger; M4 may consume only
+   VERIFIED contracts in the selected ownership closure.
+2. Add a read-only EA census over Recovery IR.  It should emit symbolic address
+   expressions, candidate regions, aliases/escapes, evidence, and structured
+   blockers without rewriting code.
+3. Define and version the game-agnostic schema IR, policy axes, provenance, and
+   digest rules in `dos_re`; keep concrete game schemas in the port.
+4. Generate codecs, field diagnostics, masks, and codec-law tests from one
+   deliberately small schema.
+5. Select the first promotion by proven closure, not semantic attractiveness
+   or byte size.
+6. Generate the native state and access rewrite, transfer authority once, and
+   install the static/runtime/import wall in the same change.
+7. Require one-step, continuation, access-closure, and detached-artifact gates
+   before publishing the region as promoted.
+8. Expand the refusal census one generic blocker class at a time; regenerate
+   all outputs after every capability addition.
