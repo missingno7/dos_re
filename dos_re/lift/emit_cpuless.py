@@ -1670,24 +1670,10 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
     callees = callees or {}
     far_callees = far_callees or {}
     plat_farcalls = plat_farcalls or {}
-    # Block leaders, computed exactly as the emitter does (dispatch arrivals are
-    # forced leaders), so the manufactured-return window below is the SAME basic
-    # block the emitter will scan.  A divergent leader set here would let the
-    # walk and the emitter disagree about whether a jmp is a computed call.
-    _leaders = set(scan.block_leaders()) | set(alt_entries)
-    leader_of: dict[int, int] = {}
-    for _lead in sorted(_leaders):
-        _p = _lead
-        while _p in scan.insts:
-            leader_of[_p] = _lead
-            _nxt = scan.insts[_p].next_ip
-            # a block ends at the next leader, at a non-fallthrough transfer,
-            # or at the end of the scan
-            if _nxt in _leaders or _nxt not in scan.insts \
-                    or scan.insts[_p].kind not in (SEQ, CALL, CALL_FAR,
-                                                   CALL_IND):
-                break
-            _p = _nxt
+    # The SAME leader map the emitter itself will use (dispatch arrivals are
+    # forced leaders), so the depth walk and the emitter cannot disagree about
+    # whether a given jmp is a computed call.
+    leader_of = scan.leader_of(alt_entries)
     depths: dict[int, set[int]] = {scan.entry: {0}}
     work = [(scan.entry, 0)]
     for a in alt_entries:

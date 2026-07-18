@@ -37,22 +37,21 @@ CS = 0x2000
 TABLE_OFF = 0x0020
 ARM_OFF = 0x0040
 ARM_RET_IP = 0x0042
-RESUME_IP = 0x0011
-FINAL_RET_IP = 0x0014
+JMP_IP = 0x0008
+RESUME_IP = 0x000D
+FINAL_RET_IP = 0x0010
 
-# The DISPATCHER.  `test ax,ax / jz RESUME` exists so the scan DISCOVERS 0x0011 as a block --
-# a resume point reachable only through the manufactured return would not be in the scan at all,
-# and that is exactly the case branch 2 refuses.
-#   0000  85 C0              test ax, ax
-#   0002  74 0D              jz   0x0011              ; makes RESUME a discovered block leader
-#   0004  B8 11 00           mov  ax, 0x0011          ; the MANUFACTURED return address
-#   0007  50                 push ax
-#   0008  8B DE              mov  bx, si
-#   000A  D1 E3              shl  bx, 1
-#   000C  2E FF A7 20 00     jmp  cs:[bx+0x0020]      ; computed CALL through the table
-#   0011  83 C0 07           add  ax, 7               ; RESUME -- dropped entirely by the tail form
-#   0014  C3                 ret
-_CONTAINER = bytes.fromhex("85c0" "740d" "b81100" "50" "8bde" "d1e3"
+# The DISPATCHER.  Note there is NO branch to RESUME: the continuation is reachable ONLY through
+# the manufactured return, which is exactly the situation the old code could not see -- the CFG
+# walk stopped at the indirect jmp, so RESUME was never scanned, never emitted, never run.
+#   0000  B8 0D 00           mov  ax, 0x000D          ; the MANUFACTURED return address
+#   0003  50                 push ax
+#   0004  8B DE              mov  bx, si
+#   0006  D1 E3              shl  bx, 1
+#   0008  2E FF A7 20 00     jmp  cs:[bx+0x0020]      ; computed CALL through the table
+#   000D  83 C0 07           add  ax, 7               ; RESUME -- reachable only via the arm's ret
+#   0010  C3                 ret
+_CONTAINER = bytes.fromhex("b80d00" "50" "8bde" "d1e3"
                            "2effa72000" "83c007" "c3")
 
 # The dispatch ARM, outside the container's scan (at CS:0x0040).  Its `ret` consumes the
@@ -60,11 +59,6 @@ _CONTAINER = bytes.fromhex("85c0" "740d" "b81100" "50" "8bde" "d1e3"
 #   0040  8B C3   mov ax, bx
 #   0042  C3      ret
 _ARM = bytes.fromhex("8bc3" "c3")
-
-# Same dispatcher, but the pushed address is 0x0700 -- NOT a block of this function.  We know a
-# return address was manufactured and we know there is no local continuation to resume at.
-_CONTAINER_FOREIGN = bytes.fromhex("85c0" "740d" "b80007" "50" "8bde" "d1e3"
-                                   "2effa72000" "83c007" "c3")
 
 # An ordinary depth-0 TAIL dispatch: nothing pushed, so the arm's ret IS this function's exit.
 #   0000  8B DE           mov bx, si
@@ -156,11 +150,26 @@ def _interp_to(mem, ss, sp0, inputs, stop_ip):
 # 1. recognised + resumable -> computed call
 # ---------------------------------------------------------------------------------------------
 
+def test_the_scan_follows_the_manufactured_return():
+    """The CFG walk must treat the pushed address as an ARRIVAL, or the continuation is invisible.
+
+    RESUME is not the target of any branch -- the only way in is the arm's `ret`.  Before this
+    change the walk stopped at the indirect jmp and everything from RESUME on was simply absent
+    from the function (that is how OVERKILL's object bounds-check went missing for 870 frames).
+    """
+    scan = _scan(_CONTAINER)
+    assert RESUME_IP in scan.manufactured_returns
+    assert RESUME_IP in scan.insts, "the resume point must be part of the function"
+    assert FINAL_RET_IP in scan.insts, "and so must the continuation beyond it"
+    # it is a FORCED block leader, exactly like a dynamic-dispatch alternate entry
+    assert RESUME_IP in scan.block_leaders()
+
+
 def test_manufactured_return_is_recognised_and_resumes_at_the_pushed_block():
     scan = _scan(_CONTAINER)
-    jmp = next(i for i in scan.insts.values() if i.ip == 0x000C)
+    jmp = next(i for i in scan.insts.values() if i.ip == JMP_IP)
     # the recogniser reads the pushed literal through the `mov ax,imm16` that fed the push
-    assert _manufactured_return(scan, jmp, 0x0004) == RESUME_IP
+    assert _manufactured_return(scan, jmp, 0x0000) == RESUME_IP
 
     spec, src = _emit(scan)
     # the computed-call form: resume inside this function, and NO intra-function `_LOCAL`
@@ -211,11 +220,23 @@ def test_computed_call_body_matches_the_interpreter_byte_for_byte():
 # 2. recognised + not a block of this function -> REFUSE
 # ---------------------------------------------------------------------------------------------
 
-def test_manufactured_return_outside_this_function_refuses_loudly():
-    scan = _scan(_CONTAINER_FOREIGN)
-    jmp = next(i for i in scan.insts.values() if i.ip == 0x000C)
-    assert _manufactured_return(scan, jmp, 0x0004) == 0x0700     # positively recognised
-    assert 0x0700 not in scan.insts                              # but not ours to resume at
+def test_manufactured_return_absent_from_the_scan_refuses_loudly():
+    """The emitter's guard: a recognised resume point that is not a block of this function.
+
+    `scan_function` now follows the arrival, so it normally IS a block -- this is defence in
+    depth for a scan produced by another path (or truncated by the region budget).  It is
+    asserted directly, by deleting the continuation from an otherwise valid scan, because the
+    property that matters is "never fall through to the silent tail", and that must hold for
+    whatever scan the emitter is handed.
+    """
+    scan = _scan(_CONTAINER)
+    for ip in [a for a in scan.insts if a >= RESUME_IP]:
+        del scan.insts[ip]
+    scan.manufactured_returns.clear()
+    scan.exits[:] = [e for e in scan.exits if e.ip < RESUME_IP]
+    jmp = scan.insts[JMP_IP]
+    assert _manufactured_return(scan, jmp, 0x0000) == RESUME_IP   # positively recognised
+    assert RESUME_IP not in scan.insts                            # but not ours to resume at
 
     with pytest.raises(Refusal) as e:
         _emit(scan)
