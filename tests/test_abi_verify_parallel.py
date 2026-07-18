@@ -21,6 +21,27 @@ import pytest
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 
+#: a core whose RUNTIME BEHAVIOUR depends on _ITER_CAP: it spins to the cap,
+#: so a test can prove the cap actually reached the worker instead of
+#: inspecting source text for the forwarding.
+_CAP_CORE = '''\
+_ITER_CAP = 20000000
+_CONTRACT = {'key': '%(key)s', 'params': (), 'returns': ()}
+
+
+def _abi_core(mem, *, _base=0):
+    n = 0
+    while n < _ITER_CAP:
+        n += 1
+    mem.ww(0x1000, 0x10, n & 0xFFFF)
+    return (), {'flags': 0, 'fmask': 0, 'cost': 3}
+
+
+def func_%(stem)s(mem, *, _base=0):
+    o, c = _abi_core(mem, _base=_base)
+    return {}, c
+'''
+
 #: a core and its mechanical twin, both trivial and identical in behaviour
 _CORE = '''\
 _ITER_CAP = 20000000
@@ -147,3 +168,51 @@ def test_an_empty_manifest_is_refused(tmp_path, corpus, capsys):
     out = capsys.readouterr().out
     assert rc == 3
     assert "proves nothing" in out
+
+
+def _spin_corpus(tmp_path, name, keys):
+    """A corpus of cores that spin to _ITER_CAP -- runtime, not source text."""
+    abi = tmp_path / name
+    abi.mkdir()
+    (abi / "__init__.py").write_text("")
+    for k in keys:
+        stem = k.replace(":", "_").lower()
+        (abi / f"core_{stem}.py").write_text(
+            _CAP_CORE % {"key": k, "stem": stem})
+    (abi / "cores_manifest.json").write_text(
+        json.dumps({"cores": list(keys), "refused": {}}))
+    (tmp_path / f"{name}_c.json").write_text(json.dumps(
+        {"functions": {k: {"params": [], "returns": [], "refusals": []}
+                       for k in keys}}))
+    (tmp_path / f"{name}_i.json").write_text(json.dumps(
+        {"functions": {k: {"signature": k} for k in keys}}))
+    return abi, tmp_path / f"{name}_c.json", tmp_path / f"{name}_i.json"
+
+
+def test_iter_cap_is_actually_applied_to_the_loaded_modules(
+        tmp_path, monkeypatch):
+    """BEHAVIOURAL: the cap must reach the modules _verify_one loads.
+
+    Driving this through the pool would be vacuous here -- the synthetic IR is
+    not liftable, so the mechanical reference fails before any core runs, and
+    a wall-clock assertion would pass because NOTHING executed.  (It did: the
+    first version of this test measured an elapsed time of a run that never
+    called the core.)  So the stub goes in at _fresh_mechanical and the cap
+    application is exercised directly, in-process.
+
+    What this does NOT cover, honestly: cross-process delivery of the cap, and
+    --budget-s termination.  Both need a genuinely liftable IR fixture.
+    """
+    import abi_core_verify as v
+    abi, c, i = _spin_corpus(tmp_path, "capabi", ["1010:0300"])
+    monkeypatch.syspath_prepend(str(tmp_path))
+    mod = __import__("capabi.core_1010_0300", fromlist=["_abi_core"])
+    assert mod._ITER_CAP == 20000000, "fixture should start at the high cap"
+
+    monkeypatch.setattr(v, "_fresh_mechanical",
+                        lambda ir, key, cache: (mod.func_1010_0300, None))
+    v._pool_init(json.loads(i.read_text()), json.loads(c.read_text()),
+                 "capabi", 2, iter_cap=1000)
+    key, rep, _dt = v._verify_one("1010:0300")
+    assert mod._ITER_CAP == 1000,         "the cap never reached the module the core actually runs in"
+    assert rep.verdict is not None

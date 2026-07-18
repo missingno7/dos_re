@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path.cwd()))
 from dos_re.lift import emit_cpuless  # noqa: E402
 from dos_re.lift.abi_diff import (  # noqa: E402
     INCONCLUSIVE, INTERNAL_ERROR, MISMATCH, VERDICT_EXIT,
-    VERIFIED, aggregate, diff_one, verdict_name)
+    VERIFIED, VerdictReport, aggregate, diff_one, verdict_name)
 from dos_re.lift.contracts import scan_for  # noqa: E402
 
 _MECH_PKG = "_abidiff_mech"       # temp package the fresh mechanical closure loads under
@@ -161,11 +161,12 @@ def _verify_one(key: str):
         rep = diff_one(mech_fn, core_mod._abi_core,
                        _W["census"]["functions"][key], states=_W["states"])
     except Exception as e:                                   # noqa: BLE001
-        # a worker crash must be a REPORTED failure, never a silently
-        # missing core -- that would look identical to a pass
-        return key, {"ok": False, "raised": 0, "status": "internal-error",
-                     "mismatches": [f"verifier raised "
-                                    f"{type(e).__name__}: {e}"]}, 0.0
+        # a worker crash must be a REPORTED failure, never a silently missing
+        # core -- that would look identical to a pass.  The TYPED report
+        # crosses the process boundary (frozen + top-level, so picklable), so
+        # the tool never has to reconstruct a verdict from a status string.
+        return key, VerdictReport.internal_error(
+            f"verifier raised {type(e).__name__}: {e}"), 0.0
     return key, rep, (_time.time() - t0) * 1000.0
 
 def main(argv=None) -> int:
@@ -369,21 +370,21 @@ def main(argv=None) -> int:
                 cost_ms[key] = int(dt)
                 if dt >= args.slow_ms:
                     slow.append((dt, key))
-                raised_states += rep.get("raised", 0)
-                if rep.get("note"):
-                    spin_notes.append(f"{key}: {rep['note']}")
-                st = rep.get("status")
-                if st == "internal-error":
-                    internal[key] = rep["mismatches"][0]
-                elif st == "verified":
+                raised_states += rep.raised
+                if rep.note:
+                    spin_notes.append(f"{key}: {rep.note}")
+                st = rep.verdict
+                if st is INTERNAL_ERROR:
+                    internal[key] = rep.diagnostics[0]
+                elif st is VERIFIED:
                     passed += 1
                     fresh_ok[key] = sigs[key]
-                elif st == "inconclusive":
-                    inconclusive[key] = rep.get("note", "inconclusive")
+                elif st is INCONCLUSIVE:
+                    inconclusive[key] = rep.note or "inconclusive"
                 else:
-                    failures[key] = rep["mismatches"][:3]
+                    failures[key] = list(rep.diagnostics[:3])
                 print(f"  [{done_n}/{len(futs)}] {key} "
-                      f"{st or 'mismatch'} {dt/1000.0:.1f}s", flush=True)
+                      f"{rep.status} {dt/1000.0:.1f}s", flush=True)
         except FutTimeout:
             timed_out = True
             # A budget breach is a REPORTED outcome, never a silent pass: the
@@ -451,30 +452,30 @@ def main(argv=None) -> int:
             # failure: the same corpus produced a crash or a verdict depending
             # only on how it was scheduled.  Scheduling must never change what
             # is concluded -- found by the test asserting exactly that.
-            rep = {"ok": False, "status": "internal-error", "raised": 0,
-                   "mismatches": [f"verifier raised {type(e).__name__}: {e}"]}
+            rep = VerdictReport.internal_error(
+                f"verifier raised {type(e).__name__}: {e}")
         dt = (time.time() - t0) * 1000.0
         cost_ms[key] = int(dt)
         if dt >= args.slow_ms:
             slow.append((dt, key))
-        raised_states += rep["raised"]
-        if rep.get("note"):
-            spin_notes.append(f"{key}: {rep['note']}")
-        if rep.get("status") == "internal-error":
+        raised_states += rep.raised
+        if rep.note:
+            spin_notes.append(f"{key}: {rep.note}")
+        if rep.verdict is INTERNAL_ERROR:
             # NOT a mismatch: the verifier failed, which proves nothing about
             # the core either way.  Collapsing the two would report a tooling
             # bug as a recovery defect.
-            internal[key] = rep["mismatches"][0]
-        elif rep.get("status") == "verified":
+            internal[key] = rep.diagnostics[0]
+        elif rep.verdict is VERIFIED:
             passed += 1
             fresh_ok[key] = sig
-        elif rep.get("status") == "inconclusive":
+        elif rep.verdict is INCONCLUSIVE:
             # NOT cached: an inconclusive core has no positive evidence, and
             # caching it would let "both sides failed identically" masquerade
             # as a verified result on every later run.
-            inconclusive[key] = rep.get("note", "inconclusive")
+            inconclusive[key] = rep.note or "inconclusive"
         else:
-            failures[key] = rep["mismatches"][:3]
+            failures[key] = list(rep.diagnostics[:3])
 
     print(f"ABI-core differential over {len(keys)} de-stacked cores, "
           f"{args.states} seeded states each (mechanical reference emitted "

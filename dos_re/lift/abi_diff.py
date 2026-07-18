@@ -50,10 +50,19 @@ class Verdict(IntEnum):
     """Ordered WORST-FIRST: aggregation takes the minimum, so one bad state
     cannot be outvoted by good ones."""
 
-    INTERNAL_ERROR = 0     # the verifier failed -- proves nothing
-    MISMATCH = 1           # outcomes or effects differ
+    MISMATCH = 0           # outcomes or effects differ -- DISPROVES equivalence
+    INTERNAL_ERROR = 1     # the verifier failed -- proves nothing
     INCONCLUSIVE = 2       # a spin/unsupported frontier: established nothing
     VERIFIED = 3           # returns, compat and effects all compared and agreed
+
+    # MISMATCH dominates INTERNAL_ERROR deliberately.  Corpus equivalence is a
+    # universal claim, so aggregation is logical AND over three-valued logic:
+    #   False AND Unknown = False
+    # One established divergence disproves the corpus, and a tooling failure on
+    # some OTHER core cannot un-disprove it.  The previous order let an
+    # internal error outrank a real mismatch, so a run with both announced
+    # "the verifier failed; no conclusion about the corpus" while holding
+    # proof that the corpus was wrong.
 
 
 INTERNAL_ERROR = Verdict.INTERNAL_ERROR
@@ -100,6 +109,41 @@ class VerdictReport:
     spin_states: int = 0
     raised: int = 0
     note: str = ""
+
+    def __post_init__(self):
+        """Reject contradictory reports at CONSTRUCTION.
+
+        The type discouraged contradiction; these make it unrepresentable.
+        VerdictReport(verdict=VERIFIED, diagnostics=("contradiction",)) was
+        still buildable, which is the same class of drift the type was
+        introduced to end.
+        """
+        v, d = self.verdict, self.diagnostics
+        if v in (Verdict.VERIFIED, Verdict.INCONCLUSIVE) and d:
+            raise ValueError(
+                f"{verdict_name(v)} report carries diagnostics {d!r}: a "
+                f"recorded divergence contradicts the verdict")
+        if v in (Verdict.MISMATCH, Verdict.INTERNAL_ERROR) and not d:
+            raise ValueError(
+                f"{verdict_name(v)} report has no diagnostics: a failing "
+                f"verdict must say what failed")
+        if self.normal_states > self.states or self.raised > self.states:
+            raise ValueError(
+                f"counts exceed states: normal={self.normal_states} "
+                f"raised={self.raised} states={self.states}")
+        if self.spin_states > self.raised:
+            raise ValueError(
+                f"spin_states {self.spin_states} exceeds raised {self.raised}")
+        if v is Verdict.VERIFIED and self.states and                 self.normal_states != self.states:
+            raise ValueError(
+                f"verified requires every state to have completed normally: "
+                f"{self.normal_states}/{self.states}")
+
+    @classmethod
+    def internal_error(cls, message: str) -> "VerdictReport":
+        """The verifier itself failed.  A factory so worker and sequential
+        paths stop hand-rolling loose dicts at the process boundary."""
+        return cls(verdict=Verdict.INTERNAL_ERROR, diagnostics=(message,))
 
     @property
     def ok(self) -> bool:
