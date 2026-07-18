@@ -526,13 +526,63 @@ def _core_alias(stem: str) -> str:
     return f"_core_{stem}"
 
 
+
+def _promote_site(blk, start, i, promo, used) -> None:
+    """Redirect ONE just-emitted instruction's memory access to the detached
+    native accessor (M4 region promotion).
+
+    Driven by IR facts: the site ip comes from the EA census, and the decoded
+    operand is validated against the promotion (segment by the decode rules,
+    displacement from the instruction) before any text changes.  The
+    substitution itself edits only the lines this instruction just emitted --
+    a deliberate, validated seam; pushing it into _translate proper is the
+    follow-up, recorded rather than hidden.
+
+    Refusal-first: unless EXACTLY ONE access of the expected shape is found
+    in the instruction's lines, this raises -- a promotion that silently
+    matched zero or two sites would detach the wrong bytes.
+    """
+    seg = _ea_seg_of(i)
+    if seg is None and 0xA0 <= i.op <= 0xA3:
+        seg = "ds"
+        for pfx in i.prefixes:
+            if pfx in (0x26, 0x2E, 0x36, 0x3E):
+                seg = SEGS[(pfx >> 3) & 3]
+    if seg is None:
+        raise Refusal(f"m4-promotion: site {i.ip:#06x} has no memory operand")
+    disp = i.imm if 0xA0 <= i.op <= 0xA3 else i.disp
+    if disp != promo["disp"]:
+        raise Refusal(
+            f"m4-promotion: site {i.ip:#06x} decodes disp {disp:#x}, schema "
+            f"says {promo['disp']:#x} -- census and code disagree, refusing")
+    acc = promo["accessor"]
+    rd = f"mem.rb({seg}, 0x{disp:04X})"
+    wr = f"mem.wb({seg}, 0x{disp:04X},"
+    if promo.get("width", 1) != 1:
+        raise Refusal("m4-promotion: only width-1 sites this slice")
+    hits = 0
+    for n in range(start, len(blk)):
+        line = blk[n]
+        c = line.count(rd) + line.count(wr)
+        if c:
+            hits += c
+            blk[n] = line.replace(rd, f"{acc}.rb({seg}, 0x{disp:04X})")                          .replace(wr, f"{acc}.wb({seg}, 0x{disp:04X},")
+    if hits != 1:
+        raise Refusal(
+            f"m4-promotion: site {i.ip:#06x} matched {hits} accesses of the "
+            f"expected shape (need exactly 1); the emitted form changed and "
+            f"this seam must be updated, not guessed around")
+    used.add(i.ip)
+
+
 def emit_abi_core(scan, proposal: dict, key: str, *,
                   name: str | None = None,
                   callees=None, far_callees=None, abi_base: str = "",
                   mech_shape=None,
                   boundary_addrs=frozenset(),
                   dispatch_addrs=frozenset(),
-                  ss_globals_floor=None) -> tuple[str, CoreContract]:
+                  ss_globals_floor=None,
+                  promotions=None) -> tuple[str, CoreContract]:
     """Generate the TRUE ABI-recovered core module for one composable
     function: semantic signature (no sp/ss, no CPU bundle), virtual local
     stack, direct NEAR calls to already-emitted ABI cores (``callees``:
@@ -548,6 +598,7 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     far_callees = far_callees or {}
     if proposal.get("refusals"):
         raise Refusal("contract-not-promotable")
+    used_promotions: set = set()
     vdepth = check_composable(scan, callees=callees, far_callees=far_callees,
                               boundary_addrs=boundary_addrs,
                               dispatch_addrs=dispatch_addrs,
@@ -632,6 +683,13 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     for st in called:
         base = f"{abi_base}." if abi_base else ""
         A(f"from {base}core_{st} import _abi_core as {_core_alias(st)}")
+    # M4 PROMOTED SITES: accesses redirected to detached native state.  The
+    # import binds the accessor object; the accessor itself refuses when
+    # detached/unattached or on a segment mismatch -- fail-loud, never a
+    # silent fall-through to the historical image.
+    for acc, module in sorted({(pr["accessor"], pr["module"])
+                               for pr in (promotions or {}).values()}):
+        A(f"from {module} import NATIVE as {acc}")
     A('')
     A("_PARITY = tuple((1 - bin(v).count('1') % 2) == 1 for v in range(256))")
     A("#: spin-detector cap.  Production keeps it high to catch a genuine")
@@ -760,6 +818,7 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
                 blk.append("continue")
                 terminated = True
                 break
+            _psite = len(blk) if promotions and ip in promotions else None
             if i.kind == CALL and i.target in callees:
                 _emit_composed_call(blk, callees[i.target], count)
             elif i.kind == CALL_FAR and i.far_target in far_callees:
@@ -770,6 +829,8 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
                 _emit_portio(i, blk, count)
             elif not _emit_vstack(i, blk, cs, vdepth[ip]):
                 _translate(i, blk, flag_written, cs)
+            if _psite is not None:
+                _promote_site(blk, _psite, i, promotions[ip], used_promotions)
             nxt = i.next_ip
             if nxt in bb_of and nxt != ip:
                 blk.append(f"_cost += {count}")
@@ -824,6 +885,13 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     A(f"    _o, _c = _abi_core({core_call}{', ' + fwd if fwd else ''})")
     A(ret_line)
     A('')
+    if promotions and set(promotions) != used_promotions:
+        missed = sorted(set(promotions) - used_promotions)
+        raise Refusal(
+            f"m4-promotion: site(s) {[hex(m) for m in missed]} were in the "
+            f"promotion map but never emitted -- a promotion that silently "
+            f"does not apply leaves the historical access live while the "
+            f"schema claims the region is native")
     contract = CoreContract(key=key, stem=stem, inputs=tuple(params),
                             returns=tuple(returns), df_livein=df_livein,
                             exit_flags=frozenset(exit_flags),
