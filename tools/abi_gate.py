@@ -35,8 +35,68 @@ _REGS = ("ax", "bx", "cx", "dx", "si", "di", "bp", "sp", "ss", "ds", "es",
          "cs")
 
 
+def _unbound_names(src: str) -> dict:
+    """Per-function, the names LOADED but never bound -- a NameError waiting
+    to happen.  Bound means: a parameter, an assignment/aug-assignment target,
+    a for/with/except target, a comprehension variable, an import, a nested
+    def/class, a module global, or a builtin.  Returns {func_name: {names}}.
+    """
+    import ast
+    import builtins
+
+    tree = ast.parse(src)
+    # the ALIAS is what gets bound: `from m import _abi_core as _core_X`
+    # binds _core_X, not _abi_core.
+    module_names = {(n.asname or n.name).split(".")[0]
+                    for node in ast.walk(tree)
+                    if isinstance(node, (ast.Import, ast.ImportFrom))
+                    for n in node.names}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            module_names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    module_names.add(t.id)
+    safe = module_names | set(dir(builtins))
+
+    out = {}
+    for fn in [n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef)]:
+        a = fn.args
+        bound = {p.arg for p in
+                 list(a.posonlyargs) + list(a.args) + list(a.kwonlyargs)}
+        if a.vararg:
+            bound.add(a.vararg.arg)
+        if a.kwarg:
+            bound.add(a.kwarg.arg)
+        loaded = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Name):
+                if isinstance(node.ctx, ast.Load):
+                    loaded.add(node.id)
+                else:
+                    bound.add(node.id)
+            elif isinstance(node, (ast.FunctionDef, ast.ClassDef)) \
+                    and node is not fn:
+                bound.add(node.name)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                bound.add(node.name)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for n in node.names:
+                    bound.add((n.asname or n.name).split(".")[0])
+        bad = loaded - bound - safe
+        if bad:
+            out[fn.name] = bad
+    return out
+
+
 def _core_files(abi_dir: Path):
-    return sorted(abi_dir.glob("core_*.py"))
+    # core_loader.py matches the glob but is the integration switch, not a
+    # core: counting it flagged a phantom stale module and a phantom missing
+    # _CONTRACT on every run.
+    return sorted(p for p in abi_dir.glob("core_*.py")
+                  if p.name != "core_loader.py")
 
 
 def gate(abi_dir: Path, census: dict) -> dict:
@@ -57,6 +117,7 @@ def gate(abi_dir: Path, census: dict) -> dict:
         "unbound_composed_call_args",
         "stale_core_modules",
         "cores_missing_contract_metadata",
+        "unbound_names_in_generated_code",
     )}
 
     keep = {f"core_{k.replace(':', '_').lower()}.py" for k in keys}
@@ -126,6 +187,20 @@ def gate(abi_dir: Path, census: dict) -> dict:
                     if a not in avail:
                         counters["unbound_composed_call_args"].append(
                             f"{name}:{a}")
+
+        # UNBOUND NAMES, anywhere in the module -- AST, not regex.
+        #
+        # The checks above only look inside _abi_core, so the generated
+        # ADAPTER went unexamined: it emitted `_flags_in=_flags_in` against a
+        # signature that never declared `_flags_in`.  That is a NameError on
+        # every call, and because the runtime catches BaseException around the
+        # program thread it surfaced only as a missing park -- eight cores, a
+        # bisection, and several demo runs to find something a compiler-grade
+        # check names instantly.  Generated code must be checked AS CODE.
+        for fname, bad in _unbound_names(s).items():
+            for nm in sorted(bad):
+                counters["unbound_names_in_generated_code"].append(
+                    f"{name}:{fname}:{nm}")
 
     # CLASSIFIED EXCEPTIONS: every function kept mechanical, by the exact
     # capability that blocked it.  The promote tool records this in the

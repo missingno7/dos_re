@@ -22,6 +22,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# the GAME root too: --check-parity imports the shipped mechanical modules
+# to compare signatures against (runtime introspection, not source parsing).
+sys.path.insert(0, str(Path.cwd()))
 
 from dos_re.lift import emit_abi  # noqa: E402
 from dos_re.lift.emit_cpuless import Refusal  # noqa: E402
@@ -39,6 +42,263 @@ def _addr_file(spec: str | None) -> frozenset:
     return frozenset(out)
 
 
+_MECH_KEEP = None
+
+
+def _mech_spec(ir, key, cache, scan_for, _active=None, *,
+               dispatch=frozenset(), heads=frozenset()):
+    """The mechanical promotion spec for one function, resolving near/far
+    callee contracts RECURSIVELY -- check_promotable refuses `contains-call`
+    without them, so an adapter for any non-leaf needs the closure walked
+    exactly as tools/abi_core_verify.py does for its reference.
+
+    CYCLES REFUSE.  The verifier never hit one because its closures start
+    from cores (acyclic by construction); the full corpus is not.  A
+    self- or mutually-recursive chain gets a named refusal rather than a
+    guessed conservative contract -- an adapter built on a guess would be
+    unverifiable, which is worse than not emitting one."""
+    from dos_re.lift import emit_cpuless as _ec
+    global _MECH_KEEP
+    if _MECH_KEEP is None:
+        _MECH_KEEP = frozenset(_ec.W16) | frozenset({"ds", "es"})
+    if key in cache:
+        return cache[key]
+    _active = _active or set()
+    if key in _active:
+        raise Refusal("mech-call-cycle")
+    _active = _active | {key}
+    scan, why = scan_for(ir["functions"][key])
+    if scan is None:
+        raise Refusal(why)
+    cs = int(key.split(":")[0], 16)
+    callees, far_callees = {}, {}
+    for i in scan.insts.values():
+        if i.kind == _ec.CALL and i.target is not None:
+            t = f"{cs:04X}:{i.target:04X}"
+            if t not in ir["functions"]:
+                raise Refusal("mech-callee-not-in-ir")
+            callees[i.target] = _mech_spec(ir, t, cache, scan_for, _active,
+                                           dispatch=dispatch, heads=heads)[1]
+        elif i.kind == _ec.CALL_FAR and i.far_target is not None:
+            t = "%04X:%04X" % i.far_target
+            if t not in ir["functions"]:
+                raise Refusal("mech-callee-not-in-ir")
+            far_callees[i.far_target] = _mech_spec(
+                ir, t, cache, scan_for, _active,
+                dispatch=dispatch, heads=heads)[1]
+    # SAME PARAMETERS the shipped corpus was generated with.  Dispatch
+    # arrivals and boundary heads WIDEN abi.inputs to the full bundle (an
+    # alt-entry's liveness is externally governed), which is what puts `cs`
+    # in a dispatch target's signature.  Omitting them produced an adapter
+    # whose signature did not match the module it replaces -- caught at
+    # runtime as "func_1010_4be7() got an unexpected keyword argument 'cs'".
+    kcs = int(key.split(":")[0], 16)
+    spec = _ec.check_promotable(
+        scan, callees=callees, far_callees=far_callees,
+        dispatch_addrs={ip for (c, ip) in dispatch if c == kcs},
+        boundary_addrs={ip for (c, ip) in heads if c == kcs})
+    abi = spec.abi
+    outs = (abi.outputs & _MECH_KEEP) - (frozenset()
+                                         if spec.sp_output
+                                         else frozenset({"sp"}))
+    contract = _ec.CalleeContract(
+        name=f"func_{key.replace(':', '_').lower()}",
+        inputs=tuple(_ec._contract_inputs(scan, abi)),
+        outputs=tuple(sorted(outs)), exit_flags=spec.exit_flags,
+        needs_plat=spec.needs_plat, ret_kind=spec.ret_kind,
+        df_livein=spec.df_livein, sp_delta=spec.sp_delta,
+        ret_pop=spec.ret_pop, sp_output=spec.sp_output,
+        sp_deltas=spec.sp_deltas, flags_livein=spec.flags_livein,
+        parks=spec.parks)
+    cache[key] = (spec, contract, scan)
+    return cache[key]
+
+
+class _ProbeSpin(Exception):
+    """The probe call did not terminate within its access budget."""
+
+
+class _ProbeMem:
+    """Throwaway memory for harvesting a shipped function's OUTPUT KEYS.
+
+    BOUNDED ON PURPOSE.  Every read answers 0, so a function that spins
+    `while [mem] == 0` -- a wait-for-flag, a retrace poll, a queue drain --
+    never terminates.  An unbounded probe hangs the whole emission with no
+    output, which is exactly how this first showed up.  The budget converts
+    that hang into a named refusal; since a probe failure now costs only the
+    ADAPTER and never the core, refusing here is cheap and honest.
+    """
+
+    MAX_ACCESS = 2_000_000
+
+    def __init__(self):
+        self.n = 0
+        self.st = {}
+
+    def _tick(self):
+        self.n += 1
+        if self.n > self.MAX_ACCESS:
+            raise _ProbeSpin()
+
+    @staticmethod
+    def _seed(lin):
+        # Deterministic pseudo-random, same idea as abi_diff.TraceMem: an
+        # all-zero memory makes `while [flag] == 0` unsatisfiable, so 90 of
+        # 113 cores could not be probed at all.  Varied bytes let those loops
+        # reach an exit; writes overlay so a function still observes its own
+        # stores.  Deterministic because a probe that differs between runs
+        # would make the emitted corpus irreproducible.
+        return (lin * 2654435761 + 0x9E37) >> 7 & 0xFF
+
+    def _b(self, lin):
+        v = self.st.get(lin)
+        return self._seed(lin) if v is None else v
+
+    def rb(self, s, o):
+        self._tick()
+        return self._b(((s << 4) + (o & 0xFFFF)) & 0xFFFFF)
+
+    def rw(self, s, o):
+        self._tick()
+        lin = ((s << 4) + (o & 0xFFFF)) & 0xFFFFF
+        return self._b(lin) | (self._b((lin + 1) & 0xFFFFF) << 8)
+
+    def wb(self, s, o, v):
+        self._tick()
+        self.st[((s << 4) + (o & 0xFFFF)) & 0xFFFFF] = v & 0xFF
+
+    def ww(self, s, o, v):
+        self._tick()
+        lin = ((s << 4) + (o & 0xFFFF)) & 0xFFFFF
+        self.st[lin] = v & 0xFF
+        self.st[(lin + 1) & 0xFFFFF] = (v >> 8) & 0xFF
+
+
+class _ProbePlat:
+    """Port/interrupt stub for the probe, bounded for the same reason as
+    _ProbeMem: a poll loop on an I/O port touches no memory at all."""
+
+    MAX_CALLS = 2_000_000
+
+    def __init__(self):
+        self.n = 0
+
+    def _tick(self):
+        self.n += 1
+        if self.n > self.MAX_CALLS:
+            raise _ProbeSpin()
+
+    def inp(self, *a):
+        self._tick()
+        # vary, for the same reason _ProbeMem does: a status-port poll
+        # (`in al, 0x3DA; test al, 8; jz`) never exits on a constant.
+        return (self.n * 2654435761 >> 5) & 0xFF
+    def outp(self, *a): self._tick()
+
+    def intr(self, n, ib, cost):
+        self._tick()
+        out = {r: 0 for r in ("ax", "bx", "cx", "dx", "si", "di", "bp",
+                              "ds", "es")}
+        out["flags"] = 0
+        return out
+
+
+def shipped_shape(import_base: str, key: str):
+    """Derive the adapter's MechShape from the SHIPPED module it replaces.
+
+    Recomputing the shape with check_promotable proved fragile: the shipped
+    corpus was generated with a parameter set we do not fully replay
+    (dispatch arrivals, boundary heads, alt-entry `_entry_ip`, observed
+    dead exits), and every divergence became a runtime TypeError.  Reading
+    the shape off the module we are replacing makes the adapter a drop-in
+    BY CONSTRUCTION.
+
+    This is runtime introspection of a generated artifact -- the signature
+    via ``__kwdefaults__``, the output keys via one probe call on throwaway
+    memory -- NOT parsing generated source, so the IR-first rule stands.
+    Refuses loudly if the module cannot be imported or probed.
+
+    MEMOISED: the emitter's fixpoint revisits a candidate once per round, and
+    the shape of a shipped module cannot change mid-run.  Without the cache
+    every round re-imported and re-probed the whole corpus, which is most of
+    why the emission ran for tens of minutes with nothing to show.  Refusals
+    are cached too -- a refusal is as stable as a success."""
+    import importlib
+    ck = (import_base, key)
+    hit = _SHAPE_CACHE.get(ck)
+    if hit is not None:
+        if isinstance(hit, Refusal):
+            raise hit
+        return hit
+    try:
+        shape = _shipped_shape_uncached(importlib, import_base, key)
+    except Refusal as e:
+        _SHAPE_CACHE[ck] = e
+        raise
+    _SHAPE_CACHE[ck] = shape
+    return shape
+
+
+_SHAPE_CACHE: dict = {}
+
+
+def _shipped_shape_uncached(importlib, import_base: str, key: str):
+    from dos_re.lift import emit_abi as _ea
+    stem = f"func_{key.replace(':', '_').lower()}"
+    mod = importlib.import_module(f"{import_base}.{stem}")
+    fn = getattr(mod, stem)
+    pos = fn.__code__.co_varnames[:fn.__code__.co_argcount]
+    kwd = dict(fn.__kwdefaults__ or {})
+    needs_plat = "plat" in pos
+    if "_entry_ip" in kwd:
+        raise Refusal("alt-entry (_entry_ip) adapter not modelled")
+    inputs = tuple(sorted(k for k in kwd
+                          if not k.startswith("_")))
+    probe_kw = {k: 0 for k in kwd}
+    args = (_ProbeMem(), _ProbePlat()) if needs_plat else (_ProbeMem(),)
+    try:
+        out, _compat = fn(*args, **probe_kw)
+    except _ProbeSpin:
+        raise Refusal("probe did not terminate (spins on synthetic memory)")
+    except Exception as e:                        # noqa: BLE001
+        raise Refusal(f"probe failed ({type(e).__name__})")
+    return _ea.MechShape(inputs=inputs, outputs=tuple(sorted(out)),
+                         needs_plat=needs_plat,
+                         df_livein="_df" in kwd,
+                         flags_livein="_flags_in" in kwd)
+
+
+def _parity_mismatch(import_base: str, key: str, shape) -> str | None:
+    """Compare an adapter's intended signature with the SHIPPED mechanical
+    module it will replace.  Reads the live function's own metadata
+    (``__kwdefaults__`` / code object) -- runtime introspection, NOT parsing
+    generated source, so the IR-first rule stands.  Returns a reason string
+    on mismatch, or None when the adapter is a genuine drop-in."""
+    import importlib
+    stem = f"func_{key.replace(':', '_').lower()}"
+    try:
+        mod = importlib.import_module(f"{import_base}.{stem}")
+        fn = getattr(mod, stem)
+    except Exception as e:                       # noqa: BLE001
+        return f"shipped module unavailable ({type(e).__name__})"
+    pos = fn.__code__.co_varnames[:fn.__code__.co_argcount]
+    kwd = set((fn.__kwdefaults__ or {}))
+    want_kw = set(shape.inputs)
+    if shape.needs_plat:
+        want_kw.add("_base")
+    if shape.df_livein:
+        want_kw.add("_df")
+    if shape.flags_livein:
+        want_kw.add("_flags_in")
+    if ("plat" in pos) != shape.needs_plat:
+        return f"plat: shipped={'plat' in pos} adapter={shape.needs_plat}"
+    if kwd != want_kw:
+        missing = sorted(kwd - want_kw)
+        extra = sorted(want_kw - kwd)
+        return (f"kwargs differ (shipped-only={missing}, adapter-only={extra})")
+    return None
+
+
 def _emit_cores(args, census, wanted) -> int:
     """Slice 2: emit the de-stacked ABI core for every destackable leaf."""
     from dos_re.lift.contracts import scan_for
@@ -52,6 +312,11 @@ def _emit_cores(args, census, wanted) -> int:
     cores: dict[str, str] = {}
     contracts: dict[str, emit_abi.CoreContract] = {}   # key -> its contract
     refused: dict[str, str] = {}
+    # cores that ARE emitted and verified but get no integration adapter, so
+    # the game keeps calling the mechanical function for them.  Distinct from
+    # `refused`: the core exists, only the drop-in scaffold is missing.
+    not_integrated: dict[str, str] = {}
+    mech_cache: dict = {}          # mechanical specs, closure-resolved
 
     def _name(prop):
         for n in prop.get("notes", ()):
@@ -67,6 +332,12 @@ def _emit_cores(args, census, wanted) -> int:
     while True:
         rounds += 1
         progress = False
+        # Emit progress per round.  All the summary output lands after the
+        # fixpoint, so a slow run was previously indistinguishable from a
+        # hang -- silence that costs tens of minutes to interpret.
+        print(f"  round {rounds}: {len(cores)} cores, {len(refused)} refused, "
+              f"{len(wanted) - len(cores) - len(refused)} undecided",
+              flush=True)
         for key in wanted:
             if key in cores or key in refused:
                 continue
@@ -122,11 +393,28 @@ def _emit_cores(args, census, wanted) -> int:
                            if "%04X:%04X" % ft in contracts}
             elif deferred:
                 continue                         # wait for callees this round
+            shape = None
+            if args.integrate:
+                # Shape taken FROM the shipped module we replace, so the
+                # adapter is a drop-in by construction rather than by a
+                # recomputation we would have to keep in lockstep.
+                #
+                # An adapter refusal must NOT cost us the CORE.  The core is
+                # the recovery artifact -- differentially proven, and useful
+                # to every later stage -- while the adapter is only the
+                # scaffold that lets the still-mechanical graph call it.  An
+                # earlier version dropped the core too, silently shrinking a
+                # verified 113-core corpus to 87 for a reason that had
+                # nothing to do with the core's correctness.
+                try:
+                    shape = shipped_shape(args.import_base, key)
+                except Refusal as e:
+                    not_integrated[key] = str(e)
             try:
                 src, contract = emit_abi.emit_abi_core(
                     scan, prop, key, name=_name(prop),
                     callees=callee_map, far_callees=far_map,
-                    abi_base=args.abi_base,
+                    abi_base=args.abi_base, mech_shape=shape,
                     boundary_addrs={ip for (hc, ip) in heads if hc == cs},
                     dispatch_addrs={ip for (hc, ip) in disp if hc == cs})
                 cores[key] = src
@@ -156,7 +444,8 @@ def _emit_cores(args, census, wanted) -> int:
         # imported by a sibling core -- silently shadowing the refusal.  The
         # emitted set is the whole truth, so the directory must match it.
         keep = {f"core_{emit_abi._stem(k)}.py" for k in cores}
-        stale = [p for p in out.glob("core_*.py") if p.name not in keep]
+        stale = [p for p in out.glob("core_*.py")
+                 if p.name not in keep and p.name != "core_loader.py"]
         for p in stale:
             p.unlink()
         if stale:
@@ -173,9 +462,38 @@ def _emit_cores(args, census, wanted) -> int:
                     # mechanical, with the exact capability that blocked it.
                     # tools/abi_gate.py reports these as the classes that
                     # still owe a generated representation.
-                    "refused": {k: v for k, v in sorted(refused.items())}}
+                    "refused": {k: v for k, v in sorted(refused.items())},
+                    # emitted + verified, but no drop-in adapter: the game
+                    # still calls the mechanical function for these.  They are
+                    # NOT refusals -- the core is real -- but they do not
+                    # count as integrated, and the honest integration figure
+                    # is len(cores) - len(not_integrated).
+                    # scoped to EMITTED cores: shipped_shape runs for every
+                    # candidate, but a candidate that is also `refused` has no
+                    # core to integrate and would inflate this count (it read
+                    # 113 when only 24 cores were affected).
+                    "not_integrated": {k: v for k, v
+                                       in sorted(not_integrated.items())
+                                       if k in cores}}
         (out / "cores_manifest.json").write_text(
             json.dumps(manifest, indent=1), encoding="utf-8")
+        if args.integrate:
+            # Only adapter-backed cores may be installed: a stem in STEMS
+            # without a mechanical-shaped entry would fail to substitute.
+            installable = sorted(k for k in cores if k not in not_integrated)
+            (out / "core_loader.py").write_text(
+                emit_abi.emit_core_loader(installable,
+                                          abi_base=args.abi_base,
+                                          import_base=args.import_base),
+                encoding="utf-8")
+            print(f"  wrote core_loader.py -- {len(installable)} of "
+                  f"{len(cores)} cores are drop-in installable")
+            blocked = {k: v for k, v in not_integrated.items() if k in cores}
+            if blocked:
+                print("  emitted but NOT integrated (core is real, adapter "
+                      "is not modelled):")
+                for reason, n in Counter(blocked.values()).most_common():
+                    print(f"    {reason:<44} {n:4d}")
         print(f"wrote {len(cores)} core modules + cores_manifest.json "
               f"to {out}")
     return 0
@@ -209,6 +527,17 @@ def main(argv=None) -> int:
                          "alt-entry function stays mechanical)")
     ap.add_argument("--entries", default="",
                     help="comma-separated CS:IP subset (bisection aid)")
+    ap.add_argument("--integrate", action="store_true",
+                    help="also emit a MECHANICAL-shaped adapter per core (so "
+                         "the still-mechanical runtime can call it) plus the "
+                         "core loader.  Without this the cores are proven "
+                         "only in isolation -- nothing executes them.")
+    ap.add_argument("--check-parity", action="store_true", default=True,
+                    help="verify each integration adapter's signature matches "
+                         "the shipped mechanical module it replaces (default "
+                         "on); refuse rather than fail mid-demo")
+    ap.add_argument("--no-check-parity", dest="check_parity",
+                    action="store_false")
     ap.add_argument("--apply", action="store_true",
                     help="write the generated files (default: dry run)")
     args = ap.parse_args(argv)
