@@ -509,6 +509,22 @@ def _emit_cores(args, census, wanted) -> int:
             # Only adapter-backed cores may be installed: a stem in STEMS
             # without a mechanical-shaped entry would fail to substitute.
             installable = sorted(k for k in cores if k not in not_integrated)
+            # ONLY VERIFIED CORES MAY BE INSTALLED.  An inconclusive core is
+            # not established as equivalent to its mechanical function, so
+            # running the game on it would be substituting unproven code and
+            # calling the result a proof.  The verdict ledger is an INPUT to
+            # integration, not a report about it.
+            if args.verified_only:
+                led = json.loads(Path(args.verified_only)
+                                 .read_text(encoding="utf-8"))
+                proven = set(led.get("verified", {}))
+                dropped = [k for k in installable if k not in proven]
+                installable = [k for k in installable if k in proven]
+                if dropped:
+                    print(f"  NOT installed ({len(dropped)} not VERIFIED in "
+                          f"{args.verified_only}): "
+                          + ", ".join(sorted(dropped)[:8])
+                          + (" ..." if len(dropped) > 8 else ""))
             (out / "core_loader.py").write_text(
                 emit_abi.emit_core_loader(installable,
                                           abi_base=args.abi_base,
@@ -555,6 +571,14 @@ def main(argv=None) -> int:
                          "alt-entry function stays mechanical)")
     ap.add_argument("--entries", default="",
                     help="comma-separated CS:IP subset (bisection aid)")
+    ap.add_argument("--verified-only", default=None,
+                    help="path to the differential's verified ledger "
+                         "(artifacts/abi/verified.json).  With it, ONLY cores "
+                         "the differential proved VERIFIED are installed by "
+                         "core_loader.py -- inconclusive cores are real "
+                         "artifacts but are not established as equivalent, so "
+                         "running the game on them would substitute unproven "
+                         "code and call the result a proof.")
     ap.add_argument("--integrate", action="store_true",
                     help="also emit a MECHANICAL-shaped adapter per core (so "
                          "the still-mechanical runtime can call it) plus the "

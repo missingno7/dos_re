@@ -175,24 +175,48 @@ Two steps, smallest first.  Both target regions this port already
 understands independently, so a wrong schema is caught by knowledge as well
 as by the differential.
 
-**Step 1 — fixed-base scalar globals.**  Take a small cluster of
-direct-addressed (`mod=0, rm=6`) DS globals whose semantics are already
-proven — e.g. the render-scroll scalars at `ds:0x00` / `ds:0x02`.  These have
-no stride, no index, no aliasing question, and known widths.  Prove the whole
-loop end to end: schema → dataclass → import/export → rewrite the access
-sites → poison the range → oracle differential green.
+**Step 1 — selected by census, not prescribed here.**  Run the EA/alias
+census (§14.2) first, then select the SMALLEST FULLY VERIFIED OWNERSHIP
+CLOSURE it reports.  The first region is whichever one the evidence says is
+cheapest to own completely -- not whichever is semantically attractive or
+smallest in bytes (§9).
 
-**Step 2 — a candidate first array-of-structs: the lemming array.**  `ds:0x00B0`,
-45 records × 45 bytes, with `+0` anim frame (u8), `+1` action (u8), `+5`
-world-X (u16), `+7` world-Y (u16), `+9` dx (signed, `>=0x8000` = facing
-left).  This is the ideal first array because the base, stride, count, and
-five field offsets/widths/signednesses are independently established, and
-the ~40 remaining bytes per record exercise conservative preservation.
-However, it is promotable only if access-closure proves that the selected
-native logic neither reads nor writes those opaque bytes.  `OPAQUE` preserves
-historical bytes for bridge comparison; it does not make an unmodelled
-dependency memoryless.  If closure is broad, choose a smaller fully owned
-region instead.
+**`ds:0x00–0x10` is a REJECTED first candidate.**  It was prescribed here as
+"no stride, no index, no aliasing question".  The aliasing claim is false.
+Measured over the recovery IR, these offsets are reached through BOTH default
+`ds:` addressing and explicit `ss:` overrides -- the small-model SS == DS
+idiom that M3b slice 9 had to promote separately:
+
+| offset | reached via `ss:` | reached via default `ds:` |
+| ---: | ---: | ---: |
+| 0x00 | 45 functions | 11 functions |
+| 0x02 | 49 | 5 |
+| 0x08 | 56 | 3 |
+
+So `ds:0x00` and `ss:0x00` are the same bytes reached through two segment
+registers, and the ownership closure is ~56 functions rather than a handful.
+That is precisely the shape §9 warns about: *a small byte range with a large
+closure is not a small first slice*.  This document stated the rule and then
+violated it in its own worked example.
+
+Keep the range as a deliberate **segment-alias test case** for later, once
+`ALIAS_VIEW` is implemented: it is the natural first exercise of a declared
+alias with one canonical storage owner.
+
+**Segment-alias canonicalization is conditional, not automatic.**  The schema
+may canonicalize `ss:X` and `ds:X` to one owner ONLY where `DS == SS` is
+PROVEN for the relevant lifetime and boundaries.  Otherwise it must refuse:
+the two segments are equal by convention in this memory model, not by
+architecture, and a program that reloads either register breaks the identity.
+
+**The lemming array is a candidate, not a promotion.**  `ds:0x00B0`,
+45 records x 45 bytes, with independently established base/stride/count and
+five known field offsets, remains attractive because a wrong schema would be
+caught by knowledge as well as by the differential.  But it is subject to the
+same gates as anything else: access closure must prove the selected native
+logic neither reads nor writes the ~40 opaque bytes per record, and `OPAQUE`
+preserving historical bytes for comparison does NOT make an unmodelled
+dependency memoryless.  If closure is broad, it is not the first slice either.
 
 Explicitly deferred until those two are green: unions, dynamic bounds,
 pointer tables, linked structures, interrupt-shared memory, memory-mapped
