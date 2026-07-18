@@ -43,21 +43,11 @@ _effect_tag = dos_effect_tag
 
 
 def _probe(rt, cs):
-    from dos_re.repro_artifacts import clone_runtime_state
-    scratch = clone_runtime_state(rt)
-    cpu = scratch.cpu
-    cpu.replacement_hooks.clear(); cpu.hook_names.clear()
-    cpu.hook_verifier = None; cpu.trace_enabled = False; cpu.pending_irq = None
-
-    def probe(ip):
-        ip &= 0xFFFF
-        cpu.s.cs, cpu.s.ip = cs & 0xFFFF, ip
-        try:
-            cpu.step()
-        except Exception:  # noqa: BLE001
-            return None
-        return ((cpu.s.ip - ip) & 0xFFFF) or None
-    return probe
+    """Interpreter IP-delta probe (shared impl: it RESTORES the code segment after each step, since
+    a probe step runs with meaningless registers and can otherwise overwrite the bytes a later probe
+    decodes -- see dos_re.lift.probe)."""
+    from dos_re.lift.probe import make_ip_delta_probe
+    return make_ip_delta_probe(rt, cs)
 
 
 def _fetch_for_mem(mem, cs):

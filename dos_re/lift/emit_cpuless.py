@@ -1052,6 +1052,12 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
             raise Refusal("cs-or-ss-mutation")
         if "sp" in (e.reads | e.writes) and not _is_stack_family(i) \
                 and not is_bootstrap:
+            # A setjmp SNAPSHOT stores the exact tracked sp and changes
+            # nothing; a longjmp RESTORE is terminal and emits a fail-loud
+            # raise (see the two recognisers).  Both are narrower than the
+            # sp-as-data this refusal exists for.
+            if _is_sp_snapshot_store(i) or _is_nonlocal_exit(scan, i):
+                continue
             raise Refusal("sp-as-data")
     _check_frame_pointer(scan, callees, far_callees)
     sp_delta, ret_pop, sp_output, sp_deltas = _check_stack_depths(
@@ -1416,6 +1422,192 @@ def _is_bootstrap_ss_switch(scan, i) -> bool:
     return "sp" in register_effects(nxt).writes
 
 
+def _is_sp_snapshot_store(i) -> bool:
+    """``mov m16, sp`` -- a setjmp-style SNAPSHOT of the stack pointer into
+    memory (e.g. Borland's ``mov ds:[000E], sp``).
+
+    Permitted, and the reasoning is narrow: the CPUless ABI keeps ``sp``
+    EXACT (that is the premise the whole depth walk rests on), so storing it
+    is an ordinary exact store of a tracked value.  The function's own ``sp``
+    is untouched, so no composition contract is affected.  Nothing is assumed
+    about who READS the slot back -- a read-back into ``sp`` is a separate
+    instruction and is judged separately by :func:`_is_nonlocal_exit`.
+
+    Restricted to a MEMORY destination: ``mov r16, sp`` (mod == 3) parks sp in
+    a general register where arbitrary arithmetic may follow, which is the
+    sp-as-data the refusal exists to catch."""
+    return i.op == 0x89 and i.modrm is not None \
+        and ((i.modrm >> 3) & 7) == 4 and (i.modrm >> 6) != 3
+
+
+#: general-register index -> name, for `push r16` / `mov r16, imm16` (opcode low 3 bits).
+_GPR16 = ("ax", "cx", "dx", "bx", "sp", "bp", "si", "di")
+
+
+def _manufactured_return(scan, jmp, leader) -> int | None:
+    """The MANUFACTURED-RETURN idiom: ``push <code addr> ; ... ; jmp <indirect>``.
+
+    Returns the pushed offset when this near indirect JMP is a computed CALL --
+    the block put a return address on the stack itself -- and ``None`` when it is
+    an ordinary tail transfer.
+
+    WHY THIS EXISTS.  A near indirect jmp is emitted as a TAIL dispatch: the
+    dispatched arm's ``ret`` is taken to be THIS function's exit, popping our
+    caller's frame.  That is only true when nothing of ours is on top of the
+    stack, i.e. at depth 0.  The arm's ``ret`` returns to WHATEVER IS ON TOP OF
+    THE STACK -- so if the block pushed a word first, the arm returns THERE, back
+    inside this function, and the tail assumption silently drops everything from
+    that address onward.  Silently: the push is emitted faithfully, the
+    continuation is simply never run.
+
+    This is a general x86 construct, not one game's quirk: it is how a compiler
+    (or hand-written dispatcher) emits a CALL whose target comes from a jump
+    table -- push the continuation, then jmp through the table, and let each arm's
+    own ``ret`` deliver control back.  ``0xE8``-style direct calls cannot express
+    a computed target, so the return address is manufactured by hand.
+
+    RECOGNISED TIGHTLY, in the manner of :func:`_is_bootstrap_ss_switch` -- a
+    positive match on the idiom, never an inference from depth alone.  Depth
+    cannot discriminate: the FRAMELESS STACK-ARG tail (a dispatcher that pushes
+    ARGUMENTS the arms pop before returning, see :func:`_check_stack_depths`) also
+    sits at nonzero depth and IS a genuine tail.  What separates them is the
+    pushed VALUE: a manufactured return address is a statically-known code offset
+    in this same function.  So the window from the block leader to the jmp must
+    contain EXACTLY ONE stack-affecting instruction, and it must be a push of a
+    value this function knows statically:
+
+      * ``push imm16``  (0x68), or
+      * ``push r16``    (0x50+r) whose register was last set by ``mov r16, imm16``
+        (0xB8+r) earlier in the same block and not written since.
+
+    Anything else -- more than one stack op, a push of a runtime value, a
+    register whose provenance is not a literal -- returns ``None`` and keeps the
+    existing behaviour, because it is NOT this idiom.  The caller decides what to
+    do with a recognised offset that is not a block of this function; it must not
+    fall through to the silent tail."""
+    if jmp.kind != JMP_IND:
+        return None                         # a CALL_IND pushes its own next_ip
+    insts = scan.insts
+    imm_regs: dict[int, int] = {}           # gpr index -> literal it holds
+    pushed: int | None = None
+    stack_ops = 0
+    ip = leader
+    while ip != jmp.ip:
+        i = insts.get(ip)
+        if i is None:                       # the block does not reach the jmp
+            return None
+        e = register_effects(i)
+        if e.stack_delta:
+            stack_ops += 1
+            if i.op == 0x68 and i.imm is not None:
+                pushed = i.imm & 0xFFFF
+            elif 0x50 <= i.op <= 0x57:
+                pushed = imm_regs.get(i.op - 0x50)
+            else:
+                pushed = None
+        if 0xB8 <= i.op <= 0xBF and i.imm is not None and i.modrm is None:
+            imm_regs[i.op - 0xB8] = i.imm & 0xFFFF   # `mov r16, imm16`
+        else:
+            for r in tuple(imm_regs):                # any other write kills it
+                if _GPR16[r] in e.writes:
+                    del imm_regs[r]
+        ip = i.next_ip
+    if stack_ops != 1:
+        return None
+    return pushed
+
+
+def _is_nonlocal_exit(scan, i) -> bool:
+    """``mov sp, m16`` whose every forward path falls straight into a RET --
+    a setjmp/longjmp RESTORE: the return happens on a stack frame this
+    function never established.
+
+    dos_re cannot REPRESENT that.  The CPUless model holds frames on the
+    HOST's Python stack, so assigning a foreign ``sp`` and returning would
+    hand the immediate Python caller a bogus depth and silently corrupt every
+    caller's accounting -- the composition would still "work" and be wrong.
+    So the construct is TERMINAL, exactly as a runtime-dead exit is: it
+    constrains no exit ABI and emits a fail-loud raise instead of a return.
+
+    What is deliberately NOT modelled: the unwind itself.  Reproducing it
+    would mean asserting which frame the longjmp lands in and what it returns
+    there -- a contract that must be RECOVERED from the paired setjmp site,
+    never guessed to make promotion pass.  Until such a site is modelled the
+    raise IS the frontier witness; in the corpora seen so far these tails are
+    C-runtime fatal-abort paths that normal execution never takes.
+
+    Recognised TIGHTLY, in the manner of :func:`_is_bootstrap_ss_switch`: the
+    `mov sp, m16` form only, and only when every forward path reaches a
+    return with nothing in between that touches the stack or transfers
+    control elsewhere.  Anything looser is ordinary sp-as-data and still
+    refuses."""
+    if not (i.op == 0x8B and i.modrm is not None
+            and ((i.modrm >> 3) & 7) == 4 and (i.modrm >> 6) != 3):
+        return False                        # not `mov sp, m16`
+    # EVERY forward path must reach the return -- so a path that never
+    # terminates disqualifies the tail.  Skipping an already-seen ip (the
+    # obvious worklist idiom) silently ACCEPTS a cycle: for
+    # `jz ret / loop: jmp loop / ret`, the taken branch sets reached_ret while
+    # the looping branch is swallowed by the visited check, and the function
+    # is promoted as a longjmp tail that emits a fail-loud raise.  That is
+    # wrong precisely where it matters: an interrupt-driven spin-wait
+    # (`cmp [flag],0 / jz wait`) is REAL behaviour in these corpora -- four
+    # live ones sit in the Lemmings corpus alone -- not a fatal-abort path.
+    #
+    # A back-edge is therefore a REFUSAL, not a node to skip.  These tails are
+    # documented as short and straight-line, so requiring acyclicity costs
+    # nothing real and makes the check prove what the docstring claims.
+    # A BACK-EDGE refuses; mere re-convergence does not.  Distinguishing the
+    # two needs the current PATH, not a global visited set: `jz L / nop /
+    # L: ret` re-reaches L legitimately (a diamond, every path still returns),
+    # while `jz ret / loop: jmp loop` re-reaches loop through a cycle and that
+    # path never returns at all.  Treating every repeat as a cycle would
+    # refuse the diamond; treating every repeat as visited (the original)
+    # accepts the loop.
+    grey: set[int] = set()                  # on the current DFS path
+    black: set[int] = set()                 # fully explored, all paths return
+    seen: set[int] = set()
+
+    def _walk(ip) -> bool:
+        if ip is None:
+            return False                    # falls out of the tail
+        if ip in grey:
+            return False                    # BACK-EDGE: this path never returns
+        if ip in black:
+            return True                     # already proved to reach a return
+        seen.add(ip)
+        if len(seen) > 32:                  # not a short abort tail
+            return False
+        nxt = scan.insts.get(ip)
+        if nxt is None:
+            return False                    # falls out of the scan
+        if nxt.kind in (RET, RETF, IRET):
+            if (nxt.imm or 0):
+                return False                # `ret N` pops a frame we don't model
+            black.add(ip)
+            return True
+        e = register_effects(nxt)
+        # nothing between the restore and the return may touch the stack,
+        # re-touch sp, or transfer control out of this tail.
+        if e.stack_delta or "sp" in (e.reads | e.writes):
+            return False
+        if nxt.kind not in (SEQ, JCC, JMP):
+            return False
+        grey.add(ip)
+        if nxt.kind == SEQ:
+            ok = _walk(nxt.next_ip)
+        elif nxt.kind == JMP:
+            ok = _walk(nxt.target)
+        else:                               # JCC: BOTH arms must return
+            ok = _walk(nxt.next_ip) and _walk(nxt.target)
+        grey.discard(ip)
+        if ok:
+            black.add(ip)
+        return ok
+
+    return _walk(i.next_ip)
+
+
 def _is_desmc_far_chain(i) -> bool:
     """A de-SMC'd DIRECT far jmp (EA ptr16:16) whose target operand is
     runtime-patched (tier 13): the ISR installer wrote the CHAINED (previous)
@@ -1478,6 +1670,10 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
     callees = callees or {}
     far_callees = far_callees or {}
     plat_farcalls = plat_farcalls or {}
+    # The SAME leader map the emitter itself will use (dispatch arrivals are
+    # forced leaders), so the depth walk and the emitter cannot disagree about
+    # whether a given jmp is a computed call.
+    leader_of = scan.leader_of(alt_entries)
     depths: dict[int, set[int]] = {scan.entry: {0}}
     work = [(scan.entry, 0)]
     for a in alt_entries:
@@ -1498,6 +1694,13 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
         ip, d = work.pop()
         i = scan.insts[ip]
         e = register_effects(i)
+        if _is_nonlocal_exit(scan, i):
+            # a longjmp restore raises at emit time -- terminal, and it
+            # constrains nothing (no exit depth / ret_pop recorded), exactly
+            # as a runtime-dead exit does.  The walk must STOP here: the ret
+            # it falls into returns on a foreign frame, so propagating this
+            # depth to it would record a fictional exit contract.
+            continue
         if e.frame_establish and d is not None:
             # `mov bp,sp`: bp now holds the current sp -- the frame base a later
             # `mov sp,bp` returns to. One frame per function (a second establish
@@ -1559,6 +1762,21 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
             # and the arm (run via `_dyn`) returns its actual sp in the merged
             # bundle -- exact whether the arm balances or not.  An UNKNOWN depth
             # (None) has no runtime sp to defer to, so it still refuses.
+            # A MANUFACTURED RETURN (`push <addr> ; jmp <indirect>`) is not an
+            # exit at all: the arm's ret consumes the pushed word and control
+            # RESUMES at that address inside this function.  Walk through it as
+            # a call would -- depth drops by the popped word -- so the blocks
+            # reachable only via the resume point get depths and their exits
+            # reach the contract.  Recording it as an exit instead would both
+            # invent an exit depth and leave the whole continuation unwalked.
+            mret = _manufactured_return(scan, i, leader_of.get(i.ip))
+            if mret is not None and mret in scan.insts:
+                after = None if d is None else d - 2
+                seen = depths.setdefault(mret, set())
+                if after not in seen:
+                    seen.add(after)
+                    work.append((mret, after))
+                continue
             if d is None:
                 raise Refusal("tail-dispatch-at-nonzero-depth")
             exit_depths.add(0 if (d == 0 or has_frame) else d)
@@ -1823,15 +2041,27 @@ def _flags_defined_by(i) -> frozenset:
 
 # --------------------------------------------------------------------------
 
-def _contract_inputs(scan, abi) -> list[str]:
+def _contract_inputs(scan, abi, boundary_addrs=frozenset()) -> list[str]:
     """The recovered function's input list.  ``sp`` joins only when the body
     has real stack traffic OR composed calls (both write the guest stack
     literally: pushed bytes and return-address bytes are observable state);
     balance keeps it out of the outputs.  Otherwise the RET-ABI sp read stays
-    the adapter's business."""
+    the adapter's business.
+
+    A BOUNDARY HEAD also forces ``sp``/``ss`` in, whatever the body does with
+    the stack.  :func:`_emit_boundary_observer` hands ``plat.boundary`` the
+    whole live bundle -- ``_DYN_REGS``, which includes ``sp`` -- and merges it
+    back, because a frame driver may deliver the game's own ISRs across the
+    park and those run on the guest stack.  Without this a head sitting in a
+    stack-free function (e.g. a two-instruction ``cmp [tick],0 ; jz self``
+    tick-wait) emitted ``'sp': sp`` against a signature that had no ``sp``
+    parameter -- a body that raises ``UnboundLocalError`` the first time the
+    head is reached.  Nothing caught it because the only head declared until
+    now happened to live in a function with calls in it."""
     needs_sp = any((_is_stack_family(i) and i.kind not in (RET, RETF))
                    or i.kind in (CALL, CALL_FAR)
                    for i in scan.insts.values())
+    needs_sp = needs_sp or any(i.ip in boundary_addrs for i in scan.insts.values())
     inputs = sorted(abi.inputs - {"sp"})
     if needs_sp:
         inputs = sorted(set(inputs) | {"sp", "ss"})
@@ -1894,7 +2124,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
     leaders = sorted(set(scan.block_leaders()) | set(alt_entries))
     bb_of = {ip: n for n, ip in enumerate(leaders)}
     has_dyn = any(_is_dyn(i) for i in scan.insts.values())
-    inputs = _contract_inputs(scan, abi)
+    inputs = _contract_inputs(scan, abi, boundary_addrs)
     outputs = _output_set(abi, sp_output)
 
     L: list[str] = []
@@ -1933,6 +2163,12 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
         A(f"from {recovered_import_base}._dyncall import ivec_exec as _ivec")
     A("")
     A("_PARITY = tuple((1 - bin(v).count('1') % 2) == 1 for v in range(256))")
+    A("#: spin-detector cap.  Production keeps it high to catch a genuine")
+    A("#: unbounded wait; the seeded differential lowers it (both sides")
+    A("#: identically), because 'both hit the cap' is the same evidence")
+    A("#: at a fraction of the cost -- a 20M-iteration spin-wait ran the")
+    A("#: 143-core corpus past 15 minutes at only 4 states.")
+    A(f"_ITER_CAP = {_DISPATCH_ITER_CAP}")
     if alt_entries:
         A("")
         A("#: dynamic-arrival ALTERNATE ENTRIES (recovery-fact dispatch")
@@ -1984,7 +2220,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
     B("_iters = 0")
     B("while True:")
     B(f"    _iters += 1")
-    B(f"    if _iters > {_DISPATCH_ITER_CAP}:")
+    B(f"    if _iters > _ITER_CAP:")
     B(f"        raise RuntimeError('CPUless dispatch spin in {key} "
       f"(block %d, cost %d): loop exceeded {_DISPATCH_ITER_CAP} iterations "
       f"-- an unbounded wait (interrupt-updated flag, or a wrong port after "
@@ -1999,6 +2235,21 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
         while ip in scan.insts:
             i = scan.insts[ip]
             count += 1
+            if _is_nonlocal_exit(scan, i):
+                # a setjmp/longjmp RESTORE (`mov sp, m16` falling into a ret):
+                # the original returns on a frame it never established.  The
+                # host stack cannot express that, and faking a plain return
+                # would silently corrupt the caller's depth -- so terminate
+                # the block loudly.  The UNWIND IS NOT MODELLED: landing frame
+                # and returned value must come from the paired setjmp site,
+                # never a guess.  Until then this raise is the witness.
+                blk.append(f"_cost += {count}")
+                blk.append(f"raise RuntimeError('CPUless: non-local exit "
+                           f"(longjmp) at {cs:04X}:{i.ip:04X} taken -- "
+                           f"frontier witness; the unwind target is not "
+                           f"modelled (recover the paired setjmp site)')")
+                terminated = True
+                break
             if i.kind in (RET, RETF, IRET):
                 if i.ip in dead_exits:
                     # a runtime-dead return (never executed; --observed): the
@@ -2110,10 +2361,23 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 # (jump table) becomes a direct block transfer; an unknown
                 # selector raises UnknownDispatchTarget -- never a fallback.
                 is_call = i.kind == CALL_IND
+                # A MANUFACTURED RETURN makes this jmp a computed CALL: the block
+                # pushed a continuation, so the arm's `ret` lands there, not on
+                # our caller's frame.  See _manufactured_return for why depth
+                # alone cannot decide this and why the tail form is only valid at
+                # depth 0.
+                mret = None if is_call else _manufactured_return(scan, i, leader)
+                if mret is not None and mret not in bb_of:
+                    # We KNOW a return address was manufactured and we know we
+                    # cannot resume at it: it is not a block of this function, so
+                    # there is no local continuation to transfer to.  REFUSE.
+                    # Falling through to the tail form here is precisely the
+                    # silent wrongness this recogniser exists to end.
+                    raise Refusal("manufactured-return-not-local")
                 off = count - 1
                 cost = "_base + _cost" if off == 0 else f"_base + _cost + {off}"
                 blk.append(f"_dt = ({_rm_read(i, True)}) & 0xFFFF")
-                if not is_call:
+                if not is_call and mret is None:
                     blk.append("if _dt in _LOCAL:")
                     blk.append(f"    _cost += {count}")
                     if flag_written:
@@ -2153,6 +2417,29 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                                f"{fname} = (_gf & 0x{fbit:X}) != 0")
                 blk.append("    _fmask |= _gm")
                 blk.append("_cost += _dc['cost']")
+                if mret is not None:
+                    # COMPUTED CALL: the arm's `ret` consumed the word this block
+                    # pushed, so sp rises by 2 exactly as it does after a
+                    # CALL_IND, and control RESUMES at the pushed offset inside
+                    # this function.  (The push itself was already emitted
+                    # literally as an ordinary instruction, so sp is already
+                    # down 2 here -- only the pop is owed.)  The _LOCAL fast path
+                    # is suppressed above on purpose: an intra-function block
+                    # goto cannot express "this arm's ret comes back to mret", so
+                    # every target goes through _dyn as a real callee.  A target
+                    # with no recovered implementation then raises
+                    # UnknownDispatchTarget -- a loud frontier witness, which is
+                    # the correct outcome and not a regression from a silent one.
+                    blk.append("sp = (sp + 2) & 0xFFFF")
+                    blk.append(f"_cost += {count}")
+                    if flag_written:
+                        bits = " | ".join(f"0x{_FLAG_BITS[f]:X}"
+                                          for f in sorted(flag_written))
+                        blk.append(f"_fmask |= {bits}")
+                    blk.append(f"bb = {bb_of[mret]}")
+                    blk.append("continue")
+                    terminated = True
+                    break
                 if is_call:
                     blk.append("sp = (sp + 2) & 0xFFFF")
                     ip = i.next_ip
@@ -2492,6 +2779,13 @@ generated DISPATCH table (.dispatch) to a DIRECT recovered call -- possibly at
 a dynamic-arrival alternate entry.  An unknown selector raises
 :class:`UnknownDispatchTarget` (a structured frontier witness).  There is NO
 fallback path: not to a CPU, not to a lifted graph, not to an interpreter.
+
+The ONE exception is a vectored INTERRUPT whose target is not game code at all
+-- the universal "chain to the previous handler" idiom leaves a ROM-BIOS entry
+in the vector, and ROM is ENVIRONMENT.  `ivec_exec` offers those to `plat.ivec`,
+the same declared device model that already owns `plat.intr` and `plat.outp`,
+before raising.  A platform is not a carrier: it has no CPU, executes no guest
+instructions, and a platform that does not implement the entry still fails loud.
 DO NOT hand-edit; regenerate."""
 import importlib
 
@@ -2555,7 +2849,20 @@ def ivec_exec(key, mem, plat, base, regs):
     """Dispatch one game-vectored interrupt (tier 12) to its recovered
     IRET-contract handler.  The CALLER owns the interrupt frame (already
     pushed; popped after); the handler is an ordinary recovered function
-    whose iret exits are plain returns."""
+    whose iret exits are plain returns.
+
+    If the vector points OUTSIDE the recovered program the target is not game
+    code and never will be: an ISR that chains to "the previous handler" is
+    holding whatever the environment installed, in practice a ROM-BIOS entry.
+    Those are offered to the platform's `ivec` before the witness is raised.
+    A platform that does not implement the entry re-raises, so an unmodelled
+    vector is still a loud frontier and not a silent no-op."""
+    if key not in HANDLERS:
+        service = getattr(plat, "ivec", None)
+        if service is not None:
+            out = service(key, base, regs)
+            if out is not None:
+                return out
     return _exec(HANDLERS, "ivec", key, mem, plat, base, regs)
 '''
 
@@ -2596,13 +2903,13 @@ def emit_adapter(scan, abi, key: str, *, signature: bytes,
                  recovered_import_base: str, needs_plat=False,
                  ret_kind: str = "near", dispatch_addrs=frozenset(),
                  df_livein=False, sp_output=False, ret_pop=0,
-                 flags_livein=False) -> str:
+                 flags_livein=False, boundary_addrs=frozenset()) -> str:
     """Generate the CPU-ABI adapter that occupies the lifted slot."""
     cs = int(key.split(":")[0], 16)
     entry = scan.entry
     name = f"lifted_{key.replace(':', '_').lower()}"
     rec = f"func_{key.replace(':', '_').lower()}"
-    inputs = _contract_inputs(scan, abi)
+    inputs = _contract_inputs(scan, abi, boundary_addrs)
     outputs = _output_set(abi, sp_output)
     alt_entries = sorted(frozenset(dispatch_addrs) & frozenset(scan.insts)
                          - frozenset({scan.entry}))

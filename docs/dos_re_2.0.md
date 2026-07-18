@@ -43,6 +43,65 @@ instead of hand-porting the game.
 
 ---
 
+## The overarching goal (owner, 2026-07-18) — the north star
+
+Every stage below is a MEANS.  The end is this:
+
+> Use deterministic, automated recovery tools to expose as much of the
+> original game as possible in a form that is **explicit, structured, and
+> easy for AI to understand**.
+
+VMless, CPUless, ABI recovery, de-stacking, memoryless state recovery,
+generated bridges and oracle verification are **not ends in themselves**.
+They are successive removals of the historical machinery that HIDES the
+actual game: instruction interpretation, registers, calling conventions,
+stack mechanics, flat DOS memory, raw addresses, compiler artifacts.
+
+The final recovered program should present the game's real logic, state,
+data relationships, rendering boundaries and platform interactions as
+directly as possible.  AI should not have to infer behavior from assembly,
+anonymous offsets, or machine-state plumbing: it should work with ordinary
+functions, explicit parameters, native objects, typed fields, clear
+ownership, and separated gameplay / rendering / input / audio / platform
+layers.  The better the tooling exposes that structure, the less AI has to
+guess, and the more reliably it can do the final semantic pass — naming,
+simplifying, organising.
+
+**The measure of success is not that the game runs without an emulator.**
+It is that the recovered code is an ideal working representation for AI:
+small enough, explicit enough, and understandable enough that substantial
+modifications are quick and safe — modern rendering, widescreen/ultrawide,
+smooth cameras, high-refresh presentation, better audio, gamepad and touch
+input, mobile ports, editors, modding, new gameplay — as ordinary additions
+rather than fresh reverse-engineering projects.
+
+Automate the archaeology ONCE, so AI spends its effort understanding and
+extending the game instead of fighting the machine it was compiled for.
+
+### What this rules OUT, concretely
+
+A stage is not "done" merely because a wall holds and the oracle is green.
+If the emitted form still speaks in machine vocabulary, the stage has moved
+the plumbing without exposing the game.  In particular, these are
+acceptable as INTERMEDIATE emission detail and are NOT acceptable in the
+final representation:
+
+* basic-block dispatch loops (`while True: if bb == 3:`) instead of
+  ordinary `if` / loops / early returns;
+* register-named locals (`ax`, `si`) where the value has a semantic role;
+* per-operation flag computation that nothing observes;
+* raw `mem.rw(seg, off)` with historical addresses;
+* register-shaped or compat-shaped public signatures.
+
+A stage may legitimately POSTPONE any of these — but the postponement must
+be recorded as debt against this goal, never re-labelled as "fine because
+the next stage does not need it".  (See `docs/abi_end_state.md` §6, which
+was revised after this goal was stated: the M4-need test and the
+final-representation test are different tests, and the disposition table
+now says so.)
+
+---
+
 ## 0. The Ten Principles
 
 > **Do not port the game.  Build the machine that ports the game.**
@@ -145,6 +204,71 @@ original binary → shared recovery IR → analyses/transformations → selected
 
 Literal generated files are regeneratable compiler artifacts and must not be
 hand-refactored.
+
+### Stage 2b — ABI-RECOVERED CPULESS
+
+Stage 2 removes the CPU *carrier*; its first (mechanical) form still exposes
+the historical machine **calling convention** in every public contract:
+
+```
+mechanical CPUless      func(mem, ax, bx, ds, si, ss, sp, plat, ...)
+ABI-recovered CPUless   func(mem, value, destination, object_index)
+DOS-layout-less         func(game_object, value)
+```
+
+ABI-recovered CPUless is the second form of stage 2 — a separate milestone
+BEFORE any state moves into authoritative native objects.  The recovered
+graph keeps the historical memory image authoritative (``mem`` and historical
+offsets may remain), but its **public contracts stop being register-shaped**:
+
+- real input parameters are inferred from register/stack live-ins;
+- return values are inferred from caller-observed outputs (never "every
+  modified register for compatibility");
+- stack arguments become ordinary Python parameters; callee-clean vs
+  caller-clean is proven, not assumed;
+- register pairs (DS:SI …) become pointer-like values or typed **memory
+  views** where their role is proven;
+- scratch registers become locals; caller-live condition results become
+  explicit booleans where meaningful;
+- recovered functions call each other through the recovered contracts —
+  historical return-address mechanics leave the public graph.
+
+Early **types are encouraged** when they describe contracts without
+transferring state authority (FarPointer, BufferView, Rect, view classes
+wrapping ``mem`` + historical address).  Every generated type is explicitly
+one of: *value type* | *historical memory view* | *native authoritative
+model* — and stage 2b may only produce the first two.  A view over ``mem``
+is still ABI-recovered CPUless, not DOS-layout-less: the historical image
+remains authoritative.
+
+Strict output taxonomy, per function: **semantic inputs/outputs** (the public
+recovered API) vs **machine-derived temporaries** (locals) vs **private
+compatibility metadata** (exit flags, virtual-time cost, return-address
+bytes, stack residue — allowed only in a private generated verification
+path).  There is ONE generated algorithmic core per function with two
+generated entrypoints: a private compatibility entry preserving the exact
+historical ABI for oracle verification, and the public ABI-recovered entry.
+No duplicate implementations — the later DOS-layout-less transformation must
+be able to swap views for native objects without rewriting the algorithm.
+
+Provenance: the original address is the permanent identity (``1010:4B68``);
+recovered names attach as metadata (``format_decimal [1010:4B68]``) through
+the naming/recovery-facts table, and are never a physical replacement for
+the numeric identity.  Names may start conservative and structural.
+
+The transformation is built over the recovery IR and the completed CPUless
+call graph — never by parsing generated Python.  Contract inference is
+promoted bottom-up to a fixpoint; conflicting call sites or uncertain
+contracts **fail loudly** (no silent fallback to a register-shaped
+signature).  The mechanical CPUless graph remains the generated reference:
+every promoted contract is differentially verified (returned values,
+observable memory effects, caller-live conditions, platform effects, virtual
+timing where still required, complete deterministic demo behavior), with the
+oracle bridge as final acceptance.
+
+The stage-2b hard wall: **the recovered program no longer exposes or depends
+on the historical CPU calling convention, even though its data may still
+live in the historical memory layout.**  Do not call this form memoryless.
 
 ### Stage 3 — DOS-LAYOUT-LESS NATIVE
 
@@ -653,9 +777,36 @@ the next major mechanical stage after the VMless graph converges.
   from the required reachable graph: every reachable function is a recovered
   CPUless implementation, verified byte-exact against the oracle standalone
   (§CPUless machinery).
+- **M3b — ABI-recovered CPUless graph.**  The mechanical CPUless graph's
+  public contracts stop being register-shaped (§Stage 2b): inferred real
+  parameters, caller-observed return values, stack args as normal
+  parameters, pointer/view types where proven, direct recovered-to-recovered
+  calls through recovered contracts, dual generated entrypoints (private
+  compat for verification, public ABI-recovered), provenance naming.  The
+  historical memory image stays authoritative; the canonical demo stays
+  oracle-clean.  Complete when no public recovered contract contains a CPU
+  object, register-named parameter, or return-address mechanics — and
+  unsupported ABI shapes fail loudly with evidence.  **End state + acceptance
+  gate: `docs/abi_end_state.md`** — which machine concepts must be eliminated
+  before M4 (generic virtual stack, register-named public parameters,
+  dict-keyed results, dead flag computation), which may remain as
+  deterministic emission detail (CFG-shaped `bb` bodies, register-named
+  *locals*, partial-register widths — M4 analyses read the IR, not emitted
+  Python), and which must remain as private compatibility metadata
+  (`_fmask`, exact flag word, virtual cost).  Every function must end as a
+  de-stacked core OR a named exception class with a generated representation.
 - **M4 — DOS-layout dissolution.**  Historical memory structures are replaced
   with native objects, oracle verification retained through the generated
-  bridge.
+  bridge: historical memory views → authoritative native dataclasses and
+  object graph → generated bridge back to the original layout → memoryless
+  runtime.  **Design: `docs/memory_schema.md`** — a generated Memory Schema
+  IR is the single layout authority; native dataclasses hold ORDINARY
+  DETACHED VALUES (a field that secretly re-reads flat memory is the
+  anti-pattern, not the goal); import/export bridges and field-level diffs
+  are generated from the schema and exist only in the verification/migration
+  environment; each promoted region is protected by a fail-loud wall.  The
+  machine stack was already promoted this way in M3b slice 2 (virtual stack +
+  proven no-alias), which is the pattern in miniature.
 - **M5 — Semantic clean port.**  The recovered implementation is
   understandable, maintainable, machine-architecture-independent.
 - **M6 — Enhancements.**  Widescreen, smooth rendering, improved audio, modern

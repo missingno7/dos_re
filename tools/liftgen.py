@@ -34,31 +34,17 @@ sys.path.insert(0, str(ROOT))
 from dos_re.lift import scan_function  # noqa: E402
 from dos_re.lift.cfg import Refusal  # noqa: E402
 from dos_re.lift.emit import EmitUnsupported, emit_function  # noqa: E402
-from dos_re.repro_artifacts import clone_runtime_state  # noqa: E402
+from dos_re.lift.probe import make_ip_delta_probe  # noqa: E402
 from dos_re.snapshot import load_snapshot, parse_addr  # noqa: E402
 
 
 def _make_probe(rt, cs: int):
-    """Interpreter IP-delta probe at cs:ip (see module docstring)."""
-    scratch = clone_runtime_state(rt)
-    cpu = scratch.cpu
-    cpu.replacement_hooks.clear()
-    cpu.hook_names.clear()
-    cpu.hook_verifier = None
-    cpu.trace_enabled = False
-    cpu.pending_irq = None
+    """Interpreter IP-delta probe at cs:ip (see module docstring).
 
-    def probe(ip: int) -> int | None:
-        ip &= 0xFFFF
-        cpu.s.cs = cs
-        cpu.s.ip = ip
-        try:
-            cpu.step()
-        except Exception:  # noqa: BLE001 — probe is advisory; scan records it
-            return None
-        return ((cpu.s.ip - ip) & 0xFFFF) or None
-
-    return probe
+    Delegates to the shared implementation, which RESTORES the code segment after each step -- a
+    probe step executes with meaningless registers and can otherwise overwrite the very bytes a
+    later probe decodes (dos_re.lift.probe explains the failure it caused)."""
+    return make_ip_delta_probe(rt, cs)
 
 
 def scan_entry(rt, cs: int, ip: int):

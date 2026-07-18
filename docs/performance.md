@@ -26,6 +26,29 @@ v7.3.20 vs CPython 3.11, Windows, 20M-instruction steady state):
 numpy-bound tests don't JIT; long verify sweeps and oracle runs gain the most.
 The JIT needs ~1–2M instructions of warmup before reaching steady state.)
 
+### What a whole differential HARNESS gains: ~10x, and only when it is long
+
+The rows above are raw interpretation. A frame-exact differential also captures
+and compares a framebuffer per frame, which does not speed up as much, so quote
+the harness number for a harness. Measured 2026-07-18, skyroads
+`scripts/verify_cpuless.py` over its 5,109-frame attract demo, end-to-end:
+
+| run length | CPython | PyPy | speedup |
+|---|---|---|---|
+| 5,109 frames (full) | 500.8 s | **47.3 s** | **10.6x** |
+| 60 frames | 40.4 s | 7.5 s | 5.4x |
+
+**Short runs gain far less** — at 60 frames, process start plus JIT warmup is
+most of the run. PyPy pays off on the long gates, which is where the cost is.
+
+**Switching interpreter is only sound if you PROVE the two agree**, because a
+faster interpreter that quietly disagrees turns a real failure into a green
+gate. The evidence for the run above: both logs hash identically (sha1
+`1da10d27…`, excluding timing heartbeats) — same per-frame lines, same
+`oracle peak 17126327 steps/frame`, same verdict. overkill has the same result
+independently (a full lockstep re-record under each produces the identical
+cache sha1). Re-run such a comparison after a PyPy upgrade; do not inherit it.
+
 Setup (Windows): `winget install PyPy.PyPy.3.11`, then
 `pypy -m ensurepip && pypy -m pip install pytest pytest-xdist numpy pygame-ce`.
 

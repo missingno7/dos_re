@@ -35,6 +35,7 @@ contract, parameterised by the port's corpus package.
 from __future__ import annotations
 
 import builtins
+import contextlib
 import importlib
 import sys
 
@@ -87,9 +88,19 @@ def forbidden_hit(dotted: str, forbidden) -> "str | None":
     return None
 
 
+#: Attribute each guard carries, holding the ``__import__`` it displaced.  Teardown reads it off the
+#: CURRENTLY-INSTALLED function rather than from a side stack, so a caller that restores
+#: ``builtins.__import__`` by hand (the older try/finally idiom) cannot desynchronise it, and nesting
+#: unwinds correctly because each guard remembers its own predecessor.
+_GUARD_PREV = "_dos_re_prev_import"
+
+
 def install_import_guard(extra_forbidden=()) -> None:
     """Arm the CPUless wall for this process. Fires only on an EXECUTED import, so pair it with a
-    STATIC import-graph lint for paths a given run does not take."""
+    STATIC import-graph lint for paths a given run does not take.
+
+    PROCESS-GLOBAL: prefer the :func:`import_guard` context manager, or pair this with
+    :func:`uninstall_import_guard`, unless the process exists only to run the walled code."""
     forbidden = tuple(BASE_FORBIDDEN) + tuple(extra_forbidden)
     real_import = builtins.__import__
 
@@ -104,7 +115,33 @@ def install_import_guard(extra_forbidden=()) -> None:
                 f"the VM runtime, or the CPU-ABI adapters.")
         return real_import(name, globals, locals, fromlist, level)
 
+    setattr(guarded, _GUARD_PREV, real_import)
     builtins.__import__ = guarded
+
+
+def uninstall_import_guard() -> bool:
+    """Disarm the currently-installed guard, restoring the ``__import__`` it displaced.
+
+    Returns True if a guard was armed. Idempotent and safe when none is, so it works as unconditional
+    teardown; nested guards unwind one level per call."""
+    prev = getattr(builtins.__import__, _GUARD_PREV, None)
+    if prev is None:
+        return False
+    builtins.__import__ = prev
+    return True
+
+
+@contextlib.contextmanager
+def import_guard(extra_forbidden=()):
+    """Arm the CPUless wall for a BLOCK, disarming it even if the block raises.
+
+    This is the form to use anywhere the process outlives the walled run (tests, a REPL, a host that
+    also drives the interpreted oracle); the bare install/uninstall pair is for a dedicated process."""
+    install_import_guard(extra_forbidden)
+    try:
+        yield
+    finally:
+        uninstall_import_guard()
 
 
 class FailLoudPlatform:
@@ -126,6 +163,17 @@ class FailLoudPlatform:
     def outp(self, port, value, width, cost):
         raise CpuStandaloneWitness(
             f"OUT to port {port & 0xFFFF:#06x} with no host platform implementation")
+
+    def ivec(self, key, cost, regs):
+        """Service a vectored interrupt whose target is NOT recovered game code.
+
+        An ISR that chains to "the previous handler" -- the universal idiom -- holds whatever the
+        environment left in the vector, in practice a ROM-BIOS entry.  That target is not game code
+        and never will be, so the recovered corpus cannot supply it and the device model must.
+
+        Returning ``None`` means "not mine": the caller then raises its own frontier witness naming
+        the vector.  The default declines everything, so an unmodelled ROM entry stays LOUD."""
+        return None
 
 
 def module_name(key: str) -> str:
@@ -192,3 +240,114 @@ def run_deep(fn, *args, stack_bytes: int = DEEP_STACK_BYTES,
     if "error" in box:
         raise box["error"]
     return box.get("value")
+
+
+# --- THE STITCH: hand-recovered overrides patched over the generated corpus -------------------------
+
+#: package -> {module basename: original module}, so :func:`uninstall_overrides` can restore.
+_SHADOWED: "dict[str, dict[str, object]]" = {}
+
+
+def generated(package: str, key: str):
+    """The GENERATED body for ``key``, even while an override shadows it.
+
+    An override that only needs to ADD an effect should DELEGATE to this rather than reimplement, so the
+    outputs, flags and virtual-time cost stay the generated ones and cannot drift."""
+    name = module_name(key)
+    real = _SHADOWED.get(package, {}).get(name)
+    if real is not None:
+        return getattr(real, name)
+    return load_recovered(package, key)
+
+
+def install_overrides(package: str, overrides: "dict") -> "list[str]":
+    """Make each ``{'CS:IP': callable}`` the running implementation inside ``package``.
+
+    The generated corpus is the SKELETON -- it holds the program's real control flow, lifted from the
+    original's own code -- and an override is SKIN: it replaces what ONE address means, never the flow.
+    Every address without an override is served by the generated body, so the composite always runs.
+
+    Installation must reach callers that ALREADY imported the callee, and that is the whole difficulty.
+    A generated module binds its callees at import time (``from pkg.func_1010_XXXX import
+    func_1010_XXXX``), so shadowing ``sys.modules`` alone only affects imports that have not happened
+    yet; any earlier caller keeps a direct reference and the override silently does nothing for every
+    call through it. Worse, resolving the original (via :func:`generated`) IMPORTS the module, which
+    eagerly binds THAT module's callees -- so installing several overrides along one call chain
+    guarantees the later ones miss. Found in skyroads: a counter built that way reported ZERO calls for
+    functions a traceback proved were executing.
+
+    So this also RETRO-PATCHES already-bound references and clears the dynamic-dispatch memo. With both,
+    installation order stops mattering.
+
+    An address with no generated counterpart FAILS LOUD: a stale entry must break the build as the
+    corpus is regenerated, never quietly stop applying.
+    """
+    import sys
+    import types
+
+    shadowed = _SHADOWED.setdefault(package, {})
+    installed = []
+    for key, impl in overrides.items():
+        name = module_name(key)
+        full = f"{package}.{name}"
+        try:
+            real = importlib.import_module(full)
+        except ModuleNotFoundError as e:
+            if e.name != full:                        # a missing CALLEE, not this address
+                raise
+            raise RuntimeError(
+                f"override for {key} has no generated counterpart ({full}). The corpus "
+                f"was regenerated and this address is no longer in it -- fix or drop the "
+                f"override; it must not silently stop applying.") from e
+        original = getattr(real, name)
+        shadow = types.ModuleType(full)
+        shadow.__dict__.update(real.__dict__)
+        setattr(shadow, name, impl)
+        shadowed[name] = real
+        sys.modules[full] = shadow
+        _rebind(package, name, original, impl)
+        installed.append(key)
+    return installed
+
+
+def _rebind(package: str, name: str, original, impl) -> None:
+    """Repoint every already-imported binding of ``name`` in ``package``, and drop the dispatch memo.
+
+    ``DISPATCH`` stores module/function NAMES so it resolves late (fine), but ``_dyncall`` memoises the
+    resolved closure on first call -- an override installed after the first dynamic transfer to that
+    address would never be seen.
+
+    SCOPED TO THE CALLEE'S OWN NAME, deliberately. A delegating override needs a live reference to the
+    autolifted body; a rebind keyed only on "holds the original function" would repoint that reference
+    too, and the differential would then compare the override against ITSELF and still pass -- the worst
+    outcome for a proof mechanism. Overkill hit exactly this when adding the same fix. Ports must reach
+    the original through :func:`generated` (which reads the saved module, never a live binding) rather
+    than caching a direct reference under the callee's own name."""
+    import sys
+
+    for mod in list(sys.modules.values()):
+        if mod is None or not getattr(mod, "__name__", "").startswith(package):
+            continue
+        if getattr(mod, name, None) is original:
+            setattr(mod, name, impl)
+    dyn = sys.modules.get(f"{package}._dyncall")
+    if dyn is not None and hasattr(dyn, "_cache"):
+        dyn._cache.clear()
+
+
+def uninstall_overrides(package: str) -> None:
+    """Restore the generated bodies and every rebound reference (tests needing a pristine corpus)."""
+    import sys
+
+    for name, real in _SHADOWED.get(package, {}).items():
+        sys.modules[f"{package}.{name}"] = real
+        original = getattr(real, name)
+        for mod in list(sys.modules.values()):
+            if mod is None or not getattr(mod, "__name__", "").startswith(package):
+                continue
+            if getattr(mod, name, None) is not None and mod is not real:
+                setattr(mod, name, original)
+    dyn = sys.modules.get(f"{package}._dyncall")
+    if dyn is not None and hasattr(dyn, "_cache"):
+        dyn._cache.clear()
+    _SHADOWED.pop(package, None)
