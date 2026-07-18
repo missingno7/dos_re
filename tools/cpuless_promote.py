@@ -170,6 +170,39 @@ def _read_plat_farcalls(path: Path):
     return out
 
 
+def _read_overrides(path: Path):
+    """Load the authoritative-override contracts a consumer supplies.
+
+    Returns {key: CalleeContract} keyed by paragraph "CS:IP".  Each override is
+    the consumer's hand-recovered body; dos_re only seeds its contract (so
+    callers compose it) and bridges the CPU ABI around it -- the body itself is
+    imported from ``import_base.<name>``.  Missing scalar fields default to a
+    plain balanced near/far callee (ret_pop 0, sp_delta 0)."""
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    entries = doc.get("overrides", doc)
+    out: dict[str, emit_cpuless.CalleeContract] = {}
+    for key, spec in entries.items():
+        if key.startswith("_"):
+            continue
+        ret_kind = spec.get("ret_kind", "near")
+        ret_pop = int(spec.get("ret_pop", 0))
+        sp_deltas = tuple(spec.get("sp_deltas", (spec.get("sp_delta", 0),)))
+        out[key.upper()] = emit_cpuless.CalleeContract(
+            name=spec["name"],
+            inputs=tuple(spec.get("inputs", ())),
+            outputs=tuple(spec.get("outputs", ())),
+            exit_flags=frozenset(spec.get("exit_flags", ())),
+            needs_plat=bool(spec.get("needs_plat", False)),
+            ret_kind=ret_kind,
+            df_livein=bool(spec.get("df_livein", False)),
+            sp_delta=spec.get("sp_delta", 0),
+            ret_pop=ret_pop,
+            sp_output=bool(spec.get("sp_output", False)),
+            sp_deltas=sp_deltas,
+            flags_livein=bool(spec.get("flags_livein", False)))
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ir", required=True)
@@ -216,6 +249,22 @@ def main(argv=None) -> int:
                          "slot.  A far-call into a boundary segment with no "
                          "contract refuses `platform-farcall-contract-unknown` "
                          "(never guesses the arg count).")
+    ap.add_argument("--overrides", default=None,
+                    help="@FILE (JSON) of AUTHORITATIVE OVERRIDE contracts: "
+                         "{\"CS:IP\": {name, inputs, outputs, ret_kind, "
+                         "ret_pop, sp_delta, sp_deltas, needs_plat, df_livein, "
+                         "flags_livein, exit_flags}}.  Each address gets its "
+                         "hand-recovered body (supplied by the consumer as "
+                         "import_base.<name>) as the SINGLE running "
+                         "implementation, composed by callers exactly like a "
+                         "generated callee -- the unified override-graph model "
+                         "(impl = overrides.get(addr, generated[addr])).  The "
+                         "generated body for the same address is still emitted "
+                         "for a differential cross-check; the override RUNS.  "
+                         "The tool emits only the identity-preserving CPU-ABI "
+                         "adapter (the body is the consumer's), seeds the "
+                         "callee contract so callers compose, and registers a "
+                         "balanced near-return override for dynamic dispatch.")
     ap.add_argument("--entries", default="",
                     help="comma-separated CS:IP candidates (default: all)")
     ap.add_argument("--limit", type=int, default=0,
@@ -326,6 +375,21 @@ def main(argv=None) -> int:
     dispatch_owner: dict[str, str] = {}
     iret_keys: set[str] = set()     # promoted IRET-contract handlers
     done: set[str] = set()
+    # AUTHORITATIVE OVERRIDES (the unified override-graph seam): seed each
+    # override's callee contract so callers compose it exactly like a generated
+    # callee (impl = overrides.get(addr, generated[addr])).  The override key is
+    # marked done so the promotion loop never generates a PARALLEL body for it;
+    # its authoritative body is the consumer's (import_base.<name>), and only
+    # its identity-preserving CPU-ABI adapter is emitted here (in --apply).
+    overrides: dict[str, emit_cpuless.CalleeContract] = {}
+    if args.overrides:
+        overrides = _read_overrides(Path(args.overrides.lstrip("@")))
+        for okey, oc in overrides.items():
+            ocs, oip = (int(x, 16) for x in okey.split(":"))
+            contracts_by_cs.setdefault(ocs, {})[oip] = oc
+            if oc.ret_kind == "far":
+                far_contracts[(ocs, oip)] = oc
+            done.add(okey)
     #: dead-register-output pruning (§ dead_register_outputs.md): per-function
     #: register outputs the exit-liveness prune dropped. Recorded on the real
     #: emission path so the report is what actually shipped. Expected empty
@@ -462,6 +526,9 @@ def main(argv=None) -> int:
 
     print(f"cpuless promotion census ({len(wanted)} candidates):")
     print(f"  promotable                     {len(promoted):4d}")
+    if overrides:
+        print(f"  authoritative overrides        {len(overrides):4d} "
+              f"(seeded contracts; callers compose them)")
     for reason, keys in sorted(refused.items(), key=lambda kv: -len(kv[1])):
         print(f"  refused: {reason:<28} {len(keys):4d}")
     if promoted:
@@ -475,6 +542,7 @@ def main(argv=None) -> int:
             "_notice": "GENERATED by dos_re tools/cpuless_promote.py -- "
                        "regenerate, do not hand-edit.",
             "promotable": promoted,
+            "overrides": sorted(overrides),
             "refused": {k: sorted(v) for k, v in sorted(refused.items())},
             "dead_output_prune": {
                 "policy": "keep register outputs live at >=1 clean return exit "
@@ -516,6 +584,24 @@ def main(argv=None) -> int:
         if standalone_only:
             print(f"STANDALONE-ONLY (parking; no adapter installed): "
                   f"{len(standalone_only)}: {', '.join(standalone_only)}")
+        # AUTHORITATIVE OVERRIDES: emit ONLY the identity-preserving CPU-ABI
+        # adapter (the body is the consumer's, already present in rec_dir under
+        # the override name).  Same lifted slot a generated twin would occupy.
+        for okey, oc in overrides.items():
+            stem = okey.replace(":", "_").lower()
+            rec = ir["functions"].get(okey)
+            if rec is None:
+                raise SystemExit(f"cpuless_promote: override {okey} is not an "
+                                 f"IR function (no signature to bind)")
+            ad_src = emit_cpuless.emit_override_adapter(
+                okey, oc, signature=bytes.fromhex(rec["signature"]),
+                recovered_import_base=args.import_base)
+            (ad_dir / f"lifted_{stem}.py").write_text(ad_src, encoding="utf-8",
+                                                      newline="\n")
+        if overrides:
+            print(f"OVERRIDES: {len(overrides)} authoritative body/bodies "
+                  f"composed as direct CPUless overrides (adapter emitted; "
+                  f"body is the consumer's authoritative implementation)")
         # the dynamic-dispatch registry: every promoted NEAR-return function
         # is a selector; owned dispatch entries route to their owner's
         # generated alternate entry.  Regenerated every apply (tier 9).
@@ -559,6 +645,31 @@ def main(argv=None) -> int:
             registry[key] = (f"{args.import_base}.{c.name}", c.name, None,
                              tuple(c.inputs), c.needs_plat, c.df_livein,
                              c.flags_livein)
+        # AUTHORITATIVE OVERRIDES are dynamically dispatchable under the SAME
+        # rule as promoted functions: only a balanced near-return override can
+        # be a near-indirect target (the near-dyn bundle assumes it); a far/
+        # ret-pop/sp-varying override is static-call reachable only.
+        for okey, oc in overrides.items():
+            if oc.ret_kind == "iret":
+                handlers[okey] = (f"{args.import_base}.{oc.name}", oc.name,
+                                  None, tuple(oc.inputs), oc.needs_plat,
+                                  oc.df_livein, oc.flags_livein)
+                continue
+            reason = None
+            if oc.ret_kind != "near":
+                reason = f"ret-kind-{oc.ret_kind}"
+            elif oc.sp_output:
+                reason = "sp-output"
+            elif oc.ret_pop:
+                reason = "ret-pop"
+            elif oc.sp_delta != 0:
+                reason = "sp-delta"
+            if reason is not None:
+                dispatch_excluded[okey] = reason
+                continue
+            registry[okey] = (f"{args.import_base}.{oc.name}", oc.name, None,
+                              tuple(oc.inputs), oc.needs_plat, oc.df_livein,
+                              oc.flags_livein)
         for dkey, owner in dispatch_owner.items():
             ocs, oip = (int(x, 16) for x in owner.split(":"))
             c = contracts_by_cs[ocs][oip]
