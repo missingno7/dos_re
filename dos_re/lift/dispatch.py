@@ -60,3 +60,154 @@ def resolve_near_indirect_target(state, mem, inst) -> "str | None":
         seg = seg or default_seg
     segval = getattr(state, seg or "ds") & 0xFFFF
     return f"{cs:04X}:{mem.rw(segval, off) & 0xFFFF:04X}"
+
+
+# ---------------------------------------------------------------------------
+# DISPATCH-ARM ABSORPTION: a switch arm is an ALTERNATE ENTRY of its container
+# ---------------------------------------------------------------------------
+#
+# A compiler lowers a dense `switch` into a jump table plus a SHARED EPILOGUE:
+# the container establishes the frame, computes an index and tail-dispatches
+# (`jmp cs:[bx*2+table]`); each arm runs its case body and falls into the one
+# `leave; ret` the container's prologue set up.  An arm is therefore NOT a
+# standalone function -- it is a second ENTRY POINT into the container's body,
+# sharing the container's frame and its epilogue.
+#
+# A function carver that only follows static edges cannot see that: the arms are
+# unreachable from the container's entry, so each one is carved as its own
+# "function" whose scan re-derives the SAME shared tail.  In isolation an arm
+# looks structurally broken -- `leave` with no `enter`, `pop si; pop di` with no
+# matching pushes -- and the CPUless gate refuses it (`leave-without-enter`,
+# `frame-restore-without-establish`).  That refusal is correct: the arm's frame
+# base genuinely lives in the container.  It is also fatal to composition,
+# because the container's own evidence gate then sees an UNPROMOTED dynamic
+# target and refuses the container too, holding out the entire dispatch cluster.
+#
+# ABSORPTION is the graph-completeness repair: union the arms' reachable
+# instructions back into the container's scan and declare each arm ip a dispatch
+# ALTERNATE ENTRY of the container.  The container becomes one function with
+# several entry points -- which is what the original object code always was.
+# The establish and the restore are then in the SAME scan, so the frame checks
+# pass on their own terms (nothing is suppressed), the jump table resolves as an
+# intra-function landing (`_LOCAL`), and the arms need no standalone promotion.
+#
+# SOUNDNESS.  Absorption is only sound when the arm really is a re-carving of the
+# container's own bytes, so it is CHECKED, never assumed:
+#   * every instruction the two scans share must be byte-identical (same ip,
+#     same encoded bytes) -- proof they decode the one instruction stream;
+#   * the arm must not establish a frame of its OWN in bytes the container does
+#     not already contain (a genuine callee that happens to be jumped to);
+#   * the arm scan must itself be liftable (no refusals to launder).
+# Anything else raises :class:`ArmAbsorptionRefusal` -- loud, never a merge that
+# guesses.  The merged scan is then handed to the ordinary promotion gate, which
+# proves the frame/stack contract for the composed whole exactly as for any
+# other function.
+
+
+class ArmAbsorptionRefusal(Exception):
+    """A dispatch arm could not be proven to be an alternate entry of its
+    container (see :func:`absorb_dispatch_arms`).  Carries a stable slug."""
+
+
+def _frame_establish_ips(scan) -> set:
+    """ips in ``scan`` that establish a frame: the atomic ``enter`` (0xC8), or
+    the hand-rolled ``push bp`` (0x55) / ``mov bp,sp`` pair.  Mirrors
+    ``emit_cpuless._check_frame_pointer``'s establish criteria."""
+    out = set()
+    push_bp = any(i.op == 0x55 for i in scan.insts.values())
+    for ip, i in scan.insts.items():
+        if i.op == 0xC8:
+            out.add(ip)
+        elif push_bp and i.op == 0x8B and i.modrm == 0xEC:   # mov bp,sp
+            out.add(ip)
+    return out
+
+
+def dispatch_arm_candidates(scan, cs, dyn_evidence, *,
+                            include_in_scan=False) -> list:
+    """The observed dispatch targets of ``scan``'s near jump-table sites -- the
+    arms of the switch this function dispatches.
+
+    ``dyn_evidence`` maps ``"CS:IP"`` site -> the observed target keys.  Only a
+    NEAR indirect jump (``jmp_ind`` with a ModRM whose /digit is 4) into this
+    same code segment qualifies: a far indirect jump leaves the segment and an
+    indirect CALL is a call, not an alternate entry.
+
+    By default only the arms OUTSIDE the scan are returned (the ones absorption
+    must pull in).  ``include_in_scan`` also returns the landings the static CFG
+    already reaches: those need no fusion, but they are still alternate entries
+    of this container rather than functions in their own right -- a carver that
+    also carved them as entries produces duplicate bodies unless they are
+    recognised as owned.  Returns the arm offsets, sorted and de-duplicated."""
+    arms = set()
+    for ip, i in scan.insts.items():
+        if i.kind != "jmp_ind" or i.modrm is None or ((i.modrm >> 3) & 7) != 4:
+            continue
+        for tgt in dyn_evidence.get(f"{cs:04X}:{ip:04X}".upper(), ()):
+            tcs, tip = (int(x, 16) for x in tgt.split(":"))
+            if tcs == cs and (include_in_scan or tip not in scan.insts):
+                arms.add(tip)
+    return sorted(arms)
+
+
+def absorb_dispatch_arms(container, arm_scans):
+    """Fuse dispatch ARMS into their CONTAINER's scan, returning a NEW scan in
+    which each arm ip is a reachable alternate entry.
+
+    ``container`` is the container's :class:`~dos_re.lift.cfg.FunctionScan`;
+    ``arm_scans`` maps each arm's entry offset to the scan carved at that entry.
+    The container scan is not mutated.  Raises :class:`ArmAbsorptionRefusal`
+    when an arm cannot be proven to be a re-carving of the container's own
+    instruction stream (see the module notes above).
+
+    The caller must pass the absorbed arm ips as ``dispatch_addrs`` to the
+    promotion gate/emitter so they become FORCED block leaders and exported
+    alternate entries -- absorbing without declaring them would leave the jump
+    table's landings unreachable in the emitted body."""
+    import copy
+
+    merged = copy.copy(container)
+    merged.insts = dict(container.insts)
+    merged.exits = list(container.exits)
+    merged.calls_near = set(container.calls_near)
+    merged.calls_far = set(container.calls_far)
+    merged.calls_indirect = list(container.calls_indirect)
+    merged.ints = set(container.ints)
+    merged.refusals = list(container.refusals)
+    merged.cs_store_targets = list(container.cs_store_targets)
+    merged.boundary_heads = list(container.boundary_heads)
+    for ip in sorted(arm_scans):
+        arm = arm_scans[ip]
+        if arm is None or ip in container.insts:
+            continue        # already an intra-scan landing: nothing to fuse
+        if arm.refusals:
+            raise ArmAbsorptionRefusal("arm-not-liftable")
+        if ip not in arm.insts:
+            raise ArmAbsorptionRefusal("arm-entry-not-decoded")
+        new_ips = set(arm.insts) - set(merged.insts)
+        for aip, inst in arm.insts.items():
+            have = merged.insts.get(aip)
+            if have is not None and have.raw != inst.raw:
+                raise ArmAbsorptionRefusal("arm-overlap-byte-conflict")
+        # A frame establish in bytes the container does not already contain
+        # means this is a self-framing function reached by an indirect jump --
+        # a genuine tail CALL, not a shared-epilogue arm.  Absorbing it would
+        # splice a second frame into the container's body.
+        if _frame_establish_ips(arm) & new_ips:
+            raise ArmAbsorptionRefusal("arm-establishes-own-frame")
+        for aip, inst in arm.insts.items():
+            merged.insts.setdefault(aip, inst)
+        have_exits = {e.ip for e in merged.exits}
+        merged.exits += [e for e in arm.exits if e.ip not in have_exits]
+        merged.calls_near |= arm.calls_near
+        merged.calls_far |= arm.calls_far
+        merged.calls_indirect = sorted(set(merged.calls_indirect)
+                                       | set(arm.calls_indirect))
+        merged.ints |= arm.ints
+        have_cs = set(merged.cs_store_targets)
+        merged.cs_store_targets += [t for t in arm.cs_store_targets
+                                    if t not in have_cs]
+        have_bh = set(merged.boundary_heads)
+        merged.boundary_heads += [h for h in arm.boundary_heads
+                                  if h not in have_bh]
+    return merged
