@@ -1050,15 +1050,28 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
                     and _is_bootstrap_ss_switch(scan, i):
                 continue    # sanctioned one-time bootstrap stack relocation
             raise Refusal("cs-or-ss-mutation")
-        if "sp" in (e.reads | e.writes) and not _is_stack_family(i) \
-                and not is_bootstrap:
-            # A setjmp SNAPSHOT stores the exact tracked sp and changes
-            # nothing; a longjmp RESTORE is terminal and emits a fail-loud
-            # raise (see the two recognisers).  Both are narrower than the
-            # sp-as-data this refusal exists for.
-            if _is_sp_snapshot_store(i) or _is_nonlocal_exit(scan, i):
+        if "sp" in e.writes and not _is_stack_family(i) and not is_bootstrap:
+            # A longjmp RESTORE writes sp but is terminal and emits a fail-loud
+            # raise (see the recogniser), so it never reaches a body that would
+            # compute on the restored value.
+            if _is_nonlocal_exit(scan, i):
                 continue
             raise Refusal("sp-as-data")
+        # READING sp is NOT sp-as-data.  The CPUless ABI keeps `sp` EXACT --
+        # that is the premise the whole depth walk rests on, and the emitted
+        # body carries it as an ordinary integer local -- so an instruction
+        # that takes sp as a SOURCE and does not write it consumes a value the
+        # body already has, and changes nothing about the stack.  The
+        # refusal is about sp as a DESTINATION: a computed write makes the
+        # depth unknowable and the frame unrecoverable.
+        #
+        # This is what the two narrow predecessors of the rule were reaching
+        # for one shape at a time -- `mov r16, sp` (a frameless routine
+        # capturing its own frame base to index stack args through) and
+        # `mov m16, sp` (a setjmp snapshot).  Both are just sp-as-source, and
+        # so is every other read: `cmp ax, sp` / `sub ax, sp` (a routine
+        # REPORTING free stack against a limit word), `push`-free arithmetic,
+        # a `test`.  One rule covers them and needs no list.
     bp_bias = _check_frame_pointer(scan, callees, far_callees)
     sp_delta, ret_pop, sp_output, sp_deltas = _check_stack_depths(
         scan, alt_entries, callees, far_callees, plat_farcalls, dead_exits,
@@ -1278,12 +1291,20 @@ def _prove_bp_framebase_at_teardowns(scan, callees, far_callees) -> None:
                 raise Refusal("frame-restore-without-establish")
             # A fused `leave` pops from the address bp names, so a BIASED bp
             # would read a slot that is not the saved base.  The split form
-            # (`mov sp,bp` + an explicit `pop`) names the slot deliberately and
-            # is exact at any constant bias.
+            # (`mov sp,bp` / `lea sp,[bp+disp]` + an explicit `pop`) names the
+            # slot deliberately and is exact at any constant bias.
             if op == 0xC9 and bpfb != 0:
                 raise Refusal("frame-pointer-biased-leave")
-            if bpfb < 0 and len(saved) > depth:
+            # Where the teardown LANDS is bp's own bias plus the offset the
+            # restore adds (`lea sp,[bp+disp]`; 0 for `mov sp,bp`).  The two are
+            # the same quantity -- distance from the frame base -- reached from
+            # opposite sides of the assignment, so they simply add.
+            eff = bpfb + (0 if op == 0xC9 else _frame_restore_disp(i))
+            if eff < 0 and len(saved) > depth:
                 raise Refusal("frame-restore-biased-over-saves")
+            # the map records BP's bias (the dataflow fact); the restore's own
+            # disp is a property of the instruction and is read straight off it
+            # by the depth walk, so it need not be carried through here.
             if bias_at.setdefault(ip, bpfb) != bpfb:
                 raise Refusal("frame-pointer-bias-join-mismatch")
         # advance the frame state
@@ -1460,12 +1481,44 @@ def _is_frame_establish(i) -> bool:
                  or (i.op == 0x89 and i.reg == 4 and i.rm == 5)))
 
 
+def _frame_restore_disp(i) -> "int | None":
+    """The CONSTANT OFFSET FROM bp this instruction restores ``sp`` to, or
+    ``None`` if it is not a frame restore at all.
+
+    ``sp := bp + disp``.  Two encodings express the one operation:
+
+    * ``mov sp, bp`` -- the un-fused half of ``leave`` (``disp`` 0), paired with
+      the ``pop bp`` that follows;
+    * ``lea sp, [bp+disp]`` -- the same teardown naming a slot at a FIXED offset
+      from the frame base.  A compiler emits it when the epilogue must land on a
+      register saved inside the frame (``lea sp,[bp-2] ; pop ds ; pop bp``)
+      rather than on the base itself, which is one instruction instead of the
+      ``dec bp ; dec bp ; mov sp,bp`` it would otherwise take.
+
+    Modelling the offset as a NUMBER is what keeps the teardown depth exactly
+    computable (``frame_base - bias - disp``) instead of collapsing to
+    sp-as-data.  It is the same move :func:`_bp_const_bias` makes for bp, on the
+    other side of the assignment -- and ``mov sp,bp`` is simply ``disp == 0``,
+    so there is no special case for either form.
+
+    Only a base of bp ALONE counts: 16-bit ``[bp+disp]`` is ``mod`` 1/2 with
+    ``rm`` 6.  ``[bp+si]`` / ``[bp+di]`` (``rm`` 2/3) add a RUNTIME index, which
+    is not a constant offset and is not recognised here; ``mod`` 0 ``rm`` 6 is
+    ``[disp16]`` and does not involve bp at all.
+    """
+    if i.mod == 3 and ((i.op == 0x8B and i.reg == 4 and i.rm == 5)
+                       or (i.op == 0x89 and i.reg == 5 and i.rm == 4)):
+        return 0                                          # mov sp, bp
+    if i.op == 0x8D and i.reg == 4 and i.rm == 6 and i.mod in (1, 2):
+        return i.disp or 0                                # lea sp, [bp+disp]
+    return None
+
+
 def _is_frame_restore(i) -> bool:
-    """`mov sp, bp` -- the hand-rolled frame epilogue (a `pop bp` follows it),
-    the un-fused half of `leave`. Restores sp to the frame base bp holds."""
-    return (i.mod == 3
-            and ((i.op == 0x8B and i.reg == 4 and i.rm == 5)     # mov sp, bp
-                 or (i.op == 0x89 and i.reg == 5 and i.rm == 4)))
+    """``sp := bp + <constant>`` -- the hand-rolled frame epilogue (a `pop bp`
+    follows it), the un-fused half of `leave`.  See :func:`_frame_restore_disp`
+    for the two encodings and why the offset is modelled as a number."""
+    return _frame_restore_disp(i) is not None
 
 
 def _is_dyn(i) -> bool:
@@ -1517,9 +1570,15 @@ def _is_sp_snapshot_store(i) -> bool:
     about who READS the slot back -- a read-back into ``sp`` is a separate
     instruction and is judged separately by :func:`_is_nonlocal_exit`.
 
+    NOW SUBSUMED.  This is simply sp read as a SOURCE, and the gate no longer
+    needs a recogniser for it: the sp-as-data refusal fires on sp as a
+    DESTINATION only, so every read-only use -- this one, ``mov r16, sp``,
+    ``cmp ax, sp`` -- is admitted by the one rule.  Kept as the documented
+    statement of why a snapshot is exact, and read by the nonlocal-exit tests
+    that pair it with the restore side.
+
     Restricted to a MEMORY destination: ``mov r16, sp`` (mod == 3) parks sp in
-    a general register where arbitrary arithmetic may follow, which is the
-    sp-as-data the refusal exists to catch."""
+    a general register, which is where the original narrow rule drew its line."""
     return i.op == 0x89 and i.modrm is not None \
         and ((i.modrm >> 3) & 7) == 4 and (i.modrm >> 6) != 3
 
@@ -1889,9 +1948,15 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
             # off the base: depth `frame_base - bias`. The bias comes from the
             # frame proof, which resolved it per teardown; absent (bias 0) this
             # is the plain reset.
+            # The restore may also name a slot at a constant offset FROM bp
+            # (`lea sp,[bp+disp]`); sp lands that many bytes further, so the
+            # depth is `frame_base - bias - disp`.  Both corrections are
+            # distances from the same frame base, one contributed by bp's own
+            # carried bias and one by the restore instruction itself.
             if frame_base is None:
                 raise Refusal("frame-restore-before-establish")
-            afters = [frame_base - (bp_bias or {}).get(ip, 0)]
+            afters = [frame_base - (bp_bias or {}).get(ip, 0)
+                      - (_frame_restore_disp(i) or 0)]
         elif d is None:
             afters = [None]
         else:
@@ -2150,6 +2215,12 @@ def _contract_inputs(scan, abi, boundary_addrs=frozenset()) -> list[str]:
     now happened to live in a function with calls in it."""
     needs_sp = any((_is_stack_family(i) and i.kind not in (RET, RETF))
                    or i.kind in (CALL, CALL_FAR)
+                   # ANY instruction that reads sp needs the caller's sp in:
+                   # the body computes with it (`cmp ax,sp`), so without this
+                   # the emitted `sp` local is unbound at its first use.  The
+                   # stack-family test above does not cover an arbitrary
+                   # sp-as-source ALU operand.
+                   or "sp" in register_effects(i).reads
                    for i in scan.insts.values())
     needs_sp = needs_sp or any(i.ip in boundary_addrs for i in scan.insts.values())
     inputs = sorted(abi.inputs - {"sp"})

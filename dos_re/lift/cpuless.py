@@ -321,6 +321,15 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         modrm_rm(wide_write=False)
         return Effects(frozenset(R), frozenset(W), mr, mw, sd)
     if op == 0x8D:                       # lea r16, m
+        if inst.reg == 4 and inst.rm == 6 and inst.mod in (1, 2):
+            # `lea sp, [bp+disp]` -- the frame RESTORE naming a slot at a fixed
+            # offset from the frame base, the same operation `mov sp,bp` is with
+            # a zero offset (see emit_cpuless._frame_restore_disp).  No constant
+            # DELTA describes it -- sp comes from bp -- so stack_delta stays
+            # None and frame_restore_to_base carries the exact meaning, exactly
+            # as it does for `mov sp,bp`.
+            return Effects(frozenset({"bp"}), frozenset({"sp"}), False, False,
+                           None, frame_restore_to_base=True)
         W.add(W16[inst.reg])
         if inst.mod != 3 and not (inst.mod == 0 and inst.rm == 6):
             R.update(_EA_REGS[inst.rm])
