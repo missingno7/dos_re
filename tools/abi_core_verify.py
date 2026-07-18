@@ -120,12 +120,19 @@ def _fresh_mechanical(ir: dict, key: str, _cache: dict):
 _W: dict = {}
 
 
-def _pool_init(ir, census, abi_base, states):
-    """Load the heavy inputs ONCE per worker, not once per core."""
+def _pool_init(ir, census, abi_base, states, iter_cap=0):
+    """Load the heavy inputs ONCE per worker, not once per core.
+
+    ``iter_cap`` must reach the workers too: it was applied only on the
+    sequential path, so `--jobs N --iter-cap X` silently ran at the emitted
+    20M cap -- the flag appeared to work while doing nothing, which is worse
+    than not offering it.
+    """
     _W["ir"] = ir
     _W["census"] = census
     _W["abi_base"] = abi_base
     _W["states"] = states
+    _W["iter_cap"] = iter_cap
     _W["mech"] = {}
 
 
@@ -142,6 +149,13 @@ def _verify_one(key: str):
     try:
         mech_fn, _ = _fresh_mechanical(_W["ir"], key, _W["mech"])
         core_mod = importlib.import_module(f"{_W['abi_base']}.core_{stem}")
+        cap = _W.get("iter_cap") or 0
+        if cap:
+            for nm, m in list(sys.modules.items()):
+                if m is not None and hasattr(m, "_ITER_CAP") and (
+                        nm.startswith(_MECH_PKG)
+                        or nm.startswith(_W["abi_base"])):
+                    m._ITER_CAP = cap
         rep = diff_one(mech_fn, core_mod._abi_core,
                        _W["census"]["functions"][key], states=_W["states"])
     except Exception as e:                                   # noqa: BLE001
@@ -326,7 +340,7 @@ def main(argv=None) -> int:
         started = time.time()
         ex = ProcessPoolExecutor(max_workers=args.jobs, initializer=_pool_init,
                                  initargs=(ir, census, args.abi_base,
-                                           args.states))
+                                           args.states, args.iter_cap))
         futs = {ex.submit(_verify_one, k): k for k, _ in todo}
         done_n = 0
         try:
@@ -363,10 +377,14 @@ def main(argv=None) -> int:
                                f"run budget (re-run with --only {k} "
                                f"--states 8 to characterise it)"]
         finally:
-            # cancel_futures matters: without it the pool waits for the very
-            # core that blew the budget, and orphaned workers outlive the
-            # parent (two survived the last kill).
+            # cancel_futures drops QUEUED work but cannot stop a worker that
+            # is already inside a pathological core -- those keep burning CPU
+            # and interpreter shutdown may still join them.  Terminate the
+            # processes so a budget breach actually ends the run.
             ex.shutdown(wait=False, cancel_futures=True)
+            for pr in list(getattr(ex, "_processes", {}).values()):
+                if pr.is_alive():
+                    pr.terminate()
         todo = []
 
     # sequential path -- the reference implementation; --jobs>1 above must

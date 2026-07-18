@@ -85,17 +85,21 @@ _STACK_FAMILY_OPS = (frozenset(range(0x50, 0x60)) | frozenset({0x06, 0x0E,
                      0x9C, 0x9D, 0xC8, 0xC9}))
 
 
-#: Offsets below this in the stack segment are the program's own globals, not
-#: stack.  The small-model layout puts globals at the bottom of the segment and
-#: the stack at the top growing down; Lemmings boots sp = 0x4AF4 and every
-#: ss:-override in the corpus targets 0x00-0x10.  The same constant guards the
-#: dead-stack mask in scripts/acceptance_cpuless.py (STACK_DATA_FLOOR), where
-#: tests/test_dead_stack_mask.py asserts ss:[0x00,0x02,0x06,0x10] stay
-#: comparable -- i.e. that they are real data.
-SS_GLOBALS_FLOOR = 0x200
+#: NO DEFAULT ON PURPOSE.  Where a program's ss-relative globals end and its
+#: stack begins is a PER-PROGRAM LAYOUT FACT, not a property of the 8086: it
+#: depends on the memory model, the boot sp, and how far the stack can grow.
+#: A framework-wide constant baked in one game's layout -- Lemmings boots
+#: sp=0x4AF4 with globals at 0x00-0x10, so 0x200 separates them there -- and
+#: would silently mis-split any program that places globals higher or grows
+#: its stack lower, promoting machine stack to "globals" with no diagnostic.
+#:
+#: The floor must therefore be SUPPLIED by the port, as a recovery fact with
+#: its own evidence (the observed global range and the minimum reachable sp).
+#: dos_re owns the mechanism; the game owns the number.
+_NO_FLOOR = object()
 
 
-def ss_globals_only(scan, floor: int = SS_GLOBALS_FLOOR):
+def ss_globals_only(scan, floor=_NO_FLOOR):
     """For a function that DOES use the machine stack: are all of its
     ``ss:``-override accesses constant-offset globals below ``floor``?
 
@@ -118,6 +122,13 @@ def ss_globals_only(scan, floor: int = SS_GLOBALS_FLOOR):
     deserves its own name -- ``stack-addressed-memory`` is a misnomer for the
     globals and should not cover them.
     """
+    if floor is _NO_FLOOR:
+        raise ValueError(
+            "ss_globals_only() needs an explicit globals floor: it is a "
+            "per-program layout fact (boot sp, memory model, stack growth), "
+            "not a framework constant.  Supply it from the port's recovery "
+            "facts with evidence for the global range and the minimum "
+            "reachable sp.")
     offs = set()
     for i in scan.insts.values():
         if not any(p == 0x36 for p in i.prefixes):
@@ -130,8 +141,16 @@ def ss_globals_only(scan, floor: int = SS_GLOBALS_FLOOR):
             return False, "computed-ss-address"
         if off is None:
             return False, "computed-ss-address"
-        if off >= floor:
-            return False, f"ss-offset-above-globals-floor:{off:#06x}"
+        # WIDTH MATTERS: a word access at floor-1 spans floor-1..floor, so it
+        # straddles the globals/stack boundary.  Checking only the START
+        # offset accepted 0x1FF as a global while its high byte is already
+        # machine stack -- and a test asserted that acceptance.  Use the
+        # widest access this instruction can make (2 bytes) unless it is
+        # provably byte-wide.
+        width = 1 if (i.op in (0xA0, 0xA2) or (i.op & 1) == 0) else 2
+        if off + width > floor:
+            return False, (f"ss-access-crosses-globals-floor:"
+                           f"{off:#06x}+{width}")
         offs.add(off)
     if not offs:
         return False, "no-ss-globals"
@@ -652,7 +671,8 @@ def _param_kinds(scan, inputs: frozenset, pairs: dict) -> list[dict]:
 def infer_contracts(ir: dict, *, external: frozenset = frozenset(),
                     names: dict[str, str] | None = None,
                     boundary_addrs: frozenset = frozenset(),
-                    dispatch_addrs: frozenset = frozenset()) -> dict:
+                    dispatch_addrs: frozenset = frozenset(),
+                    ss_globals_floor: int | None = None) -> dict:
     """The M3b contract census over a recovery IR.
 
     ``external``: "CS:IP" keys reachable outside the static direct-call
@@ -732,7 +752,8 @@ def infer_contracts(ir: dict, *, external: frozenset = frozenset(),
         # purely (ss_is_data_segment) or -- slice 9 -- alongside real stack
         # traffic but only at constant offsets below the globals floor, which a
         # de-stacked core cannot confuse with its frame.
-        ss_globals_ok = ss_globals_only(scan)[0]
+        ss_globals_ok = (ss_globals_floor is not None
+                         and ss_globals_only(scan, ss_globals_floor)[0])
         ss_semantic = ss_is_data_segment(scan) or ss_globals_ok
         machine_regs = (frozenset({"sp"}) if ss_semantic
                         else MACHINE_REGS)
@@ -754,7 +775,7 @@ def infer_contracts(ir: dict, *, external: frozenset = frozenset(),
             pointer_pairs=tuple((s, r, n) for (s, r), n
                                 in sorted(pairs.items())),
             notes=tuple(klist),
-            ss_globals_floor=(SS_GLOBALS_FLOOR if ss_globals_ok else None),
+            ss_globals_floor=(ss_globals_floor if ss_globals_ok else None),
             refusals=tuple(refusals))
 
     promotable = sorted(k for k, p in proposals.items() if not p.refusals)

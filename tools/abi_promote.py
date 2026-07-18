@@ -431,7 +431,10 @@ def _emit_cores(args, census, wanted) -> int:
                     callees=callee_map, far_callees=far_map,
                     abi_base=args.abi_base, mech_shape=shape,
                     boundary_addrs={ip for (hc, ip) in heads if hc == cs},
-                    dispatch_addrs={ip for (hc, ip) in disp if hc == cs})
+                    dispatch_addrs={ip for (hc, ip) in disp if hc == cs},
+                    # the layout fact travels WITH the census that used it,
+                    # so the emitter cannot silently apply a different floor
+                    ss_globals_floor=census.get("ss_globals_floor"))
                 cores[key] = src
                 contracts[key] = contract
             except Refusal as e:

@@ -83,6 +83,29 @@ class TraceMem:
                 and seg == self.ss_seg
                 and off >= self.ss_globals_floor)
 
+    def _store_at(self, seg: int, off: int) -> dict:
+        """The backing store for one ACCESS -- by (seg, off), not by seg.
+
+        An ss-globals function needs its segment split: offsets below the
+        floor are real globals and must live in ``data`` so both sides
+        compare them, while offsets at or above it are machine stack and must
+        live in the SHADOW.  Excluding them from the write TRACE (which is all
+        the first version did) is not enough -- they were still written into
+        the shared image, where the synthetic stack aliases a seeded pointer:
+        with ds=0x6BAF and ss=0x7000, ds:0x5510 and ss:0x1000 are the same
+        linear byte, so the mechanical side's pushes corrupted ds-visible data
+        that the de-stacked side never touches.  Three cores diverged at state
+        58 for exactly that reason.
+
+        The shadow is what models the program's real no-alias precondition
+        (its stack region is dedicated; ds/es never point into the live
+        stack).  Dropping it for these functions manufactured aliasing the
+        game never exhibits.
+        """
+        if seg == self.shadow_seg or self._is_machine_stack(seg, off):
+            return self.shadow
+        return self.data
+
     def _record(self, w) -> None:
         self.write_count += 1
         d = self.write_digest
@@ -106,26 +129,27 @@ class TraceMem:
         return self.shadow if seg == self.shadow_seg else self.data
 
     def rb(self, seg: int, off: int) -> int:
-        return self._byte((seg << 4) + (off & 0xFFFF), self._store(seg))
+        return self._byte((seg << 4) + (off & 0xFFFF),
+                          self._store_at(seg, off & 0xFFFF))
 
     def rw(self, seg: int, off: int) -> int:
         lin = (seg << 4) + (off & 0xFFFF)
-        st = self._store(seg)
+        st = self._store_at(seg, off & 0xFFFF)
         return self._byte(lin, st) | (self._byte(lin + 1, st) << 8)
 
     def wb(self, seg: int, off: int, val: int) -> None:
-        st = self._store(seg)
+        st = self._store_at(seg, off & 0xFFFF)
         lin = ((seg << 4) + (off & 0xFFFF)) & 0xFFFFF
         st[lin] = val & 0xFF
-        if st is self.data and not self._is_machine_stack(seg, off & 0xFFFF):
+        if st is self.data:
             self._record((seg, off & 0xFFFF, val & 0xFF, 1))
 
     def ww(self, seg: int, off: int, val: int) -> None:
-        st = self._store(seg)
+        st = self._store_at(seg, off & 0xFFFF)
         lin = ((seg << 4) + (off & 0xFFFF)) & 0xFFFFF
         st[lin] = val & 0xFF
         st[(lin + 1) & 0xFFFFF] = (val >> 8) & 0xFF
-        if st is self.data and not self._is_machine_stack(seg, off & 0xFFFF):
+        if st is self.data:
             self._record((seg, off & 0xFFFF, val & 0xFFFF, 2))
 
 
@@ -138,6 +162,30 @@ def _seeded_regs(params, state: int) -> dict[str, int]:
             v ^= 0x0101
         out[r] = v
     return out
+
+
+def _fold(v) -> int:
+    """Deterministic fold of one logged value, nested containers included.
+
+    Built-in ``hash()`` on a str is randomised PER PROCESS (PYTHONHASHSEED),
+    so a digest built with it is not reproducible across runs or across
+    parallel workers.  This module already avoided ``hash`` for exactly that
+    reason -- and the capped-log digest reintroduced it.  Same lesson twice:
+    a reproducibility rule has to be enforced somewhere, not remembered.
+    """
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, int):
+        return v & 0xFFFFFFFF
+    if isinstance(v, (tuple, list)):
+        d = 0
+        for w in v:
+            d = (d * 1000003 + _fold(w)) & 0xFFFFFFFFFFFF
+        return d
+    d = 0
+    for c in str(v):
+        d = (d * 131 + ord(c)) & 0xFFFFFFFF
+    return d
 
 
 class PlatStub:
@@ -172,15 +220,7 @@ class PlatStub:
         self.log_count += 1
         d = self.log_digest
         for v in item:
-            if isinstance(v, tuple):
-                for w in v:
-                    d = (d * 1000003 + (w if isinstance(w, int)
-                                        else hash(str(w)) & 0xFFFF)) \
-                        & 0xFFFFFFFFFFFF
-            else:
-                d = (d * 1000003 + (v if isinstance(v, int)
-                                    else sum(ord(c) for c in str(v)))) \
-                    & 0xFFFFFFFFFFFF
+            d = (d * 1000003 + _fold(v)) & 0xFFFFFFFFFFFF
         self.log_digest = d
         if len(self.log) < self.MAX_LOG:
             self.log.append(item)
@@ -232,6 +272,17 @@ def _run(fn, mem, kwargs, plat=None, args=()):
         return "raise", f"RuntimeError:{str(e)[:60]}"
 
 
+#: The emitters raise this exact wording when the dispatch loop exceeds
+#: _ITER_CAP (see emit_cpuless/emit_abi).  Matching on it is a CONTRACT
+#: between emitter and verifier: any other RuntimeError is a real fault and
+#: must never be mistaken for a spin-wait.
+_SPIN_MARKER = "CPUless dispatch spin"
+
+
+def _is_spin_raise(payload) -> bool:
+    return isinstance(payload, str) and _SPIN_MARKER in payload
+
+
 def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
              seed0: int = 1) -> dict:
     """Differential over ``states`` seeded machine states.  Returns a report
@@ -254,6 +305,7 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
                                f"by the mechanical signature"]}
     mismatches: list[str] = []
     raises = 0
+    spin_states = 0
     # When ss is a SEMANTIC parameter (a data-segment selector), the
     # mechanical side's ss traffic is real program data, not stack residue:
     # seed ss identically on both sides and DISABLE the shadow overlay, so
@@ -314,15 +366,23 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
             if (mk, mp) != (ak, ap):
                 mismatches.append(f"state {s}: raise mismatch "
                                   f"mech={mk}:{mp} abi={ak}:{ap}")
-            elif raises >= 3 and raises == s + 1 and not mismatches:
-                # a spin-wait function: every state so far raised the spin
-                # cap identically on both sides.  Further seeded states
-                # cannot exercise it (static memory never changes the
-                # awaited flag) -- stop early and report the limitation.
-                return {"states": s + 1, "raised": raises, "mismatches": [],
-                        "ok": True,
-                        "note": "spin-wait: all driven states hit the "
-                                "iteration cap identically on both sides"}
+            elif _is_spin_raise(mp):
+                # A spin-wait state proves nothing about the OTHER states, so
+                # it is noted and skipped -- never a reason to stop.
+                #
+                # This used to return ok=True after three matching raises, on
+                # the reasoning that "static memory never changes the awaited
+                # flag".  That reasoning holds only for a genuine spin cap,
+                # and the check never tested which exception it was: ANY
+                # RuntimeError agreeing on states 0-2 ended a requested
+                # 64-state run as PASSED.  State 3 could return normally with
+                # different outputs and never be driven -- a false green, the
+                # exact failure class this harness exists to prevent.
+                #
+                # It was a performance shortcut, and --iter-cap has since made
+                # it unnecessary: every requested state now runs, at a cap
+                # cheap enough to afford.
+                spin_states += 1
             continue
         mo, mc = mp
         ao, ac = ap
@@ -361,5 +421,10 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
                 f"mech={log_m[:6]}... abi={log_a[:6]}...")
         if len(mismatches) > 8:
             break
-    return {"states": states, "raised": raises,
-            "mismatches": mismatches, "ok": not mismatches}
+    rep = {"states": states, "raised": raises,
+           "mismatches": mismatches, "ok": not mismatches}
+    if spin_states:
+        rep["note"] = (f"spin-wait: {spin_states}/{states} driven states hit "
+                       f"the iteration cap identically on both sides "
+                       f"(all {states} states were driven)")
+    return rep

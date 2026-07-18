@@ -62,6 +62,15 @@ def main(argv=None) -> int:
                     help="recovery facts JSON with an optional "
                          "'function_names' {CS:IP: name} table (provenance "
                          "metadata; addresses remain the identity)")
+    ap.add_argument("--ss-globals-floor", default=None,
+                    help="offset in the STACK SEGMENT below which ss-relative "
+                         "accesses are the program's own globals rather than "
+                         "stack (hex or decimal).  A per-program layout fact "
+                         "-- boot sp, memory model, how far the stack grows -- "
+                         "so dos_re has no default: omit it and the ss-globals "
+                         "tier simply does not apply.  Supply it with evidence "
+                         "for the observed global range and the minimum "
+                         "reachable sp.")
     ap.add_argument("--out", default=None,
                     help="write the full census JSON here")
     args = ap.parse_args(argv)
@@ -88,10 +97,16 @@ def main(argv=None) -> int:
                 out.add((int(cs, 16), int(ip, 16)))
         return frozenset(out)
 
+    floor = (int(str(args.ss_globals_floor), 0)
+             if args.ss_globals_floor is not None else None)
     census = infer_contracts(
         ir, external=frozenset(external), names=names,
         boundary_addrs=addr_file(args.boundary_heads),
-        dispatch_addrs=addr_file(args.dispatch_entries))
+        dispatch_addrs=addr_file(args.dispatch_entries),
+        ss_globals_floor=floor)
+    # record the premise IN the census, so a consumer can see which layout
+    # fact the ss-globals proposals rest on rather than inferring it
+    census["ss_globals_floor"] = floor
 
     s = census["summary"]
     print(f"M3b ABI-contract census over {s['total']} functions:")

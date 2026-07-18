@@ -14,7 +14,17 @@ from __future__ import annotations
 
 import pytest
 
-from dos_re.lift.contracts import (SS_GLOBALS_FLOOR, ss_globals_only)
+from dos_re.lift.contracts import ss_globals_only
+
+#: the tests supply their own floor -- dos_re deliberately has no default,
+#: because where globals end and stack begins is a per-program fact.
+SS_GLOBALS_FLOOR = 0x200
+
+
+def _ss(scan, floor=SS_GLOBALS_FLOOR):
+    """dos_re deliberately has no default floor -- it is a per-program layout
+    fact -- so every caller, tests included, supplies one explicitly."""
+    return ss_globals_only(scan, floor)
 
 
 class _I:
@@ -47,7 +57,7 @@ def _disp16(off):
 
 
 def test_constant_globals_below_the_floor_are_promoted():
-    ok, offs = ss_globals_only(_Scan([_moffs(0x00), _disp16(0x10)]))
+    ok, offs = _ss(_Scan([_moffs(0x00), _disp16(0x10)]))
     assert ok
     assert offs == frozenset({0x00, 0x10})
 
@@ -55,14 +65,14 @@ def test_constant_globals_below_the_floor_are_promoted():
 def test_the_real_lemmings_offsets_qualify():
     """Every ss:-override in the corpus targets 0x00-0x10 -- the render-scroll
     and logical-camera globals."""
-    ok, offs = ss_globals_only(
+    ok, offs = _ss(
         _Scan([_moffs(o) for o in (0x0, 0x2, 0x4, 0x6, 0x8, 0xA, 0xC, 0xE)]))
     assert ok and len(offs) == 8
 
 
 def test_computed_ss_address_is_refused():
     """`ss:[bx]` could reach the live frame -- refusing is the whole point."""
-    ok, why = ss_globals_only(
+    ok, why = _ss(
         _Scan([_moffs(0x02),
                _I(0x8B, prefixes=(0x36,), modrm=0x07, mod=0, rm=7)]))
     assert not ok
@@ -70,22 +80,35 @@ def test_computed_ss_address_is_refused():
 
 
 def test_offset_above_the_floor_is_refused():
-    ok, why = ss_globals_only(_Scan([_moffs(SS_GLOBALS_FLOOR)]))
+    ok, why = _ss(_Scan([_moffs(SS_GLOBALS_FLOOR)]))
     assert not ok
-    assert why.startswith("ss-offset-above-globals-floor")
+    assert why.startswith("ss-access-crosses-globals-floor")
 
 
-def test_offset_just_below_the_floor_is_accepted():
-    """The boundary itself must be exercised, or the floor could be off by one
-    and no test would notice."""
-    ok, offs = ss_globals_only(_Scan([_moffs(SS_GLOBALS_FLOOR - 1)]))
+def test_a_word_access_straddling_the_floor_is_refused():
+    """WIDTH matters.  A word at floor-1 occupies floor-1 AND floor, so its
+    high byte is already machine stack.  An earlier version checked only the
+    START offset and accepted it -- and this test asserted that acceptance,
+    which is how a test can entrench a bug instead of catching it."""
+    ok, why = _ss(_Scan([_moffs(SS_GLOBALS_FLOOR - 1)]))
+    assert not ok
+    assert why.startswith("ss-access-crosses-globals-floor")
+
+
+def test_a_byte_access_at_the_last_global_offset_is_accepted():
+    """The complement: a BYTE at floor-1 occupies only floor-1, which is
+    genuinely below the boundary.  Without this the width fix could have been
+    'refuse everything near the floor' and no test would object."""
+    #: `mov al, ss:[off]` -- moffs8, one byte wide
+    s = _Scan([_I(0xA0, prefixes=(0x36,), imm=SS_GLOBALS_FLOOR - 1)])
+    ok, offs = _ss(s)
     assert ok and offs == frozenset({SS_GLOBALS_FLOOR - 1})
 
 
 def test_a_function_with_no_ss_override_does_not_qualify():
     """No ss: access at all means there is nothing to promote; the caller must
     not treat that as 'ss is semantic'."""
-    ok, why = ss_globals_only(_Scan([_I(0x90)]))
+    ok, why = _ss(_Scan([_I(0x90)]))
     assert not ok
     assert why == "no-ss-globals"
 
@@ -96,7 +119,9 @@ def test_stack_offset_is_far_above_the_floor():
     assert 0x4AF4 > SS_GLOBALS_FLOOR * 2
 
 
-@pytest.mark.parametrize("off", [0x1FF, 0x100, 0x0])
+@pytest.mark.parametrize("off", [0x1FE, 0x100, 0x0])
 def test_promoted_offsets_are_all_below_the_floor(off):
-    ok, offs = ss_globals_only(_Scan([_moffs(off)]))
-    assert ok and all(o < SS_GLOBALS_FLOOR for o in offs)
+    """0x1FE is the last WORD-aligned offset that still fits below the floor
+    (0x1FE..0x1FF); 0x1FF would straddle it."""
+    ok, offs = _ss(_Scan([_moffs(off)]))
+    assert ok and all(o + 2 <= SS_GLOBALS_FLOOR for o in offs)

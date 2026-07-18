@@ -236,7 +236,8 @@ def _vslot_delta(i) -> int | None:
 
 def check_composable(scan, *, callees=None, far_callees=None,
                      boundary_addrs=frozenset(),
-                     dispatch_addrs=frozenset()) -> dict[int, int]:
+                     dispatch_addrs=frozenset(),
+                     ss_globals_floor=None) -> dict[int, int]:
     """Prove one function's machine-stack use is PURELY LOCAL so its stack
     can become Python locals -- allowing direct NEAR calls to already-
     emitted ABI cores (``callees``: target ip -> :class:`CoreContract`),
@@ -274,8 +275,8 @@ def check_composable(scan, *, callees=None, far_callees=None,
     # frame is Python locals, so constant offsets below the globals floor are
     # provably disjoint from it and ss becomes an ordinary segment parameter.
     ss_globals = False
-    if not ss_data:
-        ok, why = ss_globals_only(scan)
+    if not ss_data and ss_globals_floor is not None:
+        ok, why = ss_globals_only(scan, ss_globals_floor)
         if ok:
             ss_globals = True
         elif why == "computed-ss-address":
@@ -530,7 +531,8 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
                   callees=None, far_callees=None, abi_base: str = "",
                   mech_shape=None,
                   boundary_addrs=frozenset(),
-                  dispatch_addrs=frozenset()) -> tuple[str, CoreContract]:
+                  dispatch_addrs=frozenset(),
+                  ss_globals_floor=None) -> tuple[str, CoreContract]:
     """Generate the TRUE ABI-recovered core module for one composable
     function: semantic signature (no sp/ss, no CPU bundle), virtual local
     stack, direct NEAR calls to already-emitted ABI cores (``callees``:
@@ -548,7 +550,8 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
         raise Refusal("contract-not-promotable")
     vdepth = check_composable(scan, callees=callees, far_callees=far_callees,
                               boundary_addrs=boundary_addrs,
-                              dispatch_addrs=dispatch_addrs)
+                              dispatch_addrs=dispatch_addrs,
+                              ss_globals_floor=ss_globals_floor)
     # flag liveness with the composed callees' exit-flag contributions, so a
     # `call G; jnz` idiom is analysed exactly as the mechanical emitter does.
     cc = {ip: CalleeContract(
