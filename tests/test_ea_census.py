@@ -143,3 +143,40 @@ def test_every_modrm16_form_decodes(rm, base, index):
     code = bytes([0x8B, 0x40 | rm, 0x04])
     site = _one(code)
     assert (site.base, site.index) == (base, index)
+
+
+# -- implicit-address string instructions ------------------------------------
+#
+# movs/stos/lods/cmps/scas reach ds:si and es:di with NO modrm byte.  Site
+# discovery keys off modrm, so before these were named the census skipped them
+# silently -- returning [], not even a Blocker.  A census that under-reports
+# touchers understates an ownership closure, and an M4 promotion decision
+# trusts exactly that number.  The Lemmings corpus has 814 such instructions
+# across 99 functions, so this is not a theoretical encoding.
+@pytest.mark.parametrize("code,mnem", [
+    (b"\xA4", "movsb"), (b"\xA5", "movsw"),
+    (b"\xA6", "cmpsb"), (b"\xA7", "cmpsw"),
+    (b"\xAA", "stosb"), (b"\xAB", "stosw"),
+    (b"\xAC", "lodsb"), (b"\xAD", "lodsw"),
+    (b"\xAE", "scasb"), (b"\xAF", "scasw"),
+])
+def test_string_ops_block_rather_than_vanish(code, mnem):
+    sites = sites_of(_scan(code), "1010:1000")
+    assert sites, f"{mnem} produced NO site at all -- silently invisible"
+    assert isinstance(sites[0], Blocker)
+    assert sites[0].reason == f"implicit-string-access:{mnem}"
+
+
+def test_rep_prefixed_string_op_still_blocks():
+    """rep stosw is the common form; the prefix must not hide the access."""
+    sites = sites_of(_scan(b"\xF3\xAB"), "1010:1000")
+    assert [s for s in sites if isinstance(s, Blocker)
+            and s.reason == "implicit-string-access:stosw"]
+
+
+def test_a_blocked_string_op_is_not_counted_as_a_clean_closure():
+    """The census must not report a clean, promotable picture for a function
+    whose real memory traffic it cannot see."""
+    sites = sites_of(_scan(b"\xA4\xA1\x49\xA9"), "1010:1000")   # movsb; mov ax,[A949]
+    assert any(isinstance(s, Blocker) for s in sites)
+    assert any(isinstance(s, AddressExpr) and s.disp == 0xA949 for s in sites)

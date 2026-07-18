@@ -403,6 +403,14 @@ def main(argv=None) -> int:
         futs = {ex.submit(_verify_one, k): k for k, _ in todo}
         done_n = 0
         timed_out = False
+        # EVERY submitted core must end with a recorded verdict.  Tracking
+        # "processed" explicitly (rather than inferring it from Future.done())
+        # is what makes the budget path sound: a future can COMPLETE between
+        # the timeout firing and the unfinished-scan running, and such a
+        # future was never yielded by as_completed, so its verdict -- possibly
+        # MISMATCH -- would otherwise be dropped while the run still
+        # aggregated to VERIFIED.
+        processed: set[str] = set()
         try:
             for fut in as_completed(
                     futs, timeout=(None if deadline is None
@@ -410,6 +418,7 @@ def main(argv=None) -> int:
                                             (time.time() - started)))):
                 key, rep, dt = fut.result()
                 done_n += 1
+                processed.add(key)
                 cost_ms[key] = int(dt)
                 if dt >= args.slow_ms:
                     slow.append((dt, key))
@@ -432,7 +441,39 @@ def main(argv=None) -> int:
             timed_out = True
             # A budget breach is a REPORTED outcome, never a silent pass: the
             # unfinished cores are named so the next run can target them.
-            stuck = [futs[f] for f in futs if not f.done()]
+            # NOT `if not f.done()`: a future that finished in the race window
+            # is done() but unprocessed, and would vanish from both buckets.
+            # Unprocessed is the sound test -- consume a completed result if it
+            # is there, and only call the genuinely unfinished ones stuck.
+            stuck = []
+            for f, k in futs.items():
+                if k in processed:
+                    continue
+                if f.done() and not f.cancelled():
+                    try:
+                        key, rep, dt = f.result(timeout=0)
+                    except Exception as exc:          # noqa: BLE001
+                        inconclusive[k] = (f"unverified: worker result "
+                                           f"unavailable after budget breach "
+                                           f"({type(exc).__name__}: {exc})")
+                        continue
+                    processed.add(key)
+                    cost_ms[key] = int(dt)
+                    raised_states += rep.raised
+                    st = rep.verdict
+                    if st is INTERNAL_ERROR:
+                        internal[key] = rep.diagnostics[0]
+                    elif st is VERIFIED:
+                        passed += 1
+                        fresh_ok[key] = sigs[key]
+                    elif st is INCONCLUSIVE:
+                        inconclusive[key] = rep.note or "inconclusive"
+                    else:
+                        failures[key] = list(rep.diagnostics[:3])
+                    print(f"  [late] {key} {rep.status} {dt/1000.0:.1f}s",
+                          flush=True)
+                else:
+                    stuck.append(k)
             print(f"  BUDGET EXCEEDED after {args.budget_s}s -- "
                   f"{len(stuck)} core(s) unfinished: "
                   f"{', '.join(sorted(stuck)[:8])}"
@@ -462,6 +503,20 @@ def main(argv=None) -> int:
                     pr.join(timeout=5)
             else:
                 ex.shutdown(wait=True)      # ordinary completion: let them end
+        # A SUBMITTED CORE WITH NO VERDICT MUST NOT VANISH.  Whatever the exit
+        # path -- clean, budget breach, worker death -- every key ends in
+        # exactly one bucket, or the aggregate is computed over a corpus that
+        # is quietly smaller than the one requested.
+        unaccounted = [k for _, k in futs.items()
+                       if k not in processed and k not in inconclusive
+                       and k not in failures and k not in internal]
+        for k in unaccounted:
+            inconclusive[k] = ("unverified: submitted but no verdict was "
+                               "recorded (worker lost)")
+        if unaccounted:
+            print(f"  {len(unaccounted)} core(s) submitted without a verdict "
+                  f"-> INCONCLUSIVE: {', '.join(sorted(unaccounted)[:8])}",
+                  flush=True)
         todo = []
 
     # sequential path -- the reference implementation; --jobs>1 above must

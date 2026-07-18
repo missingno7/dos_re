@@ -183,11 +183,29 @@ _STORE_OPS = frozenset({0x8F,
                         0xF6, 0xF7, 0xFE, 0xFF})
 
 
+#: the implicit-address string instructions, by opcode.  They carry no modrm,
+#: so they are invisible to modrm-driven site discovery unless named here.
+_STRING_OPS = {0xA4: "movsb", 0xA5: "movsw", 0xA6: "cmpsb", 0xA7: "cmpsw",
+               0xAA: "stosb", 0xAB: "stosw", 0xAC: "lodsb", 0xAD: "lodsw",
+               0xAE: "scasb", 0xAF: "scasw"}
+
+
 def sites_of(scan, key: str):
     """Every memory site in one function as (AddressExpr | Blocker)."""
     out = []
     for ip, i in sorted(scan.insts.items()):
         moffs = 0xA0 <= i.op <= 0xA3
+        # STRING OPS ADDRESS MEMORY WITHOUT A MODRM.  movs/stos/lods/cmps/scas
+        # reach ds:si and/or es:di implicitly, so the `no modrm -> not a memory
+        # instruction` shortcut below would drop them SILENTLY -- and a census
+        # that under-reports touchers understates an ownership closure, which
+        # is exactly the input an M4 promotion decision trusts.  Refuse per the
+        # refusal-first rule: their addresses are register-driven (si/di walked
+        # by cx), so they need a range proof this census cannot supply.
+        if i.op in _STRING_OPS:
+            out.append(Blocker(key, ip,
+                               f"implicit-string-access:{_STRING_OPS[i.op]}"))
+            continue
         if not moffs and (i.modrm is None or i.mod == 3):
             continue
         width = ACCESS_WIDTH.get(i.op)

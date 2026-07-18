@@ -165,3 +165,48 @@ def test_the_generated_law_test_passes_and_can_fail():
             tmod2.test_codec_law_import_then_export_is_byte_identical()
     finally:
         sys.modules.pop("gen_codec_law", None)
+
+
+# -- detach() must drop ALL bridge authority ---------------------------------
+def _native(reg=None):
+    """Load a generated codec + native-state pair as importable modules."""
+    import sys
+    reg = reg or _region(extent=1,
+                         fields=(Field_(name="v", offset=0, width=1,
+                                        unsigned_uses=1),))
+    sch = Schema(input_digest="d", regions=(reg,))
+    cname = "gen_codec_detach"
+    sys.modules[cname] = _load(emit_codec(reg, sch, seg_expr="seg"), cname)
+    from dos_re.lift.emit_codec import emit_native_state
+    mod = _load(emit_native_state(reg, sch, codec_module=cname), "gen_native")
+    return mod.NATIVE
+
+
+def test_detach_disarms_a_pending_lazy_blank():
+    """detach() cleared values+seg but LEFT the lazy flag armed, so the next
+    access silently re-attached -- to whatever segment happened to arrive --
+    instead of refusing.  A bridge that re-arms itself after detachment can
+    fabricate state for a core that is supposed to be running unattached."""
+    n = _native()
+    n.begin_lazy_blank()
+    n.wb(0x1234, 0x0100, 7)
+    assert n.seg == 0x1234
+    n.detach()
+    with pytest.raises(RuntimeError, match="no lazy mode armed"):
+        n.rb(0x9999, 0x0100)
+
+
+def test_detach_disarms_a_pending_lazy_import():
+    n = _native()
+    n.begin_lazy_import(_Mem())
+    n.detach()
+    with pytest.raises(RuntimeError, match="no lazy mode armed"):
+        n.rb(0x1234, 0x0100)
+
+
+def test_detach_after_a_real_attach_still_refuses():
+    n = _native()
+    n.attach_import(_Mem(), 0x1234)
+    n.detach()
+    with pytest.raises(RuntimeError, match="no lazy mode armed"):
+        n.rb(0x1234, 0x0100)

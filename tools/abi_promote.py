@@ -517,14 +517,41 @@ def _emit_cores(args, census, wanted) -> int:
             if args.verified_only:
                 led = json.loads(Path(args.verified_only)
                                  .read_text(encoding="utf-8"))
-                proven = set(led.get("verified", {}))
-                dropped = [k for k in installable if k not in proven]
-                installable = [k for k in installable if k in proven]
-                if dropped:
-                    print(f"  NOT installed ({len(dropped)} not VERIFIED in "
+                proven = led.get("verified", {})
+                # A LEDGER ENTRY NAMES A CORE *AS IT WAS WHEN VERIFIED*.  The
+                # key alone is not the proof -- the ledger stores the signature
+                # the verifier hashed, and re-emitting from a changed emitter,
+                # contract, or IR produces a DIFFERENT core under the SAME key.
+                # Trusting the key set alone let an old ledger bless freshly
+                # changed code as VERIFIED, defeating the freshness machinery
+                # this tool otherwise carries.  Recompute and compare.
+                import hashlib as _hl
+
+                def _cur_sig(key: str) -> str:
+                    h = _hl.sha256()
+                    h.update((out / f"core_{emit_abi._stem(key)}.py")
+                             .read_bytes())
+                    h.update(json.dumps(census["functions"][key],
+                                        sort_keys=True).encode())
+                    h.update(ir["functions"][key]["signature"].encode())
+                    return h.hexdigest()
+
+                unproven = [k for k in installable if k not in proven]
+                stale = [k for k in installable
+                         if k in proven and proven[k] != _cur_sig(k)]
+                dropped = unproven + stale
+                installable = [k for k in installable if k not in set(dropped)]
+                if unproven:
+                    print(f"  NOT installed ({len(unproven)} not VERIFIED in "
                           f"{args.verified_only}): "
-                          + ", ".join(sorted(dropped)[:8])
-                          + (" ..." if len(dropped) > 8 else ""))
+                          + ", ".join(sorted(unproven)[:8])
+                          + (" ..." if len(unproven) > 8 else ""))
+                if stale:
+                    print(f"  NOT installed ({len(stale)} VERIFIED under a "
+                          f"DIFFERENT signature -- the core changed since it "
+                          f"was verified, re-verify): "
+                          + ", ".join(sorted(stale)[:8])
+                          + (" ..." if len(stale) > 8 else ""))
             (out / "core_loader.py").write_text(
                 emit_abi.emit_core_loader(installable,
                                           abi_base=args.abi_base,
