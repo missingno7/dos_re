@@ -85,6 +85,36 @@ _STACK_FAMILY_OPS = (frozenset(range(0x50, 0x60)) | frozenset({0x06, 0x0E,
                      0x9C, 0x9D, 0xC8, 0xC9}))
 
 
+def ss_carries_data(scan) -> bool:
+    """True when ``ss`` addresses real program DATA in this function.
+
+    Evidence is an EXPLICIT ``ss:`` override (the small-model SS == DS
+    idiom, ``mov ss:[0x0006], ax``).  A bp-based EA that merely DEFAULTS to
+    SS is the frame idiom -- bp may hold a caller-established frame pointer
+    -- and DISQUALIFIES the function: that is a genuine stack access, not
+    data.
+
+    Unlike :func:`ss_is_data_segment` this does NOT care whether the
+    function also has stack traffic.  Once the body is de-stacked (push/pop
+    become slot locals, calls write no return address), ``ss`` is left
+    carrying data ONLY, so it is a semantic segment input either way.  The
+    difference is confined to VERIFICATION: when the mechanical reference
+    still puts its stack in that same segment, the differential must
+    separate the two (dos_re.lift.abi_diff drives the mechanical side twice
+    with different sp values -- writes that move with sp are stack, writes
+    that do not are data)."""
+    uses_ss_override = False
+    for i in scan.insts.values():
+        if any(p == 0x36 for p in i.prefixes):
+            uses_ss_override = True
+            continue                          # explicit: a segment selector
+        if i.modrm is not None and i.mod != 3 and i.rm in (2, 3, 6) \
+                and not (i.mod == 0 and i.rm == 6) \
+                and not any(p in (0x26, 0x2E, 0x3E) for p in i.prefixes):
+            return False                      # frame-shaped bp EA (SS default)
+    return uses_ss_override
+
+
 def ss_is_data_segment(scan) -> bool:
     """True when this function uses ``ss`` ONLY as an ordinary segment
     selector for memory operands, never as a stack.
@@ -669,7 +699,9 @@ def infer_contracts(ir: dict, *, external: frozenset = frozenset(),
         # the emitter materialises it as a local.  ss is machine UNLESS this
         # function uses it purely as a data-segment selector (see
         # ss_is_data_segment), in which case it is an ordinary segment input.
-        machine_regs = (frozenset({"sp"}) if ss_is_data_segment(scan)
+        # ss is semantic whenever it carries DATA -- de-stacking leaves it
+        # used for nothing else.  sp is always machine.
+        machine_regs = (frozenset({"sp"}) if ss_carries_data(scan)
                         else MACHINE_REGS)
         machinery = sorted((inputs & (machine_regs | frozenset({"cs"})))
                            | ({"bp"} if stack.framed and "bp" in inputs

@@ -259,16 +259,17 @@ def check_composable(scan, *, callees=None, far_callees=None,
       * observer/alt-entry: park- or dispatch-carrying functions stay
         mechanical (their frames are externally observable)."""
     from .cpuless import register_effects
-    from .contracts import ss_is_data_segment
+    from .contracts import ss_carries_data
 
     callees = callees or {}
     far_callees = far_callees or {}
-    # ss used PURELY as a data-segment selector (no push/pop traffic at all)
-    # is an ordinary segment input, not the stack carrier -- the small-model
-    # `mov ss:[0x0006], ax` idiom.  Its memory operands are then no more
-    # "stack-addressed" than a ds: access.  A function doing BOTH keeps the
-    # refusal: there the stack and the data genuinely share one segment.
-    ss_data = ss_is_data_segment(scan)
+    # ss that addresses real DATA (an explicit `ss:` override -- the
+    # small-model `mov ss:[0x0006], ax` idiom) is an ordinary segment input,
+    # not the stack carrier: de-stacking leaves it used for nothing else, so
+    # its operands are no more "stack-addressed" than a ds: access.  A
+    # bp-based EA that only DEFAULTS to ss is a genuine frame access and
+    # still refuses (ss_carries_data returns False for it).
+    ss_data = ss_carries_data(scan)
     cs_addrs = {ip for ip in scan.insts}
     if frozenset(boundary_addrs) & cs_addrs:
         raise Refusal("observer-in-function")

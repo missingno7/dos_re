@@ -22,11 +22,17 @@ the acceptance authority for the composed graph.
 """
 from __future__ import annotations
 
+from collections import Counter
+
 #: the stack segment handed to the MECHANICAL side; its writes there are
 #: the virtualised residue.  Register seeds deliberately never collide with
 #: it, so filtering by segment never hides a semantic write.
 STACK_SEG = 0x7000
 STACK_SP = 0x1000
+#: a SECOND initial sp for the stack/data discriminator (see diff_one).
+#: Driving the mechanical side twice, only its STACK writes move with sp;
+#: writes identical under both are real program data.
+STACK_SP_ALT = 0x0C00
 
 
 class TraceMem:
@@ -178,13 +184,20 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
                                f"by the mechanical signature"]}
     mismatches: list[str] = []
     raises = 0
-    # When ss is a SEMANTIC parameter (a data-segment selector, proven by
-    # contracts.ss_is_data_segment), the mechanical side's ss traffic is real
-    # program data, not stack residue: seed ss identically on both sides and
-    # DISABLE the shadow overlay, so those writes are compared instead of
-    # being hidden.  Such a function has no stack traffic at all, so the
-    # overlay has nothing legitimate left to hide.
+    # When ss is a SEMANTIC parameter (it carries program DATA), the
+    # mechanical side's ss traffic is not all stack residue: seed ss
+    # identically on both sides and DISABLE the whole-segment shadow, so
+    # those writes are compared rather than hidden.
+    #
+    # If that function ALSO has a machine stack (sp is a mechanical input),
+    # the stack and the data share one segment and neither a segment nor an
+    # assumed offset window can separate them.  So DISCRIMINATE BY
+    # CONSTRUCTION: drive the mechanical side twice with different initial
+    # sp values.  A write whose address depends on sp is stack; a write
+    # identical under both is real data.  Nothing about the memory layout is
+    # assumed -- the split is measured.
     ss_semantic = "ss" in params
+    two_run = ss_semantic and "sp" in mech_kd
     for s in range(states):
         regs = _seeded_regs(params, seed0 + s)
         mem_m = TraceMem(seed0 + s,
@@ -215,6 +228,13 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
         # order; only the private compat channel stays keyword.
         apos = tuple(regs[r] for r in params)
         akw = {k: v for k, v in akw.items() if k.startswith("_")}
+        if two_run:
+            # second mechanical run: identical except the initial sp
+            mem_b = TraceMem(seed0 + s)
+            plat_b = PlatStub(seed0 + s) if mech_plat else None
+            mkw_b = dict(mkw)
+            mkw_b["sp"] = STACK_SP_ALT
+            bk, bp_ = _run(mech_fn, mem_b, mkw_b, plat_b)
         mk, mp = _run(mech_fn, mem_m, mkw, plat_m)
         ak, ap = _run(abi_core_fn, mem_a, akw, plat_a, apos)
         if mk == "raise" or ak == "raise":
@@ -243,9 +263,44 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
                                   f"mech={mo.get(r)!r} abi={av!r}")
         if mc != ac:
             mismatches.append(f"state {s}: compat mech={mc} abi={ac}")
-        if mem_m.writes != mem_a.writes:
+        mech_writes = mem_m.writes
+        if two_run:
+            if bk != mk:
+                mismatches.append(
+                    f"state {s}: mechanical outcome depends on initial sp "
+                    f"({mk} vs {bk}) -- stack/data cannot be separated")
+                continue
+            if bk == "ok":
+                bo, bc = bp_
+                if bo != mp[0] or bc != mp[1]:
+                    mismatches.append(
+                        f"state {s}: mechanical RESULT depends on initial sp "
+                        f"-- the function reads its own frame as data")
+                    continue
+            # writes identical under both sp values are DATA; the rest moved
+            # with sp and are the machine stack.  Order is preserved from the
+            # primary run so the sequence comparison stays meaningful.
+            other = Counter(mem_b.writes)
+            data, stack = [], []
+            for w in mech_writes:
+                if other.get(w, 0) > 0:
+                    other[w] -= 1
+                    data.append(w)
+                else:
+                    stack.append(w)
+            # SAFETY NET: everything we excluded must be in the stack
+            # segment.  Excluding a write elsewhere would mean the
+            # discriminator is hiding real data.
+            stray = [w for w in stack if w[0] != mkw.get("ss")]
+            if stray:
+                mismatches.append(
+                    f"state {s}: sp-dependent writes OUTSIDE the stack "
+                    f"segment {stray[:4]} -- discriminator unsound here")
+                continue
+            mech_writes = data
+        if mech_writes != mem_a.writes:
             mismatches.append(
-                f"state {s}: writes mech(sem)={mem_m.writes[:6]}... "
+                f"state {s}: writes mech(sem)={mech_writes[:6]}... "
                 f"abi={mem_a.writes[:6]}...")
         log_m = plat_m.log if plat_m else []
         log_a = plat_a.log if plat_a else []
