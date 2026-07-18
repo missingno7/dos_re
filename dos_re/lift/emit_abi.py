@@ -30,17 +30,40 @@ support, raises -- never a silently degraded module.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from .decode import (CALL, CALL_FAR, CALL_IND, HLT, INT, IRET, JCC, JMP,
                      JMP_FAR, JMP_IND, RET, RETF, SEQ)
 from .cpuless import SEGS
 from .contracts import _STRING_PAIRS
-from .emit_cpuless import (Refusal, _check_flag_liveins, _DISPATCH_ITER_CAP,
-                           _FLAG_BITS, _JCC_EXPR, _patched_read, _reg16,
-                           _rm_read, _rm_write_lines, _translate)
+from .emit_cpuless import (CalleeContract, Refusal, _check_flag_liveins,
+                           _DISPATCH_ITER_CAP, _FLAG_BITS, _JCC_EXPR,
+                           _patched_read, _reg16, _rm_read, _rm_write_lines,
+                           _translate)
 
 #: XOR perturbation for proven-unobserved outputs: guaranteed to differ
 #: from the mechanical value if anything observes it.
 POISON_XOR = 0xA5A5
+
+
+@dataclass(frozen=True)
+class CoreContract:
+    """One already-emitted ABI core, as a caller composing it needs it.
+
+    ``inputs`` are the callee's semantic parameters (sorted; no sp/ss/cs);
+    ``returns`` its observed register returns; ``df_livein`` whether it
+    takes the caller's DF; ``exit_flags`` the flags it definitely defines on
+    every exit (feeds the caller's flag-liveness).  An ABI core is never
+    needs_plat or flags_livein (those shapes stay mechanical this tier), so
+    the composed call passes only ``mem`` (+ optional ``_df``) and the
+    semantic inputs, and takes back ``(_o, _c)`` -- the SAME two-tuple the
+    mechanical composition consumes, so cost and flags merge identically."""
+    key: str
+    stem: str
+    inputs: tuple
+    returns: tuple
+    df_livein: bool
+    exit_flags: frozenset
 
 
 def _stem(key: str) -> str:
@@ -197,16 +220,21 @@ def _vslot_delta(i) -> int | None:
     return None
 
 
-def check_destackable(scan, *, boundary_addrs=frozenset(),
-                      dispatch_addrs=frozenset()) -> dict[int, int]:
+def check_composable(scan, *, callees=None, boundary_addrs=frozenset(),
+                     dispatch_addrs=frozenset()) -> dict[int, int]:
     """Prove one function's machine-stack use is PURELY LOCAL so its stack
-    can become Python locals.  Returns the per-ip entry depth map (slots).
+    can become Python locals -- allowing direct NEAR calls to already-
+    emitted ABI cores (``callees``: target ip -> :class:`CoreContract`),
+    which compose at the recovered level with NO return-address mechanics.
+    Returns the per-ip entry depth map (slots).
 
-    Refusal-first; each reason is a slice-2 capability name:
-      * leaf-only: calls, interrupts, dynamic transfers compose later;
+    Refusal-first; each reason is a capability name:
+      * leaf-only: far/indirect/interrupt transfers compose in later tiers;
+        a near call to a target with NO known ABI contract also refuses
+        here (its callee is not yet an ABI core);
       * platform-port-io / flags-word-stack / sp-adjust / frame-or-sp-data /
-        ss-write: shapes whose stack or platform coupling this tier keeps
-        mechanical;
+        ss-write / ss-value-as-data: shapes whose stack or platform coupling
+        this tier keeps mechanical;
       * stack-addressed-memory: an ss-segment effective address -- the
         function reads/writes its stack as MEMORY, so the stack must stay
         memory-backed;
@@ -217,6 +245,7 @@ def check_destackable(scan, *, boundary_addrs=frozenset(),
         mechanical (their frames are externally observable)."""
     from .cpuless import register_effects
 
+    callees = callees or {}
     cs_addrs = {ip for ip in scan.insts}
     if frozenset(boundary_addrs) & cs_addrs:
         raise Refusal("observer-in-function")
@@ -224,6 +253,8 @@ def check_destackable(scan, *, boundary_addrs=frozenset(),
         raise Refusal("alt-entry-in-function")
     for i in scan.insts.values():
         k = i.kind
+        if k == CALL and i.target is not None and i.target in callees:
+            continue                          # composed near call (delta 0)
         if k in (CALL, CALL_FAR, CALL_IND, JMP_IND, JMP_FAR, INT, HLT):
             raise Refusal(f"leaf-only:{k}")
         if k == IRET:
@@ -274,7 +305,7 @@ def check_destackable(scan, *, boundary_addrs=frozenset(),
                 raise Refusal("unbalanced-stack")
             continue
         succs = []
-        if i.kind == SEQ:
+        if i.kind in (SEQ, CALL):        # a composed near call: delta 0, falls through
             succs = [i.next_ip]
         elif i.kind == JCC:
             succs = [i.next_ip, i.target]
@@ -290,6 +321,14 @@ def check_destackable(scan, *, boundary_addrs=frozenset(),
                 depth[s] = nd
                 work.append(s)
     return depth
+
+
+def check_destackable(scan, *, boundary_addrs=frozenset(),
+                      dispatch_addrs=frozenset()) -> dict[int, int]:
+    """Call-free destackability (:func:`check_composable` with no composed
+    callees): every call is leaf-only-refused.  Kept as the leaf-tier name."""
+    return check_composable(scan, callees=None, boundary_addrs=boundary_addrs,
+                            dispatch_addrs=dispatch_addrs)
 
 
 def _emit_vstack(i, blk, cs) -> bool:
@@ -345,21 +384,39 @@ def _emit_vstack(i, blk, cs) -> bool:
     return False
 
 
+def _core_alias(stem: str) -> str:
+    return f"_core_{stem}"
+
+
 def emit_abi_core(scan, proposal: dict, key: str, *,
                   name: str | None = None,
+                  callees=None, abi_base: str = "",
                   boundary_addrs=frozenset(),
-                  dispatch_addrs=frozenset()) -> str:
-    """Generate the TRUE ABI-recovered core module for one destackable leaf
+                  dispatch_addrs=frozenset()) -> tuple[str, CoreContract]:
+    """Generate the TRUE ABI-recovered core module for one composable
     function: semantic signature (no sp/ss, no CPU bundle), virtual local
-    stack, observed-only returns + the bit-identical compat channel; a
-    public entry over the one core.  Refuses (named capability) anything
-    outside the slice-2 tier -- the refusal census IS the slice-3 work
-    list."""
+    stack, direct NEAR calls to already-emitted ABI cores (``callees``:
+    target ip -> :class:`CoreContract`) with NO return-address mechanics,
+    observed-only returns + the bit-identical compat channel; a public
+    entry over the one core.
+
+    Returns ``(source, CoreContract)`` -- the module text and this
+    function's own contract, so a bottom-up driver feeds it to later
+    callers.  Refuses (named capability) anything outside this tier -- the
+    refusal census IS the next-tier work list."""
+    callees = callees or {}
     if proposal.get("refusals"):
         raise Refusal("contract-not-promotable")
-    check_destackable(scan, boundary_addrs=boundary_addrs,
-                      dispatch_addrs=dispatch_addrs)
-    exit_flags, df_livein, flags_livein = _check_flag_liveins(scan)
+    check_composable(scan, callees=callees, boundary_addrs=boundary_addrs,
+                     dispatch_addrs=dispatch_addrs)
+    # flag liveness with the composed callees' exit-flag contributions, so a
+    # `call G; jnz` idiom is analysed exactly as the mechanical emitter does.
+    cc = {ip: CalleeContract(
+              name=_core_alias(c.stem), inputs=c.inputs, outputs=c.returns,
+              exit_flags=c.exit_flags, needs_plat=False, ret_kind="near",
+              df_livein=c.df_livein)
+          for ip, c in callees.items()}
+    exit_flags, df_livein, flags_livein = _check_flag_liveins(scan, callees=cc)
     if flags_livein:
         raise Refusal("flags-livein")
 
@@ -377,19 +434,27 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
 
     leaders = sorted(set(scan.block_leaders()))
     bb_of = {ip: n for n, ip in enumerate(leaders)}
+    # the ABI callees this body actually calls -> import aliases
+    called = sorted({callees[i.target].stem for i in scan.insts.values()
+                     if i.kind == CALL and i.target in callees},
+                    key=str)
 
     L: list[str] = []
     A = L.append
     prov = f"{name} [{key}]" if name else f"[{key}]"
     A('"""AUTOGENERATED by dos_re.lift.emit_abi -- DE-STACKED ABI-recovered')
-    A(f'core for {key} (M3b slice 2).  DO NOT hand-edit; regenerate.')
+    A(f'core for {key} (M3b slice 2/3).  DO NOT hand-edit; regenerate.')
     A('')
     A('The machine stack is a Python virtual stack: no sp/ss parameters, no')
     A('stack memory writes -- the historical memory image is touched only by')
-    A("the function's SEMANTIC reads/writes.  The compat channel (exit")
-    A('flags + virtual-time cost) is bit-identical to the mechanical core;')
-    A('dos_re.lift.abi_diff compares the two forms exactly.')
+    A("the function's SEMANTIC reads/writes.  Near calls go DIRECTLY to the")
+    A('callee ABI cores (no return-address mechanics).  The compat channel')
+    A('(exit flags + virtual-time cost) is bit-identical to the mechanical')
+    A('core; dos_re.lift.abi_diff compares the two forms exactly.')
     A('"""')
+    for st in called:
+        base = f"{abi_base}." if abi_base else ""
+        A(f"from {base}core_{st} import _abi_core as {_core_alias(st)}")
     A('')
     A("_PARITY = tuple((1 - bin(v).count('1') % 2) == 1 for v in range(256))")
     A('')
@@ -465,7 +530,9 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
                 blk.append("continue")
                 terminated = True
                 break
-            if not _emit_vstack(i, blk, cs):
+            if i.kind == CALL and i.target in callees:
+                _emit_composed_call(blk, callees[i.target])
+            elif not _emit_vstack(i, blk, cs):
                 _translate(i, blk, flag_written, cs)
             nxt = i.next_ip
             if nxt in bb_of and nxt != ip:
@@ -510,7 +577,35 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     A(f"    _o, _c = _abi_core(mem{', ' + fwd if fwd else ''})")
     A(ret_line)
     A('')
-    return "\n".join(L)
+    contract = CoreContract(key=key, stem=stem, inputs=tuple(params),
+                            returns=tuple(returns), df_livein=df_livein,
+                            exit_flags=frozenset(exit_flags))
+    return "\n".join(L), contract
+
+
+def _emit_composed_call(blk, c: CoreContract) -> None:
+    """A recovered-level near call: invoke the callee ABI core DIRECTLY
+    (its _abi_core, imported as _core_<stem>), unpack its observed returns,
+    merge its exit flags through the compat mask, and accumulate its
+    virtual-time cost.  NO return-address bytes, NO sp traffic -- the whole
+    point of the de-stacked contract."""
+    kw = ["mem"]
+    if c.df_livein:
+        kw.append("_df=(1 if df else 0)")
+    kw += [f"{r}={r}" for r in c.inputs]
+    blk.append(f"_o, _c = {_core_alias(c.stem)}({', '.join(kw)})")
+    for r in c.returns:
+        blk.append(f"{r} = _o['{r}']")
+    blk.append("_gm = _c['fmask']")
+    blk.append("if _gm:")
+    blk.append("    _gf = _c['flags']")
+    for fname, fbit in (("cf", 0x01), ("pf", 0x04), ("af", 0x10),
+                        ("zf", 0x40), ("sf", 0x80), ("of", 0x800),
+                        ("intf", 0x200), ("df", 0x400)):
+        blk.append(f"    if _gm & 0x{fbit:X}: "
+                   f"{fname} = (_gf & 0x{fbit:X}) != 0")
+    blk.append("    _fmask |= _gm")
+    blk.append("_cost += _c['cost']")
 
 
 def emit_shadow_loader(keys: list[str], *, abi_base: str,

@@ -48,34 +48,85 @@ def _emit_cores(args, census, wanted) -> int:
     ir = json.loads(Path(args.ir).read_text(encoding="utf-8"))
     heads = _addr_file(args.boundary_heads)
     disp = _addr_file(args.dispatch_entries)
+    wanted_set = set(wanted)
     cores: dict[str, str] = {}
+    contracts: dict[str, emit_abi.CoreContract] = {}   # key -> its contract
     refused: dict[str, str] = {}
-    for key in wanted:
-        prop = census["functions"][key]
-        if prop["refusals"]:
-            refused[key] = "contract-not-promotable"
-            continue
-        scan, why = scan_for(ir["functions"][key])
-        if scan is None:
-            refused[key] = why
-            continue
-        cs = int(key.split(":")[0], 16)
-        name = None
+
+    def _name(prop):
         for n in prop.get("notes", ()):
             if n.startswith("name: "):
-                name = n.split()[1]
-        try:
-            cores[key] = emit_abi.emit_abi_core(
-                scan, prop, key, name=name,
-                boundary_addrs={ip for (hc, ip) in heads if hc == cs},
-                dispatch_addrs={ip for (hc, ip) in disp if hc == cs})
-        except Refusal as e:
-            refused[key] = str(e)
+                return n.split()[1]
+        return None
 
-    print(f"de-stacked ABI core emission over {len(wanted)} candidates:")
+    # BOTTOM-UP FIXPOINT (mirrors cpuless_promote): a function emits once
+    # every near-call target it needs is already an ABI core.  A target that
+    # never emits (leaf-refused, or outside the wanted set) leaves its
+    # callers refused too -- reported, never silently degraded.
+    rounds = 0
+    while True:
+        rounds += 1
+        progress = False
+        for key in wanted:
+            if key in cores or key in refused:
+                continue
+            prop = census["functions"][key]
+            if prop["refusals"]:
+                refused[key] = "contract-not-promotable"
+                progress = True
+                continue
+            scan, why = scan_for(ir["functions"][key])
+            if scan is None:
+                refused[key] = why
+                progress = True
+                continue
+            cs = int(key.split(":")[0], 16)
+            # near-call targets that are already ABI cores compose; a target
+            # not yet emitted (and not yet refused) defers this function
+            near = [i.target for i in scan.insts.values()
+                    if i.kind == emit_abi.CALL and i.target is not None]
+            callee_map = {}
+            deferred = False
+            for t in near:
+                tkey = f"{cs:04X}:{t:04X}"
+                if tkey in contracts:
+                    callee_map[t] = contracts[tkey]
+                elif tkey in refused or tkey not in wanted_set \
+                        or tkey not in census["functions"]:
+                    callee_map = None            # a callee will never be a core
+                    break
+                else:
+                    deferred = True
+            if callee_map is None:
+                # emit anyway so check_composable names the exact refusal
+                callee_map = {t: contracts[f"{cs:04X}:{t:04X}"]
+                              for t in near
+                              if f"{cs:04X}:{t:04X}" in contracts}
+            elif deferred:
+                continue                         # wait for callees this round
+            try:
+                src, contract = emit_abi.emit_abi_core(
+                    scan, prop, key, name=_name(prop),
+                    callees=callee_map, abi_base=args.abi_base,
+                    boundary_addrs={ip for (hc, ip) in heads if hc == cs},
+                    dispatch_addrs={ip for (hc, ip) in disp if hc == cs})
+                cores[key] = src
+                contracts[key] = contract
+            except Refusal as e:
+                refused[key] = str(e)
+            progress = True
+        if not progress:
+            break
+    # any still-undecided function was blocked on a deferred callee cycle
+    for key in wanted:
+        if key not in cores and key not in refused:
+            refused[key] = "call-composition-cycle"
+
+    print(f"de-stacked ABI core emission over {len(wanted)} candidates "
+          f"(fixpoint: {rounds} rounds):")
     print(f"  cores emitted  {len(cores):4d}")
     from collections import Counter
-    print("  kept mechanical (slice-3 work list):")
+    print("  kept mechanical (next-tier work list):")
     for reason, n in Counter(refused.values()).most_common():
         print(f"    {reason:<44} {n:4d}")
     if args.apply and cores:

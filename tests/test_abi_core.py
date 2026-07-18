@@ -34,7 +34,7 @@ def _emit_pair(key: str, hexbytes: str):
     mech_mod = types.ModuleType(stem)
     exec(compile(mech_src, stem + ".py", "exec"), mech_mod.__dict__)
 
-    abi_src = emit_abi.emit_abi_core(scan, prop, key)
+    abi_src, _contract = emit_abi.emit_abi_core(scan, prop, key)
     abi_mod = types.ModuleType("abi_" + emit_abi._stem(key))
     exec(compile(abi_src, "abi.py", "exec"), abi_mod.__dict__)
     return getattr(mech_mod, stem), abi_mod._abi_core, prop, abi_mod
@@ -100,3 +100,72 @@ def test_gate_refuses_calls():
     scans, _ = build_scans(ir)
     with pytest.raises(Refusal, match="leaf-only"):
         emit_abi.check_destackable(scans["1010:0000"])
+
+
+#: callee 1010:0100 -- push bx; mov bx,3; add ax,bx; pop bx; ret (adds 3 to ax)
+_C_CALLEE = "53 BB 03 00 01 D8 5B C3"
+#: caller 1010:0000 -- mov ax,10; call 0100; add ax,1; ret (-> ax = 14)
+_C_CALLER = "B8 0A 00 E8 FA 00 05 01 00 C3"
+
+
+def test_near_call_composition_matches_mechanical():
+    import sys as _sys
+    import types as _types
+    from dos_re.lift import emit_cpuless as _ec
+
+    ir = _ir({"1010:0000": _C_CALLER, "1010:0100": _C_CALLEE})
+    scans, _ = build_scans(ir)
+    census = infer_contracts(ir)
+
+    # --- ABI side: emit callee core, then caller core composing it ---
+    ck = "1010:0100"
+    csrc, ccontract = emit_abi.emit_abi_core(scans[ck], census["functions"][ck],
+                                             ck, abi_base="abidiff")
+    pkg = _types.ModuleType("abidiff")
+    _sys.modules["abidiff"] = pkg
+    cmod = _types.ModuleType("abidiff.core_1010_0100")
+    exec(compile(csrc, "core_callee.py", "exec"), cmod.__dict__)
+    _sys.modules["abidiff.core_1010_0100"] = cmod
+
+    kk = "1010:0000"
+    ksrc, _ = emit_abi.emit_abi_core(
+        scans[kk], census["functions"][kk], kk,
+        callees={0x0100: ccontract}, abi_base="abidiff")
+    kmod = _types.ModuleType("abidiff.core_1010_0000")
+    exec(compile(ksrc, "core_caller.py", "exec"), kmod.__dict__)
+
+    # composed call, no ret-addr writes: 10 + 3 + 1 = 14, memory untouched
+    m = TraceMem(1)
+    o, c = kmod._abi_core(m)
+    assert o["ax"] == 14
+    assert m.writes == []
+
+    # --- mechanical reference: compose the callee contract, same result ---
+    cscan = scans[ck]
+    cspec = _ec.check_promotable(cscan)
+    cabi = cspec.abi
+    cmech_src = _ec.emit_recovered(cscan, cabi, ck)
+    cmech = _types.ModuleType("func_1010_0100")
+    exec(compile(cmech_src, "m_callee.py", "exec"), cmech.__dict__)
+    contract = _ec.CalleeContract(
+        name="func_1010_0100",
+        inputs=tuple(_ec._contract_inputs(cscan, cabi)),
+        outputs=tuple(sorted((cabi.outputs & (frozenset(_ec.W16)
+                     | frozenset({"ds", "es"}))) - frozenset({"sp"}))),
+        exit_flags=cspec.exit_flags, needs_plat=cspec.needs_plat,
+        ret_kind=cspec.ret_kind, df_livein=cspec.df_livein)
+    kscan = scans[kk]
+    kspec = _ec.check_promotable(kscan, callees={0x0100: contract})
+    kmech_src = _ec.emit_recovered(kscan, kspec.abi, kk,
+                                   callees={0x0100: contract},
+                                   recovered_import_base="mech0")
+    mpkg = _types.ModuleType("mech0")
+    _sys.modules["mech0"] = mpkg
+    _sys.modules["mech0.func_1010_0100"] = cmech
+    kmech = _types.ModuleType("mech0.func_1010_0000")
+    exec(compile(kmech_src, "m_caller.py", "exec"), kmech.__dict__)
+
+    mo, mc = kmech.func_1010_0000(TraceMem(1), sp=0x1000, ss=0x7000)
+    assert mo["ax"] == 14
+    # observed returns + cost identical (the composed glue is exact)
+    assert o["ax"] == mo["ax"] and c["cost"] == mc["cost"]
