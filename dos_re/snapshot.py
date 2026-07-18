@@ -78,59 +78,10 @@ def write_snapshot(rt: Runtime, out_dir: str | Path, *, status: str, steps: int,
             if rt.program.exe is not None else 0,
             "overlay_size": len(rt.program.overlay),
         },
-        "dos": {
-            "video_mode": rt.dos.video_mode,
-            "video_page": rt.dos.video_page,
-            "text_mode_active": rt.dos.text_mode_active,
-            "cursor_row": rt.dos.cursor_row,
-            "cursor_col": rt.dos.cursor_col,
-            "ticks": rt.dos.ticks,
-            "vga_status_reads": rt.dos.vga_status_reads,
-            "vga_palette": [list(rgb) for rgb in getattr(rt.dos, "vga_palette", [])],
-            "dac_write_index": getattr(rt.dos, "_dac_write_index", 0),
-            "dac_read_index": getattr(rt.dos, "_dac_read_index", 0),
-            "dac_component": getattr(rt.dos, "_dac_component", 0),
-            "dac_latch": list(getattr(rt.dos, "_dac_latch", [])),
-            "pit_channel2_access": rt.dos._pit_channel2_access,
-            "pit_channel2_latch": rt.dos._pit_channel2_latch,
-            "pit_channel2_write_low": rt.dos._pit_channel2_write_low,
-            "pit_channel2_reload": rt.dos.pit_channel2_reload,
-            "pit_channel0_access": getattr(rt.dos, "_pit_channel0_access", 3),
-            "pit_channel0_latch": getattr(rt.dos, "_pit_channel0_latch", 0),
-            "pit_channel0_write_low": getattr(rt.dos, "_pit_channel0_write_low", True),
-            "pit_channel0_reload": getattr(rt.dos, "pit_channel0_reload", 0),
-            "pit_channel0_anchor_ticks": getattr(rt.dos, "pit_channel0_anchor_ticks", 0),
-            "speaker_control": rt.dos.speaker_control,
-            "opl_selected_register": rt.dos.opl_selected_register,
-            "opl_status": rt.dos.opl_status,
-            "opl_registers": {f"{reg:02X}": value for reg, value in sorted(rt.dos.opl_registers.items())},
-            "ega_planar": rt.program.memory.ega_planar,
-            "ega_map_mask": rt.program.memory.ega_map_mask,
-            "ega_read_plane": rt.program.memory.ega_read_plane,
-            "ega_data_rotate": getattr(rt.program.memory, "ega_data_rotate", 0),
-            "ega_logical_op": getattr(rt.program.memory, "ega_logical_op", 0),
-            "ega_write_mode": getattr(rt.program.memory, "ega_write_mode", 0),
-            "ega_set_reset": getattr(rt.program.memory, "ega_set_reset", 0),
-            "ega_enable_set_reset": getattr(rt.program.memory, "ega_enable_set_reset", 0),
-            "ega_bit_mask": getattr(rt.program.memory, "ega_bit_mask", 0xFF),
-            "ega_latches": list(getattr(rt.program.memory, "ega_latches", [0, 0, 0, 0])),
-            "ega_display_start": rt.program.memory.ega_display_start,
-            "next_alloc_segment": rt.dos.next_alloc_segment,
-            "allocation_limit_segment": rt.dos.allocation_limit_segment,
-            "allocations": {f"{seg:04X}": size for seg, size in sorted(rt.dos.allocations.items())},
-            "open_files": {
-                str(handle): {"path": str(f.path), "pos": f.pos, "size": len(f.data)}
-                for handle, f in rt.dos.files.items()
-            },
-            # Console input state IS machine state: a demo recorded across a
-            # console-read boot (Lemmings' machine-type menu) replays from its
-            # start snapshot and blocks forever if the queued keys vanish.
-            "key_queue": list(getattr(rt.dos, "key_queue", ())),
-            "pending_console_scancode": getattr(rt.dos, "pending_console_scancode", None),
-            "console_input_fallback": getattr(rt.dos, "console_input_fallback", None),
-            "stdout_tail": "".join(rt.dos.stdout)[-4096:],
-            "port_log_tail": rt.dos.port_log[-128:],
-        },
+        # Built by the CPU-FREE capture_dos_state (inverse of
+        # _restore_dos_state) so a CPU-free backend can persist the same
+        # machine state without an interpreter existing.
+        "dos": capture_dos_state(rt.dos, rt.program.memory),
         "hooks": {
             f"{cs:04X}:{ip:04X}": name for (cs, ip), name in sorted(rt.cpu.hook_names.items())
         },
@@ -172,4 +123,5 @@ def load_snapshot(exe_path: str | Path, snapshot_dir: str | Path, *, game_root: 
 # (scripts/lint_vmless_independence.py).  Re-exported here for callers that
 # already import restore helpers from dos_re.snapshot.
 from .snapshot_headless import (  # noqa: E402
-    load_snapshot_headless, _restore_dos_state, _restore_speaker_from_port_log_tail)
+    load_snapshot_headless, capture_dos_state, _restore_dos_state,
+    _restore_speaker_from_port_log_tail)
