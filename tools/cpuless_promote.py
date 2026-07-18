@@ -177,6 +177,25 @@ def _plan_arm_absorption(ir, wanted, dyn_evidence, desmc):
     return arm_owner, absorbed, refusals
 
 
+def _far_dyn_sites(scan, cs, dyn_evidence) -> dict:
+    """Per-function view of the evidence channel for INDIRECT FAR CALL sites:
+    ``{site ip: [observed "SEG:OFF" targets]}``.
+
+    The same ``{site: [targets]}`` map that feeds near dispatch, sliced to the
+    FF /3 sites of this function.  A site the channel says nothing about is
+    OMITTED (it stays the ordinary indirect-control-flow refusal); a site the
+    channel knows and reports empty is passed through as an empty list, which
+    the gate refuses distinctly (``far-dispatch-no-evidence``)."""
+    out = {}
+    for i in scan.insts.values():
+        if not emit_cpuless._is_far_dyn(i):
+            continue
+        site = f"{cs:04X}:{i.ip:04X}"
+        if site in dyn_evidence:
+            out[i.ip] = list(dyn_evidence[site])
+    return out
+
+
 def _gate_dyn_evidence(scan, cs, dyn_evidence, done, dispatch_owner,
                        contracts_by_cs, iret_keys=frozenset(),
                        extra_leaders=frozenset()) -> None:
@@ -688,12 +707,14 @@ def main(argv=None) -> int:
                             - frozenset({"sp"}))),
                         exit_flags=frozenset(), needs_plat=True)
                     injected_self = scan.entry
+                far_sites = _far_dyn_sites(scan, cs, dyn_evidence)
                 spec = emit_cpuless.check_promotable(
                     scan, excluded_addrs=excl_ips, callees=contracts,
                     far_callees=far_contracts, dispatch_addrs=disp_ips,
                     boundary_addrs=head_ips, plat_far_segs=plat_far_segs,
                     plat_farcalls=plat_farcalls,
-                    dead_exits=dead_exits_by_key.get(key, frozenset()))
+                    dead_exits=dead_exits_by_key.get(key, frozenset()),
+                    far_dyn_sites=far_sites)
                 abi = spec.abi
                 prune_removed[key] = emit_cpuless.output_prune_removed(
                     abi, spec.sp_output)
@@ -711,7 +732,8 @@ def main(argv=None) -> int:
                     flags_livein=spec.flags_livein, boundary_addrs=head_ips,
                     stub_targets=stub_targets.get(cs, frozenset()),
                     plat_farcalls=plat_farcalls,
-                    dead_exits=dead_exits_by_key.get(key, frozenset()))
+                    dead_exits=dead_exits_by_key.get(key, frozenset()),
+                    far_dyn_sites=far_sites)
                 adapter_src = emit_cpuless.emit_adapter(
                     scan, abi, key,
                     signature=bytes.fromhex(rec["signature"]),

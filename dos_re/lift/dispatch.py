@@ -36,6 +36,22 @@ _EA = (
 )
 
 
+def _operand_ea(state, inst) -> "tuple[int, int] | None":
+    """``(segment value, offset)`` of ``inst``'s memory operand, or ``None``
+    when the operand is a register (``mod == 3``).  Pure."""
+    mod, rm = inst.modrm >> 6, inst.modrm & 7
+    if mod == 3:
+        return None
+    seg = inst.seg_override
+    if mod == 0 and rm == 6:                          # direct [disp16]
+        off = (inst.disp or 0) & 0xFFFF
+    else:
+        regs, default_seg = _EA[rm]
+        off = (sum(getattr(state, r) for r in regs) + (inst.disp or 0)) & 0xFFFF
+        seg = seg or default_seg
+    return getattr(state, seg or "ds") & 0xFFFF, off
+
+
 def resolve_near_indirect_target(state, mem, inst) -> "str | None":
     """The ``'CS:IP'`` a near indirect jmp/call at ``inst`` transfers to.
 
@@ -48,18 +64,39 @@ def resolve_near_indirect_target(state, mem, inst) -> "str | None":
     if inst.modrm is None:
         return None
     cs = state.cs & 0xFFFF
-    mod, rm = inst.modrm >> 6, inst.modrm & 7
-    if mod == 3:                                     # register-indirect: target = the reg value
-        return f"{cs:04X}:{getattr(state, REG16[rm]) & 0xFFFF:04X}"
-    seg = inst.seg_override
-    if mod == 0 and rm == 6:                          # direct [disp16]
-        off = (inst.disp or 0) & 0xFFFF
-    else:
-        regs, default_seg = _EA[rm]
-        off = (sum(getattr(state, r) for r in regs) + (inst.disp or 0)) & 0xFFFF
-        seg = seg or default_seg
-    segval = getattr(state, seg or "ds") & 0xFFFF
+    ea = _operand_ea(state, inst)
+    if ea is None:                        # register-indirect: target = reg value
+        return f"{cs:04X}:{getattr(state, REG16[inst.modrm & 7]) & 0xFFFF:04X}"
+    segval, off = ea
     return f"{cs:04X}:{mem.rw(segval, off) & 0xFFFF:04X}"
+
+
+def resolve_far_indirect_target(state, mem, inst) -> "str | None":
+    """The ``'SEG:OFF'`` a FAR indirect jmp/call (``FF /3``, ``FF /5``) at
+    ``inst`` transfers to -- the far pointer (offset word, then segment word)
+    stored at the operand's effective address.
+
+    The far counterpart of :func:`resolve_near_indirect_target`, and the same
+    evidence channel: a capture probe traps the site and records the target it
+    is about to take, so the ``{site: [targets]}`` map the CPUless promoter's
+    evidence gate consumes covers far dispatch as well as near.  The only
+    structural difference is that the target's SEGMENT comes from memory rather
+    than from the current CS, so the key names a different segment -- the wire
+    format ("SEG:OFF") is unchanged.
+
+    ``FF /3`` and ``FF /5`` require a MEMORY operand (a register cannot hold a
+    32-bit far pointer), so a ``mod == 3`` encoding is not a far transfer at
+    all and returns ``None``, as does an instruction with no ModRM.  Pure.
+    """
+    if inst.modrm is None:
+        return None
+    ea = _operand_ea(state, inst)
+    if ea is None:
+        return None
+    segval, off = ea
+    tip = mem.rw(segval, off) & 0xFFFF
+    tcs = mem.rw(segval, (off + 2) & 0xFFFF) & 0xFFFF
+    return f"{tcs:04X}:{tip:04X}"
 
 
 # ---------------------------------------------------------------------------
