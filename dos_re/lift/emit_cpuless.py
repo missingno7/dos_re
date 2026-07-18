@@ -1482,6 +1482,14 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
     exit_depths: set[int] = set()
     ret_pops: set[int] = set()
     frame_base: int | None = None       # depth at `mov bp,sp` (hand-rolled enter)
+    # An established frame pointer (bp set by the atomic `enter`, or the
+    # hand-rolled `push bp; mov bp,sp`).  A shared-epilogue TAIL DISPATCH relies
+    # on it: the dispatch arm restores this frame with `leave` before its own
+    # return, so a nonzero-depth tail is still a balanced exit (below).  Mirrors
+    # `_check_frame_pointer`'s establish criteria exactly (enter, or push+mov).
+    has_frame = any(i.op == 0xC8 for i in scan.insts.values()) or (
+        any(register_effects(i).frame_establish for i in scan.insts.values())
+        and any(i.op == 0x55 for i in scan.insts.values()))
     while work:
         ip, d = work.pop()
         i = scan.insts[ip]
@@ -1503,10 +1511,18 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
             # composed INT site's frame read use the RETURNED sp -- exact
             # regardless of the static picture (alt-entry seeds make the
             # static depth an artifact for mid-ISR fragments).
-            if i.kind == RETF and (i.imm or 0):
-                raise Refusal("ret-n-stack-args (retf N needs far variant)")
+            #
+            # A `ret N` / `retf N` pops N caller-arg bytes AFTER the return
+            # address -- the pascal/stdcall CALLEE-CLEANUP convention.  Both the
+            # near (`ret N`, 0xC2) and far (`retf N`, 0xCA) variants carry a
+            # uniform per-function immediate: the caller's stack shrinks by N,
+            # so the exit-delta contract is `exit_depth - N` and the composing
+            # caller adds N to the return-frame pop (2+N near, 4+N far).  The
+            # far variant models the same arg-pop as the near one; only the
+            # return-frame size (a 4-byte far CS:IP vs a 2-byte near offset)
+            # differs, and that rides ret_kind, not ret_pop.
             exit_depths.add(d)
-            ret_pops.add((i.imm or 0) if i.kind == RET else 0)
+            ret_pops.add((i.imm or 0) if i.kind in (RET, RETF) else 0)
             continue
         if i.kind == JMP_IND:
             if _is_isr_chain(i):
@@ -1516,7 +1532,21 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
                 exit_depths.add(d if d is not None else 0)
                 ret_pops.add(0)
                 continue
-            if d not in (0, None):  # unknown cannot prove the tail rule
+            # A tail dispatch exits by transferring to a dispatch ARM that runs
+            # its OWN return through THIS function's frame -- the shared-epilogue
+            # idiom a compiler emits for a switch (`jmp cs:[bx*2+table]`, each
+            # arm ending `leave; ret(f)`).  At depth 0 the arm's ret pops our
+            # caller's return frame directly (the balanced case).  At a NONZERO
+            # depth the extra bytes above entry are this function's own frame
+            # (the saved bp + the enter/sub locals): a shared-epilogue arm's
+            # `leave` (mov sp,bp; pop bp) discards EVERYTHING above the frame
+            # base and restores sp to entry before its return, so the exit is
+            # still balanced -- EXACTLY as a fused `leave; ret(f)` in this
+            # function would be.  That unwind needs an established frame pointer
+            # to restore to; without one, a nonzero-depth tail has no frame to
+            # unwind and the exit sp is genuinely unrepresentable -- refuse.  An
+            # UNKNOWN depth (None) likewise cannot prove the balance -- refuse.
+            if d is None or (d != 0 and not has_frame):
                 raise Refusal("tail-dispatch-at-nonzero-depth")
             exit_depths.add(0)
             ret_pops.add(0)
@@ -2228,7 +2258,17 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 if c.df_livein:
                     kw = ("_df=(1 if df else 0)" + (", " + kw if kw else ""))
                 if c.needs_plat:
-                    _boff = count - 1
+                    # the composed callee's _base is its ENTRY instruction_count
+                    # -- reached AFTER this call executes, so it includes the
+                    # call itself: _base + _cost + count (count already counts
+                    # this instruction).  This matches the STANDALONE adapter,
+                    # which sets _base = cpu.instruction_count at entry (post
+                    # call).  Using count-1 anchored the callee's plat effects
+                    # (plat.farcall/intr/boundary) one instruction early, so an
+                    # API-boundary sample inside a COMPOSED needs_plat callee
+                    # drifted -1 vs the interpreter (the standalone farcall path
+                    # never exercised this).
+                    _boff = count
                     _b = "_base + _cost" if _boff == 0 else f"_base + _cost + {_boff}"
                     kw = (f"_base={_b}" + (", " + kw if kw else ""))
                 blk.append(f"_o, _c = {c.name}({_pass}{', ' + kw if kw else ''})")
@@ -2246,10 +2286,12 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 blk.append("_cost += _c['cost']")
                 # sp after the composed call: an sp-output callee already
                 # merged its runtime sp through the outputs loop above; the
-                # ret-addr pair (+ a uniform ret N) pops here.  A retf
-                # callee behind a NEAR call (push-cs idiom) pops 4: our
-                # return offset plus the caller's explicitly pushed CS.
-                pop_n = 4 if (far or c.ret_kind == "far") else 2 + c.ret_pop
+                # ret-addr pair (+ a uniform ret N / retf N) pops here.  A near
+                # ret pops 2 (offset) + N pascal args; a far/retf callee pops 4
+                # (offset + CS -- the far frame, or the push-cs idiom's
+                # explicitly pushed CS behind a NEAR call) + N pascal args.
+                pop_n = (4 + c.ret_pop) if (far or c.ret_kind == "far") \
+                    else 2 + c.ret_pop
                 blk.append(f"sp = (sp + {pop_n}) & 0xFFFF")
                 if i.ip in heads:
                     # a boundary head ON this call: yield AFTER the recovered
