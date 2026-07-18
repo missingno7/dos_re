@@ -20,6 +20,13 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
+
+#: The repo root (the directory containing the ``dos_re`` package).  The probe
+#: below runs in a fresh interpreter, so it needs this on its path explicitly:
+#: without it the test only passed when pytest happened to be invoked FROM this
+#: directory, and failed when a port ran the same suite from its own root.
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 CPU_FREE_MODULES = [
     "dos_re.input_demo",
@@ -45,7 +52,7 @@ def _cpu_modules_after_importing(module: str) -> list[str]:
         "                      if m == 'dos_re.cpu' or m.startswith('dos_re.cpu.'))))\n"
     )
     out = subprocess.run([sys.executable, "-c", code], text=True,
-                         capture_output=True, check=True)
+                         capture_output=True, check=True, cwd=REPO_ROOT)
     return [m for m in out.stdout.strip().split(",") if m]
 
 
