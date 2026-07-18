@@ -124,3 +124,42 @@ def test_a_bare_sp_load_from_memory_still_refuses() -> None:
     with pytest.raises(Refusal, match="sp-as-data"):
         check_promotable(_scan(bytes.fromhex("2e8b264202" "50" "c3"),
                                exits=(6,)))
+
+
+# --- every forward path must reach the return -------------------------------
+#
+# The recogniser's contract is "EVERY forward path falls straight into a RET".
+# The original worklist skipped already-visited ips, which silently ACCEPTS a
+# path that never returns: the taken branch sets reached_ret while the looping
+# branch is swallowed by the visited check.  That misfires exactly where it is
+# most dangerous -- an interrupt-driven spin-wait (`cmp [flag],0 / jz wait`) is
+# REAL behaviour in these corpora, not a fatal-abort tail, and promoting one
+# would emit a fail-loud raise where the program genuinely loops.
+
+#   mov sp, cs:[0242] ; jz +2 ; loop: jmp loop ; ret
+_RETURN_OR_LOOP = bytes.fromhex("2e8b264202" "7402" "ebfe" "c3")
+
+#   mov sp, cs:[0242] ; jz +1 ; nop ; ret      (a DIAMOND, not a cycle)
+_RETURN_DIAMOND = bytes.fromhex("2e8b264202" "7401" "90" "c3")
+
+
+def test_a_path_that_never_returns_is_refused() -> None:
+    """One arm returns, the other loops forever -- not a longjmp tail."""
+    s = _scan(_RETURN_OR_LOOP)
+    assert not _is_nonlocal_exit(s, s.insts[0])
+
+
+def test_reconvergence_is_not_a_cycle() -> None:
+    """Two paths meeting at the same RET is a diamond: every path still
+    returns, so the tail is still recognised.  Rejecting every repeated ip
+    (the naive cycle fix) would refuse this."""
+    s = _scan(_RETURN_DIAMOND)
+    assert _is_nonlocal_exit(s, s.insts[0])
+
+
+def test_a_self_loop_before_the_return_is_refused() -> None:
+    """The degenerate case: the restore falls straight into an endless loop
+    with no return anywhere."""
+    #   mov sp, cs:[0242] ; jmp -2
+    s = _scan(bytes.fromhex("2e8b264202" "ebfe"))
+    assert not _is_nonlocal_exit(s, s.insts[0])

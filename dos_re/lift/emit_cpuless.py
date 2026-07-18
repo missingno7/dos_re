@@ -1467,13 +1467,37 @@ def _is_nonlocal_exit(scan, i) -> bool:
     if not (i.op == 0x8B and i.modrm is not None
             and ((i.modrm >> 3) & 7) == 4 and (i.modrm >> 6) != 3):
         return False                        # not `mov sp, m16`
+    # EVERY forward path must reach the return -- so a path that never
+    # terminates disqualifies the tail.  Skipping an already-seen ip (the
+    # obvious worklist idiom) silently ACCEPTS a cycle: for
+    # `jz ret / loop: jmp loop / ret`, the taken branch sets reached_ret while
+    # the looping branch is swallowed by the visited check, and the function
+    # is promoted as a longjmp tail that emits a fail-loud raise.  That is
+    # wrong precisely where it matters: an interrupt-driven spin-wait
+    # (`cmp [flag],0 / jz wait`) is REAL behaviour in these corpora -- four
+    # live ones sit in the Lemmings corpus alone -- not a fatal-abort path.
+    #
+    # A back-edge is therefore a REFUSAL, not a node to skip.  These tails are
+    # documented as short and straight-line, so requiring acyclicity costs
+    # nothing real and makes the check prove what the docstring claims.
+    # A BACK-EDGE refuses; mere re-convergence does not.  Distinguishing the
+    # two needs the current PATH, not a global visited set: `jz L / nop /
+    # L: ret` re-reaches L legitimately (a diamond, every path still returns),
+    # while `jz ret / loop: jmp loop` re-reaches loop through a cycle and that
+    # path never returns at all.  Treating every repeat as a cycle would
+    # refuse the diamond; treating every repeat as visited (the original)
+    # accepts the loop.
+    grey: set[int] = set()                  # on the current DFS path
+    black: set[int] = set()                 # fully explored, all paths return
     seen: set[int] = set()
-    work = [i.next_ip]
-    reached_ret = False
-    while work:
-        ip = work.pop()
-        if ip is None or ip in seen:
-            continue
+
+    def _walk(ip) -> bool:
+        if ip is None:
+            return False                    # falls out of the tail
+        if ip in grey:
+            return False                    # BACK-EDGE: this path never returns
+        if ip in black:
+            return True                     # already proved to reach a return
         seen.add(ip)
         if len(seen) > 32:                  # not a short abort tail
             return False
@@ -1483,8 +1507,8 @@ def _is_nonlocal_exit(scan, i) -> bool:
         if nxt.kind in (RET, RETF, IRET):
             if (nxt.imm or 0):
                 return False                # `ret N` pops a frame we don't model
-            reached_ret = True
-            continue
+            black.add(ip)
+            return True
         e = register_effects(nxt)
         # nothing between the restore and the return may touch the stack,
         # re-touch sp, or transfer control out of this tail.
@@ -1492,13 +1516,19 @@ def _is_nonlocal_exit(scan, i) -> bool:
             return False
         if nxt.kind not in (SEQ, JCC, JMP):
             return False
+        grey.add(ip)
         if nxt.kind == SEQ:
-            work.append(nxt.next_ip)
+            ok = _walk(nxt.next_ip)
         elif nxt.kind == JMP:
-            work.append(nxt.target)
-        else:
-            work.extend((nxt.next_ip, nxt.target))
-    return reached_ret
+            ok = _walk(nxt.target)
+        else:                               # JCC: BOTH arms must return
+            ok = _walk(nxt.next_ip) and _walk(nxt.target)
+        grey.discard(ip)
+        if ok:
+            black.add(ip)
+        return ok
+
+    return _walk(i.next_ip)
 
 
 def _is_desmc_far_chain(i) -> bool:

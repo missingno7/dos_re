@@ -222,19 +222,15 @@ not a refusal note.
 
 | Concept | Disposition |
 |---|---|
-
-| Concept | Disposition |
-|---|---|
 | CPU object, interpreter path | **must be eliminated** (already: zero) |
 | machine call/ret, ret-addr writes, sp adjust | **must be eliminated** (done for cores) |
 | `ss`/`sp` as public parameters | **must be eliminated** (done for cores) |
 | generic `_vs` virtual stack | **must be eliminated** → slot locals (slice 6) |
 | register-named public params, dict-keyed results | **must be eliminated** → anonymous/positional (slice 6) |
-| dead flag computation | **must be eliminated**, poison-tested (slice 6) |
 | unproven dropped outputs | **must be eliminated** (already: poison-proven) |
 | register-named *body locals* | may remain THROUGH M4 (alpha-rename) — **must not remain at the end**: machine vocabulary AI has to decode |
 | `bb` dispatch loop / CFG-shaped body | may remain THROUGH M4 (analyses read the IR) — **must not remain at the end**: structured flow for provably reducible regions is a deliverable |
-| dead flag computation | deferred on yield (~9% provable) — **revisit with a better formulation**, not accepted: 6437 flag lines is noise in the final form |
+| dead flag computation | attempted in slice 6 and poison-tested, but only ~9% proved dead — **deferred on yield, NOT accepted**: 6437 flag lines is noise in the final form, so this needs a better formulation before the end state |
 | 8/16-bit partial-register ops | may remain — faithful width semantics (a real property of the program, not plumbing) |
 | `_fmask`, exact flag word, virtual cost | **must remain**, private compat channel only |
 | typed stack view for genuinely-stack-semantic functions | **must remain**, explicitly classified |
