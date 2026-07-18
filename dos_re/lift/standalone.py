@@ -164,6 +164,17 @@ class FailLoudPlatform:
         raise CpuStandaloneWitness(
             f"OUT to port {port & 0xFFFF:#06x} with no host platform implementation")
 
+    def ivec(self, key, cost, regs):
+        """Service a vectored interrupt whose target is NOT recovered game code.
+
+        An ISR that chains to "the previous handler" -- the universal idiom -- holds whatever the
+        environment left in the vector, in practice a ROM-BIOS entry.  That target is not game code
+        and never will be, so the recovered corpus cannot supply it and the device model must.
+
+        Returning ``None`` means "not mine": the caller then raises its own frontier witness naming
+        the vector.  The default declines everything, so an unmodelled ROM entry stays LOUD."""
+        return None
+
 
 def module_name(key: str) -> str:
     """The recovered module basename for a ``'CS:IP'`` key: ``'1010:5F61'`` -> ``'func_1010_5f61'``."""

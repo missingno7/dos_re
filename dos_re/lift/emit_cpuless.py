@@ -2647,6 +2647,13 @@ generated DISPATCH table (.dispatch) to a DIRECT recovered call -- possibly at
 a dynamic-arrival alternate entry.  An unknown selector raises
 :class:`UnknownDispatchTarget` (a structured frontier witness).  There is NO
 fallback path: not to a CPU, not to a lifted graph, not to an interpreter.
+
+The ONE exception is a vectored INTERRUPT whose target is not game code at all
+-- the universal "chain to the previous handler" idiom leaves a ROM-BIOS entry
+in the vector, and ROM is ENVIRONMENT.  `ivec_exec` offers those to `plat.ivec`,
+the same declared device model that already owns `plat.intr` and `plat.outp`,
+before raising.  A platform is not a carrier: it has no CPU, executes no guest
+instructions, and a platform that does not implement the entry still fails loud.
 DO NOT hand-edit; regenerate."""
 import importlib
 
@@ -2710,7 +2717,20 @@ def ivec_exec(key, mem, plat, base, regs):
     """Dispatch one game-vectored interrupt (tier 12) to its recovered
     IRET-contract handler.  The CALLER owns the interrupt frame (already
     pushed; popped after); the handler is an ordinary recovered function
-    whose iret exits are plain returns."""
+    whose iret exits are plain returns.
+
+    If the vector points OUTSIDE the recovered program the target is not game
+    code and never will be: an ISR that chains to "the previous handler" is
+    holding whatever the environment installed, in practice a ROM-BIOS entry.
+    Those are offered to the platform's `ivec` before the witness is raised.
+    A platform that does not implement the entry re-raises, so an unmodelled
+    vector is still a loud frontier and not a silent no-op."""
+    if key not in HANDLERS:
+        service = getattr(plat, "ivec", None)
+        if service is not None:
+            out = service(key, base, regs)
+            if out is not None:
+                return out
     return _exec(HANDLERS, "ivec", key, mem, plat, base, regs)
 '''
 
