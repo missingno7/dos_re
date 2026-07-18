@@ -85,6 +85,22 @@ def test_public_entry_over_the_one_core():
     assert out == (o if len(prop["returns"]) != 1 else o[0])
 
 
+def test_contract_metadata_records_pointer_roles():
+    """The generated _CONTRACT hands the NEXT stage the pointer/segment
+    structure explicitly: an offset used only to address memory is a
+    near pointer, tagged with the segment parameter it addresses through."""
+    # lodsb via ds:si, then store through it: si is address-only, ds a segment
+    _, core, prop, mod = _emit_pair("1010:0700", "AC 88 04 C3")
+    meta = mod._CONTRACT
+    roles = {p["historical"]: p for p in meta["params"]}
+    assert roles["ds"]["role"] == "segment"
+    assert roles["si"]["role"] == "pointer"
+    assert roles["si"]["in_segment"] == roles["ds"]["name"]
+    # anonymous names, historical roles preserved only as metadata
+    assert [p["name"] for p in meta["params"]] == [
+        f"arg_{k}" for k in range(len(meta["params"]))]
+
+
 def test_gate_refuses_stack_addressed_memory():
     # mov ax,[bp+2]; ret -- bp EA defaults to SS: stack used as memory
     ir = _ir({"1010:0000": "8B 46 02 C3"})

@@ -565,6 +565,37 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     A('')
     A("_PARITY = tuple((1 - bin(v).count('1') % 2) == 1 for v in range(256))")
     A('')
+    # GENERATED CONTRACT METADATA (not API): the anonymous parameters' proven
+    # roles, so the next stage gets pointer/segment structure explicitly
+    # instead of re-deriving it from register arithmetic.  Roles:
+    #   "segment"      a segment binding other parameters address through
+    #   "pointer"      an offset used ONLY to address memory, paired with a
+    #                  segment parameter (a NEAR pointer into that segment)
+    #   "value"        a scalar
+    #   "mixed"        used both as an address and as a value -- NOT
+    #                  classified as a pointer (refusal-first)
+    kinds = {p["reg"]: p["kind"] for p in proposal["params"]}
+    seg_of = {}
+    for s, r, _n in proposal["pointer_pairs"]:
+        if kinds.get(r) == "pointer" and s in kinds:
+            seg_of.setdefault(r, set()).add(s)
+    A("#: generated contract metadata -- roles, not API (see emit_abi).")
+    A("_CONTRACT = {")
+    A(f"    'key': {key!r},")
+    A("    'params': (")
+    for k, r in enumerate(params):
+        segs = sorted(seg_of.get(r, ()))
+        seg_txt = (f", 'in_segment': 'arg_{params.index(segs[0])}'"
+                   if len(segs) == 1 and segs[0] in params else "")
+        A(f"        {{'name': 'arg_{k}', 'role': {kinds.get(r, 'value')!r}, "
+          f"'historical': {r!r}{seg_txt}}},")
+    A("    ),")
+    A("    'returns': (" + ", ".join(
+        f"{{'name': 'ret_{k}', 'historical': {r!r}}}"
+        for k, r in enumerate(returns)) + ("," if len(returns) == 1 else "")
+      + "),")
+    A("}")
+    A('')
     A('')
     # PUBLIC CONTRACT SURFACE: semantic inputs are ANONYMOUS POSITIONAL
     # parameters in contract order -- no caller needs to know a register
