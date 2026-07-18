@@ -101,11 +101,19 @@ class AddressExpr:
 
 @dataclass
 class Blocker:
-    """A site whose address this pass will not express symbolically."""
+    """A site whose address this pass will not express symbolically.
+
+    ``segments`` names the segment REGISTERS the site addresses, when that
+    much is known even though the offset is not.  A blocker with segments is
+    not merely a report: ``possible_touchers`` uses it to keep an unprovable
+    access visible to the ownership closure, instead of letting an
+    unexpressible address quietly mean "no access".
+    """
 
     key: str
     ip: int
     reason: str
+    segments: tuple = ()
 
 
 @dataclass
@@ -150,11 +158,45 @@ class Census:
                 if len(segs) > 1}
 
     def closure(self, disp: int) -> set:
-        """Every function touching a static offset through ANY segment --
-        the ownership-closure size that decides whether a region is a small
-        first slice (§9)."""
+        """Every function PROVABLY touching a static offset, through any
+        segment -- the ownership-closure size that decides whether a region is
+        a small first slice (section 9).
+
+        This is the DEFINITE half only.  It is computed from expressible
+        addresses, so a site whose address this pass cannot express does not
+        appear here no matter what it touches.  Any caller deciding ownership
+        must also consult :meth:`possible_touchers`; :meth:`closure_verdict`
+        pairs them so the incomplete half cannot be forgotten.
+        """
         return {s.key for s in self.sites
                 if s.is_static and s.disp == disp}
+
+    def possible_touchers(self, segment: str) -> set:
+        """Functions that MIGHT touch ``segment`` at an unexpressible offset.
+
+        Implicit-address string instructions (movs/stos/lods/cmps/scas) walk
+        ds:si and es:di under si/di/cx the census does not track, so an offset
+        cannot be attributed.  Attributing the SEGMENT is still sound and is
+        what keeps them from vanishing: a `stosb` cannot reach a ds region
+        unless es aliases ds, but a `lodsb` addresses ds directly and could
+        reach any offset in it.
+
+        Returning them separately, rather than folding them into closure(), is
+        deliberate -- a definite toucher and a possible one call for different
+        decisions, and collapsing the two would either overstate the closure
+        or hide the doubt.
+        """
+        return {b.key for b in self.blockers if segment in b.segments}
+
+    def closure_verdict(self, disp: int, segment: str):
+        """(definite, possible) -- the whole truth about who touches a region.
+
+        Ownership is only PROVEN when ``possible`` is empty.  When it is not,
+        the region has touchers this pass cannot rule out, and promoting it
+        needs either a stronger analysis or a port-supplied disjointness fact
+        with evidence -- never an assumption that silence means absence.
+        """
+        return self.closure(disp), self.possible_touchers(segment)
 
 
 def _segment_of(i) -> str:
@@ -183,11 +225,27 @@ _STORE_OPS = frozenset({0x8F,
                         0xF6, 0xF7, 0xFE, 0xFF})
 
 
-#: the implicit-address string instructions, by opcode.  They carry no modrm,
-#: so they are invisible to modrm-driven site discovery unless named here.
-_STRING_OPS = {0xA4: "movsb", 0xA5: "movsw", 0xA6: "cmpsb", 0xA7: "cmpsw",
-               0xAA: "stosb", 0xAB: "stosw", 0xAC: "lodsb", 0xAD: "lodsw",
-               0xAE: "scasb", 0xAF: "scasw"}
+#: the implicit-address string instructions, by opcode: mnemonic and the
+#: segment REGISTERS each addresses.  They carry no modrm, so they are
+#: invisible to modrm-driven site discovery unless named here.
+#:
+#: The segment half is what makes the resulting blocker useful rather than
+#: merely honest.  The offset is unknowable to this pass (si/di walk under cx),
+#: but the segment is fixed by the instruction: lods/cmps read ds:si,
+#: stos/scas write-or-scan es:di, movs does both.  A source-only op therefore
+#: cannot reach an es region, and a dest-only op cannot reach a ds region
+#: unless the two segments alias -- which is a fact a port must supply with
+#: evidence, not something to assume in either direction.
+#:
+#: Note these are the DEFAULTS: a segment-override prefix redirects the ds:si
+#: side (never the es:di side, which is not overridable on x86).  All 814
+#: occurrences in the Lemmings corpus use the defaults, but the override is
+#: handled rather than assumed away.
+_STRING_OPS = {0xA4: ("movsb", ("ds", "es")), 0xA5: ("movsw", ("ds", "es")),
+               0xA6: ("cmpsb", ("ds", "es")), 0xA7: ("cmpsw", ("ds", "es")),
+               0xAA: ("stosb", ("es",)),      0xAB: ("stosw", ("es",)),
+               0xAC: ("lodsb", ("ds",)),      0xAD: ("lodsw", ("ds",)),
+               0xAE: ("scasb", ("es",)),      0xAF: ("scasw", ("es",))}
 
 
 def sites_of(scan, key: str):
@@ -203,8 +261,16 @@ def sites_of(scan, key: str):
         # refusal-first rule: their addresses are register-driven (si/di walked
         # by cx), so they need a range proof this census cannot supply.
         if i.op in _STRING_OPS:
+            mnem, segs = _STRING_OPS[i.op]
+            # A segment override redirects the ds:si side only; es:di is not
+            # overridable.  Carrying the real segment (rather than the default)
+            # keeps possible_touchers() honest for prefixed forms.
+            if "ds" in segs:
+                src = next((_SEG_PREFIX[p] for p in i.prefixes
+                            if p in _SEG_PREFIX), "ds")
+                segs = tuple(src if s == "ds" else s for s in segs)
             out.append(Blocker(key, ip,
-                               f"implicit-string-access:{_STRING_OPS[i.op]}"))
+                               f"implicit-string-access:{mnem}", segs))
             continue
         if not moffs and (i.modrm is None or i.mod == 3):
             continue

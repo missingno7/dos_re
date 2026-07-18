@@ -180,3 +180,69 @@ def test_a_blocked_string_op_is_not_counted_as_a_clean_closure():
     sites = sites_of(_scan(b"\xA4\xA1\x49\xA9"), "1010:1000")   # movsb; mov ax,[A949]
     assert any(isinstance(s, Blocker) for s in sites)
     assert any(isinstance(s, AddressExpr) and s.disp == 0xA949 for s in sites)
+
+
+def build_from_sites(items):
+    """Partition sites_of() output into a Census, the way build() does."""
+    c = Census()
+    for it in items:
+        (c.sites if isinstance(it, AddressExpr) else c.blockers).append(it)
+    return c
+
+
+# -- the closure must not mistake "inexpressible" for "absent" ---------------
+#
+# closure() is computed from expressible addresses, so a string op used to be
+# invisible to it twice over: first because sites_of skipped it, and then --
+# after that was fixed -- because Blockers were only ever REPORTED, never
+# consulted.  A promotion decision reading closure() alone would see a clean,
+# tiny closure for a region that a `lodsb` could walk straight through.
+def test_a_ds_string_op_makes_the_function_a_possible_toucher():
+    c = build_from_sites([
+        # a clean, provable owner of ds:[0xA949]
+        AddressExpr("1010:9967", 0x10, "ds", None, None, 0xA949, 1, True),
+    ] + sites_of(_scan(b"\xAC"), "1010:7218"))       # lodsb reads ds:si
+    definite, possible = c.closure_verdict(0xA949, "ds")
+    assert definite == {"1010:9967"}, "the provable owner is still definite"
+    assert possible == {"1010:7218"}, (
+        "a ds-addressed string op must remain visible to the closure -- an "
+        "address this pass cannot express is not an address that is absent")
+
+
+def test_an_es_only_string_op_is_not_a_possible_ds_toucher():
+    """stosb writes es:di and cannot reach a ds region unless es aliases ds,
+    which is a port fact with evidence -- not this pass's to assume."""
+    c = build_from_sites(sites_of(_scan(b"\xAA"), "1010:6170"))   # stosb
+    assert c.possible_touchers("ds") == set()
+    assert c.possible_touchers("es") == {"1010:6170"}
+
+
+def test_movs_touches_both_sides():
+    c = build_from_sites(sites_of(_scan(b"\xA4"), "1010:8822"))   # movsb
+    assert c.possible_touchers("ds") == {"1010:8822"}
+    assert c.possible_touchers("es") == {"1010:8822"}
+
+
+def test_a_segment_override_redirects_the_source_side_only():
+    """`ss: lodsb` reads ss:si.  es:di is not overridable on x86, so a
+    prefixed movs still touches es on the destination side."""
+    c = build_from_sites(sites_of(_scan(b"\x36\xAC"), "1010:1000"))
+    assert c.possible_touchers("ss") == {"1010:1000"}
+    assert c.possible_touchers("ds") == set()
+
+    c2 = build_from_sites(sites_of(_scan(b"\x36\xA4"), "1010:2000"))
+    assert c2.possible_touchers("ss") == {"1010:2000"}, "source redirected"
+    assert c2.possible_touchers("es") == {"1010:2000"}, "dest still es"
+    assert c2.possible_touchers("ds") == set()
+
+
+def test_closure_verdict_is_clean_when_nothing_is_inexpressible():
+    """The pairing must not cry wolf: a region with only provable touchers
+    reports an empty `possible`, which is what PROVEN ownership looks like."""
+    c = build_from_sites([
+        AddressExpr("1010:9967", 0x10, "ds", None, None, 0xA949, 1, True),
+        AddressExpr("1010:9967", 0x20, "ds", None, None, 0xA949, 1, False),
+    ])
+    definite, possible = c.closure_verdict(0xA949, "ds")
+    assert definite == {"1010:9967"}
+    assert possible == set()
