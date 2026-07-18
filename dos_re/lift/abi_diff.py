@@ -138,13 +138,17 @@ class PlatStub:
         return out
 
 
-def _run(fn, mem, kwargs, plat=None):
-    """(outcome_kind, payload): a normal result or the raised error text."""
+def _run(fn, mem, kwargs, plat=None, args=()):
+    """(outcome_kind, payload): a normal result or the raised error text.
+
+    ``args`` are POSITIONAL semantic inputs (the ABI core's anonymous
+    contract); ``kwargs`` are register-named (the mechanical ABI) plus the
+    private compat channel."""
     try:
         if plat is not None:
-            out, compat = fn(mem, plat, **kwargs)
+            out, compat = fn(mem, plat, *args, **kwargs)
         else:
-            out, compat = fn(mem, **kwargs)
+            out, compat = fn(mem, *args, **kwargs)
         return "ok", (out, compat)
     except ZeroDivisionError:
         return "raise", "ZeroDivisionError"
@@ -199,8 +203,12 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
             akw["_flags_in"] = fw
             if "_flags_in" in mech_kd:
                 mkw["_flags_in"] = fw
+        # the ABI core takes its semantic inputs POSITIONALLY in contract
+        # order; only the private compat channel stays keyword.
+        apos = tuple(regs[r] for r in params)
+        akw = {k: v for k, v in akw.items() if k.startswith("_")}
         mk, mp = _run(mech_fn, mem_m, mkw, plat_m)
-        ak, ap = _run(abi_core_fn, mem_a, akw, plat_a)
+        ak, ap = _run(abi_core_fn, mem_a, akw, plat_a, apos)
         if mk == "raise" or ak == "raise":
             raises += 1
             if (mk, mp) != (ak, ap):
@@ -218,10 +226,13 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
             continue
         mo, mc = mp
         ao, ac = ap
-        for r in returns:
-            if mo.get(r) != ao.get(r):
-                mismatches.append(f"state {s}: return {r} "
-                                  f"mech={mo.get(r)!r} abi={ao.get(r)!r}")
+        # mechanical returns a register-keyed dict; the ABI core returns a
+        # POSITIONAL tuple in contract order -- compare role by role.
+        for n, r in enumerate(returns):
+            av = ao[n] if n < len(ao) else None
+            if mo.get(r) != av:
+                mismatches.append(f"state {s}: return #{n} ({r}) "
+                                  f"mech={mo.get(r)!r} abi={av!r}")
         if mc != ac:
             mismatches.append(f"state {s}: compat mech={mc} abi={ac}")
         if mem_m.writes != mem_a.writes:

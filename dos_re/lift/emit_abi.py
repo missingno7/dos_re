@@ -325,7 +325,12 @@ def check_composable(scan, *, callees=None, boundary_addrs=frozenset(),
                 raise Refusal("unbalanced-stack")
             continue
         succs = []
-        if i.kind in (SEQ, CALL):        # a composed near call: delta 0, falls through
+        if i.kind in (SEQ, CALL, INT):
+            # SEQ, a composed near call (delta 0), and a serviced INT all
+            # fall through.  INT must be here: without it the walk stopped at
+            # the first interrupt, leaving the rest of the body un-depthed --
+            # which both hid a possible post-INT imbalance from the gate and
+            # left the emitter without a slot index for those instructions.
             succs = [i.next_ip]
         elif i.kind == JCC:
             succs = [i.next_ip, i.target]
@@ -411,22 +416,32 @@ def check_destackable(scan, *, boundary_addrs=frozenset(),
                             dispatch_addrs=dispatch_addrs)
 
 
-def _emit_vstack(i, blk, cs) -> bool:
-    """Emit the VIRTUAL-STACK form of a supported stack-family instruction
-    (Python list ``_vs``; masking mirrors the mechanical mem.ww).  Returns
-    False for non-stack instructions (delegate to the shared translator)."""
+def _slot(n: int) -> str:
+    return f"_slot_{n}"
+
+
+def _emit_vstack(i, blk, cs, depth: int) -> bool:
+    """Emit a supported stack-family instruction as PLAIN LOCALS.
+
+    ``depth`` is the proven virtual-stack depth (in slots) on entry to this
+    instruction -- :func:`check_composable` establishes a UNIQUE depth per ip,
+    so every push/pop resolves statically to a numbered slot variable and no
+    stack object survives in the generated body.  A push at depth ``d`` writes
+    slot ``d``; a pop at depth ``d`` reads slot ``d-1``.  Masking mirrors the
+    mechanical ``mem.ww``.  Returns False for non-stack instructions (delegate
+    to the shared translator)."""
     op = i.op
     if op in _PUSH_R16:
-        blk.append(f"_vs.append({_reg16(op & 7)} & 0xFFFF)")
+        blk.append(f"{_slot(depth)} = {_reg16(op & 7)} & 0xFFFF")
         return True
     if op in _POP_R16:
-        blk.append(f"{_reg16(op & 7)} = _vs.pop()")
+        blk.append(f"{_reg16(op & 7)} = {_slot(depth - 1)}")
         return True
     if op in _PUSH_SEG:
-        blk.append(f"_vs.append({SEGS[(op >> 3) & 3]} & 0xFFFF)")
+        blk.append(f"{_slot(depth)} = {SEGS[(op >> 3) & 3]} & 0xFFFF")
         return True
     if op in _POP_SEG:
-        blk.append(f"{SEGS[(op >> 3) & 3]} = _vs.pop()")
+        blk.append(f"{SEGS[(op >> 3) & 3]} = {_slot(depth - 1)}")
         return True
     if op in (0x68, 0x6A):
         pr = _patched_read(i, cs)
@@ -434,32 +449,34 @@ def _emit_vstack(i, blk, cs) -> bool:
             if op == 0x6A:
                 blk.append(f"_pi = {pr}")
                 blk.append("_pi = (_pi | 0xFF00) if (_pi & 0x80) else _pi")
-                blk.append("_vs.append(_pi & 0xFFFF)")
+                blk.append(f"{_slot(depth)} = _pi & 0xFFFF")
             else:
-                blk.append(f"_vs.append(({pr}) & 0xFFFF)")
+                blk.append(f"{_slot(depth)} = ({pr}) & 0xFFFF")
             return True
         imm = (i.imm or 0) & 0xFFFF
         if op == 0x6A and imm & 0x80:
             imm |= 0xFF00
-        blk.append(f"_vs.append(0x{imm & 0xFFFF:X})")
+        blk.append(f"{_slot(depth)} = 0x{imm & 0xFFFF:X}")
         return True
     if op == 0xFF and i.reg == 6:
-        blk.append(f"_vs.append(({_rm_read(i, True)}) & 0xFFFF)")
+        blk.append(f"{_slot(depth)} = ({_rm_read(i, True)}) & 0xFFFF")
         return True
     if op == 0x8F and i.reg == 0:
-        blk.append("_t = _vs.pop()")
+        blk.append(f"_t = {_slot(depth - 1)}")
         blk.extend(_rm_write_lines(i, True, "_t"))
         return True
     if op == 0x60:                          # pusha (0 placeholder for sp)
-        blk.append("_vs.extend((ax & 0xFFFF, cx & 0xFFFF, dx & 0xFFFF, "
-                   "bx & 0xFFFF, 0, bp & 0xFFFF, si & 0xFFFF, di & 0xFFFF))")
+        for k, r in enumerate(("ax", "cx", "dx", "bx")):
+            blk.append(f"{_slot(depth + k)} = {r} & 0xFFFF")
+        blk.append(f"{_slot(depth + 4)} = 0")
+        for k, r in enumerate(("bp", "si", "di"), start=5):
+            blk.append(f"{_slot(depth + k)} = {r} & 0xFFFF")
         return True
     if op == 0x61:                          # popa (discards the saved sp)
-        for r in ("di", "si", "bp"):
-            blk.append(f"{r} = _vs.pop()")
-        blk.append("_vs.pop()")
-        for r in ("bx", "dx", "cx", "ax"):
-            blk.append(f"{r} = _vs.pop()")
+        for k, r in enumerate(("di", "si", "bp"), start=1):
+            blk.append(f"{r} = {_slot(depth - k)}")
+        for k, r in enumerate(("bx", "dx", "cx", "ax"), start=5):
+            blk.append(f"{r} = {_slot(depth - k)}")
         return True
     return False
 
@@ -487,8 +504,9 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     callees = callees or {}
     if proposal.get("refusals"):
         raise Refusal("contract-not-promotable")
-    check_composable(scan, callees=callees, boundary_addrs=boundary_addrs,
-                     dispatch_addrs=dispatch_addrs)
+    vdepth = check_composable(scan, callees=callees,
+                              boundary_addrs=boundary_addrs,
+                              dispatch_addrs=dispatch_addrs)
     # flag liveness with the composed callees' exit-flag contributions, so a
     # `call G; jnz` idiom is analysed exactly as the mechanical emitter does.
     cc = {ip: CalleeContract(
@@ -548,16 +566,23 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     A("_PARITY = tuple((1 - bin(v).count('1') % 2) == 1 for v in range(256))")
     A('')
     A('')
-    argl = (["_base=0"] if needs_plat else []) \
+    # PUBLIC CONTRACT SURFACE: semantic inputs are ANONYMOUS POSITIONAL
+    # parameters in contract order -- no caller needs to know a register
+    # identity.  The compat/platform channel stays keyword-only and private.
+    # Register-named locals survive INSIDE the body (a pure alpha-rename with
+    # no structural content; see docs/abi_end_state.md).
+    pos = [f"arg_{k}" for k in range(len(params))]
+    compat_argl = (["_base=0"] if needs_plat else []) \
         + (["_df=0"] if df_livein else []) \
-        + (["_flags_in=2"] if flags_livein else []) \
-        + [f"{r}=0" for r in params]
-    args = ", ".join(argl)
+        + (["_flags_in=2"] if flags_livein else [])
     _head = "mem, plat" if needs_plat else "mem"
-    A(f"def _abi_core({_head}, *, {args}):" if args
-      else f"def _abi_core({_head}):")
+    _sig = ", ".join([_head] + [f"{p}=0" for p in pos]
+                     + (["*"] + compat_argl if compat_argl else []))
+    A(f"def _abi_core({_sig}):")
     body: list[str] = []
     B = body.append
+    for p, r in zip(pos, params):
+        B(f"{r} = {p}")
     B("_cost = 0")
     B("cf = pf = af = zf = sf = of = df = intf = False")
     if flags_livein:
@@ -569,7 +594,6 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
         B("df = _df != 0    # caller DF (hidden compat input)")
     B("_fmask = 0")
     B(f"cs = 0x{cs:04X}")
-    B("_vs = []")
     B(f"bb = {bb_of[scan.entry]}")
     B("_iters = 0")
     B("while True:")
@@ -635,7 +659,7 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
                 _emit_int(i, blk, count)
             elif i.op in _PORT_IO:
                 _emit_portio(i, blk, count)
-            elif not _emit_vstack(i, blk, cs):
+            elif not _emit_vstack(i, blk, cs, vdepth[ip]):
                 _translate(i, blk, flag_written, cs)
             nxt = i.next_ip
             if nxt in bb_of and nxt != ip:
@@ -656,8 +680,10 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
                     for f in ("cf", "pf", "af", "zf", "sf", "of",
                               "df", "intf"))
     B(f"_flags = ({fw}) & _fmask")
-    out_dict = ", ".join(f"'{r}': {r} & 0xFFFF" for r in returns)
-    B("return {" + out_dict + "}, "
+    # results are POSITIONAL, in contract order -- no call site indexes a
+    # result by register name.
+    out_tup = ", ".join(f"{r} & 0xFFFF" for r in returns)
+    B(f"return ({out_tup}{',' if len(returns) == 1 else ''}), "
       "{'flags': _flags, 'fmask': _fmask, 'cost': _cost}")
     for ln in body:
         A(f"    {ln}")
@@ -666,23 +692,26 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     if not returns:
         ret_doc, ret_line = "None", "    return None"
     elif len(returns) == 1:
-        ret_doc = returns[0]
-        ret_line = f"    return _o['{returns[0]}']"
+        ret_doc = "one value"
+        ret_line = "    return _o[0]"
     else:
-        ret_doc = "(" + ", ".join(returns) + ")"
-        ret_line = ("    return ("
-                    + ", ".join(f"_o['{r}']" for r in returns) + ")")
+        ret_doc = f"{len(returns)} values"
+        ret_line = "    return _o"
     # the public entry hides the compat channel; a needs_plat core still
     # takes plat (the caller of the ABI graph supplies it) and starts the
     # virtual clock at 0.
     pub_head = "mem, plat" if needs_plat else "mem"
-    sem_argl = ([a for a in argl if not a.startswith("_base")])
-    psig = ", ".join([pub_head] + (["*"] if sem_argl else []) + sem_argl)
-    fwd = ", ".join(f"{a.split('=')[0]}={a.split('=')[0]}" for a in sem_argl)
+    pub_compat = [a for a in compat_argl if not a.startswith("_base")]
+    psig = ", ".join([pub_head] + [f"{p}=0" for p in pos]
+                     + (["*"] + pub_compat if pub_compat else []))
+    fwd = ", ".join(pos + [f"{a.split('=')[0]}={a.split('=')[0]}"
+                           for a in pub_compat])
     core_call = "mem, plat" if needs_plat else "mem"
     A(f"def {public}({psig}):")
     A(f'    """Public ABI-recovered entry {prov}: semantic contract only.')
-    A(f'    Returns {ret_doc}."""')
+    A(f'    Parameters are positional and anonymous; returns {ret_doc}.')
+    A(f'    Historical roles, in order: {", ".join(params) or "(none)"}')
+    A(f'    -> {", ".join(returns) or "(none)"}."""')
     A(f"    _o, _c = _abi_core({core_call}{', ' + fwd if fwd else ''})")
     A(ret_line)
     A('')
@@ -701,10 +730,15 @@ def _emit_composed_call(blk, c: CoreContract, count) -> None:
     point of the de-stacked contract.  A needs_plat callee also receives
     ``plat`` and the absolute virtual time at the call site (``_base +
     _cost + offset-in-block``), exactly as the mechanical composition."""
-    head = ["mem, plat"] if c.needs_plat else ["mem"]
-    kw = list(head)
+    kw = ["mem, plat"] if c.needs_plat else ["mem"]
+    # semantic inputs go POSITIONALLY, in the callee's contract order
+    kw += [str(r) for r in c.inputs]
     if c.needs_plat:
-        off = count - 1
+        # the callee's _base is its ENTRY virtual time -- reached AFTER this
+        # call executes, so it INCLUDES the call (count already counts this
+        # instruction).  Mirrors emit_cpuless (upstream fix c3686c4: count-1
+        # anchored the callee's plat effects one instruction early).
+        off = count
         kw.append("_base=_base + _cost" if off == 0
                   else f"_base=_base + _cost + {off}")
     if c.df_livein:
@@ -717,10 +751,9 @@ def _emit_composed_call(blk, c: CoreContract, count) -> None:
                         for f in ("cf", "pf", "af", "zf", "sf", "of",
                                   "df", "intf"))
         kw.append(f"_flags_in=((_flags_in & ~_fmask) | (({fw}) & _fmask))")
-    kw += [f"{r}={r}" for r in c.inputs]
     blk.append(f"_o, _c = {_core_alias(c.stem)}({', '.join(kw)})")
-    for r in c.returns:
-        blk.append(f"{r} = _o['{r}']")
+    for n, r in enumerate(c.returns):
+        blk.append(f"{r} = _o[{n}]")
     blk.append("_gm = _c['fmask']")
     blk.append("if _gm:")
     blk.append("    _gf = _c['flags']")

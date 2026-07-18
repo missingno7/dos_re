@@ -50,10 +50,21 @@ def test_destacked_core_matches_mechanical_push_pop():
     mech, core, prop, mod = _emit_pair("1010:0300", LEAF_PUSH)
     rep = diff_one(mech, core, prop, states=48)
     assert rep["ok"], rep["mismatches"][:3]
-    # the ABI core wrote NOTHING to memory (its stack is virtual)
+    # the ABI core wrote NOTHING to memory (its stack is gone)
     m = TraceMem(7)
-    core(m, ax=1, bx=2)
+    core(m, 1, 2)          # positional: (ax, bx) in contract order
     assert m.writes == []
+
+
+def test_no_stack_object_survives_in_the_body():
+    """The proven depth map resolves push/pop to numbered slot LOCALS -- no
+    list, no runtime stack discipline, in the emitted core."""
+    ir = _ir({"1010:0300": LEAF_PUSH})
+    scans, _ = build_scans(ir)
+    prop = infer_contracts(ir)["functions"]["1010:0300"]
+    src, _ = emit_abi.emit_abi_core(scans["1010:0300"], prop, "1010:0300")
+    assert "_vs" not in src and ".append(" not in src and ".pop()" not in src
+    assert "_slot_0 = bx & 0xFFFF" in src and "bx = _slot_0" in src
 
 
 def test_destacked_core_matches_mechanical_branchy_memwrite():
@@ -62,16 +73,16 @@ def test_destacked_core_matches_mechanical_branchy_memwrite():
     assert rep["ok"], rep["mismatches"][:3]
     # semantic memory writes DO happen (and are compared by the diff)
     m = TraceMem(7)
-    core(m, ax=1, di=0x10, ds=0x1234)
+    core(m, 1, 0x10, 0x1234)   # positional: (ax, di, ds)
     assert m.writes == [(0x1234, 0x10, 1, 2)]
 
 
 def test_public_entry_over_the_one_core():
     _, core, prop, mod = _emit_pair("1010:0300", LEAF_PUSH)
     pub = getattr(mod, "abi_1010_0300")
-    out = pub(TraceMem(3), ax=2, bx=9)
-    o, _ = core(TraceMem(3), ax=2, bx=9)
-    assert out == tuple(o[r] for r in prop["returns"]) or out == o[prop["returns"][0]]
+    out = pub(TraceMem(3), 2, 9)
+    o, _ = core(TraceMem(3), 2, 9)
+    assert out == (o if len(prop["returns"]) != 1 else o[0])
 
 
 def test_gate_refuses_stack_addressed_memory():
@@ -174,7 +185,8 @@ def test_near_call_composition_matches_mechanical():
     # composed call, no ret-addr writes: 10 + 3 + 1 = 14, memory untouched
     m = TraceMem(1)
     o, c = kmod._abi_core(m)
-    assert o["ax"] == 14
+    ax_at = list(census["functions"][kk]["returns"]).index("ax")
+    assert o[ax_at] == 14
     assert m.writes == []
 
     # --- mechanical reference: compose the callee contract, same result ---
@@ -205,4 +217,4 @@ def test_near_call_composition_matches_mechanical():
     mo, mc = kmech.func_1010_0000(TraceMem(1), sp=0x1000, ss=0x7000)
     assert mo["ax"] == 14
     # observed returns + cost identical (the composed glue is exact)
-    assert o["ax"] == mo["ax"] and c["cost"] == mc["cost"]
+    assert o[ax_at] == mo["ax"] and c["cost"] == mc["cost"]
