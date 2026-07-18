@@ -42,6 +42,7 @@ from dos_re.lift.ir import (apply_desmc, desmc_operand_slots,  # noqa: E402
                             scan_from_ir_record)
 from dos_re.lift.cpuless import abi_scan  # noqa: E402
 from dos_re.lift import emit_cpuless  # noqa: E402
+from dos_re.lift import dispatch as lift_dispatch  # noqa: E402
 
 
 def _scan_for(rec: dict, desmc: bool):
@@ -63,8 +64,122 @@ def _scan_for(rec: dict, desmc: bool):
     return scan
 
 
+def _absorbed_scan(ir, key, rec, desmc, absorbed_arms):
+    """The scan to promote ``key`` from, with its dispatch ARMS fused in (see
+    :func:`dos_re.lift.dispatch.absorb_dispatch_arms`).  Identical to
+    :func:`_scan_for` when the key absorbs nothing."""
+    scan = _scan_for(rec, desmc)
+    arms = absorbed_arms.get(key)
+    if not arms:
+        return scan
+    cs = int(key.split(":")[0], 16)
+    arm_scans = {ip: _scan_for(ir["functions"][f"{cs:04X}:{ip:04X}"], desmc)
+                 for ip in arms if ip not in scan.insts}
+    if not arm_scans:
+        return scan
+    return lift_dispatch.absorb_dispatch_arms(scan, arm_scans)
+
+
+def _static_call_targets(ir) -> set[str]:
+    """Every "CS:IP" that some function CALLS statically (near or far).  An
+    address that is only ever a jump-table landing is not in this set -- that is
+    what distinguishes a shared-epilogue switch ARM from a genuine function the
+    dispatcher tail-calls."""
+    out: set[str] = set()
+    for key, rec in ir["functions"].items():
+        kcs = int(key.split(":")[0], 16)
+        for t in (rec.get("calls_near") or []):
+            out.add(f"{kcs:04X}:{int(t, 16):04X}")
+        for far in (rec.get("calls_far") or []):
+            fs, fo = far
+            out.add(f"{int(fs, 16):04X}:{int(fo, 16):04X}")
+    return out
+
+
+def _plan_arm_absorption(ir, wanted, dyn_evidence, desmc):
+    """Decide which candidates are dispatch ARMS and who owns them.
+
+    A candidate is an ARM when it is an OBSERVED near jump-table target of some
+    container's site, in the container's own segment, and is NEVER a static
+    call target anywhere in the IR (so nothing but the jump table can reach it).
+    Its OWNER is the containing candidate that dispatches to it and is not
+    itself an arm -- the lowest such entry, deterministically.
+
+    Returns ``(arm_owner, absorbed_arms, refusals)``: the arm key -> owner key
+    map, the owner key -> absorbed arm offsets map, and the arms that were
+    REFUSED absorption (arm key -> slug), which stay standalone candidates and
+    keep blocking their container honestly."""
+    called = _static_call_targets(ir)
+    wanted_set = {k.upper() for k in wanted}
+    # pass 1: every (container, arm) pair the evidence proposes
+    proposals: dict[str, set[str]] = {}         # container key -> arm keys
+    for key in sorted(wanted_set):
+        rec = ir["functions"].get(key)
+        if rec is None:
+            continue
+        cs = int(key.split(":")[0], 16)
+        try:
+            scan = _scan_for(rec, desmc)
+        except (emit_cpuless.Refusal, ValueError):
+            continue
+        arms = {f"{cs:04X}:{ip:04X}"
+                for ip in lift_dispatch.dispatch_arm_candidates(
+                    scan, cs, dyn_evidence, include_in_scan=True)}
+        # An arm need not be a promotion CANDIDATE -- it is a fragment of this
+        # container either way; what it must be is an IR-known, liftable
+        # address nothing calls statically.
+        arms = {a for a in arms
+                if a not in called
+                and ir["functions"].get(a, {}).get("liftable")}
+        if arms:
+            proposals[key] = arms
+    all_arms = set().union(*proposals.values()) if proposals else set()
+    arm_owner: dict[str, str] = {}
+    absorbed: dict[str, list[int]] = {}
+    refusals: dict[str, str] = {}
+    for key in sorted(proposals):
+        if key in all_arms:
+            continue        # a container that is itself an arm: its owner wins
+        cs = int(key.split(":")[0], 16)
+        for arm in sorted(proposals[key]):
+            if arm in arm_owner:
+                continue    # already owned (first container wins, sorted)
+            arm_owner[arm] = key
+            absorbed.setdefault(key, []).append(int(arm.split(":")[1], 16))
+    # pass 2: prove each container's fusion, dropping any that refuses
+    for key in sorted(absorbed):
+        rec = ir["functions"][key]
+        cs = int(key.split(":")[0], 16)
+        container = _scan_for(rec, desmc)
+        arm_scans = {}
+        for ip in absorbed[key]:
+            akey = f"{cs:04X}:{ip:04X}"
+            if ip in container.insts:
+                continue        # an intra-scan landing: owned, nothing to fuse
+            try:
+                arm_scans[ip] = _scan_for(ir["functions"][akey], desmc)
+            except (emit_cpuless.Refusal, ValueError):
+                refusals[akey] = "arm-not-liftable"
+        for ip in sorted(arm_scans):
+            try:
+                lift_dispatch.absorb_dispatch_arms(container, {ip: arm_scans[ip]})
+            except lift_dispatch.ArmAbsorptionRefusal as e:
+                refusals[f"{cs:04X}:{ip:04X}"] = str(e)
+        keep = [ip for ip in absorbed[key]
+                if f"{cs:04X}:{ip:04X}" not in refusals]
+        for ip in absorbed[key]:
+            if f"{cs:04X}:{ip:04X}" in refusals:
+                arm_owner.pop(f"{cs:04X}:{ip:04X}", None)
+        if keep:
+            absorbed[key] = keep
+        else:
+            del absorbed[key]
+    return arm_owner, absorbed, refusals
+
+
 def _gate_dyn_evidence(scan, cs, dyn_evidence, done, dispatch_owner,
-                       contracts_by_cs, iret_keys=frozenset()) -> None:
+                       contracts_by_cs, iret_keys=frozenset(),
+                       extra_leaders=frozenset()) -> None:
     """Evidence-gated dynamic dispatch (tier 9): a function containing
     near-indirect transfers promotes only when every OBSERVED runtime target
     of its sites (the canonical-demo probe evidence) is dispatchable --
@@ -100,7 +215,10 @@ def _gate_dyn_evidence(scan, cs, dyn_evidence, done, dispatch_owner,
             tcs, tip = (int(x, 16) for x in tgt.split(":"))
             if i.kind == "jmp_ind" and tcs == cs:
                 if leaders is None:
-                    leaders = set(scan.block_leaders())
+                    # an ABSORBED dispatch arm is a FORCED block leader (the
+                    # emitter's alt-entry rule), so it is an intra-function
+                    # landing even though no static edge targets it.
+                    leaders = set(scan.block_leaders()) | set(extra_leaders)
                 if tip in leaders:
                     continue                    # intra-function landing
             if tgt in dispatch_owner:
@@ -332,6 +450,24 @@ def main(argv=None) -> int:
                          "flag such an address falls back to its GENERATED "
                          "body (which is instruction-exact), keeping the whole "
                          "graph gate-admissible.")
+    ap.add_argument("--absorb-dispatch-arms", action="store_true",
+                    help="DISPATCH-ARM ABSORPTION (graph completeness): a "
+                         "switch ARM reached only through a container's near "
+                         "jump table is an ALTERNATE ENTRY into that "
+                         "container's body, not a standalone function -- it "
+                         "shares the container's frame and epilogue, which is "
+                         "exactly why it refuses `leave-without-enter` / "
+                         "`frame-restore-without-establish` in isolation and "
+                         "then holds the container out of promotion via "
+                         "`dyn-target-unpromoted`.  With this flag the arms "
+                         "(observed dyn targets in the same segment that are "
+                         "never a STATIC call target) are fused into their "
+                         "container's scan and declared owned alternate "
+                         "entries; they are dropped from the standalone "
+                         "candidate set.  Requires --dyn-evidence.  Every "
+                         "fusion is proven byte-identical on the overlap or "
+                         "REFUSED (arm-overlap-byte-conflict / "
+                         "arm-establishes-own-frame / arm-not-liftable).")
     ap.add_argument("--entries", default="",
                     help="comma-separated CS:IP candidates (default: all)")
     ap.add_argument("--limit", type=int, default=0,
@@ -387,6 +523,18 @@ def main(argv=None) -> int:
 
     wanted = ([e.strip().upper() for e in args.entries.split(",") if e.strip()]
               or sorted(ir["functions"]))
+
+    # DISPATCH-ARM ABSORPTION (--absorb-dispatch-arms): resolve each switch arm
+    # as an ALTERNATE ENTRY owned by its container instead of a standalone
+    # function.  arm_owner maps the arm key -> the container key that absorbs
+    # it; absorbed_arms maps the container key -> its absorbed arm offsets.
+    arm_owner: dict[str, str] = {}
+    absorbed_arms: dict[str, list[int]] = {}
+    arm_refusals: dict[str, str] = {}
+    if args.absorb_dispatch_arms:
+        arm_owner, absorbed_arms, arm_refusals = _plan_arm_absorption(
+            ir, wanted, dyn_evidence, args.desmc)
+        wanted = [k for k in wanted if k not in arm_owner]
 
     # FIXPOINT over the call DAG (tier 4, call-ABI composition): each round
     # promotes every candidate whose direct near callees are all already
@@ -493,12 +641,13 @@ def main(argv=None) -> int:
             cs = int(key.split(":")[0], 16)
             try:
                 emit_cpuless.check_promotable(
-                    _scan_for(rec, args.desmc),
+                    _absorbed_scan(ir, key, rec, args.desmc, absorbed_arms),
                     excluded_addrs={ip for (xcs, ip) in excluded if xcs == cs},
                     callees=contracts_by_cs.setdefault(cs, {}),
                     far_callees=far_contracts,
                     dispatch_addrs={ip for (xcs, ip) in dispatch_addrs
-                                    if xcs == cs},
+                                    if xcs == cs}
+                    | set(absorbed_arms.get(key, ())),
                     boundary_addrs={ip for (xcs, ip) in boundary_addrs
                                     if xcs == cs},
                     plat_far_segs=plat_far_segs, plat_farcalls=plat_farcalls,
@@ -512,12 +661,14 @@ def main(argv=None) -> int:
             rec = ir["functions"][key]
             cs = int(key.split(":")[0], 16)
             excl_ips = {ip for (xcs, ip) in excluded if xcs == cs}
-            disp_ips = {ip for (xcs, ip) in dispatch_addrs if xcs == cs}
+            arm_ips = set(absorbed_arms.get(key, ()))
+            disp_ips = {ip for (xcs, ip) in dispatch_addrs if xcs == cs} \
+                | arm_ips
             head_ips = {ip for (xcs, ip) in boundary_addrs if xcs == cs}
             contracts = contracts_by_cs.setdefault(cs, {})
             injected_self = None
             try:
-                scan = _scan_for(rec, args.desmc)
+                scan = _absorbed_scan(ir, key, rec, args.desmc, absorbed_arms)
                 # DIRECT SELF-RECURSION: compose the self-call with a
                 # conservative full-bundle contract (the inductive fixed
                 # point: assuming the callee balanced/side-effect-full, the
@@ -547,7 +698,8 @@ def main(argv=None) -> int:
                 prune_removed[key] = emit_cpuless.output_prune_removed(
                     abi, spec.sp_output)
                 _gate_dyn_evidence(scan, cs, dyn_evidence, tentative,
-                                   dispatch_owner, contracts_by_cs, iret_keys)
+                                   dispatch_owner, contracts_by_cs, iret_keys,
+                                   extra_leaders=arm_ips)
                 _gate_vector_evidence(scan, cs, vec_evidence, tentative,
                                       contracts_by_cs, iret_keys)
                 recovered_src = emit_cpuless.emit_recovered(
@@ -618,6 +770,17 @@ def main(argv=None) -> int:
               f"{len(override_time_inexact):4d} "
               + ", ".join(f"{k} {n}" for k, n in sorted(_vt.items()))
               + " -- kept on the instruction-exact GENERATED body")
+    if args.absorb_dispatch_arms:
+        n_owned = sum(1 for a, o in arm_owner.items() if o in set(promoted))
+        print(f"  dispatch arms ABSORBED          {len(arm_owner):4d} "
+              f"as alternate entries of {len(absorbed_arms)} container(s); "
+              f"{n_owned} owned by a PROMOTED container "
+              f"(dropped from the standalone candidate set)")
+        if arm_refusals:
+            _ar = Counter(arm_refusals.values())
+            print(f"  dispatch arms REFUSED absorption {len(arm_refusals):4d} "
+                  + ", ".join(f"{k} {n}" for k, n in sorted(_ar.items()))
+                  + " -- kept standalone (their container stays blocked)")
     for reason, keys in sorted(refused.items(), key=lambda kv: -len(kv[1])):
         print(f"  refused: {reason:<28} {len(keys):4d}")
     if promoted:
@@ -636,6 +799,11 @@ def main(argv=None) -> int:
                                       for k in sorted(overrides)
                                       if k in override_vtime},
             "override_time_inexact": dict(sorted(override_time_inexact.items())),
+            # DISPATCH-ARM ABSORPTION: arm key -> owning container key (the arm
+            # is an alternate entry of that container's body, not a function),
+            # and the arms whose fusion was REFUSED.
+            "absorbed_arms": dict(sorted(arm_owner.items())),
+            "absorbed_arm_refusals": dict(sorted(arm_refusals.items())),
             "refused": {k: sorted(v) for k, v in sorted(refused.items())},
             "dead_output_prune": {
                 "policy": "keep register outputs live at >=1 clean return exit "
