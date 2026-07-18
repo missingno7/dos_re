@@ -113,3 +113,35 @@ def test_retro_patch_does_not_clobber_a_delegation_alias(corpus):
         assert S.generated(PKG, "1010:2000") is real_callee
     finally:
         sys.modules.pop(f"{PKG}.oracle_alias", None)
+
+
+def test_an_override_for_an_address_the_corpus_LACKS_names_the_address(corpus):
+    """A stale entry must break the build, and say WHICH entry.
+
+    The bare ModuleNotFoundError this used to surface named a generated module
+    path, not the override that referenced it, which reads as a corpus bug
+    rather than a registry bug -- the opposite of where the fix belongs.
+    """
+    with pytest.raises(RuntimeError, match=r"1010:FFFF has no generated counterpart"):
+        S.install_overrides(PKG, {"1010:FFFF": lambda *a, **k: None})
+
+
+def test_a_missing_CALLEE_is_not_disguised_as_a_stale_registry_entry(corpus):
+    """The address exists; something it imports does not. That is a corpus
+    frontier and must keep its own error rather than be relabelled."""
+    broken = types.ModuleType(f"{PKG}.func_1010_5000")
+    sys.modules[f"{PKG}.func_1010_5000"] = broken
+
+    def loader(*a, **k):
+        raise ModuleNotFoundError("No module named 'nope'", name="nope")
+
+    import importlib as _il
+    real_import = _il.import_module
+    _il.import_module = lambda n, *a, **k: (loader() if n.endswith("func_1010_5000")
+                                            else real_import(n, *a, **k))
+    try:
+        with pytest.raises(ModuleNotFoundError, match="nope"):
+            S.install_overrides(PKG, {"1010:5000": lambda *a, **k: None})
+    finally:
+        _il.import_module = real_import
+        sys.modules.pop(f"{PKG}.func_1010_5000", None)

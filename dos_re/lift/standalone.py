@@ -290,7 +290,15 @@ def install_overrides(package: str, overrides: "dict") -> "list[str]":
     for key, impl in overrides.items():
         name = module_name(key)
         full = f"{package}.{name}"
-        real = importlib.import_module(full)          # raises CpuStandaloneWitness via load_recovered
+        try:
+            real = importlib.import_module(full)
+        except ModuleNotFoundError as e:
+            if e.name != full:                        # a missing CALLEE, not this address
+                raise
+            raise RuntimeError(
+                f"override for {key} has no generated counterpart ({full}). The corpus "
+                f"was regenerated and this address is no longer in it -- fix or drop the "
+                f"override; it must not silently stop applying.") from e
         original = getattr(real, name)
         shadow = types.ModuleType(full)
         shadow.__dict__.update(real.__dict__)
