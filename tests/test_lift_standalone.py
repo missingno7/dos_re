@@ -97,3 +97,50 @@ def test_run_deep_completes_a_deep_recursion_and_propagates():
 
     with pytest.raises(ValueError, match="propagated verbatim"):
         run_deep(boom)
+
+
+def test_uninstall_import_guard_restores_and_is_idempotent():
+    """An install with no teardown arms the wall process-globally -- the failure mode that turned a
+    whole downstream test session red from one bare call. Teardown must be available and safe."""
+    import builtins
+
+    from dos_re.lift.standalone import install_import_guard, uninstall_import_guard
+
+    original = builtins.__import__
+    install_import_guard()
+    assert builtins.__import__ is not original, "the guard must actually be armed"
+    assert uninstall_import_guard() is True
+    assert builtins.__import__ is original, "teardown must restore the previous __import__"
+    assert uninstall_import_guard() is False, "idempotent: safe as unconditional teardown"
+    assert builtins.__import__ is original
+
+
+def test_import_guard_context_disarms_even_when_the_block_raises():
+    import builtins
+
+    import pytest as _pytest
+
+    from dos_re.lift.standalone import CpuStandaloneWitness, import_guard
+
+    original = builtins.__import__
+    with _pytest.raises(CpuStandaloneWitness):
+        with import_guard():
+            __import__("dos_re.cpu")
+    assert builtins.__import__ is original, "the block raising must not leave the wall armed"
+
+
+def test_nested_guards_unwind_in_order():
+    """The stack form matters: a host may arm a broader guard around a narrower one."""
+    import builtins
+
+    from dos_re.lift.standalone import install_import_guard, uninstall_import_guard
+
+    original = builtins.__import__
+    install_import_guard()
+    first = builtins.__import__
+    install_import_guard()
+    assert builtins.__import__ is not first
+    uninstall_import_guard()
+    assert builtins.__import__ is first, "the inner teardown restores the OUTER guard, not the base"
+    uninstall_import_guard()
+    assert builtins.__import__ is original

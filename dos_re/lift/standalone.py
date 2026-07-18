@@ -35,6 +35,7 @@ contract, parameterised by the port's corpus package.
 from __future__ import annotations
 
 import builtins
+import contextlib
 import importlib
 import sys
 
@@ -87,9 +88,19 @@ def forbidden_hit(dotted: str, forbidden) -> "str | None":
     return None
 
 
+#: Attribute each guard carries, holding the ``__import__`` it displaced.  Teardown reads it off the
+#: CURRENTLY-INSTALLED function rather than from a side stack, so a caller that restores
+#: ``builtins.__import__`` by hand (the older try/finally idiom) cannot desynchronise it, and nesting
+#: unwinds correctly because each guard remembers its own predecessor.
+_GUARD_PREV = "_dos_re_prev_import"
+
+
 def install_import_guard(extra_forbidden=()) -> None:
     """Arm the CPUless wall for this process. Fires only on an EXECUTED import, so pair it with a
-    STATIC import-graph lint for paths a given run does not take."""
+    STATIC import-graph lint for paths a given run does not take.
+
+    PROCESS-GLOBAL: prefer the :func:`import_guard` context manager, or pair this with
+    :func:`uninstall_import_guard`, unless the process exists only to run the walled code."""
     forbidden = tuple(BASE_FORBIDDEN) + tuple(extra_forbidden)
     real_import = builtins.__import__
 
@@ -104,7 +115,33 @@ def install_import_guard(extra_forbidden=()) -> None:
                 f"the VM runtime, or the CPU-ABI adapters.")
         return real_import(name, globals, locals, fromlist, level)
 
+    setattr(guarded, _GUARD_PREV, real_import)
     builtins.__import__ = guarded
+
+
+def uninstall_import_guard() -> bool:
+    """Disarm the currently-installed guard, restoring the ``__import__`` it displaced.
+
+    Returns True if a guard was armed. Idempotent and safe when none is, so it works as unconditional
+    teardown; nested guards unwind one level per call."""
+    prev = getattr(builtins.__import__, _GUARD_PREV, None)
+    if prev is None:
+        return False
+    builtins.__import__ = prev
+    return True
+
+
+@contextlib.contextmanager
+def import_guard(extra_forbidden=()):
+    """Arm the CPUless wall for a BLOCK, disarming it even if the block raises.
+
+    This is the form to use anywhere the process outlives the walled run (tests, a REPL, a host that
+    also drives the interpreted oracle); the bare install/uninstall pair is for a dedicated process."""
+    install_import_guard(extra_forbidden)
+    try:
+        yield
+    finally:
+        uninstall_import_guard()
 
 
 class FailLoudPlatform:
