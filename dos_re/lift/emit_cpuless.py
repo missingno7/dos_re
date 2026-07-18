@@ -1945,15 +1945,27 @@ def _flags_defined_by(i) -> frozenset:
 
 # --------------------------------------------------------------------------
 
-def _contract_inputs(scan, abi) -> list[str]:
+def _contract_inputs(scan, abi, boundary_addrs=frozenset()) -> list[str]:
     """The recovered function's input list.  ``sp`` joins only when the body
     has real stack traffic OR composed calls (both write the guest stack
     literally: pushed bytes and return-address bytes are observable state);
     balance keeps it out of the outputs.  Otherwise the RET-ABI sp read stays
-    the adapter's business."""
+    the adapter's business.
+
+    A BOUNDARY HEAD also forces ``sp``/``ss`` in, whatever the body does with
+    the stack.  :func:`_emit_boundary_observer` hands ``plat.boundary`` the
+    whole live bundle -- ``_DYN_REGS``, which includes ``sp`` -- and merges it
+    back, because a frame driver may deliver the game's own ISRs across the
+    park and those run on the guest stack.  Without this a head sitting in a
+    stack-free function (e.g. a two-instruction ``cmp [tick],0 ; jz self``
+    tick-wait) emitted ``'sp': sp`` against a signature that had no ``sp``
+    parameter -- a body that raises ``UnboundLocalError`` the first time the
+    head is reached.  Nothing caught it because the only head declared until
+    now happened to live in a function with calls in it."""
     needs_sp = any((_is_stack_family(i) and i.kind not in (RET, RETF))
                    or i.kind in (CALL, CALL_FAR)
                    for i in scan.insts.values())
+    needs_sp = needs_sp or any(i.ip in boundary_addrs for i in scan.insts.values())
     inputs = sorted(abi.inputs - {"sp"})
     if needs_sp:
         inputs = sorted(set(inputs) | {"sp", "ss"})
@@ -2016,7 +2028,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
     leaders = sorted(set(scan.block_leaders()) | set(alt_entries))
     bb_of = {ip: n for n, ip in enumerate(leaders)}
     has_dyn = any(_is_dyn(i) for i in scan.insts.values())
-    inputs = _contract_inputs(scan, abi)
+    inputs = _contract_inputs(scan, abi, boundary_addrs)
     outputs = _output_set(abi, sp_output)
 
     L: list[str] = []
@@ -2635,6 +2647,13 @@ generated DISPATCH table (.dispatch) to a DIRECT recovered call -- possibly at
 a dynamic-arrival alternate entry.  An unknown selector raises
 :class:`UnknownDispatchTarget` (a structured frontier witness).  There is NO
 fallback path: not to a CPU, not to a lifted graph, not to an interpreter.
+
+The ONE exception is a vectored INTERRUPT whose target is not game code at all
+-- the universal "chain to the previous handler" idiom leaves a ROM-BIOS entry
+in the vector, and ROM is ENVIRONMENT.  `ivec_exec` offers those to `plat.ivec`,
+the same declared device model that already owns `plat.intr` and `plat.outp`,
+before raising.  A platform is not a carrier: it has no CPU, executes no guest
+instructions, and a platform that does not implement the entry still fails loud.
 DO NOT hand-edit; regenerate."""
 import importlib
 
@@ -2698,7 +2717,20 @@ def ivec_exec(key, mem, plat, base, regs):
     """Dispatch one game-vectored interrupt (tier 12) to its recovered
     IRET-contract handler.  The CALLER owns the interrupt frame (already
     pushed; popped after); the handler is an ordinary recovered function
-    whose iret exits are plain returns."""
+    whose iret exits are plain returns.
+
+    If the vector points OUTSIDE the recovered program the target is not game
+    code and never will be: an ISR that chains to "the previous handler" is
+    holding whatever the environment installed, in practice a ROM-BIOS entry.
+    Those are offered to the platform's `ivec` before the witness is raised.
+    A platform that does not implement the entry re-raises, so an unmodelled
+    vector is still a loud frontier and not a silent no-op."""
+    if key not in HANDLERS:
+        service = getattr(plat, "ivec", None)
+        if service is not None:
+            out = service(key, base, regs)
+            if out is not None:
+                return out
     return _exec(HANDLERS, "ivec", key, mem, plat, base, regs)
 '''
 
@@ -2739,13 +2771,13 @@ def emit_adapter(scan, abi, key: str, *, signature: bytes,
                  recovered_import_base: str, needs_plat=False,
                  ret_kind: str = "near", dispatch_addrs=frozenset(),
                  df_livein=False, sp_output=False, ret_pop=0,
-                 flags_livein=False) -> str:
+                 flags_livein=False, boundary_addrs=frozenset()) -> str:
     """Generate the CPU-ABI adapter that occupies the lifted slot."""
     cs = int(key.split(":")[0], 16)
     entry = scan.entry
     name = f"lifted_{key.replace(':', '_').lower()}"
     rec = f"func_{key.replace(':', '_').lower()}"
-    inputs = _contract_inputs(scan, abi)
+    inputs = _contract_inputs(scan, abi, boundary_addrs)
     outputs = _output_set(abi, sp_output)
     alt_entries = sorted(frozenset(dispatch_addrs) & frozenset(scan.insts)
                          - frozenset({scan.entry}))

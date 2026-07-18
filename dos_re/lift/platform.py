@@ -403,6 +403,40 @@ class CPUlessPlatformRuntime:
             f"(argbytes {argbytes}) not implemented by the standalone CPUless "
             f"runtime: bind a platform-API adapter to service import thunks")
 
+    def ivec(self, key, cost, regs):
+        """Service a vectored interrupt whose target is NOT recovered game code.
+
+        An ISR that saves its vector's previous contents and tail-chains to
+        them -- the universal idiom -- holds whatever the environment left
+        there, which in this runtime's power-on image is the BIOS IRET stub
+        ``_init_bios_environment`` wrote at F000:FF53.  OVERKILL's IRQ0 handler
+        ``1010:06E5`` does exactly this (``jmp far cs:[0738]``), so a cold
+        CPUless run reaches it on the first chained tick.
+
+        THE RULE (``runtime_core.install_bios_environment_hooks``): every
+        ROM-BIOS entry a game can vector to must exist in the same form for
+        EVERY runtime that can reach it, or the runtimes model different
+        machines.  That rule was written for the interpreter and the VMless
+        path.  The CPUless path is a third runtime that can reach it and did
+        not have it -- the generated ``ivec_exec`` had no platform seam at all
+        -- so a cold run died at the first chained tick with nothing in the
+        game to blame.  This is the same drift the rule exists to stop, one
+        runtime later.
+
+        Delegates to the SAME :func:`_chain_iret_stub` the VMless verification
+        binding uses, so the two model one machine by construction rather than
+        by two implementations agreeing.  That helper VERIFIES the target: it
+        reads the first byte from live memory and requires ``0xCF``, so an
+        external handler that is not the stub still fails loud.  Anything that
+        is not a well-formed ``SEG:OFF`` key is declined (``None``) and
+        surfaces as the caller's frontier witness."""
+        self._carrier.instruction_count = self._entry + cost
+        try:
+            seg, off = (int(part, 16) for part in key.split(":"))
+        except ValueError:
+            return None
+        return _chain_iret_stub(self.mem, seg, off, regs)
+
     def boundary(self, head_cs, head_ip, resume_ip, regs, cost):
         """Boundary-head observer (standalone owner): advance the clock to
         the head and hand the pass to the scheduler callback -- which may

@@ -719,7 +719,7 @@ def main(argv=None) -> int:
                     needs_plat=spec.needs_plat, ret_kind=spec.ret_kind,
                     dispatch_addrs=disp_ips, df_livein=spec.df_livein,
                     sp_output=spec.sp_output, ret_pop=spec.ret_pop,
-                    flags_livein=spec.flags_livein)
+                    flags_livein=spec.flags_livein, boundary_addrs=head_ips)
             except emit_cpuless.Refusal as e:
                 if injected_self is not None:
                     contracts.pop(injected_self, None)
@@ -733,7 +733,7 @@ def main(argv=None) -> int:
                 frozenset() if spec.sp_output else frozenset({"sp"}))
             contract = emit_cpuless.CalleeContract(
                 name=f"func_{key.replace(':', '_').lower()}",
-                inputs=tuple(emit_cpuless._contract_inputs(scan, abi)),
+                inputs=tuple(emit_cpuless._contract_inputs(scan, abi, head_ips)),
                 outputs=tuple(sorted(out_regs)),
                 exit_flags=spec.exit_flags, needs_plat=spec.needs_plat,
                 ret_kind=spec.ret_kind, df_livein=spec.df_livein,
