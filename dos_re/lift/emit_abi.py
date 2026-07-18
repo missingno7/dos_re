@@ -237,7 +237,8 @@ def _vslot_delta(i) -> int | None:
 def check_composable(scan, *, callees=None, far_callees=None,
                      boundary_addrs=frozenset(),
                      dispatch_addrs=frozenset(),
-                     ss_globals_floor=None) -> dict[int, int]:
+                     ss_globals_floor=None,
+                     allow_unproven_ss=False) -> dict[int, int]:
     """Prove one function's machine-stack use is PURELY LOCAL so its stack
     can become Python locals -- allowing direct NEAR calls to already-
     emitted ABI cores (``callees``: target ip -> :class:`CoreContract`),
@@ -280,7 +281,51 @@ def check_composable(scan, *, callees=None, far_callees=None,
         if ok:
             ss_globals = True
         elif why == "computed-ss-address":
-            raise Refusal("computed-ss-address")
+            # A COMPUTED ss address is not automatically a refusal any more.
+            # The constant-offset rule above can only prove data that sits
+            # below the globals floor; a program addressing a 2-D array in
+            # the stack segment legitimately computes offsets past it, and
+            # refusing those refuses the whole function.
+            #
+            # So classify the accesses by ADDRESS SPACE instead
+            # (dos_re.lift.addrspace) and split the outcome three ways:
+            #
+            #   * a constant that provably reaches the live stack, or any
+            #     access that cannot be placed at all -> still refused, now
+            #     under its own name;
+            #   * a computed ss: address -> composable, but only against a
+            #     PROOF OBLIGATION the verifier must discharge (the two-run
+            #     sp discriminator).  Nothing is assumed benign here; the
+            #     obligation travels with the contract and an undischarged
+            #     one must never reach the VERIFIED ledger.
+            from .addrspace import classify_ss, ss_data_verdict
+            acc = classify_ss(scan, stack_floor=ss_globals_floor)
+            # `sp_independence_proven=True` asks the STRUCTURAL question --
+            # "if the evidence existed, would this shape be composable?" --
+            # and still refuses an ambiguous constant, which no amount of
+            # sp-independence evidence can rescue.
+            shaped, reason = ss_data_verdict(acc,
+                                             sp_independence_proven=True)
+            if not shaped:
+                raise Refusal(reason if reason.startswith("ambiguous-ss")
+                              else "computed-ss-address")
+            if not allow_unproven_ss:
+                # DEFAULT: still refuse.  The shape is composable, but the
+                # obligation is UNDISCHARGED -- the two-run sp discriminator
+                # that would prove these writes do not move with the stack
+                # pointer is not implemented yet.  Emitting the core now
+                # would hand the differential an "ss data" access that may
+                # actually be a frame slot; the differential excludes stack
+                # writes from comparison, so the error would be EXCLUDED
+                # rather than caught.  That is a false green, and a refusal
+                # is the only honest state until the evidence channel exists.
+                raise Refusal("computed-ss-address-unproven")
+            ss_globals = True
+            # The obligation is not stored here: it is DERIVABLE from the
+            # scan and the floor, so any consumer asks
+            # `addrspace.requires_sp_independence_proof(scan, floor)` rather
+            # than having it threaded through a return value that is a depth
+            # map.  One source of truth, no signature churn.
     cs_addrs = {ip for ip in scan.insts}
     if frozenset(boundary_addrs) & cs_addrs:
         raise Refusal("observer-in-function")
