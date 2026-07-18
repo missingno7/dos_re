@@ -727,7 +727,15 @@ the next major mechanical stage after the VMless graph converges.
   historical memory image stays authoritative; the canonical demo stays
   oracle-clean.  Complete when no public recovered contract contains a CPU
   object, register-named parameter, or return-address mechanics — and
-  unsupported ABI shapes fail loudly with evidence.
+  unsupported ABI shapes fail loudly with evidence.  **End state + acceptance
+  gate: `docs/abi_end_state.md`** — which machine concepts must be eliminated
+  before M4 (generic virtual stack, register-named public parameters,
+  dict-keyed results, dead flag computation), which may remain as
+  deterministic emission detail (CFG-shaped `bb` bodies, register-named
+  *locals*, partial-register widths — M4 analyses read the IR, not emitted
+  Python), and which must remain as private compatibility metadata
+  (`_fmask`, exact flag word, virtual cost).  Every function must end as a
+  de-stacked core OR a named exception class with a generated representation.
 - **M4 — DOS-layout dissolution.**  Historical memory structures are replaced
   with native objects, oracle verification retained through the generated
   bridge: historical memory views → authoritative native dataclasses and
