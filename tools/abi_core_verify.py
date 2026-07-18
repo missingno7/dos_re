@@ -293,6 +293,7 @@ def main(argv=None) -> int:
     spin_notes: list[str] = []
     slow: list[tuple[float, str]] = []
     failures: dict[str, list[str]] = {}
+    inconclusive: dict[str, str] = {}
     mech_cache: dict = {}
     fresh_ok: dict[str, str] = {}
 
@@ -357,9 +358,11 @@ def main(argv=None) -> int:
                 raised_states += rep.get("raised", 0)
                 if rep.get("note"):
                     spin_notes.append(f"{key}: {rep['note']}")
-                if rep["ok"]:
+                if rep.get("status") == "verified":
                     passed += 1
                     fresh_ok[key] = sigs[key]
+                elif rep.get("status") == "inconclusive":
+                    inconclusive[key] = rep.get("note", "inconclusive")
                 else:
                     failures[key] = rep["mismatches"][:3]
                 print(f"  [{done_n}/{len(futs)}] {key} "
@@ -417,11 +420,20 @@ def main(argv=None) -> int:
     for key, sig in todo:
         stem = key.replace(":", "_").lower()
         t0 = time.time()
-        mech_fn, _ = _fresh_mechanical(ir, key, mech_cache)
-        core_mod = importlib.import_module(f"{args.abi_base}.core_{stem}")
-        _apply_iter_cap()
-        rep = diff_one(mech_fn, core_mod._abi_core,
-                       census["functions"][key], states=args.states)
+        try:
+            mech_fn, _ = _fresh_mechanical(ir, key, mech_cache)
+            core_mod = importlib.import_module(f"{args.abi_base}.core_{stem}")
+            _apply_iter_cap()
+            rep = diff_one(mech_fn, core_mod._abi_core,
+                           census["functions"][key], states=args.states)
+        except Exception as e:                               # noqa: BLE001
+            # SAME handling as the worker path.  The sequential path let this
+            # propagate and killed the tool, while --jobs reported it as a
+            # failure: the same corpus produced a crash or a verdict depending
+            # only on how it was scheduled.  Scheduling must never change what
+            # is concluded -- found by the test asserting exactly that.
+            rep = {"ok": False, "status": "mismatch", "raised": 0,
+                   "mismatches": [f"verifier raised {type(e).__name__}: {e}"]}
         dt = (time.time() - t0) * 1000.0
         cost_ms[key] = int(dt)
         if dt >= args.slow_ms:
@@ -429,16 +441,21 @@ def main(argv=None) -> int:
         raised_states += rep["raised"]
         if rep.get("note"):
             spin_notes.append(f"{key}: {rep['note']}")
-        if rep["ok"]:
+        if rep.get("status") == "verified":
             passed += 1
             fresh_ok[key] = sig
+        elif rep.get("status") == "inconclusive":
+            # NOT cached: an inconclusive core has no positive evidence, and
+            # caching it would let "both sides failed identically" masquerade
+            # as a verified result on every later run.
+            inconclusive[key] = rep.get("note", "inconclusive")
         else:
             failures[key] = rep["mismatches"][:3]
 
     print(f"ABI-core differential over {len(keys)} de-stacked cores, "
           f"{args.states} seeded states each (mechanical reference emitted "
           f"fresh from the IR):")
-    print(f"  IDENTICAL to mechanical  {passed:4d}"
+    print(f"  VERIFIED identical       {passed:4d}"
           + (f"   ({cached} unchanged, from cache)" if cached else ""))
     print(f"  states raising on both sides (compared equal): "
           f"{raised_states}")
@@ -446,6 +463,13 @@ def main(argv=None) -> int:
         print(f"  note: {n}")
     for dt, key in sorted(slow, reverse=True)[:8]:
         print(f"  slow: {key} took {dt/1000.0:.1f}s")
+    if inconclusive:
+        # Reported prominently: these are NOT verified, and a reader who sees
+        # only a green line would otherwise count them as such.
+        print(f"  INCONCLUSIVE             {len(inconclusive):4d}"
+              f"   (every state raised; no return/compat ever compared)")
+        for key, note in sorted(inconclusive.items())[:8]:
+            print(f"    {key}: {note}")
     if failures:
         print(f"  MISMATCHED               {len(failures):4d}")
         for key, ms in sorted(failures.items()):
@@ -480,8 +504,13 @@ def main(argv=None) -> int:
              "verified": dict(sorted(fresh_ok.items()))},
             indent=1) + "\n", encoding="utf-8")
         print(f"  cache: {len(fresh_ok)} verified entries -> {cache_path}")
-    print("ABI-CORE DIFFERENTIAL PASSED: every de-stacked core IS its "
-          "mechanical function on every driven state.")
+    if inconclusive:
+        print(f"ABI-CORE DIFFERENTIAL: {passed} verified, "
+              f"{len(inconclusive)} INCONCLUSIVE (not established as "
+              f"equivalent, not cached).  No core diverged.")
+    else:
+        print("ABI-CORE DIFFERENTIAL PASSED: every de-stacked core IS its "
+              "mechanical function on every driven state.")
     return 0
 
 

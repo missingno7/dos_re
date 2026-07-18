@@ -133,9 +133,6 @@ class TraceMem:
         h = (lin * 2654435761 ^ self.seed * 40503) & 0xFFFFFFFF
         return (h >> 13) & 0xFF
 
-    def _store(self, seg: int) -> dict:
-        return self.shadow if seg == self.shadow_seg else self.data
-
     def rb(self, seg: int, off: int) -> int:
         return self._byte((seg << 4) + (off & 0xFFFF),
                           self._store_at(seg, off & 0xFFFF))
@@ -175,8 +172,10 @@ def _seeded_regs(params, state: int) -> dict[str, int]:
 def _ser(v) -> bytes:
     """Length-delimited, deterministic serialization of a logged value.
 
-    Unambiguous by construction: every scalar carries its own length, so no
-    two distinct structures serialize to the same bytes.  Feeds an incremental
+    Unambiguous by construction: every value carries a TYPE TAG and its own
+    length, and unsupported types refuse rather than falling back on
+    str().  (An earlier version shared one tag between tuple and list, so
+    _ser((1,)) == _ser([1]) and the claim below was false.)  Feeds an incremental
     SHA-256 rather than a 48-bit polynomial, because the gate claims an EXACT
     differential and a short non-cryptographic digest can collide.
     """
@@ -185,38 +184,28 @@ def _ser(v) -> bytes:
     if isinstance(v, int):
         body = b"%d" % v
         return b"i%d:%s" % (len(body), body)
-    if isinstance(v, (tuple, list)):
+    if isinstance(v, tuple):
+        parts = b"".join(_ser(w) for w in v)
+        return b"t%d:%s" % (len(parts), parts)
+    if isinstance(v, list):
+        # a DISTINCT tag from tuple: sharing one made _ser((1,)) == _ser([1]),
+        # so the docstring's uniqueness claim was false as written
         parts = b"".join(_ser(w) for w in v)
         return b"l%d:%s" % (len(parts), parts)
     if isinstance(v, dict):
         parts = b"".join(_ser(k) + _ser(v[k]) for k in sorted(v))
         return b"d%d:%s" % (len(parts), parts)
-    body = str(v).encode("utf-8", "replace")
-    return b"s%d:%s" % (len(body), body)
+    if isinstance(v, str):
+        body = v.encode("utf-8", "replace")
+        return b"s%d:%s" % (len(body), body)
+    if v is None:
+        return b"n"
+    # REFUSE rather than fall back on str(): two unrelated objects with the
+    # same repr would otherwise serialize identically, quietly weakening the
+    # digest this gate depends on.
+    raise TypeError(f"_ser: unsupported value type {type(v).__name__!r} in a "
+                    f"platform log entry; add an explicit encoding for it")
 
-
-def _fold(v) -> int:
-    """Deterministic fold of one logged value, nested containers included.
-
-    Built-in ``hash()`` on a str is randomised PER PROCESS (PYTHONHASHSEED),
-    so a digest built with it is not reproducible across runs or across
-    parallel workers.  This module already avoided ``hash`` for exactly that
-    reason -- and the capped-log digest reintroduced it.  Same lesson twice:
-    a reproducibility rule has to be enforced somewhere, not remembered.
-    """
-    if isinstance(v, bool):
-        return int(v)
-    if isinstance(v, int):
-        return v & 0xFFFFFFFF
-    if isinstance(v, (tuple, list)):
-        d = 0
-        for w in v:
-            d = (d * 1000003 + _fold(w)) & 0xFFFFFFFFFFFF
-        return d
-    d = 0
-    for c in str(v):
-        d = (d * 131 + ord(c)) & 0xFFFFFFFF
-    return d
 
 
 class PlatStub:
@@ -372,6 +361,10 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
     mismatches: list[str] = []
     raises = 0
     spin_states = 0
+    #: states where BOTH sides returned normally, so returns and the compat
+    #: channel were actually compared.  A core with none of these has no
+    #: positive evidence at all -- see the tri-state below.
+    normal_states = 0
     # When ss is a SEMANTIC parameter (a data-segment selector), the
     # mechanical side's ss traffic is real program data, not stack residue:
     # seed ss identically on both sides and DISABLE the shadow overlay, so
@@ -458,6 +451,7 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
             # the divergence sitting in plain view.
             _cmp_effects(s, mem_m, mem_a, plat_m, plat_a, mismatches)
             continue
+        normal_states += 1
         mo, mc = mp
         ao, ac = ap
         # mechanical returns a register-keyed dict; the ABI core returns a
@@ -472,10 +466,37 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
         _cmp_effects(s, mem_m, mem_a, plat_m, plat_a, mismatches)
         if len(mismatches) > 8:
             break
-    rep = {"states": states, "raised": raises,
-           "mismatches": mismatches, "ok": not mismatches}
-    if spin_states:
-        rep["note"] = (f"spin-wait: {spin_states}/{states} driven states hit "
-                       f"the iteration cap identically on both sides "
-                       f"(all {states} states were driven)")
+    # TRI-STATE, because "both sides failed the same way" is NOT the same
+    # claim as "the ABI core is its mechanical function".  Both sides are
+    # generated by shared emitter machinery, so a matching fault can mean they
+    # share an unsupported behaviour rather than that either is right -- and a
+    # core whose every state raised never exercised its returns or its compat
+    # channel at all.  Publishing that as verified was a false green with a
+    # test asserting it.
+    #
+    #   verified      -- returns, compat and effects compared and agreed
+    #   inconclusive  -- both sides reached the same spin/unsupported frontier
+    #                    on EVERY state; nothing positive was established
+    #   mismatch      -- outcomes or effects differ
+    if mismatches:
+        status = "mismatch"
+    elif normal_states == 0:
+        status = "inconclusive"
+    else:
+        status = "verified"
+    rep = {"states": states, "raised": raises, "normal_states": normal_states,
+           "spin_states": spin_states,
+           "mismatches": mismatches, "status": status,
+           # `ok` stays "nothing diverged" for callers that only gate on
+           # failure; equivalence is `status == "verified"`.
+           "ok": not mismatches}
+    if status == "inconclusive":
+        rep["note"] = (f"INCONCLUSIVE: all {states} states raised "
+                       f"({spin_states} at the spin cap); no return or compat "
+                       f"value was ever compared, so this core is NOT "
+                       f"established as equivalent")
+    elif spin_states:
+        rep["note"] = (f"spin-wait: {spin_states}/{states} states hit the "
+                       f"iteration cap identically on both sides; the other "
+                       f"{normal_states} compared normally")
     return rep

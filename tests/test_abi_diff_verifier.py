@@ -58,8 +58,11 @@ def test_matching_raises_with_identical_writes_still_pass():
     rep = diff_one(_mech(write=(0x1234, 0x10, 0xAA), raise_with=_SPIN),
                    _abi(write=(0x1234, 0x10, 0xAA), raise_with=_SPIN),
                    _PROPOSAL, states=4)
-    assert rep["ok"], rep["mismatches"]
+    assert not rep["mismatches"]
     assert rep["raised"] == 4
+    # equal effects before an equal raise: nothing DIVERGED, but no return or
+    # compat value was ever compared, so this is not verified equivalence
+    assert rep["status"] == "inconclusive"
 
 
 def test_a_non_spin_raise_is_not_treated_as_a_spin():
@@ -67,8 +70,53 @@ def test_a_non_spin_raise_is_not_treated_as_a_spin():
     RuntimeError is a real fault."""
     rep = diff_one(_mech(raise_with="guest fault"),
                    _abi(raise_with="guest fault"), _PROPOSAL, states=4)
-    assert rep["ok"]
-    assert "note" not in rep or "spin" not in rep.get("note", "")
+    assert rep["spin_states"] == 0, "a plain fault was counted as a spin"
+    assert rep["raised"] == 4
+
+
+def test_matching_real_faults_are_INCONCLUSIVE_not_verified():
+    """Equal failure is not proven equivalence.
+
+    Both sides come from shared emitter machinery, so a matching fault can
+    mean they share an unsupported behaviour rather than that either is
+    correct -- and a core whose every state raised never exercised its
+    returns or compat channel at all.  An earlier version reported this
+    green, and an earlier version of THIS TEST asserted it should."""
+    rep = diff_one(_mech(raise_with="unsupported semantic gap"),
+                   _abi(raise_with="unsupported semantic gap"),
+                   _PROPOSAL, states=4)
+    assert rep["status"] == "inconclusive"
+    assert rep["normal_states"] == 0
+    assert "INCONCLUSIVE" in rep["note"]
+
+
+def test_all_states_spinning_is_also_inconclusive():
+    """If every state hits the spin cap, nothing positive was established --
+    the cap is a frontier, not a proof."""
+    rep = diff_one(_mech(raise_with=_SPIN), _abi(raise_with=_SPIN),
+                   _PROPOSAL, states=8)
+    assert rep["status"] == "inconclusive"
+
+
+def test_some_normal_states_make_it_verified():
+    """A core that spins on SOME states but compares normally on others does
+    have positive evidence, so it must not be demoted to inconclusive."""
+    n = {"i": 0}
+
+    def mech(mem, *, _base=0, **kw):
+        n["i"] += 1
+        if n["i"] % 2:
+            raise RuntimeError(_SPIN)
+        return {}, {"flags": 0, "fmask": 0, "cost": 0}
+
+    def abi(mem, *args, _base=0, **kw):
+        if n["i"] % 2:
+            raise RuntimeError(_SPIN)
+        return (), {"flags": 0, "fmask": 0, "cost": 0}
+
+    rep = diff_one(mech, abi, _PROPOSAL, states=8)
+    assert rep["status"] == "verified"
+    assert rep["normal_states"] > 0
 
 
 def test_every_requested_state_is_driven():
