@@ -630,25 +630,39 @@ def main(argv=None) -> int:
                                  None, tuple(c.inputs), c.needs_plat,
                                  c.df_livein, c.flags_livein)
                 continue
+            # DISPATCH ELIGIBILITY -- the rule is "is the callee's sp effect
+            # COMMUNICATED to the dispatching site?", not "is it zero".  The dyn
+            # bundle threads sp both ways: the site passes 'sp' in, `dyn_exec`
+            # merges the callee's outputs over the bundle, and the emitted site
+            # reads `sp = _do['sp']` back.  So:
+            #   * sp_output=True  -- the callee RETURNS its sp (an unbalanced or
+            #     varying exit, e.g. a frameless stack-arg tail-dispatch arm that
+            #     pops the pushed args).  The merged bundle carries the true sp,
+            #     so the site resumes on the right stack: ELIGIBLE.
+            #   * sp_delta != 0 with sp_output=False -- the callee shifts sp by a
+            #     fixed amount but does NOT return it, so merged['sp'] is the
+            #     stale input and the site would resume on a shifted stack:
+            #     EXCLUDED.
+            #   * ret_pop -- callee-pops stack args, a caller-side frame contract
+            #     the near-dyn bundle does not model: EXCLUDED.
             reason = None
             if c.ret_kind != "near":
                 reason = f"ret-kind-{c.ret_kind}"   # needs a far-dyn bundle
-            elif c.sp_output:
-                reason = "sp-output"                # needs sp threading
             elif c.ret_pop:
                 reason = "ret-pop"                  # callee-pops stack args
-            elif c.sp_delta != 0:
-                reason = "sp-delta"                 # unbalanced exit
+            elif c.sp_delta != 0 and not c.sp_output:
+                reason = "sp-delta"                 # shifts sp without returning it
             if reason is not None:
                 dispatch_excluded[key] = reason
-                continue    # only balanced near-return functions dispatch
+                continue    # the callee's sp effect is not communicable
             registry[key] = (f"{args.import_base}.{c.name}", c.name, None,
                              tuple(c.inputs), c.needs_plat, c.df_livein,
                              c.flags_livein)
         # AUTHORITATIVE OVERRIDES are dynamically dispatchable under the SAME
-        # rule as promoted functions: only a balanced near-return override can
-        # be a near-indirect target (the near-dyn bundle assumes it); a far/
-        # ret-pop/sp-varying override is static-call reachable only.
+        # rule as promoted functions (above): a near-return override whose sp
+        # effect is COMMUNICATED -- zero, or returned via sp_output -- can be a
+        # near-indirect target; a far / ret-pop / shifts-sp-without-returning-it
+        # override is static-call reachable only.
         for okey, oc in overrides.items():
             if oc.ret_kind == "iret":
                 handlers[okey] = (f"{args.import_base}.{oc.name}", oc.name,
@@ -658,11 +672,9 @@ def main(argv=None) -> int:
             reason = None
             if oc.ret_kind != "near":
                 reason = f"ret-kind-{oc.ret_kind}"
-            elif oc.sp_output:
-                reason = "sp-output"
             elif oc.ret_pop:
                 reason = "ret-pop"
-            elif oc.sp_delta != 0:
+            elif oc.sp_delta != 0 and not oc.sp_output:
                 reason = "sp-delta"
             if reason is not None:
                 dispatch_excluded[okey] = reason
