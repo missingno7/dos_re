@@ -258,8 +258,15 @@ def check_composable(scan, *, callees=None, boundary_addrs=frozenset(),
       * observer/alt-entry: park- or dispatch-carrying functions stay
         mechanical (their frames are externally observable)."""
     from .cpuless import register_effects
+    from .contracts import ss_is_data_segment
 
     callees = callees or {}
+    # ss used PURELY as a data-segment selector (no push/pop traffic at all)
+    # is an ordinary segment input, not the stack carrier -- the small-model
+    # `mov ss:[0x0006], ax` idiom.  Its memory operands are then no more
+    # "stack-addressed" than a ds: access.  A function doing BOTH keeps the
+    # refusal: there the stack and the data genuinely share one segment.
+    ss_data = ss_is_data_segment(scan)
     cs_addrs = {ip for ip in scan.insts}
     if frozenset(boundary_addrs) & cs_addrs:
         raise Refusal("observer-in-function")
@@ -301,13 +308,14 @@ def check_composable(scan, *, callees=None, boundary_addrs=frozenset(),
         if _vslot_delta(i) is None and ("sp" in e.reads or "sp" in e.writes) \
                 and k not in (RET, RETF):
             raise Refusal("frame-or-sp-data")   # sp as general data
-        if _ea_seg_of(i) == "ss":
-            raise Refusal("stack-addressed-memory")
-        if i.op in _STRING_PAIRS or i.op == 0xD7 \
-                or 0xA0 <= i.op <= 0xA3:      # moffs has no ModRM
-            for p in i.prefixes:
-                if p == 0x36:
-                    raise Refusal("stack-addressed-memory")
+        if not ss_data:
+            if _ea_seg_of(i) == "ss":
+                raise Refusal("stack-addressed-memory")
+            if i.op in _STRING_PAIRS or i.op == 0xD7 \
+                    or 0xA0 <= i.op <= 0xA3:      # moffs has no ModRM
+                for p in i.prefixes:
+                    if p == 0x36:
+                        raise Refusal("stack-addressed-memory")
 
     # virtual-stack depth walk: every ip one provable slot depth
     depth: dict[int, int] = {scan.entry: 0}

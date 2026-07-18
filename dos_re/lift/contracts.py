@@ -78,6 +78,48 @@ def scan_for(rec: dict):
     return scan, None
 
 
+#: push/pop-family opcodes: if a function has NONE of these, it never uses
+#: ss as a stack -- any ss-addressed access is a DATA-segment selector.
+_STACK_FAMILY_OPS = (frozenset(range(0x50, 0x60)) | frozenset({0x06, 0x0E,
+                     0x16, 0x1E, 0x07, 0x17, 0x1F, 0x60, 0x61, 0x68, 0x6A,
+                     0x9C, 0x9D, 0xC8, 0xC9}))
+
+
+def ss_is_data_segment(scan) -> bool:
+    """True when this function uses ``ss`` ONLY as an ordinary segment
+    selector for memory operands, never as a stack.
+
+    The small-model DOS idiom: with SS == DS the assembler emits ``ss:``
+    overrides on ordinary global accesses (``mov ss:[0x0006], ax``).  Such a
+    function has no push/pop traffic at all, so its ``ss`` is a semantic
+    SEGMENT input like ds/es -- not the machine stack carrier, and treating
+    it as machine-private would wrongly hide a real parameter.
+
+    Only an EXPLICIT ``ss:`` prefix counts as data-selector evidence.  A
+    bp-based EA that merely DEFAULTS to SS (``mov ax,[bp+2]``) is the classic
+    frame-access idiom -- bp may hold a frame pointer established by the
+    caller -- so it disqualifies the function instead.
+
+    Refusal-first: a function that does BOTH (real stack traffic AND
+    ss-addressed data) keeps ss classified as machine, because there the
+    stack and the data genuinely share one segment.  A CALL counts as stack
+    traffic for this purpose: the mechanical composition writes the return
+    address through ``ss:sp``, so the same segment carries both the frame
+    and the data and the two uses cannot be told apart."""
+    uses_ss_override = False
+    for i in scan.insts.values():
+        if i.op in _STACK_FAMILY_OPS or i.kind in (CALL, CALL_FAR):
+            return False                      # real stack traffic
+        if any(p == 0x36 for p in i.prefixes):
+            uses_ss_override = True
+            continue                          # explicit: a segment selector
+        if i.modrm is not None and i.mod != 3 and i.rm in (2, 3, 6) \
+                and not (i.mod == 0 and i.rm == 6) \
+                and not any(p in (0x26, 0x2E, 0x3E) for p in i.prefixes):
+            return False                      # frame-shaped bp EA (SS default)
+    return uses_ss_override
+
+
 def build_scans(ir: dict) -> tuple[dict, dict]:
     """(scans, skipped) over the corpus: ``scans[key]`` a FunctionScan;
     ``skipped[key]`` the reason a record could not be scanned."""
@@ -624,11 +666,15 @@ def infer_contracts(ir: dict, *, external: frozenset = frozenset(),
         pairs = pointer_pairs_of(scan, inputs)
         # cs is the function's own static code segment -- a per-function
         # constant (push cs / cs-relative reads), never a runtime parameter:
-        # the emitter materialises it as a local.
-        machinery = sorted((inputs & (MACHINE_REGS | frozenset({"cs"})))
+        # the emitter materialises it as a local.  ss is machine UNLESS this
+        # function uses it purely as a data-segment selector (see
+        # ss_is_data_segment), in which case it is an ordinary segment input.
+        machine_regs = (frozenset({"sp"}) if ss_is_data_segment(scan)
+                        else MACHINE_REGS)
+        machinery = sorted((inputs & (machine_regs | frozenset({"cs"})))
                            | ({"bp"} if stack.framed and "bp" in inputs
                               else frozenset()))
-        semantic_in = inputs - MACHINE_REGS - frozenset({"cs"}) - (
+        semantic_in = inputs - machine_regs - frozenset({"cs"}) - (
             frozenset({"bp"}) if stack.framed else frozenset())
         params = _param_kinds(scan, semantic_in, pairs)
         rets = sorted(observed[key] - MACHINE_REGS)

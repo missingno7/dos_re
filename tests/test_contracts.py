@@ -113,6 +113,31 @@ def test_unframed_bp_is_not_stack_machinery():
     assert "sp" not in regs and "ss" not in regs
 
 
+def test_ss_as_data_segment_vs_frame_access():
+    from dos_re.lift.contracts import ss_is_data_segment
+    # mov ss:[0x0006], ax ; ret -- the small-model SS==DS idiom: an explicit
+    # override on a fixed global, and no stack traffic anywhere
+    ir = _ir({"1010:0000": "36 A3 06 00 C3"})
+    scans, _ = build_scans(ir)
+    assert ss_is_data_segment(scans["1010:0000"]) is True
+    # mov ax,[bp+2] ; ret -- SS only by DEFAULT: the frame-access idiom,
+    # bp may be a caller-established frame pointer.  NOT a data selector.
+    ir = _ir({"1010:0000": "8B 46 02 C3"})
+    scans, _ = build_scans(ir)
+    assert ss_is_data_segment(scans["1010:0000"]) is False
+    # explicit override BUT real stack traffic -> stack and data share the
+    # segment; stays machine-classified
+    ir = _ir({"1010:0000": "50 36 A3 06 00 58 C3"})
+    scans, _ = build_scans(ir)
+    assert ss_is_data_segment(scans["1010:0000"]) is False
+    # explicit override BUT a CALL: the mechanical composition writes the
+    # return address through ss:sp, so the same segment carries frame AND
+    # data -- indistinguishable, so it stays machine-classified too
+    ir = _ir({"1010:0000": "36 A3 06 00 E8 F8 00 C3", "1010:0100": "C3"})
+    scans, _ = build_scans(ir)
+    assert ss_is_data_segment(scans["1010:0000"]) is False
+
+
 def test_pointer_pairs_lodsb():
     # lodsb; ret -> ds:si jointly address memory
     ir = _ir({"1010:0000": "AC C3"})

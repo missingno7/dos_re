@@ -178,17 +178,25 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
                                f"by the mechanical signature"]}
     mismatches: list[str] = []
     raises = 0
+    # When ss is a SEMANTIC parameter (a data-segment selector, proven by
+    # contracts.ss_is_data_segment), the mechanical side's ss traffic is real
+    # program data, not stack residue: seed ss identically on both sides and
+    # DISABLE the shadow overlay, so those writes are compared instead of
+    # being hidden.  Such a function has no stack traffic at all, so the
+    # overlay has nothing legitimate left to hide.
+    ss_semantic = "ss" in params
     for s in range(states):
         regs = _seeded_regs(params, seed0 + s)
-        mem_m = TraceMem(seed0 + s, shadow_stack_seg=STACK_SEG)
+        mem_m = TraceMem(seed0 + s,
+                         shadow_stack_seg=None if ss_semantic else STACK_SEG)
         mem_a = TraceMem(seed0 + s)
         plat_m = PlatStub(seed0 + s) if mech_plat else None
         plat_a = PlatStub(seed0 + s) if abi_plat else None
         mkw = dict(regs)
         if "sp" in mech_kd:
             mkw["sp"] = STACK_SP
-        if "ss" in mech_kd:
-            mkw["ss"] = STACK_SEG
+        if "ss" in mech_kd and not ss_semantic:
+            mkw["ss"] = STACK_SEG          # machine stack: goes to the shadow
         akw = dict(regs)
         if "_df" in abi_kd:
             dfv = (seed0 + s) & 1
