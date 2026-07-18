@@ -2258,7 +2258,17 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 if c.df_livein:
                     kw = ("_df=(1 if df else 0)" + (", " + kw if kw else ""))
                 if c.needs_plat:
-                    _boff = count - 1
+                    # the composed callee's _base is its ENTRY instruction_count
+                    # -- reached AFTER this call executes, so it includes the
+                    # call itself: _base + _cost + count (count already counts
+                    # this instruction).  This matches the STANDALONE adapter,
+                    # which sets _base = cpu.instruction_count at entry (post
+                    # call).  Using count-1 anchored the callee's plat effects
+                    # (plat.farcall/intr/boundary) one instruction early, so an
+                    # API-boundary sample inside a COMPOSED needs_plat callee
+                    # drifted -1 vs the interpreter (the standalone farcall path
+                    # never exercised this).
+                    _boff = count
                     _b = "_base + _cost" if _boff == 0 else f"_base + _cost + {_boff}"
                     kw = (f"_base={_b}" + (", " + kw if kw else ""))
                 blk.append(f"_o, _c = {c.name}({_pass}{', ' + kw if kw else ''})")
