@@ -188,6 +188,41 @@ not a refusal note.
 
 ## 6. The disposition table
 
+> **REVISED 2026-07-18, after the overarching goal was stated**
+> (dos_re_2.0.md, "The north star").  This table originally classified each
+> item by ONE test: *does M4 have to undo it?*  That test is necessary but
+> NOT sufficient.  The programme's actual measure is whether the recovered
+> code is an ideal working representation for AI — explicit enough that
+> substantial changes are quick and safe.
+>
+> Those are DIFFERENT tests, and three verdicts below were argued on the
+> first while reading as if they settled the second:
+>
+> * **the `bb` dispatch loop** — my argument ("M4 analyses read the IR, not
+>   emitted Python, so structuring buys M4 nothing") is correct and still
+>   stands *for M4*.  But a `while True: if bb == 3:` body is exactly the
+>   machine plumbing the goal says must not remain.  It may persist through
+>   M4; it must not persist at the end.  Structured control flow for
+>   provably reducible regions is a DELIVERABLE, not optional polish.
+> * **register-named body locals** — mechanically a pure alpha-rename, so
+>   "no structural content" is true.  Against the goal it is false: `ax`
+>   and `si` are the machine's vocabulary, and every one of them is a thing
+>   AI must decode rather than read.
+> * **per-operation flag computation** — I measured only ~9% *provably*
+>   dead under seam-conservatism and deferred on yield.  That measurement
+>   stands, but 6437 flag-assignment lines is enormous noise in the final
+>   representation, so the right response is not "defer" but "find a
+>   better-yielding formulation" (e.g. render a comparison consumed only by
+>   an adjacent jcc as a plain boolean, rather than trying to prove
+>   individual flag writes dead).
+>
+> The column below therefore distinguishes **may remain THROUGH M4** from
+> **may remain AT THE END**.  Nothing in the first column is settled; it is
+> debt with a deadline.
+
+| Concept | Disposition |
+|---|---|
+
 | Concept | Disposition |
 |---|---|
 | CPU object, interpreter path | **must be eliminated** (already: zero) |
@@ -197,9 +232,10 @@ not a refusal note.
 | register-named public params, dict-keyed results | **must be eliminated** → anonymous/positional (slice 6) |
 | dead flag computation | **must be eliminated**, poison-tested (slice 6) |
 | unproven dropped outputs | **must be eliminated** (already: poison-proven) |
-| register-named *body locals* | may remain — deterministic emission detail |
-| `bb` dispatch loop / CFG-shaped body | may remain — M4 reads IR, not emitted Python |
-| 8/16-bit partial-register ops | may remain — faithful width semantics |
+| register-named *body locals* | may remain THROUGH M4 (alpha-rename) — **must not remain at the end**: machine vocabulary AI has to decode |
+| `bb` dispatch loop / CFG-shaped body | may remain THROUGH M4 (analyses read the IR) — **must not remain at the end**: structured flow for provably reducible regions is a deliverable |
+| dead flag computation | deferred on yield (~9% provable) — **revisit with a better formulation**, not accepted: 6437 flag lines is noise in the final form |
+| 8/16-bit partial-register ops | may remain — faithful width semantics (a real property of the program, not plumbing) |
 | `_fmask`, exact flag word, virtual cost | **must remain**, private compat channel only |
 | typed stack view for genuinely-stack-semantic functions | **must remain**, explicitly classified |
 | raw `mem.rb/rw/ww` with historical addresses | **must remain** — this is precisely M4's input |
@@ -317,6 +353,45 @@ gets its own poison:
 Where the new representation *intentionally* differs from the mechanical one
 (the stack region), use a **semantic mask** — the shadow-stack overlay
 already in `abi_diff` — never a broadly weakened comparison.
+
+## 9a. Parked: the stack/data-shared tier, and a verifier-cost wall
+
+The last `stack-addressed-memory` functions use an explicit `ss:` override
+for DATA *and* have a real machine stack, so ONE segment carries both.  In
+the ABI form the ambiguity vanishes (push/pop become slot locals, calls
+write no return address), leaving `ss` used for data only — so the
+transformation is straightforward and reaches **113 → 149 cores** with the
+static wall still green.
+
+**It is parked on branch `abi-ss-stack-split`, unverified**, for a reason
+worth recording: the verification is not tractable as built.  The mechanical
+reference writes stack and data through the SAME segment, so neither a
+segment shadow nor an assumed offset window separates them.  The
+discriminator therefore MEASURES the split — drive the mechanical side twice
+with different initial `sp`; writes that move with `sp` are stack, writes
+identical under both are data — guarded so that a differing outcome, a
+differing result, or an excluded write outside the stack segment each fail
+loudly rather than silently splitting.
+
+That design is sound but doubles the mechanical work on exactly the
+loop-heavy functions (a `rep` with a seeded 16-bit `cx` runs up to 65535
+iterations).  The full run reached **50 GB RSS without finishing**; one
+function needed 84 s for 3 states.  Shipping the 36 new cores unproven would
+be precisely the wrong trade, since they are the stack/data-shared cases —
+the ones most likely to expose a flaw in the discriminator itself.
+
+**What it needs before landing:** a tractable verifier — bound the per-state
+write trace and iteration budget (reporting, never silently skipping), seed
+loop counters narrowly, or decide `sp`-dependence STATICALLY from the depth
+map instead of by re-execution.  The static route is most promising: the
+depth map already proves every stack slot's offset, so stack writes are
+identifiable without running anything twice.
+
+**Lesson for M4:** the memory-schema phase will face this same question as
+*region ownership*, and it will face it at whole-program scale.  A
+verification strategy that costs 2× execution on loop-heavy code does not
+survive that.  Prefer static ownership proofs, with re-execution reserved
+for spot-checking.
 
 ## 10. Remaining slice sequence
 

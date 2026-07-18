@@ -101,6 +101,27 @@ def test_contract_metadata_records_pointer_roles():
         f"arg_{k}" for k in range(len(meta["params"]))]
 
 
+def test_write_trace_is_bounded_but_divergence_still_detected():
+    """The retained trace is capped so one pathological function cannot eat
+    the machine (1010:37C2 spins to the 20M cap and, when its stack traffic
+    is traced rather than shadowed, appended ~20,000,000 tuples).  The
+    order-sensitive digest keeps the comparison sound PAST the cap."""
+    from dos_re.lift.abi_diff import TraceMem
+    a, b = TraceMem(1), TraceMem(1)
+    n = TraceMem.MAX_TRACE + 5000
+    for i in range(n):
+        a.wb(0x1000, i & 0xFFFF, i & 0xFF)
+        b.wb(0x1000, i & 0xFFFF, i & 0xFF)
+    assert a.write_count == n and len(a.writes) == TraceMem.MAX_TRACE
+    assert a.truncated and b.truncated
+    # identical streams agree despite truncation ...
+    assert (a.write_digest, a.write_count) == (b.write_digest, b.write_count)
+    # ... and a divergence BEYOND the retained cap is still caught
+    b.wb(0x1000, 0x4242, 0x99)
+    assert (a.write_digest, a.write_count) != (b.write_digest, b.write_count)
+    assert a.writes == b.writes          # the retained lists look identical
+
+
 def test_refuses_callee_needing_ss_when_caller_lacks_it():
     """A callee whose contract takes ss as a SEMANTIC segment (ss-as-data)
     cannot be composed by a caller that does not itself carry ss -- the call
