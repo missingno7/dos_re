@@ -43,6 +43,65 @@ instead of hand-porting the game.
 
 ---
 
+## The overarching goal (owner, 2026-07-18) — the north star
+
+Every stage below is a MEANS.  The end is this:
+
+> Use deterministic, automated recovery tools to expose as much of the
+> original game as possible in a form that is **explicit, structured, and
+> easy for AI to understand**.
+
+VMless, CPUless, ABI recovery, de-stacking, memoryless state recovery,
+generated bridges and oracle verification are **not ends in themselves**.
+They are successive removals of the historical machinery that HIDES the
+actual game: instruction interpretation, registers, calling conventions,
+stack mechanics, flat DOS memory, raw addresses, compiler artifacts.
+
+The final recovered program should present the game's real logic, state,
+data relationships, rendering boundaries and platform interactions as
+directly as possible.  AI should not have to infer behavior from assembly,
+anonymous offsets, or machine-state plumbing: it should work with ordinary
+functions, explicit parameters, native objects, typed fields, clear
+ownership, and separated gameplay / rendering / input / audio / platform
+layers.  The better the tooling exposes that structure, the less AI has to
+guess, and the more reliably it can do the final semantic pass — naming,
+simplifying, organising.
+
+**The measure of success is not that the game runs without an emulator.**
+It is that the recovered code is an ideal working representation for AI:
+small enough, explicit enough, and understandable enough that substantial
+modifications are quick and safe — modern rendering, widescreen/ultrawide,
+smooth cameras, high-refresh presentation, better audio, gamepad and touch
+input, mobile ports, editors, modding, new gameplay — as ordinary additions
+rather than fresh reverse-engineering projects.
+
+Automate the archaeology ONCE, so AI spends its effort understanding and
+extending the game instead of fighting the machine it was compiled for.
+
+### What this rules OUT, concretely
+
+A stage is not "done" merely because a wall holds and the oracle is green.
+If the emitted form still speaks in machine vocabulary, the stage has moved
+the plumbing without exposing the game.  In particular, these are
+acceptable as INTERMEDIATE emission detail and are NOT acceptable in the
+final representation:
+
+* basic-block dispatch loops (`while True: if bb == 3:`) instead of
+  ordinary `if` / loops / early returns;
+* register-named locals (`ax`, `si`) where the value has a semantic role;
+* per-operation flag computation that nothing observes;
+* raw `mem.rw(seg, off)` with historical addresses;
+* register-shaped or compat-shaped public signatures.
+
+A stage may legitimately POSTPONE any of these — but the postponement must
+be recorded as debt against this goal, never re-labelled as "fine because
+the next stage does not need it".  (See `docs/abi_end_state.md` §6, which
+was revised after this goal was stated: the M4-need test and the
+final-representation test are different tests, and the disposition table
+now says so.)
+
+---
+
 ## 0. The Ten Principles
 
 > **Do not port the game.  Build the machine that ports the game.**

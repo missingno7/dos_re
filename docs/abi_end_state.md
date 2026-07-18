@@ -188,6 +188,41 @@ not a refusal note.
 
 ## 6. The disposition table
 
+> **REVISED 2026-07-18, after the overarching goal was stated**
+> (dos_re_2.0.md, "The north star").  This table originally classified each
+> item by ONE test: *does M4 have to undo it?*  That test is necessary but
+> NOT sufficient.  The programme's actual measure is whether the recovered
+> code is an ideal working representation for AI — explicit enough that
+> substantial changes are quick and safe.
+>
+> Those are DIFFERENT tests, and three verdicts below were argued on the
+> first while reading as if they settled the second:
+>
+> * **the `bb` dispatch loop** — my argument ("M4 analyses read the IR, not
+>   emitted Python, so structuring buys M4 nothing") is correct and still
+>   stands *for M4*.  But a `while True: if bb == 3:` body is exactly the
+>   machine plumbing the goal says must not remain.  It may persist through
+>   M4; it must not persist at the end.  Structured control flow for
+>   provably reducible regions is a DELIVERABLE, not optional polish.
+> * **register-named body locals** — mechanically a pure alpha-rename, so
+>   "no structural content" is true.  Against the goal it is false: `ax`
+>   and `si` are the machine's vocabulary, and every one of them is a thing
+>   AI must decode rather than read.
+> * **per-operation flag computation** — I measured only ~9% *provably*
+>   dead under seam-conservatism and deferred on yield.  That measurement
+>   stands, but 6437 flag-assignment lines is enormous noise in the final
+>   representation, so the right response is not "defer" but "find a
+>   better-yielding formulation" (e.g. render a comparison consumed only by
+>   an adjacent jcc as a plain boolean, rather than trying to prove
+>   individual flag writes dead).
+>
+> The column below therefore distinguishes **may remain THROUGH M4** from
+> **may remain AT THE END**.  Nothing in the first column is settled; it is
+> debt with a deadline.
+
+| Concept | Disposition |
+|---|---|
+
 | Concept | Disposition |
 |---|---|
 | CPU object, interpreter path | **must be eliminated** (already: zero) |
@@ -197,9 +232,10 @@ not a refusal note.
 | register-named public params, dict-keyed results | **must be eliminated** → anonymous/positional (slice 6) |
 | dead flag computation | **must be eliminated**, poison-tested (slice 6) |
 | unproven dropped outputs | **must be eliminated** (already: poison-proven) |
-| register-named *body locals* | may remain — deterministic emission detail |
-| `bb` dispatch loop / CFG-shaped body | may remain — M4 reads IR, not emitted Python |
-| 8/16-bit partial-register ops | may remain — faithful width semantics |
+| register-named *body locals* | may remain THROUGH M4 (alpha-rename) — **must not remain at the end**: machine vocabulary AI has to decode |
+| `bb` dispatch loop / CFG-shaped body | may remain THROUGH M4 (analyses read the IR) — **must not remain at the end**: structured flow for provably reducible regions is a deliverable |
+| dead flag computation | deferred on yield (~9% provable) — **revisit with a better formulation**, not accepted: 6437 flag lines is noise in the final form |
+| 8/16-bit partial-register ops | may remain — faithful width semantics (a real property of the program, not plumbing) |
 | `_fmask`, exact flag word, virtual cost | **must remain**, private compat channel only |
 | typed stack view for genuinely-stack-semantic functions | **must remain**, explicitly classified |
 | raw `mem.rb/rw/ww` with historical addresses | **must remain** — this is precisely M4's input |
