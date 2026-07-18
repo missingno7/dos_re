@@ -1056,11 +1056,15 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     _check_frame_pointer(scan, callees, far_callees)
     sp_delta, ret_pop, sp_output, sp_deltas = _check_stack_depths(
         scan, alt_entries, callees, far_callees, plat_farcalls, dead_exits)
-    if sp_output and any(_is_dyn(i) and i.kind == JMP_IND
-                         for i in scan.insts.values()):
-        # a tail dispatch assumes the caller frame is next on the stack;
-        # an unbalanced body would hand the callee a shifted frame.
-        raise Refusal("tail-dispatch-with-unbalanced-stack")
+    # NOTE: a sp_output (unbalanced/varying exit) tail dispatch used to refuse
+    # here -- "an unbalanced body would hand the callee a shifted frame".  That
+    # is exactly the FRAMELESS STACK-ARG idiom (push args; jmp cs:[table]; each
+    # arm pops the args + returns), and it composes: the `_dyn` runtime passes
+    # the true sp to the resolved arm, which returns its actual sp in the merged
+    # bundle.  sp-as-data is already refused above (1053), so a surviving
+    # sp_output at a dyn JMP_IND is the intended stack-arg shift, not a stray
+    # imbalance.  The depth walk (_check_stack_depths) still refuses an UNKNOWN
+    # (None) tail depth -- no runtime sp to defer to.
     if any(i.ip in excluded_addrs for i in scan.insts.values()):
         raise Refusal("boundary-or-dispatch-address")
     # flag live-ins: DF alone rides the _df compat input (tier 9); ANY other
@@ -1543,12 +1547,21 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
             # base and restores sp to entry before its return, so the exit is
             # still balanced -- EXACTLY as a fused `leave; ret(f)` in this
             # function would be.  That unwind needs an established frame pointer
-            # to restore to; without one, a nonzero-depth tail has no frame to
-            # unwind and the exit sp is genuinely unrepresentable -- refuse.  An
-            # UNKNOWN depth (None) likewise cannot prove the balance -- refuse.
-            if d is None or (d != 0 and not has_frame):
+            # to restore to.
+            #
+            # WITHOUT a frame pointer it is the FRAMELESS STACK-ARG idiom: the
+            # dispatcher pushed ARGUMENTS (`push si; push di`, no bp frame) and
+            # each arm POPS exactly those args before its return (the shared
+            # epilogue restores the caller's frame explicitly).  The exact pop
+            # count is unknowable from the dispatcher, so the exit sp is not
+            # STATICALLY balanced -- but it is representable as a RUNTIME OUTPUT:
+            # record the nonzero depth as an exit depth so `sp_output` is set,
+            # and the arm (run via `_dyn`) returns its actual sp in the merged
+            # bundle -- exact whether the arm balances or not.  An UNKNOWN depth
+            # (None) has no runtime sp to defer to, so it still refuses.
+            if d is None:
                 raise Refusal("tail-dispatch-at-nonzero-depth")
-            exit_depths.add(0)
+            exit_depths.add(0 if (d == 0 or has_frame) else d)
             ret_pops.add(0)
             continue
         # a composed callee may shift the caller's depth by ANY of its exit

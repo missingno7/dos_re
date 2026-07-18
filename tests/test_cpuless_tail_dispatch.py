@@ -196,12 +196,17 @@ def test_dyn_selector_dispatches_the_container():
     assert "_dyn(" in src and "import dyn_exec as _dyn" in src
 
 
-def test_frameless_nonzero_depth_tail_still_refuses():
-    """A nonzero-depth tail with NO established frame pointer (saved si/di, not a
-    bp frame) has nothing for a `leave` to unwind -- the arm's exact pop count is
-    unknowable, so the exit sp is unrepresentable.  Must still refuse."""
-    with pytest.raises(Refusal, match="tail-dispatch-at-nonzero-depth"):
-        check_promotable(_scan(_FRAMELESS))
+def test_frameless_nonzero_depth_tail_now_composes_via_sp_output():
+    """A nonzero-depth tail with NO frame pointer (saved si/di, not a bp frame) is
+    the FRAMELESS STACK-ARG idiom: the arm pops the pushed args before its return.
+    Its exact pop count is unknowable statically, but the exit sp is representable
+    as a RUNTIME OUTPUT -- the arm (via `_dyn`) returns its actual sp.  It no longer
+    refuses; it composes with sp_output=True.  The byte-for-byte differential lives
+    in test_cpuless_frameless_tail_dispatch.py.  (A TRULY UNKNOWN tail depth -- e.g.
+    behind a composed callee with no sp_delta -- still refuses: no runtime sp to
+    defer to.)"""
+    spec = check_promotable(_scan(_FRAMELESS))
+    assert spec.sp_output is True
 
 
 def test_depth_zero_tail_dispatch_unchanged():
