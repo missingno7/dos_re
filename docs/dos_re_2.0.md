@@ -279,8 +279,17 @@ arrays, enums, references, named fields, explicit ownership.
 
 ```
 before:  x = mem.read_u16(LEMMING_BASE + index * 32 + 4)
-after:   x = game.lemmings[index].x
+after:   x = state.entities[index].field_04
 ```
+
+**The field is ANONYMOUS on purpose.**  An earlier revision of this section
+wrote `game.lemmings[index].x`, which quietly claimed two different things at
+once: that the layout was recovered, and that the *meaning* of the field was
+known.  Only the first is mechanical.  Stage 3 recovers native values, arrays,
+records, fields, indexing and ownership; it does not and cannot recover that
+offset 4 is "the x coordinate".  `entities[i].field_04` is a complete,
+correct Stage 3 result.  Renaming it to `lemmings[i].x` is Stage 4 work and a
+separate claim (see *Two claims, never merged*, below).
 
 Call it: *DOS-layout-less native* (the preferred formal term),
 *memory-model-less native*, *dissolved native model*, *clean native object
@@ -320,6 +329,28 @@ Hard rules:
 - A CPUless runtime may still use the complete historical DOS memory image.
 - A DOS-layout-less runtime may still contain ugly generated names and flow.
 - Semantic cleanliness is a separate, later stage.
+
+### Two claims, never merged: behaviour and meaning
+
+Everything this pipeline verifies is a claim about **behaviour**.  Nothing it
+verifies is a claim about **meaning**.  They are produced by different
+machinery, carry different evidence, and must be reported separately:
+
+| claim | produced by | evidence | example |
+|---|---|---|---|
+| behavioural | mechanical recovery | oracle differential, byte-exact boundaries | `state.entities[i].field_06 += state.entities[i].field_0A` is what the program does |
+| semantic | a later naming pass (Stage 4) | human or AI judgement, reviewable | `field_06` is the lemming's x coordinate |
+
+A mechanically recovered `entity.field_06` is a FINISHED Stage 3 artifact,
+not a half-done Stage 4 one.  The structure is proven; the name is absent
+because no proof produces names.
+
+The failure mode this rule exists to prevent: a plausible name makes an
+unproven structure look verified.  If a field is called `x` and the layout is
+wrong, every reader believes the wrong thing twice as fast.  So the pipeline
+emits anonymous fields, and a naming pass may later attach names *as a
+separate, separately-reviewable claim* — never by editing the recovery output
+in place and calling it the same artifact.
 
 Message wording: prefer *full VMless lifted graph*, *VMless lifted candidate*,
 *CPUless candidate*, *DOS-layout-less candidate*, *semantic native
@@ -437,6 +468,28 @@ Consequences for how the system is built:
   the toolchain may internally combine detachments when it can do so safely.
 - The hard walls (§1a) still define the meaning of whatever IS emitted; they
   constrain artifacts, not the route taken to produce them.
+
+**Which parts are scaffolding.**  §1b was written before M3b and M4 existed,
+so it did not name the machinery those stages introduced.  All of the
+following are *scaffolding to reach the highest representation* — verification
+and migration apparatus — and none is required to appear in a final game
+runtime:
+
+| scaffolding | exists to | belongs in the final runtime? |
+|---|---|---|
+| VMless / CPUless emissions | bisect and prove one detachment at a time | no — diagnostic projections |
+| ABI adapters (`_entry_ip`, compat entrypoints) | let a recovered core be substituted into a still-mechanical graph | no |
+| native-state accessors (`NATIVE.rb/wb`) | keep a promoted region mem-shaped while its owners are still mechanical | no — the target is a plain field access |
+| generated codecs (import/export) | regenerate historical bytes so the oracle can still compare | no — verification only |
+| poison | prove at runtime that no historical reader survives | no — a proof device |
+| the M4 bridge | attach/detach native state around a boundary comparison | no |
+
+The end state is **bridgeless and memoryless**: native structures, direct
+field and array access, ordinary control flow, and no residual object whose
+purpose is to translate back to a DOS layout.  If a mechanism's only job is to
+make the old and new representations comparable, it is scaffolding by
+definition, and the milestone that introduced it owes an explicit removal
+gate.
 
 The final success criterion is NOT "we completed VMless, then CPUless, then
 native, each by hand."  It is:
@@ -807,6 +860,25 @@ the next major mechanical stage after the VMless graph converges.
   environment; each promoted region is protected by a fail-loud wall.  The
   machine stack was already promoted this way in M3b slice 2 (virtual stack +
   proven no-alias), which is the pattern in miniature.
+
+  **What M4 must mechanically recover** (clarified 2026-07-18, after the first
+  scalar promotion): native values, **arrays**, **records**, **fields**,
+  **indexing**, ownership and direct control flow — while eliminating
+  registers, segments, the flat DOS image, historical offsets and runtime
+  bridges.  The target shape is
+
+  ```
+  state.entities[i].field_06 += state.entities[i].field_0A
+  ```
+
+  with ANONYMOUS field names (§*Two claims, never merged*).
+
+  **Status honesty.**  The first slice (`ds:[0xA949]` — one byte, one owner)
+  proved the machinery end to end, but it is the degenerate case: no index, no
+  record, no stride.  The indexed-region capability — array base, element
+  stride, field offsets within an element — is the SUBSTANCE of M4 and is not
+  yet built.  So M4 is *started*, not *half done*: one promoted scalar is a
+  working pipeline, not a dissolved memory model.
 - **M5 — Semantic clean port.**  The recovered implementation is
   understandable, maintainable, machine-architecture-independent.
 - **M6 — Enhancements.**  Widescreen, smooth rendering, improved audio, modern

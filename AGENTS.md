@@ -16,6 +16,14 @@ use to build verified DOS source ports. Two roles arrive here:
 - **Extending the framework itself** → this file is your rulebook;
   [`docs/architecture.md`](docs/architecture.md) is the module map.
 
+> Before proposing a new analysis layer, read
+> [`docs/future_work.md`](docs/future_work.md).  Several plausible ideas
+> (SSA/value-range analysis, a scoped facts schema, structure proposals,
+> control-flow structuring, semantic naming) have already been examined and
+> deliberately deferred, each with the prerequisite that must exist first.
+> Re-proposing one without addressing its recorded prerequisite is the thing
+> that file exists to prevent.
+
 ## What this repository is
 
 The reusable, game-agnostic core of an oracle-driven DOS recovery method: a

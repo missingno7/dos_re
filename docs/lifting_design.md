@@ -300,6 +300,23 @@ decoder (§4); "LLM does the literal translation" (that is the status quo —
 the failure mode this proposal removes is precisely unverified hand
 translation at scale).
 
+**Refinement (2026-07-18): the rejection stands for the TOOL, not for one of
+its design principles.**  A source review of Ghidra confirmed the above —
+16-bit real mode is a thin layer there (no 16-bit Borland/Microsoft compiler
+spec ships, far pointers are an open TODO in `x86-16.cspec`, the loader
+discovers segments only from relocation fixups), so nothing about adopting it
+wholesale has become more attractive.
+
+What WAS adopted is the principle behind SLEIGH/p-code, not the machinery:
+*declare an instruction's semantics once, and let every analysis consume that
+one description.*  In Ghidra the read/write set falls out of a p-code op's
+inputs and output, and width comes from a varnode's size rather than a
+per-analysis table; the implicit `ds:si`/`es:di` operands of the string
+instructions are ordinary declarations, not special cases.  dos_re's
+equivalent is `lift/effects.py` — a few hundred lines, no IR, no SSA, no
+runtime — and it is deliberately NOT a p-code clone.  See `docs/future_work.md`
+for the parts of that research that were examined and consciously deferred.
+
 ## 10. Staged roadmap (each stage ships value alone)
 
 - **M0 — the census (no codegen).** Decoder + CFG + refusal taxonomy;

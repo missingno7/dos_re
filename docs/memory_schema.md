@@ -345,6 +345,27 @@ M4 acceptance should require all of these:
 4. **Access closure:** static analysis plus runtime poison proves no promoted
    byte is reached through historical memory, aliases, interrupts, DMA/device
    models, or escaped pointers.
+
+   > **Correction (2026-07-18): "static analysis" was doing less work than
+   > this sentence implies, and the first promotion shipped on the runtime
+   > half alone.**  `Census.closure()` is computed only from addresses the
+   > census can EXPRESS, so instructions with implicit operands contributed
+   > nothing to it — the string instructions were invisible entirely.  With
+   > those named and attributed by segment, the honest verdict for the first
+   > promoted region is `1` definite toucher and **84 that cannot be ruled
+   > out**.  None is shown to reach the region; none is excluded either.
+   >
+   > So the load-bearing evidence for slice 1 was the **poison run** — the
+   > byte was poisoned for 964 boundaries and nothing diverged, which a hidden
+   > reader would have broken.  That is real evidence and it is demo-scoped
+   > evidence.  Static sole-ownership was NOT proven, and the gate should not
+   > be described as though it were.
+   >
+   > A closure computed from an incomplete census is a claim about the
+   > census, not about the program.  Until the possible-toucher set can be
+   > driven to empty (segment provenance first, then ranges — see
+   > `docs/future_work.md` §1), this gate is *empirical with a static hint*,
+   > and region promotions should say so.
 5. **Detached artifact test:** run the declared corpus with FlatMemory,
    bridges, historical address tables, and original memory artifacts absent
    from the import/runtime environment.
@@ -404,3 +425,36 @@ codecs—not as a convenient struct declaration language.
    before publishing the region as promoted.
 8. Expand the refusal census one generic blocker class at a time; regenerate
    all outputs after every capability addition.
+
+### Status (2026-07-18)
+
+Steps 1–7 are **done**, once, for `ds:[0xA949]` — one byte, one owner, all
+gates green at 964/964 boundaries in both import and detached mode.  That
+proved the machinery: schema → codec → detached native state → access rewrite
+→ poison → oracle.
+
+It is worth being blunt about what it did NOT prove.  That region is the
+degenerate case — **no index, no record, no stride** — so none of the
+machinery that makes M4 *matter* was exercised:
+
+| capability | state |
+|---|---|
+| scalar region, single owner | done |
+| array base + element stride | **not built** |
+| fields within an element | **not built** |
+| indexed access rewrite (`entities[i].field_06`) | **not built** |
+| closure over an indexed region | **not built** (and see §11.4) |
+
+Step 9, therefore, and it is the substance of M4 rather than an extension of
+it:
+
+9. **Indexed regions.**  Extend the schema IR with an array region (base,
+   element stride, element record, field offsets), extend the codec generator
+   to import/export an element-wise region, and extend the access rewrite to
+   turn `mem.rb(seg, base + i*stride + off)` into `entities[i].field_off`.
+   The lemming array (`ds:0x00B0`, stride 45) is the intended first case; its
+   owner `1010:1F19` is currently refused (`computed-ss-address`), so a
+   verified owner is a prerequisite and is NOT yet available.
+
+Field names stay ANONYMOUS throughout (`field_06`, not `x`) — see
+*Two claims, never merged* in `docs/dos_re_2.0.md`.
