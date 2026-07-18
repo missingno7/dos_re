@@ -1170,7 +1170,23 @@ def _check_frame_pointer(scan, callees=None, far_callees=None) -> None:
     restores = [i for i in scan.insts.values() if _is_frame_restore(i)]
     if not leaves and not restores:
         return
-    if leaves and not any(i.op == 0xC8 for i in scan.insts.values()):
+    # A fused `leave` (`mov sp,bp; pop bp`) tears the frame down to the ENTRY
+    # depth, so it needs a PUSHED frame base in bp -- established either by
+    # `enter` (the atomic push+set) or the hand-rolled equivalent
+    # `push bp; mov bp,sp`. A compiler freely pairs a hand-rolled
+    # `push bp; mov bp,sp` prologue with a `leave` epilogue (leave is merely the
+    # one-byte encoding of `mov sp,bp; pop bp`), so demanding an `enter` refused
+    # that whole idiom -- SimAnt's Borland corpus alone had 86 such functions.
+    # Accept the hand-rolled establish, but ONLY together with its matching
+    # `push bp`: leave's own pop consumes a saved word, so a bare `mov bp,sp`
+    # with no push is not a balanced frame (and an alt-entry epilogue fragment,
+    # `leave` with neither establish nor push, still refuses -- its frame base
+    # lives in the container function, which composes it as a whole).
+    hand_rolled_establish = (
+        any(_is_frame_establish(i) for i in scan.insts.values())
+        and any(i.op == 0x55 for i in scan.insts.values()))
+    if leaves and not any(i.op == 0xC8 for i in scan.insts.values()) \
+            and not hand_rolled_establish:
         raise Refusal("leave-without-enter")
     if restores and not any(_is_frame_establish(i) for i in scan.insts.values()):
         raise Refusal("frame-restore-without-establish")
