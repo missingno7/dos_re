@@ -1052,6 +1052,12 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
             raise Refusal("cs-or-ss-mutation")
         if "sp" in (e.reads | e.writes) and not _is_stack_family(i) \
                 and not is_bootstrap:
+            # A setjmp SNAPSHOT stores the exact tracked sp and changes
+            # nothing; a longjmp RESTORE is terminal and emits a fail-loud
+            # raise (see the two recognisers).  Both are narrower than the
+            # sp-as-data this refusal exists for.
+            if _is_sp_snapshot_store(i) or _is_nonlocal_exit(scan, i):
+                continue
             raise Refusal("sp-as-data")
     _check_frame_pointer(scan, callees, far_callees)
     sp_delta, ret_pop, sp_output, sp_deltas = _check_stack_depths(
@@ -1416,6 +1422,85 @@ def _is_bootstrap_ss_switch(scan, i) -> bool:
     return "sp" in register_effects(nxt).writes
 
 
+def _is_sp_snapshot_store(i) -> bool:
+    """``mov m16, sp`` -- a setjmp-style SNAPSHOT of the stack pointer into
+    memory (e.g. Borland's ``mov ds:[000E], sp``).
+
+    Permitted, and the reasoning is narrow: the CPUless ABI keeps ``sp``
+    EXACT (that is the premise the whole depth walk rests on), so storing it
+    is an ordinary exact store of a tracked value.  The function's own ``sp``
+    is untouched, so no composition contract is affected.  Nothing is assumed
+    about who READS the slot back -- a read-back into ``sp`` is a separate
+    instruction and is judged separately by :func:`_is_nonlocal_exit`.
+
+    Restricted to a MEMORY destination: ``mov r16, sp`` (mod == 3) parks sp in
+    a general register where arbitrary arithmetic may follow, which is the
+    sp-as-data the refusal exists to catch."""
+    return i.op == 0x89 and i.modrm is not None \
+        and ((i.modrm >> 3) & 7) == 4 and (i.modrm >> 6) != 3
+
+
+def _is_nonlocal_exit(scan, i) -> bool:
+    """``mov sp, m16`` whose every forward path falls straight into a RET --
+    a setjmp/longjmp RESTORE: the return happens on a stack frame this
+    function never established.
+
+    dos_re cannot REPRESENT that.  The CPUless model holds frames on the
+    HOST's Python stack, so assigning a foreign ``sp`` and returning would
+    hand the immediate Python caller a bogus depth and silently corrupt every
+    caller's accounting -- the composition would still "work" and be wrong.
+    So the construct is TERMINAL, exactly as a runtime-dead exit is: it
+    constrains no exit ABI and emits a fail-loud raise instead of a return.
+
+    What is deliberately NOT modelled: the unwind itself.  Reproducing it
+    would mean asserting which frame the longjmp lands in and what it returns
+    there -- a contract that must be RECOVERED from the paired setjmp site,
+    never guessed to make promotion pass.  Until such a site is modelled the
+    raise IS the frontier witness; in the corpora seen so far these tails are
+    C-runtime fatal-abort paths that normal execution never takes.
+
+    Recognised TIGHTLY, in the manner of :func:`_is_bootstrap_ss_switch`: the
+    `mov sp, m16` form only, and only when every forward path reaches a
+    return with nothing in between that touches the stack or transfers
+    control elsewhere.  Anything looser is ordinary sp-as-data and still
+    refuses."""
+    if not (i.op == 0x8B and i.modrm is not None
+            and ((i.modrm >> 3) & 7) == 4 and (i.modrm >> 6) != 3):
+        return False                        # not `mov sp, m16`
+    seen: set[int] = set()
+    work = [i.next_ip]
+    reached_ret = False
+    while work:
+        ip = work.pop()
+        if ip is None or ip in seen:
+            continue
+        seen.add(ip)
+        if len(seen) > 32:                  # not a short abort tail
+            return False
+        nxt = scan.insts.get(ip)
+        if nxt is None:
+            return False                    # falls out of the scan
+        if nxt.kind in (RET, RETF, IRET):
+            if (nxt.imm or 0):
+                return False                # `ret N` pops a frame we don't model
+            reached_ret = True
+            continue
+        e = register_effects(nxt)
+        # nothing between the restore and the return may touch the stack,
+        # re-touch sp, or transfer control out of this tail.
+        if e.stack_delta or "sp" in (e.reads | e.writes):
+            return False
+        if nxt.kind not in (SEQ, JCC, JMP):
+            return False
+        if nxt.kind == SEQ:
+            work.append(nxt.next_ip)
+        elif nxt.kind == JMP:
+            work.append(nxt.target)
+        else:
+            work.extend((nxt.next_ip, nxt.target))
+    return reached_ret
+
+
 def _is_desmc_far_chain(i) -> bool:
     """A de-SMC'd DIRECT far jmp (EA ptr16:16) whose target operand is
     runtime-patched (tier 13): the ISR installer wrote the CHAINED (previous)
@@ -1498,6 +1583,13 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
         ip, d = work.pop()
         i = scan.insts[ip]
         e = register_effects(i)
+        if _is_nonlocal_exit(scan, i):
+            # a longjmp restore raises at emit time -- terminal, and it
+            # constrains nothing (no exit depth / ret_pop recorded), exactly
+            # as a runtime-dead exit does.  The walk must STOP here: the ret
+            # it falls into returns on a foreign frame, so propagating this
+            # depth to it would record a fictional exit contract.
+            continue
         if e.frame_establish and d is not None:
             # `mov bp,sp`: bp now holds the current sp -- the frame base a later
             # `mov sp,bp` returns to. One frame per function (a second establish
@@ -1999,6 +2091,21 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
         while ip in scan.insts:
             i = scan.insts[ip]
             count += 1
+            if _is_nonlocal_exit(scan, i):
+                # a setjmp/longjmp RESTORE (`mov sp, m16` falling into a ret):
+                # the original returns on a frame it never established.  The
+                # host stack cannot express that, and faking a plain return
+                # would silently corrupt the caller's depth -- so terminate
+                # the block loudly.  The UNWIND IS NOT MODELLED: landing frame
+                # and returned value must come from the paired setjmp site,
+                # never a guess.  Until then this raise is the witness.
+                blk.append(f"_cost += {count}")
+                blk.append(f"raise RuntimeError('CPUless: non-local exit "
+                           f"(longjmp) at {cs:04X}:{i.ip:04X} taken -- "
+                           f"frontier witness; the unwind target is not "
+                           f"modelled (recover the paired setjmp site)')")
+                terminated = True
+                break
             if i.kind in (RET, RETF, IRET):
                 if i.ip in dead_exits:
                     # a runtime-dead return (never executed; --observed): the

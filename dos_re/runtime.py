@@ -86,6 +86,7 @@ def create_runtime(
     *,
     game_root: str | Path | None = None,
     command_tail: bytes | str = b"",
+    install_replacements: bool = True,
 ) -> Runtime:
     if isinstance(command_tail, str):
         command_tail = command_tail.encode("ascii")
@@ -121,6 +122,15 @@ def create_runtime(
     # chaining idiom reaches on every unclaimed IRQ.
     install_bios_environment_hooks(cpu, dos)
     registry.install(cpu)
+    if not install_replacements:
+        # THE PURE-ASM ORACLE.  Install-then-strip rather than skipping the
+        # install: the registry is populated at import time by whichever module
+        # decorated the hooks, so a caller cannot make this CPU pure by
+        # withholding an import -- some other import in the process has almost
+        # certainly done it already.  Stripping here is order-independent.
+        # The BIOS environment hooks above are NOT registry entries and stay:
+        # they are synthetic hardware, not recovered game logic.
+        registry.uninstall(cpu)
     return Runtime(program, cpu, dos)
 
 

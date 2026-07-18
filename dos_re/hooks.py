@@ -61,6 +61,65 @@ class HookRegistry:
             cpu.replacement_hooks[key] = repl.handler
             cpu.hook_names[key] = repl.name
 
+    def uninstall(self, cpu: CPU8086, *, keep=frozenset()) -> None:
+        """Strip every REGISTERED game replacement from ``cpu`` -- the pure-ASM
+        oracle.  Framework hooks installed outside the registry (the BIOS INT9
+        ISR, the dummy IRET stub) survive, because they are synthetic hardware,
+        not recovered game logic.
+
+        POST-BOOT STRIP, not import guarding.  Guarding the ``import`` of a
+        port's hooks module does NOT work: any other import in the process may
+        already have pulled it in, the registry is populated at decoration time,
+        and :meth:`install` then wires it onto the "pure" CPU anyway.  That is
+        not hypothetical -- it silently contaminated a cold-start differential
+        with a deliberately behaviour-changing optimisation hook, and the
+        differential blamed the candidate for a divergence the ORACLE was
+        producing.  Strip from the registry after boot and the import order
+        stops mattering."""
+        for key in self.replacements:
+            if key in keep:
+                continue
+            cpu.replacement_hooks.pop(key, None)
+            cpu.hook_names.pop(key, None)
+
+    def installed_on(self, cpu: CPU8086, *, allow=frozenset()) -> list:
+        """Registered game replacements currently live on ``cpu``, as
+        ``(key, name)`` sorted by address -- the evidence
+        :func:`assert_pure_oracle` reports."""
+        return sorted(
+            (key, self.replacements[key].name)
+            for key in self.replacements
+            if key in cpu.replacement_hooks and key not in allow)
+
+
+def assert_pure_oracle(cpu: CPU8086, *, allow=frozenset(),
+                       registry_=None) -> None:
+    """Fail loudly if a supposedly pure-ASM oracle carries game replacements.
+
+    A differential is only evidence if the reference side is the ORIGINAL
+    program.  A replacement hook on the oracle makes the comparison a check of
+    the candidate against a MODIFIED original -- and if that hook is a
+    deliberate optimisation (a skipped loop pass, a collapsed wait) the oracle
+    diverges from the real game while looking authoritative.  Such a run does
+    not fail; it reports a wrong frontier and sends the investigation after a
+    defect the candidate does not have.
+
+    So a harness that believes its oracle is pure should SAY so here, and get
+    an exception naming the offenders rather than a plausible wrong answer.
+    ``allow`` whitelists deliberate environment hooks (synthetic retrace/timer
+    stand-ins) that a headless oracle genuinely needs."""
+    reg = registry if registry_ is None else registry_
+    live = reg.installed_on(cpu, allow=allow)
+    if live:
+        listed = ", ".join(f"{cs:04X}:{ip:04X} {name}" for (cs, ip), name in live)
+        raise RuntimeError(
+            f"oracle is NOT pure: {len(live)} registered game replacement(s) "
+            f"still installed -- {listed}.  A differential against this CPU "
+            f"compares the candidate to a MODIFIED original, not to the game.  "
+            f"Strip them with registry.uninstall(cpu) AFTER boot (guarding the "
+            f"hooks import does not work), or pass them in allow= if they are "
+            f"deliberate environment stand-ins.")
+
 
 def _parse_disabled(text: str) -> set[tuple[int, int]]:
     out: set[tuple[int, int]] = set()

@@ -203,9 +203,7 @@ class GameFrontend:
         fails loud on the tiers it cannot provide.  Ports with hook tiers override.
         """
         if args.no_replacements:
-            for key in hook_registry.replacements:
-                rt.cpu.replacement_hooks.pop(key, None)
-                rt.cpu.hook_names.pop(key, None)
+            hook_registry.uninstall(rt.cpu)
         if args.safe_hooks:
             raise HookModeUnsupported("--safe-hooks")
         if args.verify_hooks:
