@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
@@ -232,6 +236,34 @@ def test_changed_base_snapshot_identity_rejects_cached_boundary(tmp_path):
     reopened = ReplayArtifact.open(tmp_path / "demo")
     with pytest.raises(StaleReplayError, match="base snapshot identity"):
         reopened.restore(NATIVE, point(2))
+
+
+def test_artifact_metadata_is_returned_as_a_detached_copy(tmp_path):
+    artifact = make_artifact(tmp_path)
+    metadata = artifact.metadata
+    metadata["purpose"] = "mutated"
+    assert artifact.metadata["purpose"] == "hook-verification"
+
+
+def test_published_boundary_is_restorable_from_another_process(tmp_path):
+    artifact = make_artifact(tmp_path)
+    verify_interval(
+        artifact, CounterDriver(ORACLE), CounterDriver(NATIVE),
+        point(1), point(3))
+    code = (
+        "from dos_re.replay import ReplayArtifact,ReplayPoint;"
+        f"a=ReplayArtifact.open(r'{artifact.directory}');"
+        "p=[profile for profile,count in a.profiles() "
+        "if profile.profile_id=='native'][0];"
+        f"s=a.restore(p,ReplayPoint(3,{TIMELINE!r}));"
+        "assert s.event_cursor==3"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True,
+        timeout=30, env=env)
+    assert result.returncode == 0, result.stderr
 
 
 def test_machine_projection_covers_metadata_regions_and_event_cursor():

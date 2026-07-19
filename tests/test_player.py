@@ -81,6 +81,26 @@ def test_demo_metadata_roundtrip():
     assert fresh.steps_per_frame == 555 and fresh.timer_irqs_per_frame == 3
 
 
+def test_demo_acquisition_and_runtime_loading_are_frontend_seams(tmp_path):
+    class Fe(GameFrontend):
+        def create_runtime(self, args):
+            return "cold"
+
+        def load_snapshot_runtime(self, args, snapshot_dir):
+            return ("snapshot", snapshot_dir)
+
+    fe = Fe(ROOT)
+    recorder = fe.create_demo_recorder(root=tmp_path, name="x", metadata={})
+    assert recorder.name == "x"
+    cold = type("Playback", (), {"is_cold_start": True})()
+    snap = type("Playback", (), {
+        "is_cold_start": False,
+        "snapshot_path": lambda self: tmp_path / "snap",
+    })()
+    assert fe.load_demo_runtime(object(), cold) == "cold"
+    assert fe.load_demo_runtime(object(), snap) == ("snapshot", tmp_path / "snap")
+
+
 class _StubCPU:
     def __init__(self):
         self.replacement_hooks = {}

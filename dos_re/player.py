@@ -193,6 +193,28 @@ class GameFrontend:
         if "timer_irqs_per_frame" in meta:
             args.timer_irqs_per_frame = int(meta["timer_irqs_per_frame"])
 
+    def create_demo_recorder(
+        self, *, root: Path, name: str, metadata: dict[str, object],
+    ):
+        """Create the front-end's input acquisition adapter.
+
+        The default retains the lightweight viewer recorder. Ports whose
+        recordings are proof-corpus artifacts override this to return a
+        ``ReplayArtifact``-backed recorder without coupling the generic player
+        to a game-specific execution profile.
+        """
+        return InputDemoRecorder(root=root, name=name, metadata=metadata)
+
+    def load_demo_playback(self, path: str | Path):
+        """Load the front-end's input playback adapter."""
+        return InputDemoPlayback.load(path)
+
+    def load_demo_runtime(self, args: argparse.Namespace, playback):
+        """Build the runtime shell and restore the recording's base state."""
+        if playback.is_cold_start:
+            return self.create_runtime(args)
+        return self.load_snapshot_runtime(args, playback.snapshot_path())
+
     # --- hook modes -----------------------------------------------------------------
 
     def apply_hook_mode(self, rt, args: argparse.Namespace) -> None:
@@ -526,7 +548,8 @@ def run_view(frontend: GameFrontend, rt, args,
         # happens to carry any mouse motion.
         meta = dict(frontend.demo_metadata(args))
         meta["mouse_present"] = bool(getattr(rt.dos, "mouse_present", False))
-        rec = InputDemoRecorder(root=Path(args.demo_dir), name=name, metadata=meta)
+        rec = frontend.create_demo_recorder(
+            root=Path(args.demo_dir), name=name, metadata=meta)
         # A recording that begins at boundary 0 of a POWER-ON session needs no
         # start snapshot: replay boots a fresh runtime and applies the inputs
         # from boundary 0.  Writing one anyway is not merely redundant -- it is
@@ -748,12 +771,9 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
     args = build_arg_parser(frontend, description).parse_args(argv)
 
     if args.play_demo:
-        playback = InputDemoPlayback.load(args.play_demo)
+        playback = frontend.load_demo_playback(args.play_demo)
         frontend.apply_demo_metadata(args, playback.manifest.get("metadata", {}))
-        if playback.is_cold_start:
-            rt = frontend.create_runtime(args)
-        else:
-            rt = frontend.load_snapshot_runtime(args, playback.snapshot_path())
+        rt = frontend.load_demo_runtime(args, playback)
         frontend.apply_hook_mode(rt, args)
         _use_real_console_input(rt)
         if args.headless:

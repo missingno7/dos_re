@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import tempfile
+import uuid
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -458,6 +459,11 @@ class ReplayArtifact:
     def event_stream_sha256(self) -> str:
         return str(self._manifest["event_stream_sha256"])
 
+    @property
+    def metadata(self) -> dict[str, Any]:
+        """Return a detached copy of artifact-level canonical JSON metadata."""
+        return _json_value(self._manifest["metadata"], "artifact metadata")
+
     def register_profile(
         self, profile: ExecutionProfile, *, base_point: ReplayPoint,
         base_state: ContinuationState,
@@ -582,7 +588,12 @@ class ReplayArtifact:
         root = Path("profiles") / profile.storage_key / "boundaries" / point.key
         final = self.directory / root
         final.parent.mkdir(parents=True, exist_ok=True)
-        temp = Path(tempfile.mkdtemp(prefix=f".{point.key}-", dir=final.parent))
+        # ``tempfile.mkdtemp`` can inherit a process-private ACL under the
+        # Windows desktop sandbox. Renaming that directory publishes files the
+        # next process cannot read. A normal same-parent mkdir keeps the
+        # workspace ACL while retaining atomic directory publication.
+        temp = final.parent / f".{point.key}-{uuid.uuid4().hex}.tmp"
+        temp.mkdir()
         pages: list[dict[str, Any]] = []
         try:
             for region_no, name in enumerate(sorted(state.regions)):
