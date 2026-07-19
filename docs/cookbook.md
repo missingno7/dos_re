@@ -3,6 +3,11 @@
 > 2.0 hard walls and automation principle, dos_re_2.0.md wins.  Promoted from the
 > DOS_RE 1.0 starter (template_dos_port, retired) because the mechanics remain valid.
 
+> **dos_re 3.0 replay supersession:** later references to `tick_demo`,
+> `frontend_timeline`, `pm_verify_demo`, `pm_census`, suffix demos, or separate
+> repro manifests are historical. Their proof requirements are consolidated in
+> `dos_re.replay` and [`demos_and_snapshots.md`](demos_and_snapshots.md).
+
 # Cookbook — proven techniques that live in the source repos
 
 Not everything the two ports invented could be promoted into this framework:
@@ -267,11 +272,10 @@ real cold-start demo; gate 2 caught a menu-entry fresh-start block on its first 
 `pre2_port/scripts/verify_native_frontend.py`, plus `probe_frontend_timeline.py`
 (ground-truth prober — run on any demo) and `frontend_capture.py`.
 
-**A divergence appears 10 minutes into a demo.**
-→ *Suffix repro*: `InputDemoPlayback.write_suffix` (already in the core)
-carves a snapshot + rebased event tail at the divergence boundary — "resume
-here, run 4 frames" instead of "replay everything". The frame verifier's
-repro-artifact capture (`dos_re/repro_artifacts.py`) pairs with it.
+**A divergence appears 10 minutes into a replay.**
+→ Use `replay.bisect_divergence`. The artifact caches and annotates the latest
+equivalent boundary, making the failing X→Y transition directly replayable.
+Suffix demos and separate repro bundles are obsolete.
 
 **Tracking what the demo corpus actually covers.**
 → Corpus census: enumerate demos, their length, and which

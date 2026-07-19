@@ -159,19 +159,19 @@ Classify what it finds:
 ## 7. Record / replay deterministic demos
 
 ```python
-from dos_re.input_demo import InputDemoRecorder, InputDemoPlayback
+from dos_re.replay import (ReplayArtifact, ReplayEvent, ReplayPoint,
+                           ExecutionProfile, verify_interval, bisect_divergence)
 ```
 
-Interactively: `python tools/view.py --exe GAME.EXE --record-demo NAME` (or
-F11), replay with `--play-demo <path>` (add `--headless` for speed). Keys are
-delivered via `dos_re.interrupts.deliver_scancode` (port 60h + the game's own
-INT 09h ISR — not BIOS); `dos_re.keyboard.KeyDispatcher` holds each key a full
-polled frame.
+Record the adapter's deterministic external events as one `ReplayArtifact`.
+Register the original interpreter and each candidate as an `ExecutionProfile`,
+then use `tools/replay_verify.py` or `verify_interval` for exact X→Y replay.
+Machine-backed profiles use complete machine projection; detached native
+profiles publish the same canonical semantic schema from native state.
 
-A demo is a proof artifact only if it replays byte-identically under every
-driver. Divergence deep into a demo? `InputDemoPlayback.write_suffix` carves a
-snapshot + rebased tail at the boundary — resume there, not from the start
-(`dos_re.repro_artifacts` pairs with it).
+On divergence use `bisect_divergence`. It persists the latest valid point and
+the failing successor inside the artifact; there is no suffix/repro format.
+Inspect the corpus item with `python tools/replay_info.py <artifact-dir>`.
 
 ## 8. Hook a routine
 
@@ -216,12 +216,12 @@ artifacts on mismatch).
 
 ## 10. Lift routines automatically (never hand-translate a first draft)
 
-> **The 2.0 default is WHOLE-GRAPH assembly, not per-slice proving**
+> **The 3.0 default is WHOLE-GRAPH assembly plus indexed interval replay**
 > ([`dos_re_2.0.md`](dos_re_2.0.md)): `tools/codemap.py` (census) →
 > `tools/liftemit.py` (batch-emit everything) → `tools/liftlink.py`
-> (structural linking) → `lift.install.install_vmless_graph` in the port's
-> `play_native` → end-to-end tick-boundary oracle → `tools/hook_bisect.py` on
-> divergence.  The per-slice `liftverify` loop below remains the tool for
+> (structural linking) → `lift.install.install_vmless_graph` →
+> `replay.verify_interval` → `replay.bisect_divergence` on divergence. The
+> per-slice `liftverify` loop below remains the tool for
 > per-function diagnostics and the hybrid auto-install tier.
 
 ```bash
@@ -256,6 +256,14 @@ Python and tag it `@oracle_link` — with the same oracle tests unchanged. A
 wall of unread-but-verified lifted code must never inflate "recovered %".
 
 ## 12. Prove the VM-less native core (the endgame proof)
+
+> **Removed in dos_re 3.0.** The tick-demo and frontend-timeline workflows
+> described in the historical 2.0 text below no longer exist. Native,
+> memoryless, and VM-backed candidates all use `dos_re.replay`: each execution
+> profile projects authoritative state into the oracle's `CanonicalState`
+> schema, then `verify_interval` compares the exact cached X→Y interval. See
+> [`demos_and_snapshots.md`](demos_and_snapshots.md). The text through §12b is
+> retained only as historical rationale, not an API or command reference.
 
 `dos_re.tick_demo` — the mode-independent equivalence engine. Input demos ride
 an instruction-count clock, which is **mode-dependent** (a hook runs fewer
@@ -297,24 +305,10 @@ learned from a real divergence — the module docstring has the full stories):
   (transitions whose VM frames have no native counterpart) — the compare ends
   there legitimately; an unrecovered path raises and is reported.
 
-**On divergence, carve a repro — never re-debug from the seed.** `verify_ticks`
-reported tick `i`; reposition and slice:
-
-```python
-st = make_state(demo.seed)
-replay_to(demo, st, i, inject=my_inject, tick=my_tick)   # fast: no digest checks
-demo.suffix(i, capture_bytes(st)).save("artifacts/.../repro_tick_i.bin")
-```
-
-The suffix reproduces the divergence at its own tick 0 — every subsequent
-debugging iteration replays one tick, not the whole recording. (The input-demo
-analogue is `InputDemoPlayback.write_suffix`.) The same rule applies to the
-native runner itself: **every gap/crash writes a resumable snapshot and prints
-the exact repro command** — `dos_re.player` does this for VM runners; your
-VM-less native runner must implement the same (endgame accelerator; the
-completed port's `dump_gap_snapshot` is the worked example).
-
-Inspect a recording: `python tools/tick_demo_info.py <demo.bin>`.
+**On divergence, persist the latest equivalent replay point.** Use
+`replay.bisect_divergence`; it annotates and caches the valid boundary before
+the first mismatching transition. Replay that exact X→Y interval on later
+iterations. Suffix demos and separate repro bundles are obsolete.
 
 ## 12b. Prove the VM-less FRONT END (the non-gameplay screens)
 

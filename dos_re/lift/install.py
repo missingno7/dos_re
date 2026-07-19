@@ -154,8 +154,8 @@ def install_vmless_graph(cpu, emit_dir, *, skip=()) -> dict[tuple[int, int], str
     Unlike ``install_passing_lifts`` (the hybrid tier, which gates on
     per-entry ORACLE_PASSING), this installs the whole liftable corpus
     optimistically: correctness is not proven per-entry but by the END-TO-END
-    oracle over the assembled graph, which localizes the first bad piece
-    (tools/hook_bisect.py).  This is what a ``play_native`` shell installs —
+    oracle over the assembled graph, which localizes the first bad transition
+    (``dos_re.replay.bisect_divergence``).  This is what a native-profile shell installs —
     the maximal VMless surface, with the interpreter left only as the
     fail-loud backstop for anything not covered.
 

@@ -80,8 +80,8 @@ Then follow the milestones (`dos_re_2.0.md` section 6):
    the test** for everything after.
 2. **M2 — strict VMless.**  Run the pipeline: `tools/irgen.py` (census + IR) →
    `tools/liftemit.py --from-ir` → `tools/liftlink.py --from-ir`; install the
-   graph; converge against the oracle (`tools/hook_bisect.py` localizes
-   divergences).  Close the walls: interpreter poison, boundary heads as
+   graph; converge against the oracle (`replay.bisect_divergence` localizes
+   divergences to stable timeline transitions). Close the walls: interpreter poison, boundary heads as
    recovery facts, data-only boot image (`dos_re.bootimage` +
    `dos_re.independence`, linted by `tools/lint_independence.py` and audited
    by `tools/audit_boot_image.py`).

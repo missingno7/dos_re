@@ -57,7 +57,7 @@ from dos_re.lift.smc import analyze_smc  # noqa: E402
 from dos_re.lift.emit import EmitUnsupported, emit_function  # noqa: E402
 from dos_re.lift.manifest import LiftManifest, LiftRecord  # noqa: E402
 from dos_re.lift.runtime import LiftRuntimeError  # noqa: E402
-from dos_re.repro_artifacts import clone_runtime_state  # noqa: E402
+from dos_re.snapshot import clone_runtime_state  # noqa: E402
 from dos_re.snapshot import load_snapshot, parse_addr  # noqa: E402
 from dos_re.verification import (HookVerifierConfig, HookVerifyDivergence,  # noqa: E402
                                  HookVerifyInconclusive,

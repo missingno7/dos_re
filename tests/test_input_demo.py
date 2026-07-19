@@ -93,36 +93,6 @@ def test_dos_key_value_matches_text_prompt_encoding():
     assert dos_key_value(0x3B, "") is None
 
 
-def test_input_demo_suffix_uses_playback_cursor_not_boundary_filter(tmp_path):
-    demo = tmp_path / "demo"
-    demo.mkdir()
-    (demo / "input_demo.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "snapshot": "snapshot",
-                "end_boundary": 7,
-                "metadata": {"video": "vga"},
-                "events": [
-                    {"boundary": 2, "seq": 0, "kind": "scan", "value": 0x4D},
-                    {"boundary": 2, "seq": 1, "kind": "scan", "value": 0xCD},
-                    {"boundary": 5, "seq": 2, "kind": "dos_key", "value": 0x3920, "scancode": 0x39, "text": " "},
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    playback = InputDemoPlayback.load(demo)
-    rt = DummyRuntime()
-
-    assert playback.apply_to_runtime(2, rt, deliver=_deliver) == 2
-    suffix = playback.remaining_events_from_cursor(boundary=2)
-
-    assert [event.to_json() for event in suffix] == [
-        {"boundary": 3, "seq": 0, "kind": "dos_key", "value": 0x3920, "scancode": 0x39, "text": " "},
-    ]
-
-
 class SnapshotRuntime:
     def __init__(self) -> None:
         self.program = SimpleNamespace(
@@ -172,47 +142,6 @@ class SnapshotRuntime:
             stdout=[],
             port_log=[],
         )
-
-
-def test_input_demo_write_suffix_writes_snapshot_and_rebased_manifest(tmp_path):
-    demo = tmp_path / "demo"
-    demo.mkdir()
-    (demo / "input_demo.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "snapshot": "snapshot",
-                "end_boundary": 10,
-                "metadata": {"video": "vga", "sound": "adlib"},
-                "events": [
-                    {"boundary": 4, "seq": 0, "kind": "scan", "value": 0x4D},
-                    {"boundary": 9, "seq": 1, "kind": "scan", "value": 0xCD},
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    playback = InputDemoPlayback.load(demo)
-    playback.apply_to_runtime(4, DummyRuntime(), deliver=_deliver)
-
-    out = playback.write_suffix(
-        SnapshotRuntime(),
-        root=tmp_path / "repros",
-        name="verify_divergence",
-        boundary=4,
-        status="test suffix snapshot",
-        metadata={"reason": "unit-test"},
-    )
-
-    manifest = json.loads((out / "input_demo.json").read_text(encoding="utf-8"))
-    assert (out / "snapshot" / "state.json").exists()
-    assert manifest["end_boundary"] == 6
-    assert manifest["metadata"]["video"] == "vga"
-    assert manifest["metadata"]["reason"] == "unit-test"
-    assert manifest["metadata"]["source_boundary"] == 4
-    assert manifest["events"] == [
-        {"boundary": 5, "seq": 0, "kind": "scan", "value": 0xCD},
-    ]
 
 
 def test_cold_start_demo_records_without_snapshot_and_playback_flags_it(tmp_path):
@@ -358,36 +287,6 @@ def test_old_keyboard_only_v1_demo_still_loads_and_replays(tmp_path):
     assert playback.apply_to_runtime(2, rt, deliver=_deliver) == 1
     assert rt.scans == [0x4D]
     assert rt.dos.key_queue == [0x3920]
-
-
-def test_suffix_seeds_current_mouse_state_and_carries_mouse_fields(tmp_path):
-    demo = tmp_path / "demo"
-    demo.mkdir()
-    (demo / "input_demo.json").write_text(
-        json.dumps(
-            {
-                "version": 2,
-                "snapshot": "snapshot",
-                "events": [
-                    {"boundary": 1, "seq": 0, "kind": "mouse", "u": 0.1, "v": 0.2, "buttons": 1},
-                    {"boundary": 5, "seq": 1, "kind": "mouse", "u": 0.3, "v": 0.4, "buttons": 0},
-                    {"boundary": 6, "seq": 2, "kind": "scan", "value": 0x39},
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    playback = InputDemoPlayback.load(demo)
-    playback.apply_to_runtime(2, MouseRuntime(), deliver=_deliver)
-
-    suffix = playback.remaining_events_from_cursor(boundary=2)
-    assert [event.to_json() for event in suffix] == [
-        # The mouse state current at the suffix point is seeded at boundary 0 so
-        # the suffix replay keeps re-applying it (range changes re-map it).
-        {"boundary": 0, "seq": 0, "kind": "mouse", "u": 0.1, "v": 0.2, "buttons": 1},
-        {"boundary": 3, "seq": 1, "kind": "mouse", "u": 0.3, "v": 0.4, "buttons": 0},
-        {"boundary": 4, "seq": 2, "kind": "scan", "value": 0x39},
-    ]
 
 
 def test_mouse_sample_quantizes_like_the_recorder():

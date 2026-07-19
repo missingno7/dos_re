@@ -97,6 +97,16 @@ def capture_dos_state(dos, memory) -> dict:
         "dac_read_index": getattr(dos, "_dac_read_index", 0),
         "dac_component": getattr(dos, "_dac_component", 0),
         "dac_latch": list(getattr(dos, "_dac_latch", [])),
+        "seq_index": getattr(dos, "_seq_index", 0),
+        "seq_regs": {str(k): v for k, v in getattr(dos, "_seq_regs", {}).items()},
+        "gc_index": getattr(dos, "_gc_index", 0),
+        "gc_regs": {str(k): v for k, v in getattr(dos, "_gc_regs", {}).items()},
+        "crtc_index": getattr(dos, "_crtc_index", 0),
+        "crtc_regs": {str(k): v for k, v in getattr(dos, "_crtc_regs", {}).items()},
+        "attr_index": getattr(dos, "_attr_index", 0),
+        "attr_flipflop": getattr(dos, "_attr_flipflop", False),
+        "attr_regs": {str(k): v for k, v in getattr(dos, "_attr_regs", {}).items()},
+        "misc_output": getattr(dos, "_misc_output", 0xA3),
         "pit_channel2_access": dos._pit_channel2_access,
         "pit_channel2_latch": dos._pit_channel2_latch,
         "pit_channel2_write_low": dos._pit_channel2_write_low,
@@ -106,6 +116,8 @@ def capture_dos_state(dos, memory) -> dict:
         "pit_channel0_write_low": getattr(dos, "_pit_channel0_write_low", True),
         "pit_channel0_reload": getattr(dos, "pit_channel0_reload", 0),
         "pit_channel0_anchor_ticks": getattr(dos, "pit_channel0_anchor_ticks", 0),
+        "pit_channel0_read_latch": list(getattr(dos, "_pit_channel0_read_latch", [])),
+        "vga_retrace_active_fraction": getattr(dos, "vga_retrace_active_fraction", 0.28),
         "speaker_control": dos.speaker_control,
         "opl_selected_register": dos.opl_selected_register,
         "opl_status": dos.opl_status,
@@ -120,22 +132,49 @@ def capture_dos_state(dos, memory) -> dict:
         "ega_set_reset": getattr(memory, "ega_set_reset", 0),
         "ega_enable_set_reset": getattr(memory, "ega_enable_set_reset", 0),
         "ega_bit_mask": getattr(memory, "ega_bit_mask", 0xFF),
+        "ega_read_mode": getattr(memory, "ega_read_mode", 0),
+        "ega_color_compare": getattr(memory, "ega_color_compare", 0),
+        "ega_color_dont_care": getattr(memory, "ega_color_dont_care", 0x0F),
         "ega_latches": list(getattr(memory, "ega_latches", [0, 0, 0, 0])),
         "ega_display_start": memory.ega_display_start,
+        "ega_pel_pan": getattr(memory, "ega_pel_pan", 0),
+        "ega_display_enabled": getattr(memory, "ega_display_enabled", True),
+        "ega_h_display_end": getattr(memory, "ega_h_display_end", 39),
+        "ega_pan_active": getattr(memory, "ega_pan_active", False),
+        "ega_pan_display_start": getattr(memory, "ega_pan_display_start", 0),
+        "ega_pan_pel": getattr(memory, "ega_pan_pel", 0),
         "next_alloc_segment": dos.next_alloc_segment,
         "allocation_limit_segment": dos.allocation_limit_segment,
+        "next_handle": dos.next_handle,
         "allocations": {f"{seg:04X}": size
                         for seg, size in sorted(dos.allocations.items())},
         "open_files": {
-            str(handle): {"path": str(f.path), "pos": f.pos, "size": len(f.data)}
+            str(handle): {"path": str(f.path), "pos": f.pos, "size": len(f.data),
+                          "writable": bool(f.writable)}
             for handle, f in dos.files.items()
         },
+        "file_overlay": {name: bytes(data).hex()
+                         for name, data in sorted(getattr(dos, "file_overlay", {}).items())},
+        "save_dir": None if getattr(dos, "save_dir", None) is None else str(dos.save_dir),
         # Console input state IS machine state: a demo recorded across a
         # console-read boot (Lemmings' machine-type menu) replays from its
         # start snapshot and blocks forever if the queued keys vanish.
         "key_queue": list(getattr(dos, "key_queue", ())),
         "pending_console_scancode": getattr(dos, "pending_console_scancode", None),
         "console_input_fallback": getattr(dos, "console_input_fallback", None),
+        "current_scancode": getattr(dos, "current_scancode", 0),
+        "kbd_output_buffer_full": getattr(dos, "kbd_output_buffer_full", False),
+        "kbd_shift": getattr(dos, "kbd_shift", False),
+        "kbd_ctrl": getattr(dos, "kbd_ctrl", False),
+        "kbd_alt": getattr(dos, "kbd_alt", False),
+        "kbd_caps": getattr(dos, "kbd_caps", False),
+        "mouse_present": getattr(dos, "mouse_present", False),
+        "mouse_x": getattr(dos, "mouse_x", 320),
+        "mouse_y": getattr(dos, "mouse_y", 100),
+        "mouse_buttons": getattr(dos, "mouse_buttons", 0),
+        "mouse_range": list(getattr(dos, "mouse_range", [0, 639, 0, 199])),
+        "strict_ports": getattr(dos, "strict_ports", False),
+        "unmodeled_port_reads": [list(item) for item in getattr(dos, "unmodeled_port_reads", [])],
         "stdout_tail": "".join(dos.stdout)[-4096:],
         "port_log_tail": dos.port_log[-128:],
     }
@@ -165,6 +204,16 @@ def _restore_dos_state(rt: Runtime, dos_meta: dict) -> Runtime:
     rt.dos._dac_read_index = dos_meta.get("dac_read_index", rt.dos._dac_read_index)
     rt.dos._dac_component = dos_meta.get("dac_component", rt.dos._dac_component)
     rt.dos._dac_latch = list(dos_meta.get("dac_latch", rt.dos._dac_latch))
+    rt.dos._seq_index = dos_meta.get("seq_index", rt.dos._seq_index)
+    rt.dos._seq_regs = {int(k): int(v) for k, v in dos_meta.get("seq_regs", {}).items()}
+    rt.dos._gc_index = dos_meta.get("gc_index", rt.dos._gc_index)
+    rt.dos._gc_regs = {int(k): int(v) for k, v in dos_meta.get("gc_regs", {}).items()}
+    rt.dos._crtc_index = dos_meta.get("crtc_index", rt.dos._crtc_index)
+    rt.dos._crtc_regs = {int(k): int(v) for k, v in dos_meta.get("crtc_regs", {}).items()}
+    rt.dos._attr_index = dos_meta.get("attr_index", rt.dos._attr_index)
+    rt.dos._attr_flipflop = dos_meta.get("attr_flipflop", rt.dos._attr_flipflop)
+    rt.dos._attr_regs = {int(k): int(v) for k, v in dos_meta.get("attr_regs", {}).items()}
+    rt.dos._misc_output = dos_meta.get("misc_output", rt.dos._misc_output)
     rt.dos._pit_channel2_access = dos_meta.get("pit_channel2_access", rt.dos._pit_channel2_access)
     rt.dos._pit_channel2_latch = dos_meta.get("pit_channel2_latch", rt.dos._pit_channel2_latch)
     rt.dos._pit_channel2_write_low = dos_meta.get("pit_channel2_write_low", rt.dos._pit_channel2_write_low)
@@ -175,6 +224,10 @@ def _restore_dos_state(rt: Runtime, dos_meta: dict) -> Runtime:
     rt.dos.pit_channel0_reload = dos_meta.get("pit_channel0_reload", rt.dos.pit_channel0_reload)
     rt.dos.pit_channel0_anchor_ticks = dos_meta.get("pit_channel0_anchor_ticks",
                                                     rt.dos.pit_channel0_anchor_ticks)
+    rt.dos._pit_channel0_read_latch = list(map(
+        int, dos_meta.get("pit_channel0_read_latch", rt.dos._pit_channel0_read_latch)))
+    rt.dos.vga_retrace_active_fraction = float(dos_meta.get(
+        "vga_retrace_active_fraction", rt.dos.vga_retrace_active_fraction))
     rt.dos.speaker_control = dos_meta.get("speaker_control", rt.dos.speaker_control)
     rt.dos.opl_selected_register = dos_meta.get("opl_selected_register", rt.dos.opl_selected_register)
     rt.dos.opl_status = dos_meta.get("opl_status", rt.dos.opl_status)
@@ -190,12 +243,31 @@ def _restore_dos_state(rt: Runtime, dos_meta: dict) -> Runtime:
     rt.program.memory.ega_set_reset = dos_meta.get("ega_set_reset", rt.program.memory.ega_set_reset)
     rt.program.memory.ega_enable_set_reset = dos_meta.get("ega_enable_set_reset", rt.program.memory.ega_enable_set_reset)
     rt.program.memory.ega_bit_mask = dos_meta.get("ega_bit_mask", rt.program.memory.ega_bit_mask)
+    rt.program.memory.ega_read_mode = dos_meta.get("ega_read_mode", rt.program.memory.ega_read_mode)
+    rt.program.memory.ega_color_compare = dos_meta.get("ega_color_compare", rt.program.memory.ega_color_compare)
+    rt.program.memory.ega_color_dont_care = dos_meta.get("ega_color_dont_care", rt.program.memory.ega_color_dont_care)
     rt.program.memory.ega_latches = list(dos_meta.get("ega_latches", rt.program.memory.ega_latches))
     rt.program.memory.ega_display_start = dos_meta.get("ega_display_start", rt.program.memory.ega_display_start)
+    rt.program.memory.ega_pel_pan = dos_meta.get("ega_pel_pan", rt.program.memory.ega_pel_pan)
+    rt.program.memory.ega_display_enabled = dos_meta.get("ega_display_enabled", rt.program.memory.ega_display_enabled)
+    rt.program.memory.ega_h_display_end = dos_meta.get("ega_h_display_end", rt.program.memory.ega_h_display_end)
+    rt.program.memory.ega_pan_active = dos_meta.get("ega_pan_active", rt.program.memory.ega_pan_active)
+    rt.program.memory.ega_pan_display_start = dos_meta.get("ega_pan_display_start", rt.program.memory.ega_pan_display_start)
+    rt.program.memory.ega_pan_pel = dos_meta.get("ega_pan_pel", rt.program.memory.ega_pan_pel)
     if "key_queue" in dos_meta:
         rt.dos.key_queue = [int(k) for k in dos_meta["key_queue"]]
         rt.dos.pending_console_scancode = dos_meta.get("pending_console_scancode")
         rt.dos.console_input_fallback = dos_meta.get("console_input_fallback")
+    for name in ("current_scancode", "kbd_output_buffer_full", "kbd_shift",
+                 "kbd_ctrl", "kbd_alt", "kbd_caps", "mouse_present", "mouse_x",
+                 "mouse_y", "mouse_buttons", "strict_ports"):
+        if name in dos_meta:
+            setattr(rt.dos, name, dos_meta[name])
+    if "mouse_range" in dos_meta:
+        rt.dos.mouse_range = list(map(int, dos_meta["mouse_range"]))
+    if "unmodeled_port_reads" in dos_meta:
+        rt.dos.unmodeled_port_reads = [tuple(map(int, item))
+                                       for item in dos_meta["unmodeled_port_reads"]]
     rt.dos.next_alloc_segment = dos_meta.get("next_alloc_segment", rt.dos.next_alloc_segment)
     rt.dos.allocation_limit_segment = dos_meta.get("allocation_limit_segment", rt.dos.allocation_limit_segment)
     rt.dos.allocations = {int(seg, 16): int(size) for seg, size in dos_meta.get("allocations", {}).items()}
@@ -206,10 +278,17 @@ def _restore_dos_state(rt: Runtime, dos_meta: dict) -> Runtime:
             path = Path(path)
         if not path.exists():
             path = rt.dos.resolve_game_path(Path(file_meta["path"]).name)
-        fh = FileHandle(path, bytearray(path.read_bytes()), pos=int(file_meta.get("pos", 0)))
+        fh = FileHandle(path, bytearray(path.read_bytes()), pos=int(file_meta.get("pos", 0)),
+                        writable=bool(file_meta.get("writable", False)))
         rt.dos.files[int(handle_text)] = fh
-    if rt.dos.files:
-        rt.dos.next_handle = max(rt.dos.files) + 1
+    rt.dos.next_handle = int(dos_meta.get(
+        "next_handle", max(rt.dos.files, default=4) + 1))
+    rt.dos.file_overlay = {
+        str(name): bytearray.fromhex(encoded)
+        for name, encoded in dos_meta.get("file_overlay", {}).items()
+    }
+    save_dir = dos_meta.get("save_dir")
+    rt.dos.save_dir = None if save_dir is None else Path(save_dir)
     # Stash any persisted Sound Blaster state for the front-end to apply when it
     # attaches the SB (enable_sound_blaster); restore itself stays frontend-
     # agnostic and does not create audio hardware.

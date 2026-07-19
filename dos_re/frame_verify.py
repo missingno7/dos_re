@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable, Literal, Sequence
 
 from .cpu import CPU8086, HaltExecution, UnsupportedInstruction
-from .repro_artifacts import clone_runtime_state
+from .snapshot import clone_runtime_state
 from .runtime import Runtime
 
 Addr = tuple[int, int]

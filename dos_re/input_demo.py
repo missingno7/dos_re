@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Sequence
 
 from typing import TYPE_CHECKING
 
@@ -295,92 +295,6 @@ class InputDemoPlayback:
     def next_event_index(self) -> int:
         """Index of the first recorded event that has not yet been replayed."""
         return self._index
-
-    def remaining_events_from_cursor(self, *, boundary: int) -> list[InputDemoEvent]:
-        """Return unapplied events re-keyed to a new snapshot at ``boundary``.
-
-        Use the playback cursor rather than filtering by ``event.boundary``.
-        ``apply_to_runtime`` consumes all events whose boundary is ``<=`` the
-        current boundary, so a same-boundary release/key event may already be
-        applied even though its original boundary equals the suffix start.
-        """
-        base = max(0, int(boundary))
-        out: list[InputDemoEvent] = []
-        if self._last_mouse is not None:
-            # Carry the mouse state that was current at the suffix point: the
-            # snapshot holds the mapped mouse_x/y, but the suffix replay must
-            # keep RE-APPLYING the normalized sample every boundary (range
-            # changes remap it), so seed it as a boundary-0 event.
-            u, v, buttons = self._last_mouse
-            out.append(InputDemoEvent(boundary=0, seq=0, kind="mouse", u=u, v=v, buttons=buttons))
-        for event in self.events[self._index:]:
-            out.append(InputDemoEvent(
-                boundary=max(0, event.boundary - base),
-                seq=len(out),
-                kind=event.kind,
-                value=event.value,
-                scancode=event.scancode,
-                text=event.text,
-                u=event.u,
-                v=event.v,
-                buttons=event.buttons,
-            ))
-        return out
-
-    def write_suffix(
-        self,
-        rt: Runtime,
-        *,
-        root: Path,
-        name: str,
-        boundary: int,
-        status: str,
-        metadata: dict[str, object] | None = None,
-        snapshot_name: str = "snapshot",
-        trace_tail: Iterable[str] = (),
-    ) -> Path:
-        """Write a new demo that starts from ``rt`` and replays remaining input.
-
-        This is the reproducibility helper for long demos: save a snapshot at
-        the current VM point and copy only the not-yet-applied events from the
-        original demo, rebased to the new snapshot's boundary zero.
-        """
-        root = Path(root)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out = root / f"demo_{_safe_demo_name(name)}_{stamp}"
-        snapshot_dir = out / snapshot_name
-        out.mkdir(parents=True, exist_ok=True)
-        from .snapshot import write_snapshot
-        write_snapshot(rt, snapshot_dir, status=status, steps=rt.cpu.instruction_count, trace_tail=trace_tail)
-
-        base_boundary = max(0, int(boundary))
-        end = self.end_boundary
-        suffix_end = None if end is None else max(0, int(end) - base_boundary)
-        source_metadata = dict(self.manifest.get("metadata", {}))
-        suffix_metadata = {
-            **source_metadata,
-            **dict(metadata or {}),
-            "source_demo": str(self.demo_dir),
-            "source_boundary": base_boundary,
-            "source_next_event_index": self._index,
-            "source_event_count": len(self.events),
-            "suffix_kind": "remaining_input_from_cursor",
-        }
-        events = self.remaining_events_from_cursor(boundary=base_boundary)
-        manifest = {
-            "version": DEMO_VERSION,
-            "status": "complete",
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            "stopped_at": datetime.now().isoformat(timespec="seconds"),
-            "snapshot": snapshot_name,
-            "metadata": suffix_metadata,
-            "start_boundary": 0,
-            "end_boundary": suffix_end,
-            "event_count": len(events),
-            "events": [event.to_json() for event in events],
-        }
-        (out / "input_demo.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        return out
 
     def reset(self) -> None:
         self._index = 0

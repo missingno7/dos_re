@@ -523,9 +523,9 @@ Consequences:
   `play_native`.**  Per-function proofs remain useful metadata — hybrid
   auto-install, diagnostics, regression tests, later refactoring — but they
   are not a precondition for graph assembly.
-- **Divergences are localized automatically** (`tools/hook_bisect.py`
-  binary-searches the installed set to the smallest responsible function),
-  then AI repairs only that concrete gap and the pipeline reruns.
+- **Divergences are localized automatically** (`dos_re.replay.bisect_divergence`
+  searches stable replay points for the smallest observed failing transition),
+  then the function-visit index identifies the covered code to inspect.
 - Verification must remain available through ALL stages (see §5, the bridge).
 
 The operating loop:

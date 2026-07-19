@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 
 from dos_re.snapshot_headless import load_snapshot_headless
+from dos_re.snapshot import capture_runtime_continuation, apply_runtime_continuation
 
 
 def _write_min_snapshot(tmp_path, steps: int):
@@ -82,3 +83,47 @@ def test_pit_count_write_anchors_the_phase(tmp_path):
     v1 = dos._pit_channel0_live_value(cpu)
     elapsed = int(100 * dos.PIT_TICKS_PER_INSTRUCTION_ESTIMATE)
     assert (v0 - v1) % (dos.pit_channel0_reload or 0x10000) == elapsed
+
+
+def test_real_mode_replay_continuation_restores_device_and_cursor_state(tmp_path):
+    _write_min_snapshot(tmp_path, steps=123)
+    rt = load_snapshot_headless(tmp_path, game_root=tmp_path)
+    rt.cpu.s.ax = 0xBEEF
+    rt.dos.mouse_present = True
+    rt.dos.mouse_range = [4, 44, 8, 88]
+    rt.dos.kbd_shift = True
+    rt.program.memory.ega_pel_pan = 6
+    rt.dos.next_handle = 12
+    rt.dos._pit_channel0_read_latch = [0x34, 0x12]
+    rt.dos.file_overlay["SAVE.DAT"] = bytearray(b"saved")
+    state = capture_runtime_continuation(rt, event_cursor=17)
+
+    rt.cpu.s.ax = 0
+    rt.dos.mouse_present = False
+    rt.dos.mouse_range = [0, 1, 0, 1]
+    rt.dos.kbd_shift = False
+    rt.program.memory.ega_pel_pan = 0
+    rt.dos.next_handle = 5
+    rt.dos._pit_channel0_read_latch = []
+    rt.dos.file_overlay.clear()
+    apply_runtime_continuation(rt, state)
+
+    assert state.event_cursor == 17
+    assert rt.cpu.s.ax == 0xBEEF
+    assert rt.dos.mouse_present is True
+    assert rt.dos.mouse_range == [4, 44, 8, 88]
+    assert rt.dos.kbd_shift is True
+    assert rt.program.memory.ega_pel_pan == 6
+    assert rt.dos.next_handle == 12
+    assert rt.dos._pit_channel0_read_latch == [0x34, 0x12]
+    assert rt.dos.file_overlay == {"SAVE.DAT": bytearray(b"saved")}
+
+
+def test_real_mode_replay_continuation_rejects_wall_clock(tmp_path):
+    import pytest
+
+    _write_min_snapshot(tmp_path, steps=0)
+    rt = load_snapshot_headless(tmp_path, game_root=tmp_path)
+    rt.dos.time_source = lambda: 1.0
+    with pytest.raises(ValueError, match="wall-clock"):
+        capture_runtime_continuation(rt, event_cursor=0)

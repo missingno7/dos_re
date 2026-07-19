@@ -215,3 +215,29 @@ def clone_pm_runtime(rt):
     clone = PMRuntime(image=rt.image, cpu=cpu, dos=dos, mem=mem)
     apply_pm_state(clone, state, rt.mem.data, b"".join(rt.dos.vga.planes))
     return clone
+
+
+def capture_pm_continuation(rt, *, event_cursor: int):
+    """Capture a PM runtime in the shared dos_re 3.0 continuation container."""
+    from .replay import ContinuationState
+
+    return ContinuationState(
+        schema_id="dos-re-pm-continuation-v1",
+        metadata=capture_pm_state(rt),
+        regions={
+            "memory": bytes(rt.mem.data),
+            "vga-planes": b"".join(rt.dos.vga.planes),
+        },
+        event_cursor=event_cursor,
+    ).normalized()
+
+
+def apply_pm_continuation(rt, state) -> None:
+    """Apply :func:`capture_pm_continuation` to an existing PM runtime shell."""
+    state = state.normalized()
+    if state.schema_id != "dos-re-pm-continuation-v1":
+        raise ValueError(f"not a PM continuation state: {state.schema_id!r}")
+    if set(state.regions) != {"memory", "vga-planes"}:
+        raise ValueError("PM continuation requires memory and vga-planes regions")
+    apply_pm_state(rt, state.metadata, state.regions["memory"],
+                   state.regions["vga-planes"])

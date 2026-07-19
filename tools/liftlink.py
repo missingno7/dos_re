@@ -21,8 +21,8 @@ Edge rule (STRUCTURAL — the 2.0 default):
 
 Correctness of the linked graph is judged END-TO-END: full-state oracle
 comparison at tick boundaries over the assembled graph, with
-``tools/hook_bisect.py`` localizing any divergence to the responsible
-function.  Per-function ORACLE_PASSING is NOT a link precondition —
+``dos_re.replay.bisect_divergence`` localizing any divergence to a stable
+timeline transition. Per-function ORACLE_PASSING is NOT a link precondition —
 ``--proven-edges`` restores that 1.x conservative gate for the hybrid tier or
 for debugging, but it must not be the default posture (oracle-guided
 convergence, docs/dos_re_2.0.md §2).
@@ -63,7 +63,7 @@ sys.path.insert(0, str(ROOT))
 
 from dos_re.lift.cfg import FunctionScan, scan_function  # noqa: E402
 from dos_re.lift.emit import EmitUnsupported, emit_function  # noqa: E402
-from dos_re.repro_artifacts import clone_runtime_state  # noqa: E402
+from dos_re.snapshot import clone_runtime_state  # noqa: E402
 from dos_re.snapshot import load_snapshot, parse_addr  # noqa: E402
 
 PASSING = "ORACLE_PASSING"
@@ -229,7 +229,7 @@ def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
       qualifies on the STRUCTURAL criterion alone (liftable census entry,
       all-near-``ret`` exits).  Correctness is guaranteed not per-callee but
       by END-TO-END oracle comparison over the assembled graph, which
-      localizes the first bad piece (tools/hook_bisect.py).
+      localizes the first bad transition (dos_re.replay.bisect_divergence).
     * ``structural=False`` (1.x conservative, ``--proven-edges``) — a callee
       must additionally be ORACLE_PASSING on some board.  Safe standalone (a
       linked call reaches only proven code); useful for the hybrid tier and
@@ -604,7 +604,7 @@ def main(argv=None) -> int:
         print("blocked edges: " + ", ".join(f"{r}={n}" for r, n in sorted(reasons.items())))
     print("NOTE: re-emitted callers carry NEW bodies -- the linked graph is "
           "judged END-TO-END (tick-boundary oracle comparison over the "
-          "assembled VMless graph; hook_bisect localizes any divergence). "
+          "assembled VMless graph; replay bisection localizes any divergence). "
           "liftverify along a drive remains available for per-function "
           "diagnostics and the hybrid tier.")
 
