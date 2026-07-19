@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 from copy import deepcopy
@@ -11,6 +12,7 @@ import pytest
 
 from dos_re.replay import (
     CanonicalState,
+    ConcurrentReplayWriterError,
     ContinuationState,
     ExecutionProfile,
     FunctionVisitIndex,
@@ -264,6 +266,62 @@ def test_published_boundary_is_restorable_from_another_process(tmp_path):
         [sys.executable, "-c", code], capture_output=True, text=True,
         timeout=30, env=env)
     assert result.returncode == 0, result.stderr
+
+
+def test_interrupted_boundary_publication_recovers(tmp_path):
+    for stage, expected_cached in (
+        ("prepared", False),
+        ("pending-indexed", True),
+        ("directory-published", True),
+        ("manifest-indexed", True),
+    ):
+        artifact = make_artifact(tmp_path / stage)
+        driver = CounterDriver(ORACLE)
+        driver.replay_to(artifact, point(3))
+
+        def interrupt(current, target=stage):
+            if current == target:
+                raise RuntimeError(f"interrupted after {target}")
+
+        artifact._publication_stage = interrupt
+        with pytest.raises(RuntimeError, match="interrupted"):
+            artifact.cache(ORACLE, point(3), driver.capture())
+
+        reopened = ReplayArtifact.open(artifact.directory)
+        assert reopened.has_cached(ORACLE, point(3)) is expected_cached
+        if not expected_cached:
+            assert reopened.cache(ORACLE, point(3), driver.capture())
+        assert reopened.restore(ORACLE, point(3)).digest == driver.capture().digest
+
+
+def test_live_concurrent_writer_is_rejected_without_manifest_damage(tmp_path):
+    artifact = make_artifact(tmp_path)
+    lock = artifact.directory / ".replay-writer.lock"
+    lock.write_text(json.dumps({
+        "pid": os.getpid(), "host": socket.gethostname(), "token": "other",
+    }))
+    try:
+        with pytest.raises(ConcurrentReplayWriterError):
+            artifact.annotate(point(1), kind="test", metadata={})
+    finally:
+        lock.unlink()
+    reopened = ReplayArtifact.open(artifact.directory)
+    assert reopened.event_stream_sha256 == artifact.event_stream_sha256
+
+
+def test_separate_artifact_handles_reload_before_each_mutation(tmp_path):
+    artifact = make_artifact(tmp_path)
+    first = ReplayArtifact.open(artifact.directory)
+    second = ReplayArtifact.open(artifact.directory)
+    first.annotate(point(1), kind="first", metadata={})
+    second.annotate(point(1), kind="second", metadata={})
+
+    manifest = json.loads((artifact.directory / "replay.json").read_text())
+    kinds = [
+        entry["kind"]
+        for entry in manifest["points"][point(1).key]["annotations"]
+    ]
+    assert kinds == ["first", "second"]
 
 
 def test_machine_projection_covers_metadata_regions_and_event_cursor():

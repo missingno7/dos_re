@@ -24,10 +24,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
 import shutil
 import tempfile
 import uuid
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
@@ -43,6 +45,10 @@ class ReplayError(RuntimeError):
 
 class StaleReplayError(ReplayError):
     """The artifact/cache identity does not match the requested execution."""
+
+
+class ConcurrentReplayWriterError(ReplayError):
+    """Another process is currently mutating this replay artifact."""
 
 
 @dataclass(frozen=True)
@@ -383,6 +389,77 @@ class VerificationResult:
         return self.comparison.equivalent
 
 
+class ReplayRecording:
+    """In-memory event capture finalized as one immutable ReplayArtifact.
+
+    Frontends own input sampling and stable-boundary detection; this class owns
+    the sole persistent representation.  No partial or frontend-specific
+    manifest is written while recording.
+    """
+
+    def __init__(
+        self, directory: str | Path, *, timeline_id: str,
+        profile: ExecutionProfile, base_state: ContinuationState,
+        metadata: Mapping[str, Any] | None = None,
+    ):
+        self.directory = Path(directory)
+        self.timeline_id = str(timeline_id)
+        self.profile = profile
+        self.base_state = base_state.normalized()
+        self.metadata = _json_value(metadata or {}, "recording metadata")
+        self._events: list[ReplayEvent] = []
+        self._sequence = 0
+        self._finished = False
+
+    @property
+    def event_count(self) -> int:
+        return len(self._events)
+
+    @property
+    def active(self) -> bool:
+        return not self._finished
+
+    def add(self, ordinal: int, channel: str, payload: Any) -> ReplayEvent:
+        if self._finished:
+            raise RuntimeError("replay recording is already complete")
+        event = ReplayEvent(
+            ReplayPoint(int(ordinal), self.timeline_id),
+            self._sequence, channel, payload)
+        self._events.append(event)
+        self._sequence += 1
+        return event
+
+    def finish(
+        self, end_ordinal: int, *, end_state: ContinuationState | None = None,
+    ) -> "ReplayArtifact":
+        if self._finished:
+            raise RuntimeError("replay recording is already complete")
+        end = ReplayPoint(int(end_ordinal), self.timeline_id)
+        if self.base_state.event_cursor != 0:
+            raise ValueError("a new replay recording base must use event cursor 0")
+        if any(event.point.ordinal > end.ordinal for event in self._events):
+            raise ValueError("recording end precedes an event")
+        if end_state is not None and end_state.normalized().event_cursor != len(self._events):
+            raise ValueError("recording endpoint cursor does not cover every event")
+        metadata = dict(self.metadata)
+        metadata.update({
+            "recording_profile_id": self.profile.profile_id,
+            "end_point": end.to_json(),
+        })
+        artifact = ReplayArtifact.create(
+            self.directory, timeline_id=self.timeline_id,
+            events=self._events, metadata=metadata)
+        base = ReplayPoint(0, self.timeline_id)
+        artifact.register_profile(
+            self.profile, base_point=base, base_state=self.base_state)
+        if end_state is not None and end != base:
+            artifact.cache(
+                self.profile, end, end_state,
+                metadata={"kind": "recording-end"})
+        self._finished = True
+        return artifact
+
+
 class ReplayArtifact:
     """One deterministic replay corpus item and all profile-local caches."""
 
@@ -418,6 +495,7 @@ class ReplayArtifact:
             seen.add(key)
         manifest = {
             "format_version": FORMAT_VERSION,
+            "revision": 0,
             "timeline_id": timeline_id,
             "page_size": int(page_size),
             "events": [event.to_json() for event in ordered],
@@ -428,7 +506,10 @@ class ReplayArtifact:
             "points": {},
         }
         artifact = cls(directory, manifest)
-        artifact._write()
+        with artifact._locked_mutation(reload=False):
+            if path.exists():
+                raise FileExistsError(path)
+            artifact._write()
         return artifact
 
     @classmethod
@@ -438,6 +519,8 @@ class ReplayArtifact:
         if int(manifest.get("format_version", 0)) != FORMAT_VERSION:
             raise ReplayError("unsupported replay artifact version")
         artifact = cls(directory, manifest)
+        with artifact._locked_mutation(reload=False):
+            artifact._recover_incomplete_publications()
         expected = _sha256(_canonical_json([event.to_json() for event in artifact.events]))
         if expected != manifest.get("event_stream_sha256"):
             raise ReplayError("event stream hash mismatch")
@@ -468,28 +551,30 @@ class ReplayArtifact:
         self, profile: ExecutionProfile, *, base_point: ReplayPoint,
         base_state: ContinuationState,
     ) -> None:
-        self._point(base_point)
-        state = base_state.normalized()
-        if state.schema_id != profile.continuation_schema:
-            raise ValueError("base continuation schema does not match execution profile")
-        existing = self._manifest["profiles"].get(profile.profile_id)
-        if existing is not None:
-            stored = ExecutionProfile.from_json(existing["identity"])
-            if stored != profile:
-                raise StaleReplayError(
-                    f"profile {profile.profile_id!r} is already registered with another identity")
-            raise ValueError(f"profile already registered: {profile.profile_id!r}")
-        root = Path("profiles") / profile.storage_key
-        base_manifest = self._write_full_state(root / "base", base_point, state, profile)
-        self._manifest["profiles"][profile.profile_id] = {
-            "identity": profile.to_json(),
-            "identity_digest": profile.identity_digest,
-            "base_state_sha256": state.digest,
-            "base_point": base_point.to_json(),
-            "base": base_manifest.as_posix(),
-            "boundaries": {},
-        }
-        self._write()
+        with self._locked_mutation():
+            self._point(base_point)
+            state = base_state.normalized()
+            if state.schema_id != profile.continuation_schema:
+                raise ValueError("base continuation schema does not match execution profile")
+            existing = self._manifest["profiles"].get(profile.profile_id)
+            if existing is not None:
+                stored = ExecutionProfile.from_json(existing["identity"])
+                if stored != profile:
+                    raise StaleReplayError(
+                        f"profile {profile.profile_id!r} is already registered with another identity")
+                raise ValueError(f"profile already registered: {profile.profile_id!r}")
+            root = Path("profiles") / profile.storage_key
+            base_manifest = self._write_full_state(root / "base", base_point, state, profile)
+            self._manifest["profiles"][profile.profile_id] = {
+                "identity": profile.to_json(),
+                "identity_digest": profile.identity_digest,
+                "base_state_sha256": state.digest,
+                "base_point": base_point.to_json(),
+                "base": base_manifest.as_posix(),
+                "boundaries": {},
+                "pending_boundaries": {},
+            }
+            self._write()
 
     def require_profile(self, profile: ExecutionProfile) -> dict[str, Any]:
         record = self._manifest["profiles"].get(profile.profile_id)
@@ -569,89 +654,102 @@ class ReplayArtifact:
         self, profile: ExecutionProfile, point: ReplayPoint, state: ContinuationState,
         *, metadata: Mapping[str, Any] | None = None,
     ) -> bool:
-        self._point(point)
-        record = self.require_profile(profile)
-        if self.has_cached(profile, point):
-            return False
-        state = state.normalized()
-        if state.schema_id != profile.continuation_schema:
-            raise ValueError("continuation schema does not match execution profile")
-        base_point = ReplayPoint.from_json(record["base_point"])
-        base = self._read_full_state(record["base"], base_point, profile)
-        if base.digest != record.get("base_state_sha256"):
-            raise StaleReplayError("profile base snapshot identity changed")
-        if set(state.regions) != set(base.regions):
-            raise ValueError("continuation region set differs from profile base")
-        for name in base.regions:
-            if len(state.regions[name]) != len(base.regions[name]):
-                raise ValueError(f"continuation region size differs from base: {name!r}")
-        root = Path("profiles") / profile.storage_key / "boundaries" / point.key
-        final = self.directory / root
-        final.parent.mkdir(parents=True, exist_ok=True)
-        # ``tempfile.mkdtemp`` can inherit a process-private ACL under the
-        # Windows desktop sandbox. Renaming that directory publishes files the
-        # next process cannot read. A normal same-parent mkdir keeps the
-        # workspace ACL while retaining atomic directory publication.
-        temp = final.parent / f".{point.key}-{uuid.uuid4().hex}.tmp"
-        temp.mkdir()
-        pages: list[dict[str, Any]] = []
-        try:
-            for region_no, name in enumerate(sorted(state.regions)):
-                current, original = state.regions[name], base.regions[name]
-                for index, start in enumerate(range(0, len(current), self.page_size)):
-                    payload = current[start:start + self.page_size]
-                    if payload == original[start:start + self.page_size]:
-                        continue
-                    rel = Path("pages") / f"{region_no:04d}" / f"{index:08x}.zlib"
-                    path = temp / rel
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(zlib.compress(payload, 6))
-                    pages.append({
-                        "region": name, "index": index, "size": len(payload),
-                        "sha256": _sha256(payload), "file": (root / rel).as_posix(),
-                    })
-            _write_json(temp / "state.json", {
-                "format_version": FORMAT_VERSION, "point": point.to_json(),
-                "profile_identity_digest": profile.identity_digest,
-                "base_state_sha256": base.digest,
-                "schema_id": state.schema_id, "metadata": state.metadata,
-                "event_cursor": state.event_cursor, "state_sha256": state.digest,
-                "boundary_metadata": _json_value(metadata or {}, "boundary metadata"),
-                "changed_pages": pages,
-            })
-            if final.exists():
-                raise ReplayError(f"unindexed boundary directory already exists: {final}")
-            os.replace(temp, final)
-            temp = None
-        finally:
-            if temp is not None and temp.exists():
-                shutil.rmtree(temp)
-        record["boundaries"][point.key] = {
-            "point": point.to_json(), "manifest": (root / "state.json").as_posix(),
-        }
-        self._write()
-        return True
+        with self._locked_mutation():
+            self._point(point)
+            record = self.require_profile(profile)
+            if self.has_cached(profile, point):
+                return False
+            state = state.normalized()
+            if state.schema_id != profile.continuation_schema:
+                raise ValueError("continuation schema does not match execution profile")
+            base_point = ReplayPoint.from_json(record["base_point"])
+            base = self._read_full_state(record["base"], base_point, profile)
+            if base.digest != record.get("base_state_sha256"):
+                raise StaleReplayError("profile base snapshot identity changed")
+            if set(state.regions) != set(base.regions):
+                raise ValueError("continuation region set differs from profile base")
+            for name in base.regions:
+                if len(state.regions[name]) != len(base.regions[name]):
+                    raise ValueError(f"continuation region size differs from base: {name!r}")
+            root = Path("profiles") / profile.storage_key / "boundaries" / point.key
+            final = self.directory / root
+            final.parent.mkdir(parents=True, exist_ok=True)
+            temp = final.parent / f".{point.key}-{uuid.uuid4().hex}.tmp"
+            temp.mkdir()
+            pending_committed = False
+            pages: list[dict[str, Any]] = []
+            try:
+                for region_no, name in enumerate(sorted(state.regions)):
+                    current, original = state.regions[name], base.regions[name]
+                    for index, start in enumerate(range(0, len(current), self.page_size)):
+                        payload = current[start:start + self.page_size]
+                        if payload == original[start:start + self.page_size]:
+                            continue
+                        rel = Path("pages") / f"{region_no:04d}" / f"{index:08x}.zlib"
+                        path = temp / rel
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(zlib.compress(payload, 6))
+                        pages.append({
+                            "region": name, "index": index, "size": len(payload),
+                            "sha256": _sha256(payload), "file": (root / rel).as_posix(),
+                        })
+                _write_json(temp / "state.json", {
+                    "format_version": FORMAT_VERSION, "point": point.to_json(),
+                    "profile_identity_digest": profile.identity_digest,
+                    "base_state_sha256": base.digest,
+                    "schema_id": state.schema_id, "metadata": state.metadata,
+                    "event_cursor": state.event_cursor, "state_sha256": state.digest,
+                    "boundary_metadata": _json_value(metadata or {}, "boundary metadata"),
+                    "changed_pages": pages,
+                })
+                self._publication_stage("prepared")
+                pending = record.setdefault("pending_boundaries", {})
+                pending[point.key] = {
+                    "point": point.to_json(),
+                    "manifest": (root / "state.json").as_posix(),
+                    "temp": temp.relative_to(self.directory).as_posix(),
+                }
+                self._write()
+                pending_committed = True
+                self._publication_stage("pending-indexed")
+                if final.exists():
+                    raise ReplayError(f"boundary directory already exists: {final}")
+                os.replace(temp, final)
+                temp = None
+                self._publication_stage("directory-published")
+                record["boundaries"][point.key] = {
+                    "point": point.to_json(), "manifest": (root / "state.json").as_posix(),
+                }
+                pending.pop(point.key, None)
+                self._write()
+                self._publication_stage("manifest-indexed")
+            finally:
+                if not pending_committed and temp is not None and temp.exists():
+                    shutil.rmtree(temp)
+            return True
 
     def annotate(self, point: ReplayPoint, *, kind: str, metadata: Mapping[str, Any]) -> None:
-        self._point(point)
-        if not kind:
-            raise ValueError("point annotation kind must not be empty")
-        entries = self._manifest["points"].setdefault(point.key, {
-            "point": point.to_json(), "annotations": [],
-        })
-        entries["annotations"].append({
-            "kind": kind, "metadata": _json_value(metadata, "point annotation"),
-        })
-        self._write()
+        with self._locked_mutation():
+            self._point(point)
+            if not kind:
+                raise ValueError("point annotation kind must not be empty")
+            entries = self._manifest["points"].setdefault(point.key, {
+                "point": point.to_json(), "annotations": [],
+            })
+            entries["annotations"].append({
+                "kind": kind, "metadata": _json_value(metadata, "point annotation"),
+            })
+            self._write()
 
     def set_function_visits(self, index: FunctionVisitIndex) -> None:
-        for visit in index.records():
-            if visit.first_entry is not None:
-                self._point(visit.first_entry)
-            if visit.last_exit is not None:
-                self._point(visit.last_exit)
-        self._manifest["function_visits"] = index.to_json()
-        self._write()
+        with self._locked_mutation():
+            for visit in index.records():
+                if visit.first_entry is not None:
+                    self._point(visit.first_entry)
+                if visit.last_exit is not None:
+                    self._point(visit.last_exit)
+            self._manifest["function_visits"] = index.to_json()
+            self._write()
 
     def function_visits(self) -> tuple[FunctionVisit, ...]:
         return tuple(FunctionVisit.from_json(raw)
@@ -732,7 +830,139 @@ class ReplayArtifact:
             raise ReplayError(f"artifact path escapes its directory: {relative!r}") from exc
         return path
 
+    @property
+    def _lock_path(self) -> Path:
+        return self.directory / ".replay-writer.lock"
+
+    @contextmanager
+    def _locked_mutation(self, *, reload: bool = True):
+        """Serialize mutations and reject a live competing writer.
+
+        The lock is intentionally artifact-local and non-waiting: tooling gets
+        a precise failure instead of silently interleaving two manifests.  A
+        lock left by a dead process on this host is reclaimed automatically.
+        """
+        self.directory.mkdir(parents=True, exist_ok=True)
+        token = uuid.uuid4().hex
+        owner = {
+            "pid": os.getpid(), "host": socket.gethostname(), "token": token,
+        }
+        payload = (_canonical_json(owner) + b"\n")
+        for attempt in range(2):
+            try:
+                fd = os.open(self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                if attempt == 0 and self._reclaim_stale_lock():
+                    continue
+                raise ConcurrentReplayWriterError(
+                    f"another writer owns replay artifact {self.directory}")
+            else:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                break
+        try:
+            if reload and self.path.exists():
+                current = _read_json(self.path)
+                if int(current.get("format_version", 0)) != FORMAT_VERSION:
+                    raise ReplayError("unsupported replay artifact version")
+                self._manifest = current
+                self._recover_incomplete_publications()
+            yield
+        finally:
+            try:
+                current_owner = _read_json(self._lock_path)
+            except ReplayError:
+                current_owner = {}
+            if current_owner.get("token") == token:
+                self._lock_path.unlink(missing_ok=True)
+
+    def _reclaim_stale_lock(self) -> bool:
+        try:
+            owner = _read_json(self._lock_path)
+        except ReplayError:
+            return False
+        if owner.get("host") != socket.gethostname():
+            return False
+        try:
+            pid = int(owner["pid"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if _process_is_alive(pid):
+            return False
+        try:
+            self._lock_path.unlink()
+        except FileNotFoundError:
+            pass
+        return True
+
+    def _recover_incomplete_publications(self) -> None:
+        """Finish or discard cache publications interrupted at any stage."""
+        changed = False
+        for record in self._manifest.get("profiles", {}).values():
+            pending = record.setdefault("pending_boundaries", {})
+            boundaries = record.setdefault("boundaries", {})
+            for key, entry in list(pending.items()):
+                final_manifest = self._resolve(entry["manifest"])
+                final = final_manifest.parent
+                temp = self._resolve(entry["temp"])
+                if not final_manifest.exists() and (temp / "state.json").exists():
+                    final.parent.mkdir(parents=True, exist_ok=True)
+                    if final.exists():
+                        shutil.rmtree(temp)
+                    else:
+                        os.replace(temp, final)
+                if final_manifest.exists():
+                    self._validate_boundary_manifest(record, key, final_manifest)
+                    boundaries[key] = {
+                        "point": entry["point"], "manifest": entry["manifest"],
+                    }
+                pending.pop(key, None)
+                changed = True
+
+            identity = ExecutionProfile.from_json(record["identity"])
+            boundary_root = (
+                self.directory / "profiles" / identity.storage_key / "boundaries")
+            if boundary_root.exists():
+                for child in boundary_root.iterdir():
+                    if child.name.startswith(".") and child.name.endswith(".tmp"):
+                        shutil.rmtree(child)
+                        changed = True
+                        continue
+                    if not child.is_dir() or child.name in boundaries:
+                        continue
+                    state_path = child / "state.json"
+                    if not state_path.exists():
+                        raise ReplayError(f"incomplete orphan replay boundary: {child}")
+                    self._validate_boundary_manifest(record, child.name, state_path)
+                    raw = _read_json(state_path)
+                    boundaries[child.name] = {
+                        "point": raw["point"],
+                        "manifest": state_path.relative_to(self.directory).as_posix(),
+                    }
+                    changed = True
+        if changed:
+            self._write()
+
+    def _validate_boundary_manifest(
+        self, record: Mapping[str, Any], key: str, path: Path,
+    ) -> None:
+        raw = _read_json(path)
+        point = ReplayPoint.from_json(raw["point"])
+        identity = ExecutionProfile.from_json(record["identity"])
+        if point.key != key:
+            raise ReplayError(f"boundary directory key mismatch: {path.parent}")
+        if raw.get("profile_identity_digest") != identity.identity_digest:
+            raise ReplayError(f"orphan boundary profile mismatch: {path.parent}")
+        if raw.get("base_state_sha256") != record.get("base_state_sha256"):
+            raise ReplayError(f"orphan boundary base mismatch: {path.parent}")
+
+    def _publication_stage(self, stage: str) -> None:
+        """Test seam called after each durable cache-publication stage."""
+
     def _write(self) -> None:
+        self._manifest["revision"] = int(self._manifest.get("revision", 0)) + 1
         _write_json(self.path, self._manifest)
 
 
@@ -938,6 +1168,20 @@ def _json_value(value: Any, what: str) -> Any:
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _read_json(path: Path) -> dict[str, Any]:

@@ -43,7 +43,7 @@ Related, outside `docs/`:
   — runnable 5-minute demo of the hook/verify/snapshot loop on a synthetic EXE.
 - [`../examples/tiny_frame_game/`](../examples/tiny_frame_game/README.md) —
   the whole lifecycle in ten minutes: a synthetic frame-loop game through
-  oracle boot, cold-start demos, snapshots, both verification oracles, and a
+  oracle boot, embedded-base replay artifacts, snapshots, both verification oracles, and a
   state mirror.
 - [`../AGENTS.md`](../AGENTS.md) — the rules for extending this framework
   (including the missing-behaviour → extension recipes).

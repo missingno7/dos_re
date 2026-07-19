@@ -13,7 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from dos_re.dos import DOSMachine
-from dos_re.input_demo import InputDemoEvent
+from dos_re.input_demo import MOUSE_CHANNEL, RealModeInputAdapter, mouse_payload
+from dos_re.replay import ReplayEvent, ReplayPoint
 
 
 class _Regs:
@@ -98,16 +99,16 @@ def test_unknown_service_is_a_no_op_not_a_crash() -> None:
     dos.int33(cpu)      # must not raise (16-bit core stays lenient)
 
 
-def test_mouse_demo_event_round_trips_through_json() -> None:
-    e = InputDemoEvent(boundary=7, seq=3, kind="mouse", u=0.25, v=0.75, buttons=2)
+def test_mouse_replay_event_round_trips_through_json() -> None:
+    e = ReplayEvent(
+        ReplayPoint(7, "mouse-frame-v1"), 3, MOUSE_CHANNEL,
+        mouse_payload(0.25, 0.75, 2))
     raw = e.to_json()
-    back = InputDemoEvent.from_json(raw)
-    assert (back.kind, back.u, back.v, back.buttons) == ("mouse", 0.25, 0.75, 2)
+    back = ReplayEvent.from_json(raw)
+    assert back == e
 
 
 def test_replay_reinjects_a_mouse_sample_through_the_driver() -> None:
-    from dos_re.input_demo import InputDemoPlayback
-
     dos, cpu = _dos(), _Cpu()
     dos.int33(_reset(cpu))
 
@@ -116,8 +117,11 @@ def test_replay_reinjects_a_mouse_sample_through_the_driver() -> None:
 
     rt = _RT()
     rt.dos = dos
-    event = InputDemoEvent(boundary=0, seq=0, kind="mouse", u=0.5, v=0.5, buttons=1)
-    InputDemoPlayback._apply_event(rt, event, deliver=lambda r, sc: None)
+    event = ReplayEvent(
+        ReplayPoint(0, "mouse-frame-v1"), 0, MOUSE_CHANNEL,
+        mouse_payload(0.5, 0.5, 1))
+    RealModeInputAdapter((event,)).apply_to_runtime(
+        0, rt, deliver=lambda r, sc: None)
     cpu.s.ax = 0x0003
     dos.int33(cpu)
     assert (cpu.s.cx, cpu.s.dx, cpu.s.bx) == (int(0.5 * 639), int(0.5 * 199), 1)
@@ -131,7 +135,7 @@ def test_mouse_presence_defaults_to_absent_so_a_mouse_is_never_ambient() -> None
     control), so an ambient mouse would silently diverge every recording made
     without one -- unacceptable in a framework whose contract is byte-exact
     replay.  Front-ends opt in: the interactive viewer unconditionally, replay
-    from the recording's own answer (InputDemoPlayback.mouse_present_hint)."""
+    from the recording's explicit ReplayArtifact ``mouse_present`` metadata)."""
     dos, cpu = DOSMachine(root=Path(".")), _Cpu()   # default: no mouse
     cpu.s.ax = 0x0000
     dos.int33(cpu)
@@ -140,38 +144,6 @@ def test_mouse_presence_defaults_to_absent_so_a_mouse_is_never_ambient() -> None
     cpu.s.ax, cpu.s.cx, cpu.s.dx, cpu.s.bx = 0x0003, 0x1111, 0x2222, 0x3333
     dos.int33(cpu)
     assert (cpu.s.cx, cpu.s.dx, cpu.s.bx) == (0x1111, 0x2222, 0x3333)
-
-
-def test_has_mouse_events_detects_the_mouse_channel() -> None:
-    from dos_re.input_demo import InputDemoPlayback
-
-    kb = InputDemoPlayback(demo_dir=Path("."), manifest={"events": [
-        {"boundary": 0, "seq": 0, "kind": "scan", "value": 0x48}]})
-    assert kb.has_mouse_events is False
-    mouse = InputDemoPlayback(demo_dir=Path("."), manifest={"events": [
-        {"boundary": 0, "seq": 0, "kind": "scan", "value": 0x48},
-        {"boundary": 1, "seq": 0, "kind": "mouse", "value": 0, "mx": 0.5, "my": 0.5}]})
-    assert mouse.has_mouse_events is True
-
-
-def test_mouse_present_hint_prefers_recorded_metadata_over_the_heuristic() -> None:
-    from dos_re.input_demo import InputDemoPlayback
-
-    kb_events = [{"boundary": 0, "seq": 0, "kind": "scan", "value": 0x48}]
-    # legacy demo, no metadata flag -> fall back to has_mouse_events (False here).
-    legacy = InputDemoPlayback(demo_dir=Path("."), manifest={"events": kb_events})
-    assert legacy.mouse_present_hint is False
-    # a keyboard demo recorded WITH the mouse present carries no mouse motion but
-    # pins mouse_present=True, so it must replay present.
-    pinned = InputDemoPlayback(demo_dir=Path("."), manifest={
-        "events": kb_events, "metadata": {"mouse_present": True}})
-    assert pinned.mouse_present_hint is True
-    # and an explicit False pin wins over any stray mouse event too.
-    pinned_off = InputDemoPlayback(demo_dir=Path("."), manifest={
-        "events": kb_events + [{"boundary": 1, "seq": 0, "kind": "mouse",
-                                "value": 0, "mx": 0.5, "my": 0.5}],
-        "metadata": {"mouse_present": False}})
-    assert pinned_off.mouse_present_hint is False
 
 
 def _reset(cpu: _Cpu) -> _Cpu:

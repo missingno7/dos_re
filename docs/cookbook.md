@@ -3,8 +3,7 @@
 > 2.0 hard walls and automation principle, dos_re_2.0.md wins.  Promoted from the
 > DOS_RE 1.0 starter (template_dos_port, retired) because the mechanics remain valid.
 
-> **dos_re 3.0 replay supersession:** later references to `tick_demo`,
-> `frontend_timeline`, `pm_verify_demo`, `pm_census`, suffix demos, or separate
+> **dos_re 3.0 replay supersession:** historical replay engines, suffix demos, or separate
 > repro manifests are historical. Their proof requirements are consolidated in
 > `dos_re.replay` and [`demos_and_snapshots.md`](demos_and_snapshots.md).
 
@@ -87,8 +86,8 @@ timelines. The 16-bit rule ("instructions ARE time",
 reproducible path (record / replay / headless) must clock every IRQ from
 `instruction_count`; only a casual live view may pace by wall clock
 (`pm_player._configure_sound(deterministic=...)`). PM demos also record a
-per-frame full-VM digest (`pm_input_demo.frame_digest`), so `--play-demo`
-self-verifies: `demo VERIFIED` / `demo DIVERGED at frame N`. Any change to
+complete continuation state through `ReplayArtifact`; oracle/candidate
+verification uses canonical endpoint comparison. Any change to
 an emulated clock invalidates old recordings — re-record, don't debug them.
 
 **The next routine to recover isn't a leaf — it calls helpers you haven't
@@ -106,10 +105,10 @@ strict verifier never sees them. Worked example: `kegg/composition_hooks.py`
 
 **"What do I recover next, and how do I prove it?" needs a repeatable
 corpus.** → A recorded gameplay demo *is* the corpus. Two tools close the
-loop from the port root: `dos_re/tools/pm_census.py` replays N frames and
+loop from the port root: the execution atlas replays N frames and
 ranks hot call targets (static profile: ins/calls/INT/port-I/O; HOOKED
 tagged) — the top un-hooked pure LEAF in the game's code region is usually
-the next slice; `dos_re/tools/pm_verify_demo.py` replays the demo under the
+the next slice; `replay.verify_interval` replays the exact covered interval under the
 differential verifier (`--focus 0xADDR` while iterating on one routine,
 unfocused as the pre-commit pass). KE's level-2 demo proved `rects_overlap`
 2364/2364 calls in one unfocused pass.
@@ -234,21 +233,19 @@ let a wall of unread-but-verified lifted code inflate the campaign's
 ## Verification depth (the endgame)
 
 **Proving the native port equals the VM, tick by tick, over whole playthroughs.**
-→ *Tick-demo harness* — **now a framework engine**: `dos_re/tick_demo.py`
-(`TickDemo` + `masked_digest` + `record_ticks` + `verify_ticks`; usage
-skeleton in dos_re's `docs/agent_toolbox.md` §12). Record seed + per-tick
+→ Use `ReplayArtifact` stable game-tick points with `CanonicalState`. Record
+the continuation base plus per-tick
 consumed input + a gameplay-state digest (render-only ranges masked out — ONE
 digest definition shared with the forward oracle), replay through the VM-less
 core, compare per tick. Includes the non-obvious lesson, now a first-class
 *sideband* channel: state derived from instruction count (P2's idle-fidget
 timer) must be *recorded and injected*, since the native port has no
 instruction count. Worked examples of the full pipeline (pre-framework, still
-the richest reference): `pre2/native/game_tick_demo.py`,
-`pre2_port/scripts/verify_finish_demo.py`, `scripts/verify_native_tick_demo.py`.
+the richest reference) are intentionally not linked as current APIs.
 
 **Proving the native FRONT END behaves like the original — the screens with no game tick.**
-→ *The FOUR-GATE front-end proof* — **a framework engine**: `dos_re/frontend_timeline.py`
-(usage skeleton in dos_re's `docs/agent_toolbox.md` §12b). The tick demo captures
+→ Express front-end transitions as stable replay points and canonical semantic
+state. A gameplay-only interval captures
 none of the intro / title / menu / attract / map / tally — they run with no tick —
 so those flows ship verified against nothing and drift (a screen shown in the wrong
 ORDER, an attract demo entered instead of the recorded selection, a wall screen
@@ -266,11 +263,11 @@ Input honesty: capture the raw key-flag window the VM's front end sampled per fr
 (include EVERYTHING the flow reads — menu key flags can live below the scancode
 table) and feed it to native CAUSALLY per screen (`input_segments`/`SegmentedInput`),
 so presses land on the same screen at the same relative moment. Needs a
-**cold-start demo**; seed the candidate from the FRONT-END entry state (boot
+**artifact based at cold boot**; seed the candidate from the FRONT-END entry state (boot
 constants), not a level-jump bootstrap. Worked end-to-end (all four gates green on a
-real cold-start demo; gate 2 caught a menu-entry fresh-start block on its first run):
-`pre2_port/scripts/verify_native_frontend.py`, plus `probe_frontend_timeline.py`
-(ground-truth prober — run on any demo) and `frontend_capture.py`.
+real cold-boot replay; gate 2 caught a menu-entry fresh-start block on its first run):
+Historical port-local scripts documented this proof before consolidation; they
+are intentionally not linked as current APIs.
 
 **A divergence appears 10 minutes into a replay.**
 → Use `replay.bisect_divergence`. The artifact caches and annotates the latest

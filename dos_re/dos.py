@@ -253,7 +253,7 @@ class DOSMachine:
     # recording made without one.  In a framework whose contract is byte-exact
     # replay, that has to be an explicit opt-in, not an ambient default.  The
     # front-end turns it on: the interactive viewer unconditionally, replay from
-    # the recording's own answer (input_demo.mouse_present_hint).  A mouse-driven
+    # the recording's own ReplayArtifact metadata.  A mouse-driven
     # game must opt in (its demos carry mouse events, so the hint says True).
     mouse_present: bool = False
     # Reset (fn 0) parks the pointer at the CENTRE OF THE DRIVER'S OWN RANGE,

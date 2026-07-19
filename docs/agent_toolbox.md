@@ -265,14 +265,14 @@ wall of unread-but-verified lifted code must never inflate "recovered %".
 > [`demos_and_snapshots.md`](demos_and_snapshots.md). The text through §12b is
 > retained only as historical rationale, not an API or command reference.
 
-`dos_re.tick_demo` — the mode-independent equivalence engine. Input demos ride
+The removed 2.0 tick-specific engine was mode-independent. Input demos rode
 an instruction-count clock, which is **mode-dependent** (a hook runs fewer
 emulated instructions than the ASM it replaces) and doesn't exist VM-less; a
 tick demo is keyed to the GAME TICK, so one recording replays identically in
 pure-ASM, hybrid, and native.
 
 ```python
-from dos_re.tick_demo import TickDemo, masked_digest, record_ticks, verify_ticks
+REMOVED DOS_RE 2.0 PSEUDOCODE (not an importable API)
 
 # RECORD (VM = the oracle): adapter supplies the seam addresses + capture logic
 demo = record_ticks(rt, cs=0x1030, ds=0x1A0F,
@@ -281,7 +281,7 @@ demo = record_ticks(rt, cs=0x1030, ds=0x1A0F,
                     observe={DECODE: grab_keys, KEY_SAMPLE: refine_keys},
                     commit=finish_tick, digest=lambda rt: my_digest(rt),
                     advance_one_frame=drive)      # an input-demo replay usually drives this
-demo.save("artifacts/.../tick_demo.bin")
+REMOVED_SAVE_OPERATION
 
 # VERIFY (no VM at all): every tick — inject keys+sidebands, ONE native tick, compare
 n_ok, div = verify_ticks(TickDemo.load(path), native_state,
@@ -316,20 +316,17 @@ The tick demo captures **zero** of the front end: intro / title / menu / attract
 / world-map / tally all run with no game tick. Those are exactly where a VM-less
 port drifts undetected — a screen shown in the wrong ORDER, a dropped fade, a
 screen before/after the wrong transition (e.g. a "you must be expert" wall shown
-*after* the map+level load instead of *before*). `dos_re.frontend_timeline` is
+*after* the map+level load instead of *before*). The removed 2.0 timeline was
 the front-end analogue of the tick demo: a per-PRESENT-FRAME timeline.
 
 A per-frame pixel diff is the WRONG proof here — the reference recording rides a
 wall-clock/instruction budget the native scene generator does not share, so frame
 cadences are incomparable. What IS well-defined and cadence-free is the flow's
-DISCRETE structure, proven by **four gates** (all in `dos_re.frontend_timeline`;
+DISCRETE structure, historically proven by four gates;
 worked end-to-end in pre2's `scripts/verify_native_frontend.py`):
 
 ```python
-from dos_re.frontend_timeline import (capture, collapse, filter_runs, diff_sequence,
-                                      pack_fields, diff_fields,                 # gate 2
-                                      input_segments, SegmentedInput,           # causal input
-                                      diff_offsets, spread_beyond)              # gates 3+4
+REMOVED DOS_RE 2.0 PSEUDOCODE (not an importable API)
 
 ref  = filter_runs(collapse(capture(vm_sample, N)),  ignore=TRANSIENT)   # ground truth
 segs = input_segments(ref, per_frame_raw_input, N)   # the VM's input, segmented PER SCREEN
@@ -367,10 +364,10 @@ each frame (include EVERYTHING the flow reads — pre2's menu reads '1'/'2' flag
 [0x27F6/F7] *below* the scancode table, and the idle counter drives the attract
 timeout). Then `input_segments` + `SegmentedInput` deliver it per-SCREEN, so a
 keypress lands on the same screen at the same relative moment with no shared clock.
-A cold-start demo (boot → oldies → titles → menu → level) is required so the native
+A replay artifact whose base is captured at cold boot (oldies → titles → menu → level) is required so the native
 cold-boot entry aligns with the VM — and seed the candidate from the FRONT-END entry
 state (boot constants), not a level-jump bootstrap. pre2 adapters:
-`scripts/probe_frontend_timeline.py` (ground-truth prober — run on ANY demo to see
+a historical ground-truth prober (run on any old recording to see
 what the original does) + `scripts/verify_native_frontend.py` (the 4-gate proof).
 
 Front-end iteration cost (two OVERKILL-learned gotchas): (1) front-end probing has

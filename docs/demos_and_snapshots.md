@@ -45,6 +45,14 @@ JSON payload. The event-stream hash is part of the artifact. Drivers apply the
 same events according to their own representation while stopping at exactly
 the requested point.
 
+The interactive players capture through `ReplayRecording`. It buffers
+normalized immutable events, then finalizes exactly one `ReplayArtifact` with
+the complete base continuation and optional cached endpoint. Real-mode
+`input_demo.py` and protected-mode `pm_input_demo.py` are adapters only:
+keyboard/mouse normalization and application, plus the PM stable frame seam.
+They define no file names, manifests, versions, snapshots, or compatibility
+branches.
+
 ## Continuation state is not comparison state
 
 This separation is the central 3.0 rule.
@@ -106,9 +114,14 @@ demo/
       pages/**/*.zlib
 ```
 
-JSON and boundary publication use same-directory atomic replacement. Paths are
-contained under the artifact root; compressed payload sizes and hashes are
-verified before use.
+Artifact mutation uses a non-waiting artifact-local writer lock. A live second
+writer is rejected, and a lock left by a dead local process is reclaimed.
+Boundary publication is journaled in the top-level manifest before the staged
+directory is atomically renamed. Opening the artifact completes a pending
+rename, indexes an already-published valid directory, discards an unpublished
+staging directory, and also adopts a valid orphan produced by the pre-journal
+implementation. Paths are contained under the artifact root; compressed
+payload sizes and hashes are verified before use.
 
 ## Validation and invalidation
 

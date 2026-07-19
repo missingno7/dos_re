@@ -29,9 +29,9 @@ def test_oracle_boot_and_frames(tmp_path):
     assert [r[0] for r in rows] == [0, 1, 2, 3]
 
 
-def test_cold_start_demo_record_replay_roundtrip(tmp_path):
+def test_replay_artifact_record_replay_roundtrip(tmp_path):
     exe = build_game_exe(tmp_path / "TINY.EXE")
-    walkthrough.stage_cold_start_demo(exe, tmp_path)
+    walkthrough.stage_replay_artifact(exe, tmp_path)
 
 
 def test_snapshot_restore_equivalence(tmp_path):
