@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import json
-from typing import Iterable, Protocol
+from typing import Callable, Iterable, Protocol
 
 
 class Requirement(str, Enum):
@@ -76,7 +76,7 @@ class ExecutionConfiguration:
 
 
 @dataclass(frozen=True)
-class CoverageResult:
+class ProgramCoverage:
     """Conservative reachable program identities for one product profile."""
 
     roots: tuple[str, ...]
@@ -84,19 +84,14 @@ class CoverageResult:
     unresolved_edges: tuple[str, ...] = ()
     evidence_identity: str = ""
 
+    def coverage_for(self, product_profile: str) -> "ProgramCoverage":
+        return self
+
 
 class CoverageSource(Protocol):
     """Interface current IR adapters and the future Execution Atlas implement."""
 
-    def coverage_for(self, product_profile: str) -> CoverageResult: ...
-
-
-@dataclass(frozen=True)
-class StaticCoverageSource:
-    coverage: CoverageResult
-
-    def coverage_for(self, product_profile: str) -> CoverageResult:
-        return self.coverage
+    def coverage_for(self, product_profile: str) -> ProgramCoverage: ...
 
 
 @dataclass(frozen=True)
@@ -120,6 +115,43 @@ class RuntimeServiceDescriptor:
     development_capabilities: frozenset[str] = frozenset()
     dependencies: frozenset[str] = frozenset()
     implementation_digest: str = ""
+
+
+@dataclass(frozen=True)
+class ImplementationEntry:
+    descriptor: ImplementationDescriptor
+    implementation: Callable | None = None
+    activate: Callable[[object, tuple[str, ...]], None] | None = None
+
+
+@dataclass(frozen=True)
+class ImplementationCatalog:
+    entries: tuple[ImplementationEntry, ...]
+
+    def __post_init__(self) -> None:
+        identities = [item.descriptor.implementation_id for item in self.entries]
+        if len(set(identities)) != len(identities):
+            raise ValueError("implementation IDs must be unique")
+
+    @property
+    def implementations(self) -> tuple[ImplementationDescriptor, ...]:
+        return tuple(entry.descriptor for entry in self.entries)
+
+    def implementation(self, implementation_id: str) -> Callable | None:
+        for entry in self.entries:
+            if entry.descriptor.implementation_id == implementation_id:
+                return entry.implementation
+        raise KeyError(implementation_id)
+
+
+@dataclass(frozen=True)
+class RuntimeServiceCatalog:
+    services: tuple[RuntimeServiceDescriptor, ...] = ()
+
+    def __post_init__(self) -> None:
+        identities = [item.service_id for item in self.services]
+        if len(set(identities)) != len(identities):
+            raise ValueError("runtime service IDs must be unique")
 
 
 @dataclass(frozen=True)
@@ -176,6 +208,7 @@ class ExecutionPlan:
     coverage_identity: str
     bindings: tuple[PlanBinding, ...]
     implementations: tuple[ImplementationDescriptor, ...]
+    catalog: ImplementationCatalog
     services: tuple[RuntimeServiceDescriptor, ...]
     report: DetachmentReport
     plan_digest: str
@@ -306,7 +339,7 @@ def _ordered_candidates(
 
 def _plan_digest(
     configuration: ExecutionConfiguration,
-    coverage: CoverageResult,
+    coverage: ProgramCoverage,
     bindings: tuple[PlanBinding, ...],
     selected: tuple[ImplementationDescriptor, ...],
     services: tuple[RuntimeServiceDescriptor, ...],
@@ -365,15 +398,13 @@ def _plan_digest(
 def plan_execution(
     configuration: ExecutionConfiguration,
     coverage_source: CoverageSource,
-    implementations: Iterable[ImplementationDescriptor],
-    services: Iterable[RuntimeServiceDescriptor] = (),
+    implementation_catalog: ImplementationCatalog,
+    service_catalog: RuntimeServiceCatalog = RuntimeServiceCatalog(),
 ) -> ExecutionPlan:
     """Resolve an immutable plan or fail a strict profile before execution."""
     coverage = coverage_source.coverage_for(configuration.product_profile)
-    all_implementation_items = tuple(implementations)
+    all_implementation_items = implementation_catalog.implementations
     known_ids = {item.implementation_id for item in all_implementation_items}
-    if len(known_ids) != len(all_implementation_items):
-        raise ValueError("implementation IDs must be unique")
     unknown_overrides = sorted(set(configuration.selected_overrides) - known_ids)
     if unknown_overrides:
         raise ValueError("unknown selected overrides: " + ", ".join(unknown_overrides))
@@ -393,10 +424,8 @@ def plan_execution(
                 f"multiple selected authored implementations own {target}: "
                 + ", ".join(sorted(owners))
             )
-    service_items = tuple(services)
+    service_items = service_catalog.services
     service_by_id = {service.service_id: service for service in service_items}
-    if len(service_by_id) != len(service_items):
-        raise ValueError("runtime service IDs must be unique")
 
     bindings: list[PlanBinding] = []
     selected_by_id: dict[str, ImplementationDescriptor] = {}
@@ -533,6 +562,7 @@ def plan_execution(
         coverage_identity=coverage.evidence_identity,
         bindings=binding_items,
         implementations=selected,
+        catalog=implementation_catalog,
         services=selected_services,
         report=report,
         plan_digest=digest,

@@ -6,19 +6,17 @@ from pathlib import Path
 from .cpu import CPU8086, CPUState
 from .dos import DOSMachine
 from .memory import LoadedProgram, load_mz_program
-from .hooks import registry
-# The Runtime shell + the EXE-FREE image constructor live in runtime_core so the
-# strict-VMless import graph can reach them without reaching this module's
+# The Runtime shell + the EXE-FREE image constructor live in runtime_core so an
+# EXE-independent import graph can reach them without reaching this module's
 # load_mz_program loader edge (dos_re_2.0 §"The EXE-independence wall").
 # enable_sound_blaster lives in runtime_core (loader-free) and is re-exported
 # here: it attaches hardware to a Runtime and has no loader dependency, but
-# THIS module does (create_runtime -> load_mz_program), so a strict-VMless
-# runner importing it from here would drag the loader onto its import graph
+# THIS module does (create_runtime -> load_mz_program), so detached composition
+# importing it from here would drag the loader onto its import graph
 # and fail lint_independence. Same reason snapshot_headless is split out.
 from .runtime_core import (Runtime, create_runtime_from_image, BIOS_INT9_ENTRY,
                            _BIOS_IRET_STUB, _BIOS_INT9_LINEAR,
                            enable_sound_blaster,  # noqa: F401  (re-export)
-                           use_real_console_input,  # noqa: F401  (re-export)
                            install_bios_environment_hooks,
                            _init_bios_environment)
 
@@ -86,7 +84,6 @@ def create_runtime(
     *,
     game_root: str | Path | None = None,
     command_tail: bytes | str = b"",
-    install_replacements: bool = True,
 ) -> Runtime:
     if isinstance(command_tail, str):
         command_tail = command_tail.encode("ascii")
@@ -121,16 +118,4 @@ def create_runtime(
     # type-ahead buffer INT 16h reads); and the dummy IRET stub, which the same
     # chaining idiom reaches on every unclaimed IRQ.
     install_bios_environment_hooks(cpu, dos)
-    registry.install(cpu)
-    if not install_replacements:
-        # THE PURE-ASM ORACLE.  Install-then-strip rather than skipping the
-        # install: the registry is populated at import time by whichever module
-        # decorated the hooks, so a caller cannot make this CPU pure by
-        # withholding an import -- some other import in the process has almost
-        # certainly done it already.  Stripping here is order-independent.
-        # The BIOS environment hooks above are NOT registry entries and stay:
-        # they are synthetic hardware, not recovered game logic.
-        registry.uninstall(cpu)
     return Runtime(program, cpu, dos)
-
-

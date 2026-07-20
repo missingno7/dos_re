@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     # without the runtime edge.  load_snapshot_headless already imports the
     # carrier lazily, inside the function -- so only a caller that actually
     # builds a VM shell pays for it (measured: this edge was importing
-    # dos_re.cpu on every play_cpuless boot, 2026-07-17).
+    # dos_re.cpu on every detached profile boot, 2026-07-17).
     from .runtime_core import Runtime
 
 

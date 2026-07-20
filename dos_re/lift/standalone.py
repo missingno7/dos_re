@@ -3,7 +3,7 @@
 A promoted corpus (DOS_RE 2.0 stage 3) is a package of pure
 ``func_<cs>_<ip>(mem, plat, *, <regs>) -> (outputs, _compat)`` modules that import only their siblings.
 Turning that into a running program takes the same four things in every port, and each port had grown
-its own copy of them (lemmings' ``play_cpuless``, skyroads', overkill's ``cpuless_host``). They live
+its own copy of them. They live
 here once:
 
 * :func:`install_import_guard` -- THE WALL. Arms ``builtins.__import__`` so any import of the

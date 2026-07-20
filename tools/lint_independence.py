@@ -20,7 +20,7 @@ methods that hold such imports, so they are reported as INFO, not failures.
 Usage (from a port):
     python dos_re/tools/lint_independence.py \
         --repo-root . \
-        --root scripts/play_vmless.py --root mygame/vmless_boot.py \
+        --root product/launcher.py --root mygame/generated_boot.py \
         --forbidden create_mygame_runtime --forbidden load_mygame_snapshot
 
 Exit code 0 = independent; nonzero = a forbidden module-level edge was found.

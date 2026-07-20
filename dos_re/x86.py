@@ -5,7 +5,7 @@ Extracting these here breaks the ``dos -> cpu`` import edge: the DOS/hardware
 device model no longer imports the interpreter, so the standalone CPUless
 platform runtime (``dos_re.lift.platform.CPUlessPlatformRuntime``) can own a
 device model without pulling ``CPU8086`` into its import graph (dos_re_2.0.md
-section 4; the play_cpuless import guard forbids the interpreter).
+section 4; the detached profile import guard forbids the interpreter).
 """
 from __future__ import annotations
 

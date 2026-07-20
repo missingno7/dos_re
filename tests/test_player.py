@@ -15,14 +15,15 @@ import pytest
 
 from dos_re import player
 from dos_re.execution import (
-    CoverageResult,
     ExecutionPlanError,
+    ImplementationCatalog,
     ImplementationDescriptor,
+    ImplementationEntry,
     ImplementationOrigin,
-    StaticCoverageSource,
+    ProgramCoverage,
+    profile_configuration,
 )
-from dos_re.hooks import registry as hook_registry
-from dos_re.player import GameFrontend, HookModeUnsupported, build_arg_parser
+from dos_re.player import GameFrontend, build_arg_parser
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,10 +33,11 @@ def _parse(frontend: GameFrontend, argv: list[str]):
 
 
 def test_import_stays_lazy_about_viewer_deps():
-    """Importing dos_re.player must not pull in numpy or pygame — headless demo
-    replay has to work on machines without the viewer extras."""
+    """Planning imports no viewer, interpreter, or EXE-loader dependency."""
     code = ("import sys; import dos_re.player; "
-            "bad = [m for m in ('numpy', 'pygame') if m in sys.modules]; "
+            "bad = [m for m in "
+            "('numpy', 'pygame', 'dos_re.cpu', 'dos_re.runtime') "
+            "if m in sys.modules]; "
             "assert not bad, f'dos_re.player eagerly imported {bad}'")
     result = subprocess.run([sys.executable, "-c", code],
                             capture_output=True, text=True, cwd=ROOT, timeout=60)
@@ -50,8 +52,6 @@ def test_standard_cli_defaults():
     assert args.plan_only is False
     assert args.play_demo is None
     assert args.demo_continue is False
-    assert args.no_replacements is False
-    assert args.safe_hooks is False and args.verify_hooks is False and args.trace_hooks is False
     assert args.steps_per_frame == GameFrontend.default_steps_per_frame
     assert args.timer_irqs_per_frame == GameFrontend.default_timer_irqs_per_frame
     assert args.present_hz == GameFrontend.default_present_hz
@@ -101,32 +101,6 @@ class _StubRuntime:
         self.cpu = _StubCPU()
 
 
-def test_no_replacements_uninstalls_registry_hooks_only():
-    key = (0x7777, 0x0001)   # unlikely to collide with a real registration
-    assert key not in hook_registry.replacements
-    hook_registry.replacements[key] = object()
-    try:
-        rt = _StubRuntime()
-        framework_key = (0xF000, 0xE987)                 # BIOS INT9 stays installed
-        rt.cpu.replacement_hooks = {key: "game_hook", framework_key: "bios_int9"}
-        rt.cpu.hook_names = {key: "game_hook", framework_key: "bios_int9"}
-        fe = GameFrontend(ROOT)
-        args = _parse(fe, ["--no-replacements"])
-        fe.apply_hook_mode(rt, args)
-        assert key not in rt.cpu.replacement_hooks
-        assert framework_key in rt.cpu.replacement_hooks
-    finally:
-        del hook_registry.replacements[key]
-
-
-@pytest.mark.parametrize("flag", ["--safe-hooks", "--verify-hooks", "--trace-hooks"])
-def test_unimplemented_hook_tiers_fail_loud(flag):
-    fe = GameFrontend(ROOT)
-    args = _parse(fe, [flag])
-    with pytest.raises(HookModeUnsupported):
-        fe.apply_hook_mode(_StubRuntime(), args)
-
-
 def test_detached_profile_fails_before_runtime_construction():
     class Fe(GameFrontend):
         created = False
@@ -145,20 +119,20 @@ def test_detached_profile_fails_before_runtime_construction():
 def test_frontend_can_declare_exe_free_implementation_for_same_player():
     class Fe(GameFrontend):
         def execution_coverage(self, args):
-            return StaticCoverageSource(CoverageResult(
+            return ProgramCoverage(
                 roots=("root",),
                 reachable=frozenset({"root", "frame"}),
                 evidence_identity="tiny-coverage",
-            ))
+            )
 
         def execution_implementations(self, args):
-            return (ImplementationDescriptor(
+            return ImplementationCatalog((ImplementationEntry(ImplementationDescriptor(
                 implementation_id="mixed-external",
                 targets=frozenset({"root", "frame"}),
                 origin=ImplementationOrigin.GENERATED,
                 properties=frozenset({"vmless", "dos-memory-backed"}),
                 implementation_digest="tiny-v1",
-            ),)
+            )),))
 
         default_provider_preference = ("mixed-external",)
 
@@ -202,3 +176,81 @@ def test_run_headless_respects_frame_budget(capsys):
     assert player.run_headless(fe, rt, args) == 0
     assert rt.cpu.instruction_count == 70
     assert "frames: 7" in capsys.readouterr().out
+
+
+def test_verification_profile_requires_an_explicit_interval():
+    with pytest.raises(SystemExit, match="requires --play-demo"):
+        player.main(GameFrontend(ROOT), ["--profile", "verification"])
+
+
+def test_verification_profile_dispatches_before_runtime_boot(monkeypatch):
+    class Fe(GameFrontend):
+        def create_runtime(self, args):
+            raise AssertionError("verification must use replay drivers")
+
+    seen = []
+    monkeypatch.setattr(
+        player,
+        "_run_differential_verification",
+        lambda frontend, args, plan: seen.append(plan) or 7,
+    )
+    assert player.main(Fe(ROOT), ["--profile", "verification"]) == 7
+    assert seen[0].configuration.verification_policy.mode == "differential"
+
+
+@pytest.mark.parametrize(
+    "obsolete",
+    (
+        "--no-replacements",
+        "--safe-hooks",
+        "--verify-hooks",
+        "--trace-hooks",
+    ),
+)
+def test_removed_hook_flags_are_rejected(obsolete):
+    with pytest.raises(SystemExit):
+        _parse(GameFrontend(ROOT), [obsolete])
+
+
+def test_selected_implementation_activator_is_the_only_binding_authority():
+    activated = []
+
+    class Fe(GameFrontend):
+        default_provider_preference = ("native-frame",)
+
+        def execution_configuration(self, args):
+            return profile_configuration(
+                args.profile,
+                program_identity=self.program_identity(args),
+                selected_overrides=("native-frame",),
+                provider_preference=self.default_provider_preference,
+            )
+
+        def execution_coverage(self, args):
+            return ProgramCoverage(
+                roots=("frame",),
+                reachable=frozenset({"frame"}),
+                evidence_identity="frame-v1",
+            )
+
+        def execution_implementations(self, args):
+            descriptor = ImplementationDescriptor(
+                implementation_id="native-frame",
+                targets=frozenset({"frame"}),
+                origin=ImplementationOrigin.AUTHORED,
+                implementation_digest="native-v1",
+            )
+            return ImplementationCatalog((ImplementationEntry(
+                descriptor,
+                implementation=lambda: None,
+                activate=lambda runtime, targets: activated.append(
+                    (runtime, targets)
+                ),
+            ),))
+
+    frontend = Fe(ROOT)
+    args = _parse(frontend, [])
+    plan = frontend.resolve_execution_plan(args)
+    runtime = object()
+    frontend.bind_execution_plan(runtime, plan)
+    assert activated == [(runtime, ("frame",))]

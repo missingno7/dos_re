@@ -97,8 +97,8 @@ python tools/pm_boot.py --exe assets/GAME.EXE --png frame.png \
     --keys 20 --scancodes 39,b9 --at 30000000            # run to the frontier
 ```
 
-`tools/pm_view.py` is the zero-setup live window for these titles (the
-PM `view.py`); `dos_re.pm_player.main` is the same runner as a library for a
+`tools/view.py --protected-mode` is the zero-setup live window for these titles;
+`dos_re.pm_player.PMFrontend` is the protected-mode driver behind the canonical
 port's own `scripts/play.py`.
 
 `pm_boot` is the bring-up loop: each run stops at the first unimplemented
@@ -165,7 +165,9 @@ from dos_re.replay import (ReplayArtifact, ReplayEvent, ReplayPoint,
 
 Record the adapter's deterministic external events as one `ReplayArtifact`.
 Register the original interpreter and each candidate as an `ExecutionProfile`,
-then use `tools/replay_verify.py` or `verify_interval` for exact X→Y replay.
+then use the project player with `--profile verification --play-demo DIR
+--verify-start X --verify-end Y` for exact X→Y replay. Add `--bisect` to
+persistently locate the first divergent transition inside that interval.
 Machine-backed profiles use complete machine projection; detached native
 profiles publish the same canonical semantic schema from native state.
 
@@ -173,17 +175,26 @@ On divergence use `bisect_divergence`. It persists the latest valid point and
 the failing successor inside the artifact; no second replay record is created.
 Inspect the corpus item with `python tools/replay_info.py <artifact-dir>`.
 
-## 8. Hook a routine
+## 8. Add a faithful implementation
 
 ```python
-@registry.replace(0x1030, 0x4537, "scan_4537")   # dos_re.hooks.HookRegistry
-def hook(cpu): ...                                # thin adapter over a pure rule
+ImplementationEntry(
+    ImplementationDescriptor(
+        "scan_4537", frozenset({"function:1030:4537"}),
+        ImplementationOrigin.AUTHORED,
+        category=OverrideCategory.FAITHFUL,
+        implementation_digest="...",
+    ),
+    implementation=scan_4537,
+    activate=real_mode_adapter,
+)
 ```
 
-- Return mechanics must be exact; child hook boundaries route through
+- The semantic body is CPUless; the backend activator owns exact return
+  mechanics. Child boundaries route through
   `call_installed_hook_like_near_call` / `jump_installed_hook_boundary`
   (a direct Python call hides the child from verification —
-  `tools/audit_hook_oracle.py` catches this statically).
+  the execution plan keeps the boundary explicit).
 - Runtime-patched routine? Guard with `self_disable_if_patched` /
   `code_matches`; multiple live variants → `dos_re.runtime_code`.
 - Unrecovered path reached at runtime → raise `dos_re.gaps.HybridGap`. Never
@@ -331,7 +342,6 @@ python tools/gen_island_manifest.py <game>.codecs <game>.recovered -o docs/recov
 ```bash
 python tools/lint.py                        # the game-agnostic / lean-deps boundary (stdlib+numpy core)
 python tools/audit_layers.py <game>/recovered   # pure layer never imports the VM
-python tools/audit_hook_oracle.py <game>    # no child hooks hidden from verification
 python tools/check_undefined_names.py       # latent-NameError guard
 python tools/check_doc_links.py .           # broken doc links (docs are agent-maintained; run after edits)
 python -m pytest tests -q                   # framework suite (pypy runs it ~4x faster)

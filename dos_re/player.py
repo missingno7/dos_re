@@ -1,51 +1,19 @@
-"""dos_re.player — the game-agnostic core every port's ``scripts/play.py`` builds on.
+"""The single dos_re execution and launch lifecycle.
 
-``play.py`` is the human entry point of a game port: run the (hybrid) game in a live
-viewer, resume/save snapshots, record/replay input demos, take screenshots — the
-artifacts a human hands to the AI during reverse engineering.  Every port needs the
-same skeleton; before this module each port copy-pasted and mutated it (four CLIs,
-four flag vocabularies).  This module owns the game-agnostic 90%:
+Every game exposes one ``scripts/play.py`` built from :class:`GameFrontend`.
+The player resolves one immutable execution plan before constructing a runtime,
+then dispatches real-mode, protected-mode, differential-verification, or
+presentation behavior through frontend methods. Recovery level is a property
+of each selected implementation, never a player mode.
 
-  * the STANDARD CLI (same flag names in every port — see ``build_arg_parser``):
-      run mode      viewer by default; ``--headless`` disables it
-      snapshots     ``--snapshot DIR`` resume, ``--save-snapshot [DIR]`` on exit
-      demos         ``--record-demo NAME``, ``--play-demo DIR`` (+ ``--demo-continue``
-                    to hand the game to the player when the demo ends), ``--demo-dir``
-      hook modes    ``--no-replacements``, ``--safe-hooks``, ``--verify-hooks``,
-                    ``--trace-hooks`` (defined for every port from day one; a port
-                    without that tier fails LOUD, it never silently ignores the flag)
-      pacing        ``--present-hz``, ``--steps-per-frame``, ``--timer-irqs-per-frame``,
-                    ``--frames N`` / ``--steps N`` budgets (headless smokes)
-      presentation  ``--scale``, ``--square-pixels``
-      boot          ``--exe``, ``--game-root``, ``--dos-args``
-  * the viewer loop: pygame window (``dos_re.display.Display``), keyboard forwarding
-    as XT scancodes (``KeyDispatcher`` -> ``deliver_scancode``), and the standard
-    hotkeys — F10 screenshot, F11 demo-record toggle, F12 snapshot;
-  * headless demo replay (fast, deterministic, no pygame);
-  * crash handling: a gap snapshot is written on any unhandled VM exception;
-  * the standard exit report (status / frames / steps / CPU state).
+The canonical CLI owns development/release policy, snapshots, ReplayArtifact
+recording and playback, exact verification intervals, pacing, presentation,
+and persistence. A frontend supplies game identities, coverage, implementation
+and service catalogs, runtime construction, backend activators, and—when
+verification is supported—an oracle/candidate driver pair.
 
-A port subclasses :class:`GameFrontend` and overrides only what its game needs —
-usually ``create_runtime``/``load_snapshot_runtime`` (its own adapter boot),
-``advance_frame`` (its pacing policy) and the pacing defaults.  The DEFAULT model is
-the simple deterministic one proven by skyroads_port: a fixed instruction budget per
-frame with N timer IRQs, so the frame index alone is the demo clock and record/replay
-are trivially deterministic — **within one hook mode**: a step-budget clock is
-mode-DEPENDENT (a hook is one step() however much ASM it replaces), so demos
-recorded under it only replay under the same installed-hook set (see
-docs/demos_and_snapshots.md, "the boundary-clock invariant").  For hook-mode-
-independent demos, override ``advance_frame`` with a GAME-PROGRESS clock — run
-until the game's own frame boundary (its present/page-flip, a boundary address
-crossing à la pm_input_demo's ``frame_tick_addr``, or a registered input-wait) —
-so the frame index counts game frames, not interpreter steps.  A mature port
-(pre2_port) replaces ``advance_frame`` with its own wall-clock/PIT model and
-keeps the CLI contract.
-
-Import discipline: this module is the FRONTEND RING (see tools/lint.py).  It keeps
-numpy/pygame imports lazy — importing ``dos_re.player`` (and running headless demo
-replay) needs neither installed; only opening the viewer or taking a screenshot does.
-
-Worked examples: the Lemmings pilot's runners (lemmings_port/scripts/) and the tools/new_project.py starter.
+This module is in the frontend ring. Viewer dependencies stay lazy so planning,
+headless execution, and verification do not import numpy or pygame.
 """
 from __future__ import annotations
 
@@ -56,21 +24,21 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from dos_re.cpu import HaltExecution, UnsupportedInstruction
 from dos_re.dos import ConsoleInputWouldBlock
 from dos_re.execution import (
-    CoverageResult,
     ExecutionConfiguration,
     ExecutionPlan,
+    ImplementationCatalog,
     ImplementationDescriptor,
+    ImplementationEntry,
     ImplementationOrigin,
+    ProgramCoverage,
+    RuntimeServiceCatalog,
     RuntimeServiceDescriptor,
-    StaticCoverageSource,
     format_execution_plan,
     plan_execution,
     profile_configuration,
 )
-from dos_re.hooks import registry as hook_registry
 from dos_re.input_demo import (
     MOUSE_CHANNEL,
     SCAN_CHANNEL,
@@ -79,41 +47,25 @@ from dos_re.input_demo import (
     mouse_sample,
     scan_payload,
 )
-from dos_re.interrupts import deliver_interrupt, deliver_scancode
-from dos_re.keyboard import KeyDispatcher, scancode_table  # noqa: F401  (re-export)
-from dos_re.runtime_core import use_real_console_input
-# NOTE: the EXE loader (create_runtime) and the EXE-based load_snapshot are
-# imported LAZILY inside the default GameFrontend methods below, not at module
-# level.  A frontend that overrides create_runtime/load_snapshot_runtime (e.g.
-# the strict-VMless runner) then never pulls the loader onto its import graph
-# (scripts/lint_vmless_independence.py).  write_snapshot is EXE-free.
+from dos_re.keyboard import KeyDispatcher, scancode_table
+from dos_re.x86 import HaltExecution, UnsupportedInstruction
+# The EXE loader is imported lazily inside default frontend methods. A detached
+# frontend can therefore construct its selected runtime without importing the
+# interpreter loader. ``write_snapshot`` itself is EXE-free.
 from dos_re.replay import (
     ExecutionProfile,
     ReplayArtifact,
+    ReplayDriver,
     ReplayPoint,
     ReplayRecording,
+    bisect_divergence,
+    verify_interval,
 )
 from dos_re.snapshot import (
     apply_runtime_continuation,
     capture_runtime_continuation,
     write_snapshot,
 )
-
-# The default framebuffer decoder is a LEAF (dos_re.framebuffer): decoding video
-# memory needs no CPU, and this module imports the interpreter at module level --
-# a CPU-free consumer (a port rasterizer's fallback for modes it does not
-# implement, reached from the standalone CPUless runtime) must not pull the VM in
-# behind it.  Re-exported here so existing callers keep working.
-from dos_re.framebuffer import (WIDTH, HEIGHT, PLANAR_ROW_BYTES,  # noqa: F401
-                                decode_frame_default)
-
-
-#: Re-exported from keyboard.py, where it must live: a strict-VMless
-#: viewer needs it and cannot import this module (the player reaches the
-#: loader). It is a pure lookup table -- it had no business behind the
-#: EXE loader, and being there meant the one runner that could not import
-#: it hand-rolled a 7-key subset instead.
-
 
 def _timestamp_dir(root: Path, prefix: str) -> Path:
     return Path(root) / f"{prefix}_{datetime.now():%Y%m%d_%H%M%S}"
@@ -125,6 +77,10 @@ class _RealReplayRecorder:
     def __init__(self, frontend, args, rt, *, root: Path, name: str, metadata: dict):
         directory = _timestamp_dir(root, f"replay_{_safe_name(name)}")
         profile = frontend.replay_profile(args, rt)
+        if profile.role != "oracle":
+            raise RuntimeError(
+                "ReplayArtifact recording requires the untouched oracle plan"
+            )
         base = frontend.capture_replay_state(rt, event_cursor=0)
         timeline = f"real-mode-frame-boundaries:{frontend.name}:v1"
         self.recording = ReplayRecording(
@@ -239,21 +195,8 @@ def _runtime_identity() -> str:
     return h.hexdigest()
 
 
-class HookModeUnsupported(SystemExit):
-    """A hook-mode flag was passed that this port has no implementation for.
-
-    The flags exist in every port's CLI from day one so the vocabulary is stable;
-    a port that has not built that tier yet fails LOUD instead of silently running
-    something else (the no-silent-fallbacks rule applies to the CLI too).
-    """
-
-    def __init__(self, flag: str) -> None:
-        super().__init__(f"{flag} is not implemented by this port yet "
-                         f"(see dos_re.player.GameFrontend.apply_hook_mode)")
-
-
 class GameFrontend:
-    """Per-game adapter for the standard play runner.  Subclass and override.
+    """Per-game adapter for the canonical player. Subclass and override.
 
     The defaults implement the SIMPLE DETERMINISTIC model: fixed
     ``--steps-per-frame`` instruction budget + ``--timer-irqs-per-frame`` INT 08h
@@ -303,21 +246,21 @@ class GameFrontend:
             provider_preference=self.default_provider_preference,
         )
 
-    def execution_coverage(self, args: argparse.Namespace) -> StaticCoverageSource:
+    def execution_coverage(self, args: argparse.Namespace) -> ProgramCoverage:
         """Coverage adapter for the current monolithic interpreted runtime."""
         program = self.program_identity(args)
         root = f"{program}:program"
-        return StaticCoverageSource(CoverageResult(
+        return ProgramCoverage(
             roots=(root,),
             reachable=frozenset({root}),
-            evidence_identity=f"legacy-monolith:{program}",
-        ))
+            evidence_identity=f"interpreted-program:{program}",
+        )
 
     def execution_implementations(
         self, args: argparse.Namespace,
-    ) -> tuple[ImplementationDescriptor, ...]:
+    ) -> ImplementationCatalog:
         root = f"{self.program_identity(args)}:program"
-        return (ImplementationDescriptor(
+        return ImplementationCatalog((ImplementationEntry(ImplementationDescriptor(
             implementation_id="interpreted-original",
             targets=frozenset({root}),
             origin=ImplementationOrigin.INTERPRETED,
@@ -325,12 +268,12 @@ class GameFrontend:
             requires_original_exe=True,
             requires_interpreter=True,
             implementation_digest=_runtime_identity(),
-        ),)
+        )),))
 
     def execution_services(
         self, args: argparse.Namespace,
-    ) -> tuple[RuntimeServiceDescriptor, ...]:
-        return ()
+    ) -> RuntimeServiceCatalog:
+        return RuntimeServiceCatalog()
 
     def resolve_execution_plan(self, args: argparse.Namespace) -> ExecutionPlan:
         """Resolve before boot so strict profiles cannot touch forbidden runtime."""
@@ -340,6 +283,49 @@ class GameFrontend:
             self.execution_implementations(args),
             self.execution_services(args),
         )
+
+    def launch(self, args: argparse.Namespace, plan: ExecutionPlan) -> int:
+        """Run the selected plan through this frontend's execution driver."""
+        return _launch_real_mode(self, args)
+
+    def verification_drivers(
+        self,
+        args: argparse.Namespace,
+        plan: ExecutionPlan,
+        artifact: ReplayArtifact,
+    ) -> tuple[ReplayDriver, ReplayDriver]:
+        """Create oracle and candidate drivers for differential replay.
+
+        A game frontend owns the runtime-specific adapters, but not the
+        verification command, interval semantics, or persistence format.
+        """
+        raise RuntimeError(
+            f"{type(self).__name__} does not provide differential replay drivers"
+        )
+
+    def bind_execution_plan(self, runtime, plan: ExecutionPlan) -> None:
+        """Install selected providers through their declared backend activators."""
+        targets_by_implementation: dict[str, list[str]] = {}
+        for binding in plan.bindings:
+            targets_by_implementation.setdefault(
+                binding.implementation_id, []
+            ).append(binding.target)
+        descriptors = {
+            item.implementation_id: item for item in plan.implementations
+        }
+        for implementation_id, targets in sorted(targets_by_implementation.items()):
+            descriptor = descriptors[implementation_id]
+            entry = next(
+                item for item in plan.catalog.entries
+                if item.descriptor.implementation_id == implementation_id
+            )
+            if entry.activate is not None:
+                entry.activate(runtime, tuple(sorted(targets)))
+            elif descriptor.origin is not ImplementationOrigin.INTERPRETED:
+                raise RuntimeError(
+                    f"selected implementation {implementation_id!r} has no "
+                    "backend activator"
+                )
 
     def default_save_dir(self, args: argparse.Namespace) -> Path:
         """Where the live product persists the game's own saved files (progress,
@@ -367,16 +353,22 @@ class GameFrontend:
 
     def advance_frame(self, rt, args: argparse.Namespace, frame: int) -> None:
         """Advance the VM one displayed/simulated frame.  THE pacing extension point."""
+        from dos_re.interrupts import deliver_interrupt
+
         for _ in range(max(0, args.timer_irqs_per_frame)):
             deliver_interrupt(rt, 0x08)
         rt.cpu.run(args.steps_per_frame)
 
     def decode_frame(self, rt):
         """Return the current screen as an HxWx3 uint8 array."""
+        from dos_re.framebuffer import decode_frame_default
+
         return decode_frame_default(rt)
 
     def deliver_input(self, rt, scancode: int) -> None:
         """Deliver one XT scancode to the game (override e.g. to bound ISR steps)."""
+        from dos_re.interrupts import deliver_scancode
+
         deliver_scancode(rt, scancode)
 
     # --- demo determinism ---------------------------------------------------------
@@ -400,12 +392,17 @@ class GameFrontend:
 
     def replay_profile(self, args: argparse.Namespace, rt) -> ExecutionProfile:
         """Stable identity used to invalidate profile-local replay caches."""
-        mode = (
-            "oracle" if args.no_replacements else
-            "verify" if args.verify_hooks else
-            "trace" if args.trace_hooks else
-            "safe" if args.safe_hooks else "candidate"
+        plan = args.execution_plan
+        only_interpreted = bool(plan.implementations) and all(
+            implementation.origin is ImplementationOrigin.INTERPRETED
+            for implementation in plan.implementations
         )
+        role = (
+            "oracle"
+            if only_interpreted and not plan.configuration.selected_overrides
+            else "candidate"
+        )
+        mode = plan.configuration.profile
         overrides = tuple(sorted(
             f"{key!r}:{value}" for key, value in rt.cpu.hook_names.items()))
         plan_digest = getattr(getattr(args, "execution_plan", None), "plan_digest", "")
@@ -417,7 +414,7 @@ class GameFrontend:
         ).hexdigest()[:12]
         return ExecutionProfile(
             profile_id=f"real-mode-{mode}-{key}",
-            role="oracle" if mode == "oracle" else "candidate",
+            role=role,
             implementation=implementation,
             image=_content_identity(args.exe),
             runtime=_runtime_identity(),
@@ -432,24 +429,6 @@ class GameFrontend:
 
     def apply_replay_state(self, rt, state) -> None:
         apply_runtime_continuation(rt, state)
-
-    # --- hook modes -----------------------------------------------------------------
-
-    def apply_hook_mode(self, rt, args: argparse.Namespace) -> None:
-        """Apply --no-replacements / --safe-hooks / --verify-hooks / --trace-hooks.
-
-        The generic base handles ``--no-replacements`` (uninstall every registered
-        replacement hook, keeping framework-level hooks like the BIOS INT9 ISR) and
-        fails loud on the tiers it cannot provide.  Ports with hook tiers override.
-        """
-        if args.no_replacements:
-            hook_registry.uninstall(rt.cpu)
-        if args.safe_hooks:
-            raise HookModeUnsupported("--safe-hooks")
-        if args.verify_hooks:
-            raise HookModeUnsupported("--verify-hooks")
-        if args.trace_hooks:
-            raise HookModeUnsupported("--trace-hooks")
 
     # --- presentation ------------------------------------------------------------
 
@@ -522,18 +501,13 @@ def build_arg_parser(frontend: GameFrontend,
     demo.add_argument("--demo-dir", default=str(frontend.artifacts_dir / "demos"),
                       help="directory to write recorded demos into")
 
-    hooks = p.add_argument_group("hook modes")
-    hooks.add_argument("--no-replacements", action="store_true",
-                       help="ORACLE mode: pure original ASM, no recovered hooks")
-    hooks.add_argument("--safe-hooks", action="store_true",
-                       help="original game logic with only the render/decode-owned "
-                            "hook tier (fails loud if this port has no such tier)")
-    hooks.add_argument("--verify-hooks", action="store_true",
-                       help="run the ASM oracle and diff each recovered replacement "
-                            "against it (fails loud if this port has no verifier)")
-    hooks.add_argument("--trace-hooks", action="store_true",
-                       help="hybrid runtime + a live tally of which hooks fire "
-                            "(fails loud if this port has no tracer)")
+    verify = p.add_argument_group("verification")
+    verify.add_argument("--verify-start", type=int,
+                        help="first stable replay point (verification profile)")
+    verify.add_argument("--verify-end", type=int,
+                        help="last stable replay point (verification profile)")
+    verify.add_argument("--bisect", action="store_true",
+                        help="locate the first divergent transition in the interval")
 
     pace = p.add_argument_group("pacing")
     pace.add_argument("--present-hz", type=int, default=frontend.default_present_hz,
@@ -965,35 +939,7 @@ def run_view(frontend: GameFrontend, rt, args,
     return _exit_report(rt, status=status, frames=frame_box["n"])
 
 
-# --- entry point -----------------------------------------------------------------------------------
-
-#: Re-exported from runtime_core, where it must live: a strict-VMless runner
-#: needs it and cannot import this module (the player reaches the loader).
-_use_real_console_input = use_real_console_input
-
-
-def main(frontend: GameFrontend, argv: list[str] | None = None,
-         description: str | None = None) -> int:
-    """The standard play.py main: parse the unified CLI and dispatch.
-
-    ``python scripts/play.py`` -> live viewer (hybrid runtime).
-    ``--headless``             -> bounded headless run (snapshot for study).
-    ``--play-demo DIR``        -> replay (viewer unless --headless; +``--demo-continue``
-                                  hands over to the player when the demo ends).
-    """
-    args = build_arg_parser(frontend, description).parse_args(argv)
-    hook_modes = (
-        args.no_replacements, args.safe_hooks, args.verify_hooks, args.trace_hooks
-    )
-    if args.profile == "verification" and not any(hook_modes):
-        # Compatibility adapter for the current hook verifier. Ports eventually
-        # express this through VerificationPolicy and a verification driver.
-        args.verify_hooks = True
-    args.execution_plan = frontend.resolve_execution_plan(args)
-    if args.plan_only:
-        print(format_execution_plan(args.execution_plan))
-        return 0
-
+def _launch_real_mode(frontend: GameFrontend, args: argparse.Namespace) -> int:
     if args.play_demo:
         playback = _RealReplayPlayback.open(args.play_demo)
         frontend.apply_demo_metadata(args, playback.artifact.metadata)
@@ -1001,8 +947,8 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
         base = playback.artifact.restore(
             playback.profile, ReplayPoint(0, playback.artifact.timeline_id))
         frontend.apply_replay_state(rt, base)
+        frontend.bind_execution_plan(rt, args.execution_plan)
         playback.adapter.seek(base.event_cursor)
-        frontend.apply_hook_mode(rt, args)
         current = frontend.replay_profile(args, rt)
         for field in ("image", "runtime", "devices", "continuation_schema"):
             if getattr(current, field) != getattr(playback.profile, field):
@@ -1017,7 +963,7 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
             )
         else:
             playback.artifact.require_profile(current)
-        _use_real_console_input(rt)
+        rt.dos.console_input_fallback = None
         if args.headless:
             return run_replay_headless(frontend, rt, args, playback)
         return run_view(frontend, rt, args, playback=playback)
@@ -1026,8 +972,63 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
         rt = frontend.load_snapshot_runtime(args, args.snapshot)
     else:
         rt = frontend.create_runtime(args)
-    frontend.apply_hook_mode(rt, args)
-    _use_real_console_input(rt)
+    frontend.bind_execution_plan(rt, args.execution_plan)
+    rt.dos.console_input_fallback = None
     if args.headless:
         return run_headless(frontend, rt, args)
     return run_view(frontend, rt, args)
+
+
+def _run_differential_verification(
+    frontend: GameFrontend,
+    args: argparse.Namespace,
+    plan: ExecutionPlan,
+) -> int:
+    if not args.play_demo:
+        raise SystemExit("--profile verification requires --play-demo")
+    if args.verify_start is None or args.verify_end is None:
+        raise SystemExit(
+            "--profile verification requires --verify-start and --verify-end"
+        )
+    artifact = ReplayArtifact.open(args.play_demo)
+    start = ReplayPoint(args.verify_start, artifact.timeline_id)
+    end = ReplayPoint(args.verify_end, artifact.timeline_id)
+    oracle, candidate = frontend.verification_drivers(args, plan, artifact)
+    if args.bisect:
+        points = tuple(
+            ReplayPoint(ordinal, artifact.timeline_id)
+            for ordinal in range(args.verify_start, args.verify_end + 1)
+        )
+        found = bisect_divergence(artifact, oracle, candidate, points)
+        if found is None:
+            print(f"EQUIVALENT {start.ordinal}..{end.ordinal}")
+            return 0
+        before, after, result = found
+        print(f"DIVERGENT transition {before.ordinal}->{after.ordinal}")
+    else:
+        result = verify_interval(artifact, oracle, candidate, start, end)
+        if result.equivalent:
+            print(
+                f"EQUIVALENT {start.ordinal}..{end.ordinal} "
+                f"{result.comparison.oracle_digest}"
+            )
+            return 0
+        print(f"DIVERGENT {start.ordinal}..{end.ordinal}")
+    for difference in result.comparison.differences:
+        print("  " + difference)
+    return 1
+
+
+def main(frontend: GameFrontend, argv: list[str] | None = None,
+         description: str | None = None) -> int:
+    """Resolve one canonical execution plan, then dispatch its frontend driver."""
+    args = build_arg_parser(frontend, description).parse_args(argv)
+    args.execution_plan = frontend.resolve_execution_plan(args)
+    if args.plan_only:
+        print(format_execution_plan(args.execution_plan))
+        return 0
+    if args.execution_plan.configuration.verification_policy.mode == "differential":
+        return _run_differential_verification(
+            frontend, args, args.execution_plan
+        )
+    return frontend.launch(args, args.execution_plan)

@@ -85,7 +85,7 @@ it never simulates more of the world.
 ## The pixel-aspect lesson
 
 320×200 DOS games were displayed on 4:3 CRTs — pixels 1.2× tall (`par=1.2` in
-`dos_re/tools/display.py`). But internal effects were often authored in raw square-
+`dos_re.display`). But internal effects were often authored in raw square-
 pixel coordinates. Both presentations are legitimate:
 
 - **4:3 (par=1.2)** — historically authentic display shape.

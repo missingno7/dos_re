@@ -7,8 +7,8 @@ runtime from a raw memory image + register state.
 
 It deliberately does NOT import ``load_mz_program`` / ``parse_mz`` / ``load_le``.
 The EXE loader (:func:`dos_re.runtime.create_runtime`) lives in
-:mod:`dos_re.runtime` and imports FROM here — so the strict-VMless import graph
-(``scripts/lint_vmless_independence.py``) reaches this core but never the loader
+:mod:`dos_re.runtime` and imports FROM here—so an EXE-independent import graph
+reaches this core but never the loader
 that parses the binary (dos_re/docs/dos_re_2.0.md §"The EXE-independence wall").
 """
 from __future__ import annotations
@@ -19,7 +19,6 @@ from pathlib import Path
 from .cpu import CPU8086, CPUState
 from .dos import DOSMachine
 from .memory import LoadedProgram, Memory
-from .hooks import registry
 
 
 @dataclass
@@ -30,7 +29,7 @@ class Runtime:
 
 
 #: The dummy-IRET stub as a hook entry.  The byte at _BIOS_IRET_STUB is an IRET
-#: that the INTERPRETER can simply execute -- but a strict-VMless runtime may
+#: that the INTERPRETER can simply execute—but a VM-independent runtime may
 #: not interpret ANY x86, and a game that chains an IRQ vector to "the previous
 #: handler" (the universal idiom) jumps straight here on every single IRQ.  So
 #: the power-on environment needs a NATIVE form of it too, or the EXE-free
@@ -72,25 +71,6 @@ def install_bios_environment_hooks(cpu, dos) -> None:
     cpu.replacement_hooks[BIOS_IRET_ENTRY] = bios_iret_stub
     cpu.hook_names[BIOS_IRET_ENTRY] = "bios_iret_stub"
 
-
-def use_real_console_input(rt) -> None:
-    """Make blocking DOS console reads wait for a real key instead of Esc.
-
-    DOSMachine defaults ``console_input_fallback`` to 0x011B (Esc) so a bare
-    ``cpu.run()`` with no driver loop cannot hang on a blocking read. Any driver
-    with a frame loop catches ``ConsoleInputWouldBlock`` and does not need it --
-    and for a game that reads menu keys via INT 21h AH=07h (SkyRoads does) the
-    synthesis is actively harmful: it receives a phantom Esc, reads it as
-    "quit", and calls exit(0), presenting as the program quitting itself
-    seconds after the menu appears with no keypress.
-
-    Lives HERE, not in player.py, because a strict-VMless runner needs it and
-    must not import the player (which reaches the loader). That is exactly how
-    the bug it prevents got into scripts/play_vmless.py: the helper existed but
-    was unreachable from behind the wall, so the one path that needed it most
-    was the one path that could not call it.
-    """
-    rt.dos.console_input_fallback = None
 
 def enable_sound_blaster(rt: Runtime, *, base: int = 0x220, irq: int = 7, dma: int = 1,
                          detection_only: bool = False):
@@ -148,7 +128,7 @@ def create_runtime_from_image(
     same CPU + DOS + BIOS environment around them.  Nothing here reads or parses
     an executable; ``program.exe`` is ``None`` by construction.
 
-    This is the load path for the strict-VMless runtime, which must be
+    This is the load path for a VM-independent runtime, which must be
     *physically* independent of the original binary.  The image is assumed to
     already contain a booted machine state (PSP, IVT, BIOS data area,
     decompressed program), so this does NOT re-seed the PSP/BIOS the way a cold
@@ -168,7 +148,6 @@ def create_runtime_from_image(
     cpu.port_reader = dos.port_read
     cpu.port_writer = dos.port_write
     install_bios_environment_hooks(cpu, dos)
-    registry.install(cpu)
     program = LoadedProgram(
         exe=None,
         memory=mem,

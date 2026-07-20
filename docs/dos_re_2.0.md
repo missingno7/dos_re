@@ -17,7 +17,7 @@ milestone is M4 (DOS-layout dissolution).**
 
 > **M3 CPUless — ACCEPTED (2026-07-16).**  The whole reachable graph from the
 > game root is CPUless: recovered functions compute over `(mem, plat, *regs)`
-> with no CPU carrier, no interpreter, no lifted graph.  `play_cpuless` runs
+> with no CPU carrier, no interpreter, no lifted graph.  `detached profile` runs
 > the game standalone from the data-only boot image, and
 > `scripts/acceptance_cpuless.py` proves it BYTE-EXACT against the interpreted
 > oracle over the whole demo (regs + flags + poison-masked memory at every
@@ -39,7 +39,7 @@ binary
 → structurally linked VM-less graph
 → automatically generated native shell
 → oracle-guided convergence
-→ play_native
+→ release profile
 → automatic memory-structure recovery
 → generated native↔historical-state verification bridge
 → clean source port
@@ -389,7 +389,8 @@ They feed the unified planner's detachment report. They do not require a
 uniform recovery level across a game and do not fix runner names. One
 profile-driven `play.py` runs development, verification, detached, or release
 plans. A separate closed-world exporter produces standalone artifacts;
-stage-named players are temporary aliases only.
+Recovery stages are implementation properties, not player identities. There is
+only one profile-driven player.
 
 There are **two independent walls at the VMless stage**, and both must hold
 before M2 is accepted:
@@ -523,7 +524,7 @@ Consequences:
 - **Assemble the largest supported graph as early as possible.**  Mechanical
   integration is optimistic within the declared supported subset.
 - **Per-function ORACLE_PASSING does not gate linking or inclusion in
-  `play_native`.**  Per-function proofs remain useful metadata — hybrid
+  `release profile`.**  Per-function proofs remain useful metadata — hybrid
   auto-install, diagnostics, regression tests, later refactoring — but they
   are not a precondition for graph assembly.
 - **Divergences are localized automatically** (`dos_re.replay.bisect_divergence`
@@ -777,7 +778,7 @@ Rules:
   inherit it.
 - **Unknown effects fail loudly** — never a silent fallback to hidden
   emulation.
-- Existing reusable material: the `play_native` shells of **pre2_port,
+- Existing reusable material: the `release profile` shells of **pre2_port,
   skyroads_port, overkill_port** already contain adapter-shaped video/input/
   timing code to mine; **`opl3_fast.py` is usable as-is as the audio-adapter
   synth in a native game**.
@@ -786,7 +787,7 @@ The progression:
 
 ```
 binary → automatic lifting → effect recognition → native adapter binding
-→ linked CPU-less game graph → generated play_native
+→ linked CPU-less game graph → generated release profile
 ```
 
 Long-term: dos_re accumulates a growing adapter library, so each later game

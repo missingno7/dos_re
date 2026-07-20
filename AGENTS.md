@@ -5,9 +5,9 @@ agent-facing toolkit — the mechanical/oracle/lifting toolbox that AI agents
 use to build verified DOS source ports. Two roles arrive here:
 
 - **Using the toolbox to port a game** → the workflow is
-  [`docs/getting_started.md`](docs/getting_started.md) (canonical architecture:
-  [`docs/dos_re_2.0.md`](docs/dos_re_2.0.md); worked reference: the Lemmings
-  pilot, `lemmings_port`); the task → tool →
+  [`docs/getting_started.md`](docs/getting_started.md) (canonical execution:
+  [`docs/execution_planner.md`](docs/execution_planner.md); overrides:
+  [`docs/override_architecture.md`](docs/override_architecture.md)); the task → tool →
   command index for THIS repo's machinery is
   [`docs/agent_toolbox.md`](docs/agent_toolbox.md). You touch `dos_re/` only
   under the extension rules below — and when your game needs behaviour the VM
@@ -48,9 +48,8 @@ beats large intuitive rewrites.
   game-specific recovery fact (record the smallest explicit, evidence-backed
   declaration in the port and feed it to the pipeline) — then REGENERATE and
   re-verify end-to-end. Generated output is disposable; hand-patching it is
-  not a fix. Use the canonical stage vocabulary (interpreted oracle → VMless
-  lifted → CPUless lifted → DOS-layout-less native → semantic clean port);
-  "native" is banned as a bare term.
+  not a fix. Recovery stages describe individual implementation properties;
+  they never select a player or become separate product architectures.
 
 - **`dos_re/` must stay game-agnostic; numpy is first-class, pygame is
   viewer-only.** No game addresses, filenames, or formats in the core. numpy

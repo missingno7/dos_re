@@ -121,13 +121,6 @@ class RuntimeCodeSlot:
         return self.installer_status.startswith("observed") or self.installer_status.startswith("static")
 
 
-def variants_by_addr(
-    slots: Mapping[Addr, RuntimeCodeSlot],
-) -> dict[Addr, tuple[RuntimeCodeVariant, ...]]:
-    """Backwards-compatible lookup used by hook guards/tests."""
-    return {addr: slot.variants for addr, slot in slots.items()}
-
-
 def live_code_bytes(cpu, addr: Addr, size: int) -> bytes:
     seg, off = addr
     start = linear(seg, off)

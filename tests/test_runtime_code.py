@@ -20,7 +20,6 @@ from dos_re.runtime_code import (
     identify_runtime_code_variant,
     require_runtime_code_variant,
     runtime_code_staticization_report,
-    variants_by_addr,
 )
 
 ADDR = (0x1010, 0x0100)
@@ -91,12 +90,6 @@ def test_staticization_report_and_gate():
         ),
     )
     assert_runtime_code_staticization_ready(staticized)  # must not raise
-
-
-def test_variants_by_addr_backwards_compatible_lookup():
-    accepted = RuntimeCodeVariant(addr=ADDR, name="accepted", signature=b"\x90\x90", island="x", status="hooked-verified")
-    slots = _slots(accepted)
-    assert variants_by_addr(slots) == {ADDR: (accepted,)}
 
 
 def test_write_tracer_fires_only_inside_registered_regions():

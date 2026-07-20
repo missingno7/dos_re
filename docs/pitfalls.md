@@ -50,10 +50,10 @@ deleted in the same commit that grounds the leaf.*
 
 **5. Parent hooks hiding children.** [both] A lifted parent called a child
 hook's Python function directly, making the child a shared black box inside
-the parent's verify transaction. → `--verify-hooks` passed while the child was
+the parent's verify transaction. → `verification profile` passed while the child was
 wrong. → *Route child boundaries through
 `call_installed_hook_like_near_call` / `jump_installed_hook_boundary`;
-`dos_re/tools/audit_hook_oracle.py` enforces it statically.*
+the execution plan keeps the boundary explicit.*
 
 ## Verification
 

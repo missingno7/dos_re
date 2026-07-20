@@ -1,4 +1,4 @@
-"""PM (DOS/4GW) play runner: live viewer + headless runs for CPU386 runtimes.
+"""Protected-mode execution driver for the canonical player lifecycle.
 
 The protected-mode counterpart of :mod:`dos_re.player`, reduced to what the
 PM runtime supports today: a pygame window presenting the VGA screen
@@ -23,29 +23,24 @@ The user names only the artifact directory.
 FRONTEND RING module: pygame imports stay lazy so headless use (and
 ``import dos_re``) never require it.
 
-A game port's ``scripts/play.py`` is a thin wrapper::
+A game port constructs :class:`PMFrontend` in its single
+``scripts/play.py`` and passes it to :func:`dos_re.player.main`.
 
-    from dos_re.pm_player import main
-    raise SystemExit(main(argv, default_exe="assets/GAME.EXE",
-                          create_runtime=my_create_runtime,
-                          title="My Game", boot_keys=(0x20,)))
-
-Origin: promoted from the Krypton Egg port's play runner (the first DOS/4GW
-title), generalized to any PM runtime.
+It contains no parser, profile resolver, or entrypoint of its own.
 """
 from __future__ import annotations
 
-import argparse
 import hashlib
-import inspect
 import threading as _threading
 import time
 from pathlib import Path
 
 from .dos4gw import DosInputExhausted, render_pm_frame
+from .execution import ExecutionPlan
 from .frame_verify import write_rgb_png
 from .input_demo import MOUSE_CHANNEL, mouse_payload
 from .pm_snapshot import apply_pm_continuation, capture_pm_continuation
+from .player import GameFrontend
 from .replay import ExecutionProfile, ReplayArtifact, ReplayPoint, ReplayRecording
 
 try:                       # numpy is a first-class dep; audio resampling needs it
@@ -94,12 +89,9 @@ def _file_identity(path: str | Path) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _pm_profile(exe: str | Path, rt, install_hooks=None) -> ExecutionProfile:
+def _pm_profile(exe: str | Path, rt, plan: ExecutionPlan) -> ExecutionProfile:
     implementation = hashlib.sha256()
-    if install_hooks is not None:
-        source = inspect.getsourcefile(install_hooks)
-        if source and Path(source).is_file():
-            implementation.update(Path(source).read_bytes())
+    implementation.update(plan.plan_digest.encode("ascii"))
     runtime = hashlib.sha256()
     root = Path(__file__).parent
     for name in ("cpu386.py", "dos4gw.py", "runtime.py", "pm_snapshot.py", "replay.py"):
@@ -558,6 +550,11 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                                   artifacts / "demos" / f"replay_{int(now * 1000)}")
                         if replay_profile is None:
                             raise ValueError("PM recording requires an execution profile")
+                        if replay_profile.role != "oracle":
+                            raise RuntimeError(
+                                "ReplayArtifact recording requires the untouched "
+                                "oracle plan"
+                            )
                         recording = ReplayRecording(
                             bundle,
                             timeline_id=f"protected-mode-frame-boundaries:{frame_tick_addr:#x}:v1",
@@ -817,70 +814,67 @@ def _configure_sound(dos, sound_blaster, *, deterministic: bool):
         anchor_cadence=not deterministic)
 
 
-def main(argv=None, *, default_exe: str | None = None, create_runtime=None,
-         title: str = "dos_re PM", boot_keys=(), description: str | None = None,
-         artifacts_dir: str | Path = "artifacts",
-         sound_blaster: tuple[int, int, int] | None = None,
-         frame_tick_addr: int | None = None, install_hooks=None) -> int:
-    """The standard PM play-runner CLI.  Game wrappers supply the defaults.
+class PMFrontend(GameFrontend):
+    """Protected-mode execution driver for the canonical player pipeline."""
 
-    ``frame_tick_addr`` (an address the program executes once per frame)
-    enables F11 demo recording and ``--play-demo`` deterministic replay."""
-    from .pm_snapshot import load_pm_snapshot
-    from .runtime import create_pm_runtime
+    default_steps_per_frame = 20_000_000
 
-    ap = argparse.ArgumentParser(description=description or main.__doc__)
-    ap.add_argument("--exe", default=default_exe, required=default_exe is None)
-    ap.add_argument("--headless", action="store_true")
-    ap.add_argument("--steps", type=int, default=20_000_000,
-                    help="instruction budget (headless)")
-    ap.add_argument("--png", default="", help="render the final screen to this PNG")
-    ap.add_argument("--scale", type=int, default=3, help="window scale factor")
-    ap.add_argument("--snapshot", default="", help="resume from a saved snapshot dir")
-    ap.add_argument("--no-sound", action="store_true",
-                    help="do not attach the emulated Sound Blaster")
-    ap.add_argument("--record-demo", default="",
-                    help="viewer: directory for the next F11 recording "
-                         "(default: artifacts/demos/demo_<stamp>/)")
-    ap.add_argument("--play-demo", default="",
-                    help="replay a ReplayArtifact directory deterministically "
-                         "(restores the artifact's continuation base; "
-                         "headless unless --show)")
-    ap.add_argument("--save-snapshot", default="",
-                    help="replay: save a snapshot of the final state here")
-    ap.add_argument("--show", action="store_true",
-                    help="replay: show the final frame in a window")
-    args = ap.parse_args(argv)
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        default_exe: str | None = None,
+        create_runtime=None,
+        title: str = "dos_re PM",
+        boot_keys=(),
+        sound_blaster: tuple[int, int, int] | None = None,
+        frame_tick_addr: int | None = None,
+    ) -> None:
+        super().__init__(root)
+        self.default_exe = default_exe
+        self._runtime_factory = create_runtime
+        self.title = title
+        self.boot_keys = tuple(boot_keys)
+        self.sound_blaster = sound_blaster
+        self.frame_tick_addr = frame_tick_addr
 
-    build = create_runtime or create_pm_runtime
-    # Reproducible paths keep the deterministic instruction-count SB clock:
-    # recording a demo (so it can replay), replaying one, or a headless run.
-    # Only a casual live viewer (none of these) uses wall-clock audio pacing.
-    deterministic = bool(args.headless or args.play_demo or args.record_demo)
+    def add_arguments(self, parser) -> None:
+        parser.add_argument("--png", default="", help="render the final screen to this PNG")
+        parser.add_argument("--no-sound", action="store_true")
+        parser.add_argument("--show", action="store_true",
+                            help="replay: show the final frame in a window")
 
-    # An explicit --snapshot affects ordinary runs. Replay restores its own
-    # embedded continuation base after the runtime shell has been created.
-    snapshot_src = args.snapshot or None
-    if snapshot_src:
-        # Resume the frozen state, then re-install the adapter's recovered
-        # hooks (load_pm_snapshot rebuilds a bare runtime; without this the
-        # resumed game runs pure-interpreted — ~10x slower).
-        rt = load_pm_snapshot(args.exe, snapshot_src)
-        if install_hooks is not None:
-            install_hooks(rt.cpu)
-    else:
-        rt = build(args.exe)
-    if sound_blaster is not None and not args.no_sound:
-        _configure_sound(rt.dos, sound_blaster, deterministic=deterministic)
-    profile = _pm_profile(args.exe, rt, install_hooks)
-    if args.play_demo:
-        return run_replay(rt, args.play_demo, boot_keys=boot_keys,
-                          snapshot_dir=args.save_snapshot or None, png=args.png,
-                          show=args.show, scale=args.scale, title=title,
-                          replay_profile=profile)
-    if args.headless:
-        return run_headless(rt, steps=args.steps, png=args.png, boot_keys=boot_keys)
-    return run_viewer(rt, scale=args.scale, title=title, artifacts_dir=artifacts_dir,
-                      frame_tick_addr=frame_tick_addr,
-                      record_demo=args.record_demo or None,
-                      replay_profile=profile)
+    def launch(self, args, plan: ExecutionPlan) -> int:
+        from .pm_snapshot import load_pm_snapshot
+        from .runtime import create_pm_runtime
+
+        deterministic = bool(args.headless or args.play_demo or args.record_demo)
+        if args.snapshot:
+            rt = load_pm_snapshot(args.exe, args.snapshot)
+        else:
+            factory = self._runtime_factory or create_pm_runtime
+            rt = factory(args.exe)
+        self.bind_execution_plan(rt, plan)
+        if self.sound_blaster is not None and not args.no_sound:
+            _configure_sound(rt.dos, self.sound_blaster, deterministic=deterministic)
+        profile = _pm_profile(args.exe, rt, plan)
+        if args.play_demo:
+            return run_replay(
+                rt, args.play_demo, boot_keys=self.boot_keys,
+                snapshot_dir=None if args.save_snapshot in (None, "auto")
+                else args.save_snapshot,
+                png=args.png, show=args.show, scale=args.scale, title=self.title,
+                replay_profile=profile,
+            )
+        if args.headless:
+            return run_headless(
+                rt, steps=args.steps or self.default_steps_per_frame,
+                png=args.png, boot_keys=self.boot_keys,
+            )
+        return run_viewer(
+            rt, scale=args.scale, title=self.title,
+            artifacts_dir=self.artifacts_dir,
+            frame_tick_addr=self.frame_tick_addr,
+            record_demo=args.record_demo,
+            replay_profile=profile,
+        )
