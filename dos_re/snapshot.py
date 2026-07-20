@@ -123,8 +123,8 @@ def load_snapshot(exe_path: str | Path, snapshot_dir: str | Path, *, game_root: 
 # (scripts/lint_vmless_independence.py).  Re-exported here for callers that
 # already import restore helpers from dos_re.snapshot.
 from .snapshot_headless import (  # noqa: E402
-    load_snapshot_headless, capture_dos_state, _restore_dos_state,
-    _restore_speaker_from_port_log_tail)
+    capture_dos_state, _restore_dos_state, _restore_speaker_from_port_log_tail)
+from .snapshot_runtime import load_snapshot_headless  # noqa: E402
 
 
 def clone_runtime_state(src: Runtime) -> Runtime:

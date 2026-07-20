@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 
-from dos_re.snapshot_headless import load_snapshot_headless
+from dos_re.snapshot_runtime import load_snapshot_headless
 from dos_re.snapshot import capture_runtime_continuation, apply_runtime_continuation
 
 

@@ -130,7 +130,7 @@ def boot_vmless_image(
     already at the canonical post-decompression entry -- there is no loader
     phase to interpret.
     """
-    from .snapshot_headless import load_snapshot_headless
+    from .snapshot_runtime import load_snapshot_headless
     from .lift.install import install_vmless_graph
 
     boot_dir = Path(boot_dir)

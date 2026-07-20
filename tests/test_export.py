@@ -82,6 +82,23 @@ def test_export_rejects_dynamic_loading(tmp_path: Path):
         )
 
 
+def test_export_ignores_annotation_only_development_imports(tmp_path: Path):
+    launcher = tmp_path / "launch.py"
+    launcher.write_text(
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from dos_re.cpu import CPU8086\n"
+        "print('product')\n",
+        encoding="utf-8",
+    )
+    export_release(
+        _release_plan(),
+        (ExportFile(launcher, "launch.py"),),
+        tmp_path / "dist",
+        launcher="launch.py",
+    )
+
+
 def test_export_resolves_forbidden_relative_imports(tmp_path: Path):
     module = tmp_path / "product.py"
     module.write_text("from . import player\n", encoding="utf-8")

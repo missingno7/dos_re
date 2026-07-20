@@ -421,7 +421,7 @@ It is enforced **physically**, not by convention:
   `code_as_data` in the recovery facts and preserved.  Output:
   `generated/vmless_boot/{memory_1mb.bin, state.json, manifest.json}`.
 - **EXE-free load path.**  `dos_re.runtime_core.create_runtime_from_image` +
-  `dos_re.snapshot_headless.load_snapshot_headless` build the runtime from the
+  `dos_re.snapshot_runtime.load_snapshot_headless` builds the runtime from the
   image alone (`program.exe is None`).  The EXE loader (`create_runtime` →
   `load_mz_program`) lives in a *different* module that the VMless graph never
   imports.

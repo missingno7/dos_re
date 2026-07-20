@@ -49,6 +49,26 @@ class ExportError(RuntimeError):
     pass
 
 
+def _runtime_nodes(tree: ast.AST):
+    """Yield AST nodes that can execute at runtime.
+
+    Annotation-only imports inside ``if TYPE_CHECKING`` are development-time
+    type information, not packaged capabilities.
+    """
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.If) and (
+            isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING"
+            or isinstance(node.test, ast.Attribute)
+            and node.test.attr == "TYPE_CHECKING"
+        ):
+            for child in node.orelse:
+                yield child
+                yield from _runtime_nodes(child)
+            continue
+        yield node
+        yield from _runtime_nodes(node)
+
+
 def _import_names(path: Path, destination: Path) -> set[str]:
     if path.suffix != ".py":
         return set()
@@ -56,7 +76,7 @@ def _import_names(path: Path, destination: Path) -> set[str]:
     module_parts = destination.with_suffix("").parts
     package_parts = module_parts[:-1]
     names: set[str] = set()
-    for node in ast.walk(tree):
+    for node in _runtime_nodes(tree):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
@@ -83,7 +103,7 @@ def _dynamic_loading_calls(path: Path) -> tuple[str, ...]:
         return ()
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     found: set[str] = set()
-    for node in ast.walk(tree):
+    for node in _runtime_nodes(tree):
         if not isinstance(node, ast.Call):
             continue
         if isinstance(node.func, ast.Name) and node.func.id in {

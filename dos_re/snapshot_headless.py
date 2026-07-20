@@ -1,75 +1,7 @@
-"""EXE-free snapshot restore — the load path that never touches an executable.
-
-This module is deliberately split out of :mod:`dos_re.snapshot` so that the
-strict-VMless runtime can import ``load_snapshot_headless`` (and the shared
-``_restore_dos_state``) WITHOUT pulling in the EXE-based ``load_snapshot`` →
-``create_runtime`` → ``load_mz_program`` loader.  The independence lint
-(``scripts/lint_vmless_independence.py``) walks the import graph, and the whole
-point is that this graph contains no loader edge (dos_re/docs/dos_re_2.0.md
-§"The EXE-independence wall").
-
-Nothing here parses an executable: the runtime shell is built from the
-snapshot's own memory image + register state via
-:func:`dos_re.runtime.create_runtime_from_image`.
-"""
+"""CPU-free capture and restore for DOS, device, and memory-controller state."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    # ANNOTATION ONLY.  Importing Runtime at module level would drag
-    # runtime_core -> .cpu (CPU8086/CPUState) into every importer of this
-    # module, which defeats the split this file exists for: the CPUless runner
-    # imports _restore_dos_state and must not acquire a CPU carrier by doing
-    # so.  `from __future__ import annotations` keeps the signatures readable
-    # without the runtime edge.  load_snapshot_headless already imports the
-    # carrier lazily, inside the function -- so only a caller that actually
-    # builds a VM shell pays for it (measured: this edge was importing
-    # dos_re.cpu on every detached profile boot, 2026-07-17).
-    from .runtime_core import Runtime
-
-
-def load_snapshot_headless(
-    snapshot_dir: str | Path,
-    *,
-    game_root: str | Path,
-    memory_name: str = "memory_1mb.bin",
-) -> Runtime:
-    """Restore a snapshot WITHOUT the original executable.
-
-    The EXE-free analogue of :func:`dos_re.snapshot.load_snapshot`: it builds the
-    runtime shell from the snapshot's own memory image and register state via
-    :func:`dos_re.runtime.create_runtime_from_image` instead of re-parsing the
-    binary.  This is what a data-only boot image is loaded through — the
-    strict-VMless runtime never touches ``vgalemmi.exe``.  ``game_root`` is
-    required (there is no ``exe_path`` to derive it from).
-    """
-    from .cpu import CPUState
-    from .runtime_core import create_runtime_from_image
-
-    snap = Path(snapshot_dir)
-    meta = json.loads((snap / "state.json").read_text(encoding="utf-8"))
-    memory_image = (snap / memory_name).read_bytes()
-    state = CPUState(**meta["cpu"])
-    rt = create_runtime_from_image(
-        memory_image, state,
-        game_root=game_root,
-        psp_segment=meta.get("program", {}).get("psp_segment", 0),
-        program_meta=meta.get("program"))
-    _restore_dos_state(rt, meta.get("dos", {}))
-    # VIRTUAL TIME IS MACHINE STATE.  The PIT down-counter is derived from
-    # instruction_count (dos._pit_channel0_live_value), so the phase a program
-    # can MEASURE (latch port 43h, read port 40h) is part of the machine, the
-    # same way the DAC or the tick count is.  write_snapshot records it as
-    # "steps"; dropping it here restarted every restored runtime at t=0 while
-    # the interpreted oracle arrived with the loader's count -- invisible until
-    # a program measured absolute phase.  VGA Lemmings' High Performance PC
-    # timer calibration (1010:15AD/1602) does exactly that, and diverged by
-    # precisely (steps * 3) mod 0x10000 PIT ticks (2026-07-17).
-    rt.cpu.instruction_count = int(meta.get("steps") or 0)
-    return rt
 
 
 def capture_dos_state(dos, memory) -> dict:
@@ -180,12 +112,11 @@ def capture_dos_state(dos, memory) -> dict:
     }
 
 
-def _restore_dos_state(rt: Runtime, dos_meta: dict) -> Runtime:
+def _restore_dos_state(rt, dos_meta: dict):
     """Apply the persisted DOS/EGA/PIT/OPL/console state onto a built runtime.
 
-    Shared by :func:`dos_re.snapshot.load_snapshot` (EXE-based shell) and
-    :func:`load_snapshot_headless` (EXE-free shell): both restore the same
-    machine state; only the way the shell is constructed differs.
+    Shared by machine-backed and CPU-free runtimes. Both restore the same
+    continuation state; only the runtime shell differs.
     """
     from .dos import FileHandle
     rt.dos.video_mode = dos_meta.get("video_mode", rt.dos.video_mode)
@@ -296,7 +227,7 @@ def _restore_dos_state(rt: Runtime, dos_meta: dict) -> Runtime:
     return rt
 
 
-def _restore_speaker_from_port_log_tail(rt: Runtime, port_log_tail) -> None:
+def _restore_speaker_from_port_log_tail(rt, port_log_tail) -> None:
     """Best-effort PC-speaker state recovery for older snapshots.
 
     Pre-sound-state snapshots only stored the last few OUT instructions.  Replaying

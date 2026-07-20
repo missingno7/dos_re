@@ -133,7 +133,7 @@ def create_runtime_from_image(
     already contain a booted machine state (PSP, IVT, BIOS data area,
     decompressed program), so this does NOT re-seed the PSP/BIOS the way a cold
     EXE load would — restoring those from the image is the caller's job (see
-    ``dos_re.snapshot_headless.load_snapshot_headless``).
+    ``dos_re.snapshot_runtime.load_snapshot_headless``).
     """
     mem = Memory()
     if len(memory_image) != len(mem.data):
