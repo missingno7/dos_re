@@ -21,6 +21,8 @@ from dos_re.replay import (
     ReplayError,
     ReplayEvent,
     ReplayPoint,
+    ReplayPointCoordinate,
+    ReplayRecording,
     StaleReplayError,
     bisect_divergence,
     machine_projection,
@@ -53,6 +55,47 @@ def profile(profile_id: str, role: str, implementation: str,
 
 ORACLE = profile("oracle", "oracle", "interpreter", "machine-v1")
 NATIVE = profile("native", "candidate", "detached-native", "native-v1")
+
+
+def test_timeline_coordinates_are_hashed_immutable_stop_contract(tmp_path):
+    recording = ReplayRecording(
+        tmp_path / "coordinate-replay",
+        timeline_id=TIMELINE,
+        profile=NATIVE,
+        base_state=CounterDriver(NATIVE).capture(),
+        metadata={"purpose": "coordinate-contract"},
+    )
+    recording.mark(0, schema_id="guest-instructions-v1", value=100)
+    recording.add(0, "input", {"value": 3})
+    recording.mark(1, schema_id="guest-instructions-v1", value=137)
+    artifact = recording.finish(1)
+
+    assert artifact.timeline_coordinate(point(0)).value == 100
+    assert artifact.timeline_coordinate(point(1)).value == 137
+    assert len(artifact.timeline_coordinates_sha256) == 64
+    with pytest.raises(ReplayError, match="immutable"):
+        artifact.set_timeline_coordinates(
+            [
+                ReplayPointCoordinate(point(0), "guest-instructions-v1", 99),
+                ReplayPointCoordinate(point(1), "guest-instructions-v1", 137),
+            ],
+            provenance={"kind": "conflicting-rewrite"},
+        )
+
+
+def test_coordinate_less_artifact_can_be_materialized_once(tmp_path):
+    artifact = make_artifact(tmp_path)
+    coordinates = [
+        ReplayPointCoordinate(point(i), "semantic-tick-v1", i * 2)
+        for i in range(len(VALUES) + 1)
+    ]
+
+    assert artifact.set_timeline_coordinates(
+        coordinates, provenance={"kind": "one-shot-test"})
+    assert not artifact.set_timeline_coordinates(
+        coordinates, provenance={"kind": "one-shot-test"})
+    reopened = ReplayArtifact.open(artifact.directory)
+    assert reopened.timeline_coordinate(point(7)).value == 14
 
 
 def test_replay_execution_identity_rejects_obsolete_or_unknown_fields():

@@ -37,6 +37,7 @@ from typing import Any, Iterable, Mapping, Protocol, Sequence
 FORMAT_VERSION = 1
 DEFAULT_PAGE_SIZE = 4096
 MANIFEST = "replay.json"
+GUEST_INSTRUCTION_COORDINATE = "dos-re:guest-instruction-count:v1"
 
 
 class ReplayError(RuntimeError):
@@ -79,6 +80,43 @@ class ReplayPoint:
         if raw.get("key", point.key) != point.key:
             raise ReplayError("replay point key does not match its timeline and ordinal")
         return point
+
+
+@dataclass(frozen=True)
+class ReplayPointCoordinate:
+    """Backend-neutral declaration of where a timeline point actually stops.
+
+    An ordinal orders points; it does not by itself make the stop reproducible
+    across implementations with different dispatch granularity.  The frontend
+    chooses a coordinate schema (guest instruction count, simulation tick,
+    presentation fence, native transaction id, ...), and every replay driver
+    for that timeline must stop at the declared coordinate exactly.
+    """
+
+    point: ReplayPoint
+    schema_id: str
+    value: Any
+
+    def __post_init__(self) -> None:
+        if not self.schema_id:
+            raise ValueError("timeline coordinate schema_id must not be empty")
+        object.__setattr__(
+            self, "value", _json_value(self.value, "timeline coordinate value"))
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "point": self.point.to_json(),
+            "schema_id": self.schema_id,
+            "value": self.value,
+        }
+
+    @classmethod
+    def from_json(cls, raw: Mapping[str, Any]) -> "ReplayPointCoordinate":
+        return cls(
+            ReplayPoint.from_json(raw["point"]),
+            str(raw["schema_id"]),
+            raw.get("value"),
+        )
 
 
 @dataclass(frozen=True)
@@ -654,6 +692,7 @@ class ReplayRecording:
         self.base_state = base_state.normalized()
         self.metadata = _json_value(metadata or {}, "recording metadata")
         self._events: list[ReplayEvent] = []
+        self._coordinates: dict[int, ReplayPointCoordinate] = {}
         self._sequence = 0
         self._finished = False
 
@@ -675,6 +714,21 @@ class ReplayRecording:
         self._sequence += 1
         return event
 
+    def mark(
+        self, ordinal: int, *, schema_id: str, value: Any,
+    ) -> ReplayPointCoordinate:
+        """Declare the exact cross-backend stop coordinate for one point."""
+        if self._finished:
+            raise RuntimeError("replay recording is already complete")
+        coordinate = ReplayPointCoordinate(
+            ReplayPoint(int(ordinal), self.timeline_id), schema_id, value)
+        existing = self._coordinates.get(coordinate.point.ordinal)
+        if existing is not None and existing != coordinate:
+            raise ValueError(
+                f"timeline point {coordinate.point.ordinal} was marked twice")
+        self._coordinates[coordinate.point.ordinal] = coordinate
+        return coordinate
+
     def finish(
         self, end_ordinal: int, *, end_state: ContinuationState | None = None,
     ) -> "ReplayArtifact":
@@ -687,6 +741,15 @@ class ReplayRecording:
             raise ValueError("recording end precedes an event")
         if end_state is not None and end_state.normalized().event_cursor != len(self._events):
             raise ValueError("recording endpoint cursor does not cover every event")
+        if self._coordinates:
+            expected = set(range(end.ordinal + 1))
+            actual = set(self._coordinates)
+            if actual != expected:
+                missing = sorted(expected - actual)
+                extra = sorted(actual - expected)
+                raise ValueError(
+                    "recording timeline coordinates must cover every ordinal; "
+                    f"missing={missing[:8]} extra={extra[:8]}")
         metadata = dict(self.metadata)
         metadata.update({
             "recording_profile_id": self.profile.profile_id,
@@ -694,7 +757,9 @@ class ReplayRecording:
         })
         artifact = ReplayArtifact.create(
             self.directory, timeline_id=self.timeline_id,
-            events=self._events, metadata=metadata)
+            events=self._events,
+            coordinates=self._coordinates.values(),
+            metadata=metadata)
         base = ReplayPoint(0, self.timeline_id)
         artifact.register_profile(
             self.profile, base_point=base, base_state=self.base_state)
@@ -721,6 +786,7 @@ class ReplayArtifact:
         *,
         timeline_id: str,
         events: Iterable[ReplayEvent],
+        coordinates: Iterable[ReplayPointCoordinate] = (),
         metadata: Mapping[str, Any] | None = None,
         page_size: int = DEFAULT_PAGE_SIZE,
     ) -> "ReplayArtifact":
@@ -739,6 +805,20 @@ class ReplayArtifact:
             if key in seen:
                 raise ValueError(f"duplicate event position/sequence: {key}")
             seen.add(key)
+        ordered_coordinates = sorted(
+            coordinates, key=lambda coordinate: coordinate.point.ordinal)
+        coordinate_ordinals: set[int] = set()
+        coordinate_schemas = {item.schema_id for item in ordered_coordinates}
+        if len(coordinate_schemas) > 1:
+            raise ValueError("one replay timeline cannot mix coordinate schemas")
+        for coordinate in ordered_coordinates:
+            if coordinate.point.timeline_id != timeline_id:
+                raise ValueError("timeline coordinate uses a different timeline")
+            if coordinate.point.ordinal in coordinate_ordinals:
+                raise ValueError(
+                    f"duplicate timeline coordinate: {coordinate.point.ordinal}")
+            coordinate_ordinals.add(coordinate.point.ordinal)
+        encoded_coordinates = [item.to_json() for item in ordered_coordinates]
         manifest = {
             "format_version": FORMAT_VERSION,
             "revision": 0,
@@ -746,6 +826,10 @@ class ReplayArtifact:
             "page_size": int(page_size),
             "events": [event.to_json() for event in ordered],
             "event_stream_sha256": _sha256(_canonical_json([e.to_json() for e in ordered])),
+            "timeline_coordinates": encoded_coordinates,
+            "timeline_coordinates_sha256": _sha256(
+                _canonical_json(encoded_coordinates)),
+            "timeline_coordinate_provenance": None,
             "metadata": _json_value(metadata or {}, "artifact metadata"),
             "profiles": {},
             "function_visits": [],
@@ -772,6 +856,15 @@ class ReplayArtifact:
         expected = _sha256(_canonical_json([event.to_json() for event in artifact.events]))
         if expected != manifest.get("event_stream_sha256"):
             raise ReplayError("event stream hash mismatch")
+        encoded_coordinates = [
+            coordinate.to_json()
+            for coordinate in artifact.timeline_coordinates
+        ]
+        coordinate_digest = _sha256(_canonical_json(encoded_coordinates))
+        if coordinate_digest != manifest.get(
+            "timeline_coordinates_sha256", coordinate_digest
+        ):
+            raise ReplayError("timeline coordinate hash mismatch")
         return artifact
 
     @property
@@ -789,6 +882,88 @@ class ReplayArtifact:
     @property
     def event_stream_sha256(self) -> str:
         return str(self._manifest["event_stream_sha256"])
+
+    @property
+    def timeline_coordinates(self) -> tuple[ReplayPointCoordinate, ...]:
+        return tuple(
+            ReplayPointCoordinate.from_json(raw)
+            for raw in self._manifest.get("timeline_coordinates", ())
+        )
+
+    @property
+    def timeline_coordinates_sha256(self) -> str:
+        encoded = [item.to_json() for item in self.timeline_coordinates]
+        return str(self._manifest.get(
+            "timeline_coordinates_sha256",
+            _sha256(_canonical_json(encoded)),
+        ))
+
+    def timeline_coordinate(self, point: ReplayPoint) -> ReplayPointCoordinate:
+        self._point(point)
+        matches = [
+            coordinate for coordinate in self.timeline_coordinates
+            if coordinate.point == point
+        ]
+        if len(matches) != 1:
+            raise ReplayError(
+                f"timeline point {point.ordinal} has no exact stop coordinate")
+        return matches[0]
+
+    def set_timeline_coordinates(
+        self,
+        coordinates: Iterable[ReplayPointCoordinate],
+        *,
+        provenance: Mapping[str, Any],
+    ) -> bool:
+        """Materialize a previously unindexed timeline exactly once.
+
+        This is intentionally not a compatibility playback path. A project may
+        run an explicit one-shot materializer over a valuable recording, after
+        which normal replay requires and consumes the resulting coordinates.
+        """
+        ordered = tuple(sorted(
+            coordinates, key=lambda coordinate: coordinate.point.ordinal))
+        if not ordered:
+            raise ValueError("timeline coordinate materialization is empty")
+        schemas = {item.schema_id for item in ordered}
+        if len(schemas) != 1:
+            raise ValueError("one replay timeline cannot mix coordinate schemas")
+        ordinals: set[int] = set()
+        for coordinate in ordered:
+            self._point(coordinate.point)
+            if coordinate.point.ordinal in ordinals:
+                raise ValueError(
+                    f"duplicate timeline coordinate: {coordinate.point.ordinal}")
+            ordinals.add(coordinate.point.ordinal)
+        end_raw = self.metadata.get("end_point")
+        if isinstance(end_raw, Mapping):
+            end = ReplayPoint.from_json(end_raw)
+            expected = set(range(end.ordinal + 1))
+            if ordinals != expected:
+                missing = sorted(expected - ordinals)
+                extra = sorted(ordinals - expected)
+                raise ValueError(
+                    "materialized timeline coordinates must cover every ordinal; "
+                    f"missing={missing[:8]} extra={extra[:8]}")
+        encoded = [item.to_json() for item in ordered]
+        digest = _sha256(_canonical_json(encoded))
+        encoded_provenance = _json_value(
+            provenance, "timeline coordinate provenance")
+        with self._locked_mutation():
+            current = self._manifest.get("timeline_coordinates", [])
+            if current:
+                if (
+                    current == encoded
+                    and self._manifest.get("timeline_coordinate_provenance")
+                    == encoded_provenance
+                ):
+                    return False
+                raise ReplayError("timeline coordinates are immutable once materialized")
+            self._manifest["timeline_coordinates"] = encoded
+            self._manifest["timeline_coordinates_sha256"] = digest
+            self._manifest["timeline_coordinate_provenance"] = encoded_provenance
+            self._write()
+        return True
 
     @property
     def metadata(self) -> dict[str, Any]:
@@ -810,6 +985,7 @@ class ReplayArtifact:
             "format_version": int(self._manifest["format_version"]),
             "timeline_id": self.timeline_id,
             "event_stream_sha256": self.event_stream_sha256,
+            "timeline_coordinates_sha256": self.timeline_coordinates_sha256,
             "recording_profile_id": recording_profile_id,
             "recording_profile": record,
         }))

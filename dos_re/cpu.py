@@ -1073,13 +1073,14 @@ class CPU8086:
                     res = (old - 1) & ((1 << bits)-1); self.set_incdec_flags(old, res, bits, dec=True); opn = "dec"
                 operand.write(res); return T and f"{opn} {operand.text}"
             if op == 0xFF and reg == 2:
-                operand = self.decode_rm_operand(mod, rm, 16, seg_override); target = operand.read(); self.push(s.ip); s.ip = target; return T and f"call {operand.text}"
+                operand = self.decode_rm_operand(mod, rm, 16, seg_override); target = operand.read(); self.push(s.ip); s.ip = target; self.call_depth += 1; return T and f"call {operand.text}"
             if op == 0xFF and reg == 3:
                 if mod == 3:
                     raise UnsupportedInstruction("far indirect call requires memory operand")
                 operand = self.decode_rm_operand(mod, rm, 16, seg_override)
                 off, farseg = operand.read_far()
                 self.push(s.cs); self.push(s.ip); s.cs = farseg; s.ip = off
+                self.call_depth += 1
                 return T and f"call far {operand.text}"
             if op == 0xFF and reg == 4:
                 operand = self.decode_rm_operand(mod, rm, 16, seg_override); target = operand.read(); s.ip = target; return T and f"jmp {operand.text}"

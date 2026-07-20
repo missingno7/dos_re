@@ -1124,6 +1124,7 @@ class DOSMachine:
             cpu.push(cpu.s.flags)
             cpu.push(cpu.s.cs & 0xFFFF)
             cpu.push(cpu.s.ip & 0xFFFF)
+            cpu.call_depth += 1
             cpu.set_flag(IF, False)
             cpu.set_flag(TF, False)
             cpu.s.cs, cpu.s.ip = seg & 0xFFFF, off & 0xFFFF

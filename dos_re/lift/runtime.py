@@ -167,6 +167,7 @@ def emulate_call(cpu: CPU8086, cs: int, target: int, ret_ip: int,
     s = cpu.s
     sp_after_ret = s.sp & 0xFFFF          # SP a plain RET restores
     cpu.push(ret_ip & 0xFFFF)
+    cpu.call_depth += 1
     s.cs, s.ip = cs & 0xFFFF, target & 0xFFFF
 
     def done() -> bool:
@@ -183,6 +184,7 @@ def emulate_far_call(cpu: CPU8086, seg: int, off: int, ret_cs: int, ret_ip: int,
     sp_after_ret = s.sp & 0xFFFF
     cpu.push(ret_cs & 0xFFFF)
     cpu.push(ret_ip & 0xFFFF)
+    cpu.call_depth += 1
     s.cs, s.ip = seg & 0xFFFF, off & 0xFFFF
 
     def done() -> bool:

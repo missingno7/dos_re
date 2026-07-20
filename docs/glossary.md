@@ -14,7 +14,8 @@
 | **Verification claim** | Reproducible finite result binding an implementation digest, oracle and candidate execution identities, ReplayArtifact, exact interval, and comparison schema. A passing claim is not universal correctness. |
 | **Counterexample** | Persisted replay boundary and mismatch showing one verification claim fails; it becomes a focused regression for the next implementation digest. |
 | **ReplayExecutionIdentity** | Immutable identity of one oracle or candidate execution composition used to validate replay continuation caches. It is distinct from execution-policy profiles. |
-| **ReplayPoint** | Stable position on a replay timeline whether or not a snapshot is cached there. |
+| **ReplayPoint** | Stable identity and ordering position on a replay timeline whether or not a snapshot is cached there. |
+| **ReplayPointCoordinate** | Schema-tagged backend-neutral stop coordinate for a ReplayPoint, such as guest instruction count, simulation tick, or presentation fence. Host backend-dispatch counts are forbidden. |
 | **CachedBoundary** | Independently restorable continuation at a ReplayPoint, stored as metadata plus pages changed from the replay base. |
 | **ContinuationState** | Backend-specific complete state required for deterministic continuation, including devices, scheduling, timing, and event cursor. |
 | **CanonicalState** | Backend-neutral authoritative projection used when oracle and candidate representations differ. |

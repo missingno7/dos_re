@@ -42,6 +42,7 @@ def deliver_interrupt(rt: Runtime, num: int, *, max_steps: int = 200_000) -> boo
     cpu.push(cpu.s.flags)
     cpu.push(ret_cs)
     cpu.push(ret_ip)
+    cpu.call_depth += 1
     cpu.set_flag(IF, False)
     cpu.set_flag(TF, False)
     cpu.s.cs, cpu.s.ip = seg & 0xFFFF, off & 0xFFFF

@@ -80,12 +80,17 @@ def _assert_equivalent(code: bytes, *, cases: int = 60, data_len: int = 0, entry
                         data, entry)
         hook = _make_cpu(code, CPUState(**{k: getattr(state, k) for k in state.__slots__}),
                          data, entry)
+        # Both bodies were entered through the same original CALL. Generated
+        # RET paths and synthetic nested CALLs must preserve the observer's
+        # call-stack continuation state as well as registers and memory.
+        asm.call_depth = hook.call_depth = 1
         _run_interpreted(asm)
         lifted(hook)
 
         assert (hook.s.cs, hook.s.ip) == (CS, RET_IP), f"case {case}: lifted did not return"
         assert asm.s.snapshot() == hook.s.snapshot(), f"case {case} registers/flags\n{src}"
         assert asm.mem.data == hook.mem.data, f"case {case} memory\n{src}"
+        assert asm.call_depth == hook.call_depth, f"case {case} call depth\n{src}"
         if check_time:
             assert asm.instruction_count == hook.instruction_count, \
                 f"case {case} virtual time: interpreted {asm.instruction_count} " \

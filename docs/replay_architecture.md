@@ -53,9 +53,19 @@ never certifies every function visited by the replay for unobserved inputs.
 ## Stable points and events
 
 A replay chooses one canonical monotonic timeline. `ReplayPoint` is
-`(timeline_id, ordinal)`; the pair is its stable identity. Function entry,
-function exit, frame, instruction count, crash, divergence, and manual names
-are annotations on a point, not competing clocks.
+`(timeline_id, ordinal)`; the pair is its stable identity and ordering key.
+Every executable ordinal also has a `ReplayPointCoordinate`: a schema-tagged,
+backend-neutral declaration of where execution must stop. Guest instruction
+count, simulation tick, presentation fence, or a native transaction identity
+may supply that coordinate. Function entry, function exit, frame, crash,
+divergence, and manual names remain annotations, not competing clocks.
+
+Host dispatch count is never a stable coordinate. `CPU.run(N)` performs `N`
+calls to `step()`, but one generated-function dispatch may account many guest
+instructions. A machine-backed driver therefore consumes the persisted guest
+instruction coordinate and must reach it exactly; overshooting fails loudly
+and means that implementation needs a resumable boundary. The coordinate hash
+is part of the artifact identity.
 
 `ReplayEvent` stores a point, stable sequence number, channel, and canonical
 JSON payload. The event-stream hash is part of the artifact. Drivers apply the
@@ -63,8 +73,9 @@ same events according to their own representation while stopping at exactly
 the requested point.
 
 The interactive players capture through `ReplayRecording`. It buffers
-normalized immutable events, then finalizes exactly one `ReplayArtifact` with
-the complete base continuation and optional cached endpoint. Real-mode
+normalized immutable events and point coordinates, then finalizes exactly one
+`ReplayArtifact` with the complete base continuation and optional cached
+endpoint. Real-mode
 `replay_input.py` and protected-mode `pm_replay_input.py` are adapters only:
 keyboard/mouse normalization and application, plus the PM stable frame seam.
 They define no file names, manifests, versions, snapshots, or compatibility
