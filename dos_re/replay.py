@@ -1935,50 +1935,20 @@ def _observe_segment(
 ) -> _ObservedSegment:
     _driver_at(oracle, start, "observed segment start")
     _driver_at(candidate, start, "observed segment start")
-    oracle_effects = _begin_observable(oracle) if observable_effects else None
-    candidate_effects = _begin_observable(candidate) if observable_effects else None
-    oracle_boundaries = RollingEffectDigest(
-        "dos-re:semantic-point-states:v1")
-    candidate_boundaries = RollingEffectDigest(
-        "dos-re:semantic-point-states:v1")
-    oracle_projection = _project(oracle)
-    candidate_projection = _project(candidate)
-    try:
-        for ordinal in range(start.ordinal + 1, end.ordinal + 1):
-            point = ReplayPoint(ordinal, artifact.timeline_id)
-            oracle.replay_to(artifact, point)
-            candidate.replay_to(artifact, point)
-            _driver_at(oracle, point, "semantic observation")
-            _driver_at(candidate, point, "semantic observation")
-            if ordinal == end.ordinal:
-                oracle_projection = _project(oracle)
-                candidate_projection = _project(candidate)
-                oracle_digest = oracle_projection.digest
-                candidate_digest = candidate_projection.digest
-            else:
-                oracle_digest = _point_digest(oracle)
-                candidate_digest = _point_digest(candidate)
-            oracle_boundaries.record_bytes(
-                SEMANTIC_BOUNDARY,
-                bytes.fromhex(oracle_digest),
-                identity=ordinal,
-            )
-            candidate_boundaries.record_bytes(
-                SEMANTIC_BOUNDARY,
-                bytes.fromhex(candidate_digest),
-                identity=ordinal,
-            )
-    finally:
-        oracle_effect_digest = (
-            _end_observable(oracle, oracle_effects)
-            if observable_effects else None)
-        candidate_effect_digest = (
-            _end_observable(candidate, candidate_effects)
-            if observable_effects else None)
-    oracle_boundary_digest = oracle_boundaries.finish(
-        "dos-re:semantic-point-states:v1")
-    candidate_boundary_digest = candidate_boundaries.finish(
-        "dos-re:semantic-point-states:v1")
+    (
+        oracle_projection,
+        oracle_boundary_digest,
+        oracle_effect_digest,
+    ) = _observe_driver_segment(
+        artifact, oracle, start, end,
+        observable_effects=observable_effects)
+    (
+        candidate_projection,
+        candidate_boundary_digest,
+        candidate_effect_digest,
+    ) = _observe_driver_segment(
+        artifact, candidate, start, end,
+        observable_effects=observable_effects)
     comparison = oracle_projection.compare(candidate_projection)
     boundary_equivalent = oracle_boundary_digest == candidate_boundary_digest
     effects_equivalent = (
@@ -1990,6 +1960,45 @@ def _observe_segment(
         boundary_equivalent, effects_equivalent,
         oracle_boundary_digest, candidate_boundary_digest,
         oracle_effect_digest, candidate_effect_digest,
+    )
+
+
+def _observe_driver_segment(
+    artifact: ReplayArtifact,
+    driver: ReplayDriver,
+    start: ReplayPoint,
+    end: ReplayPoint,
+    *,
+    observable_effects: bool,
+) -> tuple[
+    CanonicalState,
+    ObservableIntervalDigest,
+    ObservableIntervalDigest | None,
+]:
+    """Run one side contiguously so tracing does not defeat backend/JIT locality."""
+    effects = _begin_observable(driver) if observable_effects else None
+    boundaries = RollingEffectDigest("dos-re:semantic-point-states:v1")
+    projection = _project(driver)
+    try:
+        for ordinal in range(start.ordinal + 1, end.ordinal + 1):
+            point = ReplayPoint(ordinal, artifact.timeline_id)
+            driver.replay_to(artifact, point)
+            _driver_at(driver, point, "semantic observation")
+            if ordinal == end.ordinal:
+                projection = _project(driver)
+                digest = projection.digest
+            else:
+                digest = _point_digest(driver)
+            boundaries.record_bytes(
+                SEMANTIC_BOUNDARY, bytes.fromhex(digest), identity=ordinal)
+    finally:
+        effect_digest = (
+            _end_observable(driver, effects)
+            if observable_effects else None)
+    return (
+        projection,
+        boundaries.finish("dos-re:semantic-point-states:v1"),
+        effect_digest,
     )
 
 
