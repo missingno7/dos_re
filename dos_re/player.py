@@ -31,6 +31,7 @@ from dos_re.execution import (
     ExeBootstrapProvider,
     ExecutionConfiguration,
     ExecutionPlan,
+    ExecutionPlanError,
     ImplementationCatalog,
     ImplementationDescriptor,
     ImplementationEntry,
@@ -1085,7 +1086,11 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
          description: str | None = None) -> int:
     """Resolve one canonical execution plan, then dispatch its frontend driver."""
     args = build_arg_parser(frontend, description).parse_args(argv)
-    args.execution_plan = frontend.resolve_execution_plan(args)
+    try:
+        args.execution_plan = frontend.resolve_execution_plan(args)
+    except ExecutionPlanError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if args.plan_only:
         print(format_execution_plan(args.execution_plan))
         return 0

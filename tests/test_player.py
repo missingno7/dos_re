@@ -16,7 +16,6 @@ import pytest
 from dos_re import player
 from dos_re.execution import (
     NativeBootstrapProvider,
-    ExecutionPlanError,
     ImplementationCatalog,
     ImplementationDescriptor,
     ImplementationEntry,
@@ -102,7 +101,7 @@ class _StubRuntime:
         self.cpu = _StubCPU()
 
 
-def test_detached_profile_fails_before_runtime_construction():
+def test_detached_profile_fails_before_runtime_construction(capsys):
     class Fe(GameFrontend):
         created = False
 
@@ -111,10 +110,9 @@ def test_detached_profile_fails_before_runtime_construction():
             raise AssertionError("strict planning must happen before boot")
 
     fe = Fe(ROOT)
-    with pytest.raises(ExecutionPlanError) as caught:
-        player.main(fe, ["--profile", "detached", "--headless"])
+    assert player.main(fe, ["--profile", "detached", "--headless"]) == 2
     assert not fe.created
-    assert caught.value.report.policy_forbidden_capabilities
+    assert "required capabilities forbidden" in capsys.readouterr().err
 
 
 def test_frontend_can_declare_exe_free_implementation_for_same_player():
