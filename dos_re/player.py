@@ -1271,7 +1271,8 @@ def _run_differential_verification(
                 f"EQUIVALENT {start.ordinal}..{end.ordinal} "
                 f"{result.comparison.oracle_digest} "
                 f"mode={guarantee} points={checked.points_observed} "
-                f"checkpoints={checked.checkpoints_compared} span={span}"
+                f"checkpoints={checked.checkpoints_compared} span={span} "
+                f"effects={checked.observable_event_count}"
             )
             return 0
         assert checked.failed_interval is not None

@@ -228,8 +228,8 @@ rich state comparison only every configurable checkpoint span. A failed digest
 causes only the most recent interval to be restored and replayed point by point,
 yielding the first divergent semantic transition for detailed tracing.
 
-The rolling accumulator accepts primitive integer records through one reusable
-40-byte buffer; it does not allocate event objects in hot I/O paths. Machine
+The rolling accumulator packs primitive integer records into one reusable
+64 KiB buffer; it does not allocate event objects in hot I/O paths. Machine
 adapters emit canonical interrupts and port reads/writes directly. Input and
 presentation adapters emit their own stable identities. Complete canonical
 state at every point covers memory changes that survive to a semantic boundary.

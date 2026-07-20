@@ -2,8 +2,8 @@
 
 The replay verifier needs an order-sensitive account of effects that can
 escape a semantic boundary.  It must not build a Python object graph in the
-hot path.  :class:`RollingEffectDigest` therefore owns one fixed packing
-buffer and feeds primitive integer records directly into SHA-256.
+hot path.  :class:`RollingEffectDigest` therefore owns one fixed 64 KiB packing
+buffer and feeds batches of primitive integer records into SHA-256.
 
 Backends emit the same canonical effect identifiers even when their internal
 implementations differ.  A machine backend may emit these records from its
@@ -33,6 +33,7 @@ FILESYSTEM = 8
 CONSOLE_OUTPUT = 9
 
 _RECORD = struct.Struct("<I4xQQQQ")
+_BUFFER_SIZE = _RECORD.size * 1638  # 65,520 bytes; exact record multiple
 
 
 @dataclass(frozen=True)
@@ -51,12 +52,14 @@ class ObservableIntervalDigest:
 class RollingEffectDigest:
     """Allocation-bounded accumulator for canonical primitive effects.
 
-    ``record`` performs no tuple/dict allocation and reuses one 40-byte buffer.
+    ``record`` performs no tuple/dict allocation and reuses one bounded buffer.
     ``record_bytes`` is for already-available payloads such as console or file
     output; callers should prefer integer identities in genuinely hot paths.
     """
 
-    __slots__ = ("_hash", "_buffer", "_view", "_count", "_finished")
+    __slots__ = (
+        "_hash", "_buffer", "_view", "_used", "_count", "_finished",
+    )
 
     def __init__(self, schema_id: str = OBSERVABLE_EFFECT_SCHEMA) -> None:
         if not schema_id:
@@ -65,8 +68,9 @@ class RollingEffectDigest:
         encoded = schema_id.encode("utf-8")
         self._hash.update(len(encoded).to_bytes(4, "little"))
         self._hash.update(encoded)
-        self._buffer = bytearray(_RECORD.size)
+        self._buffer = bytearray(_BUFFER_SIZE)
         self._view = memoryview(self._buffer)
+        self._used = 0
         self._count = 0
         self._finished = False
 
@@ -84,12 +88,14 @@ class RollingEffectDigest:
     ) -> None:
         if self._finished:
             raise RuntimeError("observable-effect digest is already finished")
+        if self._used + _RECORD.size > len(self._buffer):
+            self._flush()
         mask = 0xFFFFFFFFFFFFFFFF
         _RECORD.pack_into(
-            self._buffer, 0, int(kind) & 0xFFFFFFFF,
+            self._buffer, self._used, int(kind) & 0xFFFFFFFF,
             int(a) & mask, int(b) & mask, int(c) & mask, int(d) & mask,
         )
-        self._hash.update(self._view)
+        self._used += _RECORD.size
         self._count += 1
 
     def record_bytes(
@@ -101,6 +107,7 @@ class RollingEffectDigest:
     ) -> None:
         payload = bytes(payload)
         self.record(kind, identity, len(payload))
+        self._flush()
         self._hash.update(payload)
 
     def finish(
@@ -108,6 +115,12 @@ class RollingEffectDigest:
     ) -> ObservableIntervalDigest:
         if self._finished:
             raise RuntimeError("observable-effect digest is already finished")
+        self._flush()
         self._finished = True
         return ObservableIntervalDigest(
             schema_id, self._count, self._hash.hexdigest())
+
+    def _flush(self) -> None:
+        if self._used:
+            self._hash.update(self._view[:self._used])
+            self._used = 0

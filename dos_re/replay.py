@@ -641,6 +641,7 @@ class CheckpointVerificationResult:
     checkpoints_compared: int
     observable_effects: bool
     failed_interval: tuple[ReplayPoint, ReplayPoint] | None = None
+    observable_event_count: int = 0
 
     @property
     def equivalent(self) -> bool:
@@ -1802,6 +1803,7 @@ def verify_checkpointed(
     cursor = start
     points_observed = 0
     checkpoints = 0
+    observable_event_count = 0
     final_segment: _ObservedSegment | None = None
     failed_interval: tuple[ReplayPoint, ReplayPoint] | None = None
     while cursor.ordinal < end.ordinal:
@@ -1816,6 +1818,8 @@ def verify_checkpointed(
         points_observed += checkpoint.ordinal - cursor.ordinal
         checkpoints += 1
         final_segment = segment
+        if segment.oracle_effect_digest is not None:
+            observable_event_count += segment.oracle_effect_digest.event_count
         if not segment.equivalent:
             failed_interval, segment, refined_points = _refine_failed_segment(
                 artifact, oracle, candidate, cursor, checkpoint,
@@ -1891,7 +1895,7 @@ def verify_checkpointed(
         })
     return CheckpointVerificationResult(
         result, checkpoint_span, points_observed, checkpoints,
-        observable_effects, failed_interval)
+        observable_effects, failed_interval, observable_event_count)
 
 
 def _observe_segment(
