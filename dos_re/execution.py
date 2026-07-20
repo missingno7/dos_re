@@ -767,7 +767,6 @@ def _plan_digest(
                         {
                             "id": artifact.artifact_id,
                             "runtime_path": artifact.runtime_path,
-                            "source_path": artifact.source_path,
                             "mode": artifact.export_mode.value,
                             "sha256": artifact.expected_sha256,
                             "instruction": artifact.generation_instruction,

@@ -1,6 +1,8 @@
 """Contracts for the dos_re 3.0 execution planner."""
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from dos_re.execution import (
@@ -575,6 +577,39 @@ def test_plan_digest_changes_with_implementation_evidence():
         _implementation("external", (ROOT, CALLEE), digest="two"),
     ))
     assert first.plan_digest != second.plan_digest
+
+
+def test_plan_digest_ignores_bootstrap_source_location(tmp_path):
+    source_a = tmp_path / "checkout-a" / "state.json"
+    source_b = tmp_path / "checkout-b" / "state.json"
+    source_a.parent.mkdir()
+    source_b.parent.mkdir()
+    source_a.write_text("{}", encoding="utf-8")
+    source_b.write_text("{}", encoding="utf-8")
+
+    def build_plan(source):
+        bootstrap = BuildImageBootstrapProvider(
+            "build-image",
+            ("machine state",),
+            artifacts=(BootstrapArtifact(
+                "boot-state",
+                "bootstrap/state.json",
+                str(source),
+                expected_sha256=hashlib.sha256(b"{}").hexdigest(),
+            ),),
+            provider_digest="producer-content-digest",
+        )
+        return plan_execution(
+            profile_configuration(
+                "development",
+                program_identity=PROGRAM,
+                bootstrap_provider=bootstrap,
+            ),
+            COVERAGE,
+            _catalog(_implementation("external", (ROOT, CALLEE))),
+        )
+
+    assert build_plan(source_a).plan_digest == build_plan(source_b).plan_digest
 
 
 def test_execution_composition_digest_ignores_coverage_evidence():
