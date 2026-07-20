@@ -4,10 +4,9 @@ Near indirect jmp/call sites -- jump tables, computed function pointers, dispatc
 stubs -- are unresolvable statically, but when a program runs, every target each
 site takes is observable for free.  A capture probe traps such a site at its
 instruction boundary and calls :func:`resolve_near_indirect_target` to record the
-target the interpreter is about to take, building the ``{site: [targets]}``
-evidence the CPUless promoter's EVIDENCE GATE consumes (dos_re_2.0 §6a: a
-dynamic-transfer function promotes only when every observed target is
-dispatchable).
+target the interpreter is about to take, building ``{site: [targets]}``
+evidence. A CPUless implementation may use that evidence only when every
+required observed target is dispatchable.
 
 Two shapes are handled, both genuine dispatches the CPUless dispatch registry
 must resolve:

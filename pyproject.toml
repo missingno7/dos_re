@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dos-re"
-version = "0.1.0"
+version = "3.0.0"
 description = "Oracle-driven DOS program recovery with stable identities, deterministic replay, evidence Atlas, mixed implementations, and closed-world export"
 readme = "README.md"
 license = { file = "LICENSE" }

@@ -1,4 +1,4 @@
-"""dos_re.lift.manifest: the lifter's proof ledger, and emitted block coverage."""
+"""Generated-function verification evidence and emitted block coverage."""
 from __future__ import annotations
 
 import random
@@ -14,7 +14,7 @@ from dos_re.memory import Memory
 
 def test_record_rejects_unknown_status():
     with pytest.raises(ValueError):
-        LiftRecord(entry="1010:0100", module="x.py", status="RECOVERED")  # islands vocab, not ours
+        LiftRecord(entry="1010:0100", module="x.py", status="RECOVERED")
 
 
 def test_manifest_roundtrips(tmp_path):
@@ -36,9 +36,8 @@ def test_fully_covered_needs_all_blocks():
     assert not rec.fully_covered
 
 
-def test_lift_statuses_are_disjoint_from_island_statuses():
-    from dos_re.islands import STATUSES as ISLAND_STATUSES
-    assert not (set(STATUSES) & set(ISLAND_STATUSES))   # metrics-honesty rule (§7)
+def test_status_vocabulary_is_verification_only():
+    assert STATUSES == ("LIFTED", "ORACLE_PASSING", "NOT_REACHED", "DIVERGED")
 
 
 def test_emitted_coverage_tracks_executed_blocks():

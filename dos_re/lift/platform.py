@@ -1,5 +1,4 @@
-"""Platform-effect contract + backends for CPUless recovered functions
-(M3 stage 2, dos_re_2.0.md section 4).
+"""Platform-effect contract and backends for CPUless recovered functions.
 
 A recovered CPUless function computes game behaviour over ``(mem, plat, *regs)``
 and receives NO CPU object.  When it must reach the machine (a port read/write,
@@ -35,7 +34,7 @@ The timing is owned by the generated metadata, NOT by any VM.
 TWO BACKENDS implement the same contract:
 
   * :class:`VMlessPlatformAdapter` -- a VERIFICATION-ONLY binding, used while
-    CPUless functions execute inside the mixed VMless graph.  It binds effects
+    CPUless functions may execute inside a mixed generated graph. It binds effects
     to the live VM's ``port_reader``/``port_writer`` and sets the VM's
     ``instruction_count``.  It is NOT the runtime owner of platform behaviour.
 
@@ -57,7 +56,7 @@ class VMlessPlatformAdapter:
     """Bind the ``plat`` contract to a live VM (cpu + its DOS port hooks).
 
     VERIFICATION ONLY: used while a CPUless function runs inside the mixed
-    VMless graph, so its effects can be compared against the interpreted
+    generated graph, so its effects can be compared against the interpreted
     oracle.  ``entry`` is the VM's ``instruction_count`` at function entry;
     each effect's absolute virtual time is ``entry + cost``."""
 
@@ -154,7 +153,7 @@ class VMlessPlatformAdapter:
         """Boundary-head observer (verification binding).  Writes the live
         bundle back to the VM so a park resumes from CURRENT state, then
         fires the VM's boundary hook (which may raise BoundaryReached).
-        NOTE: parking functions are STANDALONE-ONLY in the replay graph (their
+        NOTE: parking functions are DIRECT-GRAPH-ONLY in a replay graph (their
         adapters are not installed -- an unwound park would lose composed
         caller locals), so this path serves the differential harness, where
         no hook is armed and the observer is inert."""
@@ -224,7 +223,8 @@ def _chain_iret_stub(mem, vec_seg: int, vec_off: int, regs: dict) -> tuple:
     register bundle and flags as the recovered body left them.  This is
     VERIFIED, not assumed -- the target's first byte is read from live memory
     and MUST be ``iret``.  Any other target is an unmodelled external handler:
-    fail loud (the hard wall).  Returns the ``(regs, compat)`` pair the emitter
+    fail with an unresolved-edge diagnostic. Returns the ``(regs, compat)``
+    pair the emitter
     expects from a chain, same shape as the recovered-handler dispatch."""
     op = mem.rb(vec_seg & 0xFFFF, vec_off & 0xFFFF)
     if op != 0xCF:
@@ -245,7 +245,7 @@ INT_REGS = ("ax", "bx", "cx", "dx", "si", "di", "bp", "ds", "es")
 class _IntCarrier:
     """A register + memory carrier the pure DOS service handlers manipulate.
     It executes NOTHING -- not a CPU carrier, just the explicit INT reg bundle
-    (dos_re_2.0 section 4: DOS services are platform adapters).  ``set_flag``
+    (DOS services are explicit platform-adapter effects). ``set_flag``
     and ``halted`` are the only handler hooks beyond ``s``/``mem``."""
 
     class _Regs:

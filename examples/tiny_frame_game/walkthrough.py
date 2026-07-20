@@ -1,23 +1,17 @@
-"""tiny_frame_game — the dos_re 3.0 lifecycle on a synthetic game.
+"""Several dos_re 3.0 capabilities demonstrated on a synthetic frame loop.
 
-Where ``examples/minimal_adapter`` shows the hook/verify/snapshot loop on a
-straight-line program, this walkthrough runs every core mechanism against a
-real *frame loop* (retrace wait, INT 09h keyboard ISR, framebuffer output):
-
-  1. stable identities + retained Recovery IR
-  2. oracle ReplayArtifact + function-visit evidence
-  3. Execution Atlas -> ProgramCoverage
-  4. ImplementationCatalog + development/release plans + DetachmentReport
-  5. cached machine continuation and replay
-  6. low-level differential and frame verification
-  7. a typed state view over authoritative DOS memory
+The example combines stable identities, retained Recovery IR, ReplayArtifact,
+Execution Atlas queries, mixed-plan construction, continuation restore,
+differential verification, and a typed DOS-memory view. They run in one useful
+order so this file doubles as an integration test; the order is not a required
+port workflow, and each mechanism remains independently usable.
 
 Run from the repo root:
 
     python examples/tiny_frame_game/walkthrough.py
 
-No game assets, no dependencies. Read game.py for the synthetic program; read
-the retired 1.0 starter's lifecycle docs (historical) for how these stages map onto a real port.
+No game assets and no external dependencies are required. Read ``game.py`` for
+the synthetic program and ``docs/getting_started.md`` for the composable model.
 """
 from __future__ import annotations
 
@@ -42,7 +36,6 @@ from game import (  # noqa: E402
 )
 
 from dos_re.atlas import ExecutionAtlas  # noqa: E402
-from dos_re.checkpoints import run_to_next_checkpoint  # noqa: E402
 from dos_re.cpu import CPU8086  # noqa: E402
 from dos_re.execution import (BuildTarget, ImplementationCatalog,
                               ImplementationDescriptor, ImplementationEntry,
@@ -57,8 +50,9 @@ from dos_re.identity import (FunctionIdentity, ImageIdentity, ProgramIdentity,
 from dos_re.memory import linear  # noqa: E402
 from dos_re.player import GameFrontend  # noqa: E402
 from dos_re.runtime import Runtime, create_runtime  # noqa: E402
-from dos_re.replay import (ExecutionProfile, FunctionVisitIndex, ReplayArtifact,
-                           ReplayPoint, ReplayRecording)  # noqa: E402
+from dos_re.replay import (FunctionVisitIndex, ReplayArtifact,
+                           ReplayExecutionIdentity, ReplayPoint,
+                           ReplayRecording)  # noqa: E402
 from dos_re.snapshot import (apply_runtime_continuation, capture_runtime_continuation,
                              load_snapshot, write_snapshot)  # noqa: E402
 from dos_re.state_view import ByteBackend, StructView, U8  # noqa: E402
@@ -68,19 +62,29 @@ from dos_re.verification import HookVerifierConfig, HookVerifyDivergence, instal
 REPLAY_EVENTS = ((3, 0x1E), (6, 0x9E))  # 'A' make at frame 3, break at frame 6
 
 
-def checkpoints_for(rt: Runtime) -> dict[tuple[int, int], str]:
-    return {(rt.program.entry_cs, FRAME_LOOP_TOP): "frame: loop top"}
+def _run_to_frame_boundary(
+    rt: Runtime, *, skip_current: bool, max_steps: int = 100_000,
+) -> None:
+    """Example backend adapter for the replay's stable frame point."""
+    target = (rt.program.entry_cs, FRAME_LOOP_TOP)
+    if skip_current:
+        rt.cpu.step()
+    for _ in range(max_steps):
+        if rt.cpu.addr() == target:
+            return
+        rt.cpu.step()
+    raise TimeoutError(f"frame boundary {target!r} not reached")
 
 
 def boot(exe: Path) -> Runtime:
     """Boot and run the setup code to the FIRST frame boundary (no frame drawn yet)."""
     rt = create_runtime(exe)
-    run_to_next_checkpoint(rt.cpu, checkpoints_for(rt), max_steps=100_000, skip_current=False)
+    _run_to_frame_boundary(rt, skip_current=False)
     return rt
 
 
 def advance_frame(rt: Runtime) -> None:
-    run_to_next_checkpoint(rt.cpu, checkpoints_for(rt), max_steps=100_000)
+    _run_to_frame_boundary(rt, skip_current=True)
 
 
 def framebuffer_row(rt: Runtime) -> bytes:
@@ -88,9 +92,9 @@ def framebuffer_row(rt: Runtime) -> bytes:
     return bytes(rt.cpu.mem.data[base:base + WIDTH])
 
 
-# ---- stage 1: the oracle runs -------------------------------------------------------------------
+# ---- capability: run the original oracle ---------------------------------------------------------
 
-def stage_oracle(exe: Path) -> list[bytes]:
+def demonstrate_oracle(exe: Path) -> list[bytes]:
     rt = boot(exe)
     assert rt.dos.video_mode == 0x13
     rows = []
@@ -103,7 +107,7 @@ def stage_oracle(exe: Path) -> list[bytes]:
     return rows
 
 
-# ---- stage 2: ReplayArtifact record + replay ----------------------------------------------------
+# ---- capability: ReplayArtifact record and replay ------------------------------------------------
 
 def run_session(rt: Runtime, frames: int, playback: RealModeInputAdapter | None = None,
                 recorder: ReplayRecording | None = None) -> list[bytes]:
@@ -124,12 +128,12 @@ def run_session(rt: Runtime, frames: int, playback: RealModeInputAdapter | None 
     return rows
 
 
-def stage_replay_artifact(
+def demonstrate_replay_artifact(
     exe: Path, tmp: Path, function_id: str,
 ) -> ReplayArtifact:
     # Record from a stable frame seam with a complete embedded base.
     rt = boot(exe)
-    profile = ExecutionProfile(
+    profile = ReplayExecutionIdentity(
         "tiny-oracle", "oracle", "tiny-frame-interpreter",
         hashlib.sha256(exe.read_bytes()).hexdigest(),
         "example-runtime-v1", "example-devices-v1",
@@ -162,7 +166,7 @@ def stage_replay_artifact(
     return artifact
 
 
-# ---- stage 3: retained IR -> Atlas -> plans -----------------------------------------------------
+# ---- capability: combine retained IR, replay, Atlas, and plans -----------------------------------
 
 def stable_program_identity(exe: Path) -> tuple[ProgramIdentity, ImageIdentity, str]:
     program = ProgramIdentity("tiny-frame-game:1")
@@ -234,7 +238,7 @@ def draw_catalog(
     ),))
 
 
-def stage_atlas_and_planning(
+def demonstrate_atlas_and_planning(
     exe: Path, tmp: Path, artifact: ReplayArtifact, program: ProgramIdentity,
     image: ImageIdentity, function_id: str,
 ) -> ProgramCoverage:
@@ -285,9 +289,9 @@ def stage_atlas_and_planning(
     return coverage
 
 
-# ---- stage 4: snapshot determinism --------------------------------------------------------------
+# ---- capability: snapshot determinism ------------------------------------------------------------
 
-def stage_snapshot(exe: Path, tmp: Path) -> None:
+def demonstrate_snapshot(exe: Path, tmp: Path) -> None:
     rt = boot(exe)
     for _ in range(3):
         advance_frame(rt)
@@ -302,7 +306,7 @@ def stage_snapshot(exe: Path, tmp: Path) -> None:
     print("[snapshot]  restored runtime's continuation matches the live one, frame for frame")
 
 
-# ---- stages 4+5: wrong hook caught, correct hook verified ---------------------------------------
+# ---- capability: wrong adapter caught, correct implementation verified ---------------------------
 
 def _draw_frame_body(fill_width: int):
     """Natural authored behavior, independent of CPU control flow."""
@@ -329,7 +333,9 @@ def _bind_draw_implementation(
     GameFrontend(ROOT).bind_execution_plan(rt, plan)
 
 
-def stage_hooks(exe: Path, function_id: str, coverage: ProgramCoverage) -> None:
+def demonstrate_focused_verification(
+    exe: Path, function_id: str, coverage: ProgramCoverage,
+) -> None:
     # Wrong: fills one byte short. Registers match; only full-memory diff sees it.
     rt = boot(exe)
     _bind_draw_implementation(
@@ -356,7 +362,7 @@ def stage_hooks(exe: Path, function_id: str, coverage: ProgramCoverage) -> None:
     print("[hybrid]    recovered draw routine ran 5 frames, every call verified vs the ASM oracle")
 
 
-# ---- stage 6: the frame verifier ----------------------------------------------------------------
+# ---- capability: frame verification --------------------------------------------------------------
 
 def _boundary_hook(cpu: CPU8086) -> None:
     """Thin replacement for the boundary instruction (MOV DX,03DAh) at FRAME_LOOP_TOP."""
@@ -381,7 +387,7 @@ def _sample_builder(rt, side, frame_no, kind, hook, boundary_steps, start, recen
                              context="tiny")
 
 
-def stage_frame_verifier(
+def demonstrate_frame_verifier(
     exe: Path, tmp: Path, function_id: str, coverage: ProgramCoverage,
 ) -> None:
     def lockstep(candidate_fill: int) -> int:
@@ -409,7 +415,7 @@ def stage_frame_verifier(
           f"(diff artifacts dumped for inspection)")
 
 
-# ---- stage 7: the state mirror ------------------------------------------------------------------
+# ---- capability: typed state view ---------------------------------------------------------------
 
 class TinyGameView(StructView):
     """The game's state behind human names — offsets live HERE, nowhere else."""
@@ -421,7 +427,7 @@ class TinyGameView(StructView):
         super().__init__(ByteBackend(rt.cpu.mem, base=rt.program.entry_cs << 4), 0)
 
 
-def stage_state_mirror(exe: Path) -> None:
+def demonstrate_state_view(exe: Path) -> None:
     rt = boot(exe)
     for _ in range(3):
         advance_frame(rt)
@@ -442,14 +448,14 @@ def main() -> int:
         tmp = Path(tmp_str)
         exe = build_game_exe(tmp / "TINY.EXE")
         program, image, function_id = stable_program_identity(exe)
-        stage_oracle(exe)
-        artifact = stage_replay_artifact(exe, tmp, function_id)
-        coverage = stage_atlas_and_planning(
+        demonstrate_oracle(exe)
+        artifact = demonstrate_replay_artifact(exe, tmp, function_id)
+        coverage = demonstrate_atlas_and_planning(
             exe, tmp, artifact, program, image, function_id)
-        stage_snapshot(exe, tmp)
-        stage_hooks(exe, function_id, coverage)
-        stage_frame_verifier(exe, tmp, function_id, coverage)
-        stage_state_mirror(exe)
+        demonstrate_snapshot(exe, tmp)
+        demonstrate_focused_verification(exe, function_id, coverage)
+        demonstrate_frame_verifier(exe, tmp, function_id, coverage)
+        demonstrate_state_view(exe)
     print("walkthrough complete: identity, IR, replay, Atlas, planning, "
           "detachment, verification, and state projection -- all green")
     return 0

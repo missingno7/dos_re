@@ -54,22 +54,27 @@ Framework interceptors—replay clocks, verification wrappers, wait parking,
 profilers, and synthetic environment services—are runtime services, not
 program overrides.
 
-## Canonical authored boundary
+## Authored body and adapter boundary
 
-An authored semantic callable is ordinary CPUless Python:
+An authored semantic callable is ordinary CPUless Python. Its project-owned
+contract may look like:
 
 ```text
 implementation(context, recovered arguments...) -> declared results
 ```
 
 It never receives an instruction decoder or an implicit fallback-to-ASM
-operation. Its capability context contains only declared memory views,
-platform services, deterministic services, and presentation sinks.
+operation. `ImplementationEntry` deliberately does not impose a universal
+function signature: recovered ABIs and state models differ between programs.
+The descriptor declares dependencies and evidence; the project tests the
+body's recovered contract.
 
 The `activate` callable is backend-specific. It maps stable targets and the
 recovered contract to registers, stack, memory, arguments, returns, timing,
 and control flow. The semantic implementation is not duplicated across
 interpreted, generated VMless, generated CPUless, or ABI-recovered callers.
+An activator may construct restricted views or presentation sinks when those
+are useful enforcement boundaries.
 
 CPUless does not imply memoryless. A faithful implementation may continue to
 use the DOS memory model when that is the useful authoritative state.
@@ -87,19 +92,24 @@ state. A mismatch is a defect, not an automatic reclassification.
 ### Non-authoritative enhancement
 
 Presentation or host integration which intentionally changes owned output but
-not authoritative gameplay. Its context exposes authoritative state read-only
-and writable presentation sinks. Verification compares authoritative state
-with the enhancement enabled and disabled, excluding only declared output.
+not authoritative gameplay. The category's contract requires authoritative
+state to be treated as read-only and permits writes only to declared
+presentation sinks. Ports enforce that with restricted views where practical
+and with enabled/disabled authoritative-state tests. The framework does not
+pretend that a metadata enum alone makes an arbitrary Python object read-only.
+Verification compares authoritative state with the enhancement enabled and
+disabled, excluding only declared output.
 
 Enhancements attach to a seam; they do not claim authoritative function
 coverage.
 
 ### Behavioral modification
 
-An intentional authoritative change. It declares activation, affected
-domains, tests, expected invariants or rejoin points, and divergence scope.
-It never runs under faithful-equivalence policy. Differences outside the
-declared scope remain failures.
+An intentional authoritative change. Its catalog entry declares the behavioral
+category and cites modification-specific tests/evidence; the project records
+affected domains, expected invariants or rejoin points, and divergence scope
+with that evidence. It never runs under faithful-equivalence policy.
+Differences outside the declared scope remain failures.
 
 ## Backend portability
 
@@ -125,7 +135,7 @@ services, coverage evidence, policy, and build target. Replay cache identity
 therefore changes whenever implementation selection or its evidence changes.
 
 The original interpreted plan remains the oracle. Candidate plans may mix
-generated and authored implementations at any recovery level. Complete
+generated and authored implementations at any representation depth. Complete
 machine projection is used while representations match; canonical semantic
 projection supports detached native state.
 

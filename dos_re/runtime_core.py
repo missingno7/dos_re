@@ -9,7 +9,7 @@ It deliberately does NOT import ``load_mz_program`` / ``parse_mz`` / ``load_le``
 The EXE loader (:func:`dos_re.runtime.create_runtime`) lives in
 :mod:`dos_re.runtime` and imports FROM here—so an EXE-independent import graph
 reaches this core but never the loader
-that parses the binary (dos_re/docs/history/dos_re_2.0.md §"The EXE-independence wall").
+that parses the binary, so detached runtime checks can exclude the loader.
 """
 from __future__ import annotations
 

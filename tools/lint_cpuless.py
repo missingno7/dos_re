@@ -1,8 +1,6 @@
-"""lint_cpuless.py -- STATIC proof that a standalone CPUless runtime cannot
-reach a CPU: not the interpreter, not the lifted graph, not the CPU-ABI
-adapters, not a fallback to any of them.
+"""lint_cpuless.py -- audit a selected source closure for CPU independence.
 
-Generic, game-agnostic (docs/history/dos_re_2.0.md section 6).  The runner's runtime
+Generic and game-agnostic. The runtime
 import guard is the DYNAMIC backstop; this is the static one, and it is
 strictly stronger in the ways that matter:
 
@@ -125,7 +123,7 @@ def forbidden_paths(forbidden: tuple[str, ...], repo_root: Path,
         parts = Path(*f.split("."))
         for d in (repo_root / parts, repo_root / "dos_re" / parts):
             if d.is_dir():
-                out[d.resolve()] = f       # a forbidden PACKAGE (lemmings.lifted)
+                out[d.resolve()] = f       # a forbidden package tree
     return out
 
 
@@ -220,10 +218,10 @@ def walk_runner(roots: list[Path], repo_root: Path,
     execute), then module-level edges transitively.  ``seen`` is returned so
     the caller can report the graph size.
 
-    NOTE for packaging: ``seen`` is a WALL-PROOF closure, not a shipping list.
+    NOTE for packaging: ``seen`` is an audit closure, not a shipping list.
     It deliberately stops following function-local imports below the roots, so
-    a module a reached library lazily imports (lemmings.tick_clock._heads ->
-    lemmings.input_waits) is absent from it.  Use :func:`runtime_payload` to
+    a module a reached library lazily imports is absent from it. Use
+    :func:`runtime_payload` to
     decide what a release package must carry -- an APK built from ``seen``
     died with ModuleNotFoundError on the first device it ran on."""
     seen: set[Path] = set()
@@ -293,18 +291,18 @@ def runtime_payload(roots: list[Path], repo_root: Path,
     A different question from :func:`walk_runner`'s, and it needs a different
     walk -- getting this wrong breaks a release in one of two ways:
 
-      * follow only module-level edges below the roots (the wall walk's rule)
+      * follow only module-level edges below the roots (the audit walk's rule)
         and you MISS what a reached module lazily imports and then calls:
-        lemmings.tick_clock._heads() imports lemmings.input_waits inside the
+        a runtime helper imports a deferred input service inside the
         function, and an APK packaged from that closure crashed on device.
         So: follow function-local imports at every level.
       * follow them into FORBIDDEN modules and you would ship the interpreter
         itself -- dos_re.snapshot's load path lazily imports dos_re.cpu, for
         the VM callers it also serves.  Those paths cannot execute in a
         release (the runner never calls them, and the import guard would fire
-        if it did), so: prune at the wall.  The package therefore contains a
+        if it did), so prune at the forbidden dependency boundary. The package contains a
         module whose unexecuted branch names an absent one -- that is the
-        wall being real, not a packaging defect.
+        declared policy being enforced, not a packaging defect.
 
     Package ``__init__.py`` files are part of the WALK, not an afterthought:
     importing a module executes its packages' ``__init__`` first, so they are
@@ -347,7 +345,7 @@ def runtime_payload(roots: list[Path], repo_root: Path,
                         targets.append(sp)
             for tgt in targets:
                 if _under_forbidden(tgt, fpaths) is not None:
-                    continue                      # prune at the wall
+                    continue                      # prune forbidden dependency
                 if tgt not in seen:
                     work.append(tgt)
     out = set()

@@ -18,7 +18,7 @@ from dos_re.execution import (
 from dos_re.identity import FunctionIdentity, ImageIdentity, ProgramIdentity, real_mode_address
 from dos_re.replay import (
     ContinuationState,
-    ExecutionProfile,
+    ReplayExecutionIdentity,
     ReplayArtifact,
     ReplayEvidenceRecorder,
     ReplayExecutionEvidence,
@@ -30,7 +30,7 @@ from dos_re.runtime_code import RuntimeCodeSlot, RuntimeCodeVariant
 PROGRAM = ProgramIdentity("fixture:1")
 IMAGE = ImageIdentity(PROGRAM, "fixture-exe", "sha256", "a" * 64)
 TIMELINE = "fixture-oracle-frames-v1"
-ORACLE = ExecutionProfile(
+ORACLE = ReplayExecutionIdentity(
     "fixture-oracle", "oracle", "original-interpreter", str(IMAGE),
     "runtime-v1", "devices-v1", "machine-v1", "canonical-v1")
 
@@ -109,9 +109,16 @@ def make_replay(path):
         function(0x100), function(0x200), "call", ReplayPoint(3, TIMELINE))
     recorder.enter(function(0x200), ReplayPoint(3, TIMELINE))
     recorder.exit(function(0x200), ReplayPoint(4, TIMELINE))
+    recorder.observe_runtime_variant("runtime-variant:fixture-dispatch:a")
+    recorder.enter(function(0x400), ReplayPoint(5, TIMELINE))
     recorder.exit(function(0x100), ReplayPoint(6, TIMELINE))
     artifact.set_function_visits(recorder.visits)
     artifact.set_execution_evidence(ORACLE, recorder.evidence(ORACLE))
+    artifact.annotate(
+        ReplayPoint(5, TIMELINE),
+        kind="divergence-predecessor",
+        metadata={"first_mismatch": "fixture transition"},
+    )
     return artifact
 
 
@@ -122,11 +129,13 @@ def test_static_and_replay_sources_build_queries_and_planner_coverage(tmp_path):
         tmp_path / "atlas", program=PROGRAM,
         product_roots={"development": [function(0x100)]})
     slot = RuntimeCodeSlot(
-        (0x1010, 0x500), "dispatch-slot", "main", None, "dispatch",
-        (RuntimeCodeVariant(
-            (0x1010, 0x500), "installed-a", b"\x90\xc3", "main",
-            "staticized", ("fixture",)),),
-        None, "observed-installer")
+        addr=(0x1010, 0x500), name="dispatch-slot", subsystem="main",
+        owner=None, role="dispatch",
+        variants=(RuntimeCodeVariant(
+            addr=(0x1010, 0x500), name="installed-a",
+            signature=b"\x90\xc3", subsystem="main",
+            status="staticized", observed_in=("fixture",)),),
+        staticization=None, writer_status="observed-writer")
     atlas.import_recovery_ir(
         ir, image=IMAGE, roots=["1010:0100"], runtime_code=[slot])
     replay = make_replay(tmp_path / "replay")
@@ -152,12 +161,21 @@ def test_static_and_replay_sources_build_queries_and_planner_coverage(tmp_path):
     assert best.first_entry == ReplayPoint(2, TIMELINE)
     assert best.last_exit == ReplayPoint(6, TIMELINE)
     assert best.cached_at_or_before_entry == best.first_entry
+    assert best.runtime_variants == ("runtime-variant:fixture-dispatch:a",)
+    assert best.annotations[0]["kind"] == "divergence-predecessor"
+    assert atlas.best_replay(function(0x200)).annotations == ()
+
+    incomplete = atlas.best_replay(function(0x400))
+    assert incomplete.incomplete is True
+    assert incomplete.complete is False
+    assert atlas.resolve(
+        "runtime-variant:fixture-dispatch:a").kind == "runtime-code-variant"
 
     refused = atlas.resolve("1010:0400")
     assert refused.metadata["liftable"] is False
     assert refused.metadata["refusals"][0]["reason"] == "unsupported-opcode"
     assert len(atlas.nodes(kind="runtime-code-slot")) == 1
-    assert len(atlas.nodes(kind="runtime-code-variant")) == 1
+    assert len(atlas.nodes(kind="runtime-code-variant")) == 2
 
     region_id = "fixture:1:region:gameplay"
     catalog = ImplementationCatalog((ImplementationEntry(
@@ -228,7 +246,7 @@ def test_stale_source_and_ambiguous_query_fail_loud(tmp_path):
 
 def test_execution_evidence_rejects_candidate_profile(tmp_path):
     replay = make_replay(tmp_path / "replay")
-    candidate = ExecutionProfile(
+    candidate = ReplayExecutionIdentity(
         "candidate", "candidate", "native", str(IMAGE), "runtime", "devices",
         "machine-v1", "canonical-v1")
     replay.register_profile(
@@ -239,3 +257,103 @@ def test_execution_evidence_rejects_candidate_profile(tmp_path):
     with pytest.raises(ValueError, match="oracle"):
         replay.set_execution_evidence(
             candidate, ReplayExecutionEvidence(candidate.identity_digest))
+
+
+def test_atlas_can_grow_from_manual_facts_without_recovery_ir(tmp_path):
+    atlas = ExecutionAtlas.create(
+        tmp_path / "atlas",
+        program=PROGRAM,
+        product_roots={"investigation": ["manual:entry"]},
+    )
+    facts = {
+        "identity": "analyst-notebook-v1",
+        "nodes": [
+            {
+                "id": "manual:entry",
+                "kind": "execution-point",
+                "label": "observed entry",
+                "metadata": {"provenance": "runtime trace"},
+            },
+            {
+                "id": "manual:target",
+                "kind": "execution-point",
+                "label": "observed target",
+                "metadata": {},
+            },
+        ],
+        "edges": [{
+            "source": "manual:entry",
+            "target": "manual:target",
+            "kind": "observed-transfer",
+            "status": "observed",
+        }],
+    }
+    path = tmp_path / "facts.json"
+    path.write_text(json.dumps(facts), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/atlas.py",
+            "ingest-facts",
+            str(atlas.directory),
+            str(path),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "manual:analyst-notebook-v1"
+
+    reopened = ExecutionAtlas.open(atlas.directory)
+    assert reopened.path("manual:entry", "manual:target") == (
+        "manual:entry",
+        "manual:target",
+    )
+    coverage = reopened.coverage_for("investigation")
+    assert coverage.reachable == frozenset({"manual:entry", "manual:target"})
+
+
+def test_atlas_preserves_conflicting_evidence_claims(tmp_path):
+    atlas = ExecutionAtlas.create(tmp_path / "atlas", program=PROGRAM)
+    atlas.add_manual_facts(
+        "trace-a",
+        provenance={"artifact": "trace-a.json", "sha256": "a" * 64},
+        nodes=[{
+            "id": "manual:entry", "kind": "execution-point",
+            "label": "entry from trace A", "metadata": {"role": "dispatch"},
+        }],
+        edges=[{
+            "source": "manual:entry", "target": "manual:target",
+            "kind": "observed-transfer", "status": "observed",
+            "metadata": {"condition": "zero"},
+        }],
+    )
+    atlas.add_manual_facts(
+        "trace-b",
+        provenance={"artifact": "trace-b.json", "sha256": "b" * 64},
+        nodes=[{
+            "id": "manual:entry", "kind": "execution-point",
+            "label": "entry from trace B", "metadata": {"role": "handler"},
+        }],
+        edges=[{
+            "source": "manual:entry", "target": "manual:target",
+            "kind": "observed-transfer", "status": "observed",
+            "metadata": {"condition": "nonzero"},
+        }],
+    )
+
+    entry = atlas.resolve("manual:entry")
+    assert "role" not in entry.metadata
+    assert {claim["value"] for claim in entry.conflicts["role"]} == {
+        "dispatch", "handler",
+    }
+    assert {claim["source"] for claim in entry.conflicts["label"]} == {
+        "manual:trace-a", "manual:trace-b",
+    }
+    edge = atlas.callees(entry.identity)[0]
+    assert "condition" not in edge.metadata
+    assert {claim["value"] for claim in edge.conflicts["condition"]} == {
+        "zero", "nonzero",
+    }

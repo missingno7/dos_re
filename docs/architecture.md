@@ -1,93 +1,89 @@
 # Architecture and authority boundaries
 
-dos_re 3.0 has one acyclic lifecycle:
+dos_re consists of optional recovery operations connected by one acyclic
+authority graph. “Acyclic” describes dependency direction; it does not require
+a game to use every component.
 
 ```text
-identity <- Recovery IR
-    ^           |
-    |           +------> Atlas ------> ProgramCoverage
-    |                      ^                  |
-    +------ ReplayArtifact-+                  v
-                                      ImplementationCatalog
-                                                |
-RuntimeServiceCatalog + BootstrapProvider ------+
-                                                v
-                                  ExecutionConfiguration
-                                                |
-                                                v
-                              ExecutionPlan + DetachmentReport
-                                  |             |          |
-                               player      verification   export
-                                  |
-                           backend adapters
+                         stable identities
+                +-------------+-------------+
+                |             |             |
+          Recovery IR   ReplayArtifact   explicit facts
+                |             |             |
+                +-------------+-------------+
+                              |
+                    Execution Atlas projection
+                    navigation / CoverageSource
+                              |
+     ImplementationCatalog + RuntimeServiceCatalog + BootstrapProvider
+                              |
+                    ExecutionConfiguration
+                              |
+                ExecutionPlan + DetachmentReport
+                    /          |          \
+                 player   verification   export
+                    |
+              backend adapters
 ```
 
-Arrows mean “is consumed by.” Replay and Recovery IR depend only on stable
-identities, not on Atlas or planning. Atlas may join externally supplied plan
-and catalog records for navigation, but it does not own them. The planner
-consumes the `CoverageSource` protocol and has no Atlas storage or CPU-backend
-dependency.
+Recovery IR, replay, and explicit facts can exist independently. The Atlas
+stores normalized materializations and deterministic indexes so they can be
+queried together; the cited source artifacts remain the evidence authorities.
+Planning can also consume a conservative `ProgramCoverage` directly.
 
 ## Module ownership
 
 | Modules | Authority |
 |---|---|
 | `identity.py` | Stable serialized identities |
-| `lift/ir.py`, `recovery_ir.py` | Canonical retained recovery structure |
-| `replay.py`, `replay_input.py`, `pm_replay_input.py`, snapshot modules | ReplayArtifact and backend-specific capture/apply mechanics |
-| `atlas.py` | Persistent evidence aggregation, graph queries, inverse replay coverage |
-| `execution.py` | ProgramCoverage, catalogs, configuration, planning, detachment report |
-| `overrides.py` | Authored implementation metadata, context boundary, verification contract |
-| `bootstrap.py`, `bootstrap_runtime.py` | Bootstrap providers and consumption of planned artifacts |
-| `player.py` | One launch lifecycle |
-| `pm_backend.py` and project adapters | Backend construction and machine-specific I/O |
-| `verify.py`, `frame_verify.py`, replay verification modules | Oracle/candidate comparison |
-| `export.py` | Explicit closed-world packaging |
-| `hooks.py`, `interrupts.py` | Low-level runtime interception details, not implementation catalogs |
+| `lift/ir.py` | Recovery IR loading and re-elaboration |
+| `replay.py`, replay input adapters, snapshot modules | ReplayArtifact and backend-specific capture/apply mechanics |
+| `atlas.py` | Materialized evidence projection, graph queries, inverse replay index |
+| `execution.py` | Coverage, catalogs, configuration, bootstrap declarations, planning, detachment report |
+| `bootstrap_runtime.py` | Validation and consumption of planned bootstrap artifacts |
+| `player.py` | One launch and replay command interface |
+| `pm_backend.py` and port adapters | Backend construction and machine-specific I/O |
+| `verification.py`, `frame_verify.py`, replay verification | Oracle/candidate comparison |
+| `export.py` | Closed-world packaging |
+| `hooks.py`, `interrupts.py` | Low-level runtime interception, not implementation selection |
 
-`RuntimeServiceCatalog` and `ImplementationCatalog` are separate because a
-service such as display or host input is not an owner of recovered program
-code. Framework interrupt and host-service interceptors likewise remain backend
-machinery rather than authored overrides.
+`RuntimeServiceCatalog` is separate from `ImplementationCatalog`: a display,
+input, or diagnostic service does not own recovered program code.
 
-## Hard invariants
+## Invariants
 
-1. Stable identity values cross artifact boundaries; generated names and raw
+1. Stable identities cross artifact boundaries; generated names and bare
    addresses do not.
-2. Recovery IR owns static facts; replay owns recorded dynamic facts; Atlas
-   owns their normalized evidence join.
-3. Atlas coverage is conservative. Unknown edges remain unresolved.
-4. `ImplementationCatalog` is the only available-implementation authority.
-5. `ExecutionConfiguration` is the only composition and policy authority.
-6. `ExecutionPlan` is immutable and binds exactly one implementation per
-   reachable identity.
-7. The player and backend adapters consume a plan. They cannot select or
-   silently fall back.
-8. Verification compares plans but never changes selection.
-9. Bootstrap is declared and validated before runtime construction.
-10. Export consumes one exact release plan and includes only its explicit file
-    and dependency closure.
+2. Every evidence record cites its producer and provenance.
+3. Atlas queries preserve conflicts and unresolved uncertainty.
+4. Observation extends knowledge but never proves an unseen edge absent.
+5. `ImplementationCatalog` is the only available-implementation inventory.
+6. `ExecutionConfiguration` is the only composition and policy input.
+7. A validated plan binds exactly one owner to every reachable authoritative
+   identity.
+8. Player and backend adapters cannot select or silently fall back.
+9. Verification compares selected plans without changing them.
+10. Bootstrap is declared and validated before runtime construction.
+11. Export includes only the exact file and dependency closure of its plan.
 
 ## Backend boundary
 
-Real mode and protected mode differ in machine construction, event
-normalization, stable-point observation, and continuation-state projection.
-They share the player, ReplayArtifact format, identity model, Atlas, planning,
-verification policies, and export rules. `pm_backend.py` is therefore a backend
-adapter, not a second player.
+Real mode, protected mode, generated execution, and detached native execution
+may differ in construction, event application, continuation capture, and
+canonical projection. They share identity, catalog, planning, replay,
+verification, and export contracts.
 
-An authored override receives a canonical context. A wrapper may translate
-registers, stack state, DOS memory, native state, arguments, returns, and
-control flow for a particular backend; the semantic implementation is not
-duplicated.
+An authored semantic body is not duplicated by backend. A selected activator
+may translate registers, stack state, DOS memory, native values, arguments,
+returns, timing, and control transfer for one backend.
 
-## Dependency direction guard
+## Dependency guards
 
-Low-level identity and Recovery IR modules must not import replay, Atlas,
-execution planning, player, or backend modules. Replay must not import Atlas or
-execution selection. Atlas must not import player or backend dispatch.
-`execution.py` stays backend-neutral. Export and player may consume a plan but
-may not create an alternate selection authority.
+- `identity.py` must not import replay, Atlas, execution, player, or backends.
+- replay must not import Atlas or implementation selection;
+- Atlas must not import player or backend dispatch;
+- `execution.py` stays backend-neutral;
+- player and export consume plans but cannot create alternate selection
+  authorities.
 
-Historical architecture records live under [`history/`](history/) and are
-non-normative.
+Historical designs are isolated under [`history/`](history/).

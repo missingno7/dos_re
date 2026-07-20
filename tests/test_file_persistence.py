@@ -96,7 +96,7 @@ def game_dir(tmp_path: Path) -> Path:
 
 def test_default_drops_writes_on_close_so_a_reopen_reads_the_pristine_file(game_dir: Path) -> None:
     """With persistence OFF (the deterministic default) a write does NOT survive
-    close: a re-open reads the original file, byte-for-byte the legacy behaviour.
+    close: a re-open reads the original file because persistence is disabled.
     This MUST hold or a replay where the game rewrites then re-reads a file (e.g.
     Skyroads reloading SKYROADS.CFG after a level break) would replay differently
     from how it was recorded."""

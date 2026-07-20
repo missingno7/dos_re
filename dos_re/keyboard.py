@@ -75,7 +75,7 @@ class KeyDispatcher:
         """Apply queued events for one emulated boundary.
 
         ``allow_release=False`` is used by the interactive player immediately
-        after a visual presenter boundary.  A legacy gameplay loop can present
+        after a visual presenter boundary. The original program can present
         the frame before it checks some one-shot keys such as Esc, so releasing
         a quick tap at that boundary would clear the game's key table before
         the original post-present input code can observe it.  We still drain

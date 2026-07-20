@@ -1,7 +1,7 @@
-"""Module-naming policy for emitted lifted graphs — the manifest seam.
+"""Module-naming policy for emitted generated graphs.
 
-Historically every emitted module is named ``lifted_{cs:04x}_{ip:04x}.py``
-with a same-named function inside, and the link/install machinery derives
+By default every emitted module is named ``lifted_{cs:04x}_{ip:04x}.py``
+with a same-named function inside, and graph tooling derives
 file names from entry addresses by that pattern.  A port whose recovery IR
 carries symbol identity wants SYMBOLIC names (modules named for the original
 routines) without forking that machinery — so the mapping becomes data: a
@@ -11,19 +11,18 @@ small manifest, ``graph_manifest.json``, living beside the emitted modules:
      "entries": {"CS:IP": "module_stem", ...}}
 
 Every consumer that maps an entry address to its module file
-(``install.resolve_links``, ``install.install_vmless_graph``,
+(``install.resolve_links``, ``install.activate_generated_graph``, and
 ``tools/liftlink.py``) loads ``GraphNaming`` from the emit dir: manifest
-entries win, everything else falls back to the historical default stem — an
-unmanifested corpus behaves exactly as before.  The stem doubles as the
+entries win, everything else uses the address-derived default stem. The stem
+doubles as the
 module's function name (the loaders' ``getattr(module, stem)`` convention),
 so a stem must be a valid Python identifier.
 
 The POLICY that chooses symbolic stems (symbol source, sanitization,
 collision suffixes) belongs to the consuming port, which owns its symbol
 table; this module only records, validates, and serves the chosen mapping.
-It also gives the next stage (adapter routing around manually recovered
-implementations) its seam: replacing one entry's module in the manifest
-re-routes every consumer without touching the machinery.
+The execution catalog and planner decide whether the resulting graph is
+selected; this module only owns names inside the generated artifact.
 """
 from __future__ import annotations
 
@@ -35,7 +34,7 @@ MANIFEST_NAME = "graph_manifest.json"
 
 
 def default_stem(cs: int, ip: int) -> str:
-    """The historical address-derived module/function stem."""
+    """The default address-derived module/function stem."""
     return f"lifted_{cs:04x}_{ip:04x}"
 
 
@@ -47,10 +46,10 @@ def parse_entry(entry: str) -> tuple[int, int]:
 class GraphNaming:
     """Entry-address → module-stem mapping for one emitted graph directory.
 
-    ``mapping`` keys are ``"CS:IP"`` strings (paragraph-base, the pipeline's
-    canonical keys); values are module stems (file name without ``.py``,
+    ``mapping`` keys are ``"CS:IP"`` strings (paragraph-base stable
+    address keys); values are module stems (file name without ``.py``,
     also the function name inside).  Entries absent from the mapping resolve
-    to :func:`default_stem` — the empty mapping IS the historical behavior.
+    to :func:`default_stem`.
     """
 
     def __init__(self, mapping: dict[str, str] | None = None) -> None:

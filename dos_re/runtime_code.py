@@ -2,17 +2,15 @@
 
 Some addresses in a DOS executable are not single static routines: the cold
 executable can contain one routine body while startup/gameplay materializes a
-different body at the same CS:IP. Hooking such addresses by address alone is
-unsafe: the hook must first prove which live byte variant is installed.
+different body at the same CS:IP. Selecting such addresses by location alone is
+unsafe: the adapter must first prove which live byte variant is active.
 
 The policy this module encodes is stricter than merely emulating self-modifying
-code: runtime-installed bodies are treated as old-school specialization/dispatch
-installation. Every accepted body becomes a named, documented, verified static
-source implementation. Unknown byte variants fail fast; they are new
-reverse-engineering frontiers, not an excuse to run interpreted ASM silently.
+code: runtime-written bodies are treated as observed specialization/dispatch
+variants. Every accepted body becomes a named, documented, verified static
+implementation candidate. Unknown byte variants fail fast; they remain
+unresolved evidence rather than an excuse to interpret silently.
 
-(Generalized from Overkill's ``overkill/runtime_code.py`` — the mechanism was
-already game-agnostic; only the per-game slot table was parameterized out.)
 """
 from __future__ import annotations
 
@@ -31,7 +29,7 @@ class UnknownRuntimeCodeVariant(RuntimeError):
 
 
 class RuntimeCodeStaticizationError(RuntimeError):
-    """Raised when runtime-code slots are not ready for source-port lifting."""
+    """Raised when required runtime-code staticization evidence is incomplete."""
 
 
 @dataclass(frozen=True)
@@ -39,7 +37,7 @@ class RuntimeCodeVariant:
     addr: Addr
     name: str
     signature: bytes
-    island: str
+    subsystem: str
     status: str
     observed_in: tuple[str, ...] = ()
     notes: str = ""
@@ -54,20 +52,20 @@ class RuntimeCodeVariant:
 
     @property
     def is_accepted_runtime_body(self) -> bool:
-        """Whether this variant may be executed by a staticized hook."""
-        return self.status.startswith("hooked") or self.status.startswith("staticized")
+        """Whether this variant has a verified static representation."""
+        return self.status.startswith("staticized")
 
 
 @dataclass(frozen=True)
 class RuntimeCodeStaticization:
-    """How a runtime-installed code body is represented in the source port.
+    """How a runtime-written code body is represented statically.
 
     This records the intended transformation:
 
         patched bytes -> named variant -> explicit static source logic
 
     It intentionally does not install or mutate code. It is a manifest entry and
-    audit target proving that a runtime-code slot has a flat source-port owner.
+    evidence record identifying the corresponding static implementation.
     """
 
     source_module: str
@@ -87,7 +85,7 @@ class RuntimeCodeStaticization:
 class RuntimeCodeSlot:
     """A polyvariant executable slot in the original runtime image.
 
-    A slot is the stable source-port concept. Variants are the original byte
+    A slot is a stable program concept. Variants are the original byte
     bodies observed in that slot. Staticization describes the source logic that
     replaces accepted runtime-installed variants without preserving
     interpreter-level self-modifying behavior.
@@ -95,13 +93,13 @@ class RuntimeCodeSlot:
 
     addr: Addr
     name: str
-    island: str
+    subsystem: str
     owner: Addr | None
     role: str
     variants: tuple[RuntimeCodeVariant, ...]
     staticization: RuntimeCodeStaticization | None
-    installer_status: str
-    installer_evidence: tuple[str, ...] = ()
+    writer_status: str
+    writer_evidence: tuple[str, ...] = ()
     notes: str = ""
 
     @property
@@ -117,8 +115,8 @@ class RuntimeCodeSlot:
         return self.staticization is not None and bool(self.accepted_variants)
 
     @property
-    def has_installer_evidence(self) -> bool:
-        return self.installer_status.startswith("observed") or self.installer_status.startswith("static")
+    def has_writer_evidence(self) -> bool:
+        return self.writer_status.startswith("observed") or self.writer_status.startswith("static")
 
 
 def live_code_bytes(cpu, addr: Addr, size: int) -> bytes:
@@ -130,10 +128,10 @@ def live_code_bytes(cpu, addr: Addr, size: int) -> bytes:
 def identify_runtime_code_variant(
     cpu, addr: Addr, slots: Mapping[Addr, RuntimeCodeSlot],
 ) -> RuntimeCodeVariant:
-    """Return the known runtime-code variant currently installed at ``addr``.
+    """Return the known runtime-code variant currently active at ``addr``.
 
     The match is exact for the registered signature length. Unknown bytes are a
-    reverse-engineering frontier and therefore fail fast.
+    unresolved observation and therefore fail fast.
     """
     slot = slots.get(addr)
     variants = slot.variants if slot is not None else ()
@@ -157,13 +155,13 @@ def identify_runtime_code_variant(
 def require_runtime_code_variant(
     cpu, addr: Addr, expected_name: str, slots: Mapping[Addr, RuntimeCodeSlot],
 ) -> RuntimeCodeVariant:
-    """Identify the live variant and require that it is the hook's target body."""
+    """Identify the live variant and require the selected implementation's body."""
     variant = identify_runtime_code_variant(cpu, addr, slots)
     if variant.name != expected_name:
         live = live_code_bytes(cpu, addr, min(64, variant.size))
         raise UnknownRuntimeCodeVariant(
             f"runtime-code variant {variant.name!r} at {addr[0]:04X}:{addr[1]:04X} "
-            f"is known but not valid for hook {expected_name!r}; "
+            f"is known but not valid for implementation {expected_name!r}; "
             f"status={variant.status}; live={live.hex(' ')}"
         )
     return variant
@@ -197,9 +195,9 @@ def describe_live_runtime_code_state(
 
 
 def runtime_code_staticization_report(
-    slots: Mapping[Addr, RuntimeCodeSlot], *, strict_installers: bool = False,
+    slots: Mapping[Addr, RuntimeCodeSlot], *, strict_writers: bool = False,
 ) -> list[dict[str, object]]:
-    """Describe every runtime-code slot and whether it is source-port staticized."""
+    """Describe staticization evidence for every runtime-code slot."""
     report: list[dict[str, object]] = []
     for slot in slots.values():
         staticization = slot.staticization
@@ -208,34 +206,38 @@ def runtime_code_staticization_report(
             missing.append("accepted runtime variant")
         if staticization is None:
             missing.append("static source target")
-        if strict_installers and not slot.has_installer_evidence:
-            missing.append("installer provenance")
+        if strict_writers and not slot.has_writer_evidence:
+            missing.append("writer provenance")
         report.append({
             "addr": f"{slot.addr[0]:04X}:{slot.addr[1]:04X}",
             "slot": slot.name,
-            "island": slot.island,
+            "subsystem": slot.subsystem,
             "accepted_variants": tuple(v.name for v in slot.accepted_variants),
             "all_variants": tuple(v.name for v in slot.variants),
             "staticized": slot.is_staticized,
             "static_target": staticization.target if staticization else "",
             "dispatch": staticization.dispatch if staticization else "",
-            "installer_status": slot.installer_status,
+            "writer_status": slot.writer_status,
             "missing": tuple(missing),
         })
     return report
 
 
 def assert_runtime_code_staticization_ready(
-    slots: Mapping[Addr, RuntimeCodeSlot], *, strict_installers: bool = False,
+    slots: Mapping[Addr, RuntimeCodeSlot], *, strict_writers: bool = False,
 ) -> None:
-    """Fail if any accepted runtime-code slot lacks a static source owner.
+    """Fail if any accepted runtime-code slot lacks staticization evidence.
 
-    This is the project-level gate for the policy "no self-modifying source".
-    The default gate allows installer provenance to remain pending while the
-    accepted variant is already staticized; pass ``strict_installers=True`` when
-    preparing to declare 100% runtime-code exhaustion.
+    This is a focused evidence check, not a release or coverage authority.
+    Planning still resolves the selected implementation and every reachable
+    edge. ``strict_writers=True`` additionally requires provenance for the
+    runtime writer.
     """
-    bad = [row for row in runtime_code_staticization_report(slots, strict_installers=strict_installers) if row["missing"]]
+    bad = [
+        row for row in runtime_code_staticization_report(
+            slots, strict_writers=strict_writers)
+        if row["missing"]
+    ]
     if bad:
         lines = ["runtime-code staticization is incomplete:"]
         for row in bad:
@@ -262,7 +264,7 @@ class RuntimeCodeWriteEvent:
 
 
 class RuntimeCodeWriteTracer:
-    """Optional write tracer for discovering code materialization/installers.
+    """Optional write tracer for discovering runtime code materialization.
 
     Install it on a CPU to watch writes that overlap runtime-code addresses. It
     is intentionally opt-in so normal gameplay and tests do not pay for code

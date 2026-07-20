@@ -1,13 +1,17 @@
-"""Minimal end-to-end walkthrough of the dos_re oracle workflow — no game assets needed.
+"""Narrow CPU-backed adapter and focused-verifier example — no game assets.
 
 This script builds a tiny synthetic DOS MZ executable (a stand-in "game"), then
-demonstrates the whole loop the framework exists for:
+demonstrates one optional low-level development slice:
 
   1. run the original binary in the VM (the oracle),
   2. select one authored implementation through the implementation catalog,
   3. let the differential verifier prove its CPU adapter byte-exact against the
      interpreted original ASM (and watch it catch a deliberately wrong hook),
-  4. snapshot the machine and replay deterministically from the snapshot.
+  4. check that the backend's raw machine snapshot restores deterministically.
+
+This is not the persistent ReplayArtifact workflow and not a required recovery
+sequence. See ``examples/tiny_frame_game`` for an integration example and
+``docs/getting_started.md`` for the composable workspace model.
 
 Run it from the repo root:
 
@@ -209,7 +213,7 @@ def main() -> int:
               f"restored continuation AX = {restored.cpu.s.ax}  (must match)")
         assert rt.cpu.s.ax == restored.cpu.s.ax == 5
 
-    print("example completed: oracle run, verified hook, caught bad hook, deterministic snapshot")
+    print("adapter example completed: focused verification and snapshot restore are green")
     return 0
 
 

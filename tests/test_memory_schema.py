@@ -2,7 +2,7 @@
 
 Most of these assert a REFUSAL.  That is the point of the type: this same
 tree produced two false greens from a verdict model whose contradictory
-states were merely "not supposed to happen", so M4's ownership model enforces
+states were merely "not supposed to happen", so the ownership model enforces
 its rules at construction instead of documenting them.
 
 Every refusal here corresponds to a rule in docs/memory_schema.md §10.
@@ -162,7 +162,7 @@ def test_a_valid_alias_pair_is_accepted():
 def test_the_digest_is_deterministic_and_content_sensitive():
     """Freshness (§11.6): every generated artifact embeds this, so a stale
     generation must be detectable -- the same mechanism that caught four
-    stale runs during M3b."""
+    stale analysis runs."""
     a = Schema(regions=(_region(name="x"),), input_digest="abc")
     b = Schema(regions=(_region(name="x"),), input_digest="abc")
     assert a.digest() == b.digest()

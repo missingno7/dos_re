@@ -43,7 +43,7 @@ def test_int_is_liftable_and_recorded():
 
 
 def test_indirect_jump_is_a_tail_exit():
-    # jmp bx ends the region as an exit (the 32-bit pipeline's treatment):
+    # jmp bx ends the region as an exit (matching the 32-bit emitter):
     # the lifted hook computes the target, sets CS:IP, and hands back to the
     # VM.  Observed need: Lemmings' sound-driver dispatcher / ISR chaining.
     code = bytes.fromhex("FFE3")          # jmp bx

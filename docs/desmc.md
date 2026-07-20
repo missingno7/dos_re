@@ -1,99 +1,108 @@
-# De-SMC — lifting self-modifying code as explicit data flow
+# De-SMC: explicit data flow for supported code mutation
 
-> «Detection must always prevent a frozen lift.  A separate evidence-driven
-> de-SMC pass may replace code mutation with explicit data or control flow,
-> but only after proving equivalence against the interpreter.»
+Self-modifying code cannot be frozen into generated code from one observed
+memory image. dos_re therefore keeps two independent facts:
 
-## The problem
+- ordinary lifting refuses code whose instruction bytes may be written;
+- an optional de-SMC analysis may describe a supported operand mutation and
+  generate a candidate that reads the live operand bytes as data.
 
-A literal lift freezes the code bytes one snapshot happened to hold.  If the
-program PATCHES those bytes at runtime, the lifted copy keeps executing the
-frozen operands — silently.  Found the hard way on SkyRoads: its LZS decoder
-(`1010:66E6`) writes each compressed file's header-derived bit-width
-immediates into its own body before decoding; the lift baked one menu-time
-snapshot's widths and decoded every file with them, corrupting the startup
-allocation chain into an out-of-memory exit with no error anywhere near the
-cause.
+De-SMC is one optional recovery operation. It is not a mandatory stage, and an
+observed mutation set is not evidence that every possible code version has
+been seen.
 
-## The two layers
+## Refusal is the default
 
-**Layer 1 — refusal (always on).**  `lift/cfg.py` collects every
-statically-visible code write (a CS-override store to a direct 16-bit
-address) during the scan.  A target inside the function's own instruction
-bytes refuses it (`self-modifying`); `lift/irgen_core.py` adjudicates
-cross-function writes census-wide and refuses the PATCHED function
-(`code-patched-at-runtime`, naming the patcher).  The ordinary lift can never
-silently freeze mutable code.  This layer has no opt-out.
+`dos_re/lift/cfg.py` records statically visible writes through `CS`.
+`dos_re/lift/irgen_core.py` resolves cross-function writes across the recovered
+census. A function that writes its own instruction bytes is refused as
+`self-modifying`; a function written by another function is refused as
+`code-patched-at-runtime`.
 
-**Layer 2 — the de-SMC pass (`lift/smc.py`, opt-in).**  Each refused write is
-resolved against the DECODED target instruction: which field do the written
-bytes land in?  When every write into a function is a supported operand-field
-patch, the function becomes a `desmc-candidate` and `liftemit --desmc` emits
-it with those operands read from LIVE CODE MEMORY instead of baked in:
+There is no switch that permits the ordinary emitter to freeze those bytes.
+Unsupported or unresolved code mutation remains fail-loud and may continue to
+execute through another selected implementation.
 
-    # 1010:6728  6a05  push imm8        (field runtime-patched)
-    _pi = mem.rb(s.cs, 0x6729)
-    cpu.push((_pi | 0xFF00) if _pi & 0x80 else _pi)
+## Optional transform
 
-This is semantics-preserving by construction: the real CPU decodes whatever
-the bytes hold at that moment, and the transformed lift reads exactly those
-bytes.  Patchers need no special handling — their stores into the code
-segment are ordinary memory writes the transformed consumer now observes.
-Patch timing, multiple patchers, and re-patching between calls are all
-covered by the same argument.  The patch-slot cells are DATA now:
-`dos_re.bootimage` preserves them from poisoning automatically (from the
-IR's `smc` verdicts), and `tools/audit_boot_image.py` accepts the exemption
-only for slots the IR itself declares.
+`dos_re/lift/smc.py` resolves a statically visible write against the decoded
+target instruction. A function receives a `desmc-candidate` verdict only when
+every write into it targets a supported operand field. For that candidate,
+`liftemit --desmc` emits reads from the live code-memory field instead of
+embedding the operand found in the recovery image.
 
-## Mutation classes and their verdicts
+Patchers still perform ordinary memory writes. The generated consumer observes
+the field at execution time, so different patch timing or repeated writes do
+not require a separate generated function for each operand value. This is the
+intended model, not promotion evidence; the emitted implementation must still
+pass differential verification.
 
-| class | example | verdict |
-|---|---|---|
-| immediate operand of a data instruction | `push imm8`, `ALU acc,imm`, `mov reg,imm` | **transformable** (v1) |
-| absolute far-transfer pointer | `jmp/call far ptr16:16` (ISR chain-to-old-vector) | **transformable** (v1) — reads the live pointer, i.e. becomes an indirect far transfer, which the emitter already models as a tail exit |
-| memory displacement / moffs address | `mov [imm16], ax` | supportable by the same mechanism; not yet enabled (no observed case) |
-| relative branch displacement | patched `jcc rel8` | **refused** — a mutated relative target cannot be re-expressed against lifted block structure without new machinery |
-| ModR/M or opcode mutation | instruction SHAPE changes | **refused** — a finite-variant emitter (emit each observed variant, dispatch on the live byte) is conceivable but unproven |
-| whole-sequence replacement / runtime-generated code | | **refused**, permanently — that is not operand patching, it is a different program |
-| patch inside the entry-signature window | | **refused** (`patched-inside-entry-signature`) — it would trip the module's own SMC guard on every legitimate re-patch |
+## Current mutation classes
 
-A single unsupported write keeps the whole function refused
-(`desmc-unsupported` with the slot-level reason).
+| Mutation | Current verdict |
+|---|---|
+| Supported immediate operand of a data instruction | transformable candidate |
+| Absolute pointer of a direct far call or jump | transformable candidate |
+| Memory displacement or `moffs` address | refused; not implemented |
+| Relative branch displacement | refused; lifted block targets would change |
+| ModR/M or opcode | refused; instruction shape would change |
+| Write crossing an instruction boundary | refused |
+| Whole-sequence replacement or runtime-generated code | refused |
+| Patch inside the generated entry-signature window | refused |
 
-## Verification contract
+One unsupported slot gives the whole function a `desmc-unsupported` verdict
+with a slot-level reason.
 
-A candidate is a CANDIDATE, not a proof.  The emitted module is promoted by
-the ordinary differential machinery — `liftverify` in situ, then the
-end-to-end replay differential — run over inputs that exercise MULTIPLE patch
-configurations.  The SkyRoads validation: the transformed `66E6`, executed
-from the identical pre-state as the interpreted oracle over a full TREKDAT
-chunk (2,148 bit-reader calls through runtime-patched widths that the
-prologue re-writes per chunk), matched the oracle's final state with a
-**0-byte diff over the full 1 MB machine image**, and the previously-corrupt
-startup allocation sequence became byte-identical to the interpreter's.
+## Evidence and identities
 
-## Census report
-
-Every function's IR record carries its verdict:
+Recovery IR owns the static de-SMC verdict and the cited write/field facts:
 
 ```json
-"smc": {
-  "status": "desmc-candidate",
-  "slots": [
-    {"patcher": "66E6:66F5", "write_width": 1, "target": "66E6:6728",
-     "field": "imm", "field_addr": "6729", "field_size": 1,
-     "status": "candidate"}
-  ]
+{
+  "smc": {
+    "status": "desmc-candidate",
+    "slots": [
+      {
+        "patcher": "66E6:66F5",
+        "write_width": 1,
+        "target": "66E6:6728",
+        "field": "imm",
+        "field_addr": "6729",
+        "field_size": 1,
+        "status": "candidate"
+      }
+    ]
+  }
 }
 ```
 
-`status` distinguishes: no `smc` key (not patched at all) /
-`desmc-candidate` / `desmc-unsupported` (with per-slot reasons).  Records
-with candidates keep `liftable: false` — the plain emit path still refuses
-them; only `--desmc` consumes the verdict.
+The plain record remains `liftable: false`; only the explicit de-SMC emit path
+consumes the candidate verdict. Addresses identify the decoded write and field
+within that evidence source. Runtime code variants and stable program
+identities remain separate evidence that can be projected into the Execution
+Atlas.
 
-Semantic naming (e.g. SkyRoads' recovered `LzsWidths.width_len` for the slot
-at `6729`) is deliberately NOT required by the machinery: slots are keyed by
-address + decoded field, which is what the equivalence proof needs.  A port's
-naming manifest may label slots for readability; that is metadata, never
-evidence.
+If a build image zeroes recovered code bytes, `dos_re.bootimage` preserves
+de-SMC operand cells declared by Recovery IR because the generated
+implementation reads them as data. That preservation makes the artifact
+internally usable; code-byte poisoning is an optional diagnostic and is not
+proof of release coverage or detachment.
+
+## Verification contract
+
+Before selecting a transformed implementation as faithful:
+
+1. use `liftverify --desmc` for focused in-situ comparison;
+2. replay oracle and candidate intervals that exercise multiple patch values
+   and repeated patching when applicable;
+3. compare complete continuation state or the declared canonical semantic
+   projection;
+4. retain the Recovery IR verdict, implementation digest, and replay evidence
+   referenced by the catalog entry;
+5. keep unseen or unsupported runtime code variants fail-loud.
+
+Semantic names can label fields for readers, but they do not replace the
+decoded write/operand evidence.
+
+The incident that motivated this mechanism is recorded in
+[`history/desmc_2.0.md`](history/desmc_2.0.md).

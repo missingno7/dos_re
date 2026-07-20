@@ -1,99 +1,78 @@
-> Current policy reference for `OverrideCategory.ENHANCEMENT`. Execution and
-> release closure remain owned by [`execution_planner.md`](execution_planner.md).
+# Non-authoritative enhancements
 
-# Non-authoritative enhancements over verified game state
+A non-authoritative enhancement changes presentation or host integration
+without changing authoritative program behavior. It is declared with
+`OverrideCategory.ENHANCEMENT` in the implementation catalog and selected
+explicitly by an execution configuration. Catalog selection does not make an
+implementation read-only automatically: read-only behavior is a declared and
+tested policy contract enforced by the port's adapter, projections, and
+verification.
 
-> This file defines the read-only authoritative-state boundary and verification
-> policy for presentation and host integrations.
-> Enhancement registration and verification policy are defined by
-> [`override_architecture.md`](override_architecture.md).
+See [`override_architecture.md`](override_architecture.md) for catalog
+ownership and [`execution_planner.md`](execution_planner.md) for composition
+and release policy.
 
-The Prehistorik 2 port shipped modern comforts (widescreen, frame
-interpolation, smooth transitions, stereo SFX, scaling) *without ever
-diverging from the verified game*. That worked because of two rules — one
-about the boundary, one about the **order** — and every port built on this
-framework should adopt both.
+## Contract
 
-## The sequencing rule: verify the authoritative seam first
+An enhancement declaration identifies:
 
-**An enhancement may attach only after the authoritative state it consumes has
-a verified read-only seam.** It does not require the entire game to be
-memoryless. The unchanged surrounding program may still run through the
-interpreter, generated VMless code, or generated CPUless code:
+- the authoritative state projection it consumes;
+- the presentation or host output it owns;
+- any host services and assets it requires;
+- the output domains intentionally excluded from parity comparison;
+- tests showing that enabling it does not mutate authoritative state.
 
-```text
-baseline backend → verified authoritative state seam → read-only enhancement
-                 \____________________________________/ replay state comparison
-```
+The adapter should expose only the state needed by the enhancement and separate
+writable presentation sinks from authoritative storage. Python cannot make an
+arbitrary object graph transitively immutable, so a wrapper or convention is
+not proof. Verification is the enforcement boundary.
 
-Do not use an enhancement to invent missing gameplay state or hide an
-unverified subsystem. If presentation needs information the baseline does not
-expose, recover and verify that state seam first. This permits useful
-renderers, audio outputs, host UI, and debug visualization to land
-incrementally without turning presentation into a second authority.
+An implementation that writes gameplay, timing, collision, RNG, object, level,
+input, scheduler, or other authoritative state is not an enhancement. It must
+be classified as either a faithful replacement or a behavioral modification.
 
-## The boundary rule
+## Attachment seam
 
-**Enhancements are pure presentation: they read game state and write none.**
+An enhancement may attach as soon as its input seam is understood and verified;
+the rest of the program may still use any mixture of interpreted, generated,
+ABI-recovered, DOS-memory-backed, or native implementations. It does not require
+global memoryless or EXE-detached execution.
 
-- The **faithful core** owns gameplay, timing, collisions, RNG, object state,
-  level state, input semantics — everything the oracle verifies. It is
-  byte-comparable against the original forever.
-- The **enhanced layer** owns widescreen, interpolation, scaling, CRT vs
-  square-pixel aspect, stereo expansion, modern UI/options, fullscreen. It may
-  intentionally diverge from the original's *frame output*; it must never
-  mutate gameplay state.
+The seam may be a read-only DOS-memory view, a canonical semantic projection,
+or a recovered presentation-intent model. It remains a projection of the
+authoritative state, not a second source of gameplay truth. If required data is
+missing, recover and verify that state at its owning layer instead of deriving
+plausible gameplay facts in presentation code.
 
-Enforce it, don't aspire to it: pre2 proved every enhancement pixel-/state-
-equal to the faithful game at its neutral setting (the "alpha=1 parity gate"),
-so *enhanced never means diverged* — it is the same game, shown better. An
-enhancement that needs data the faithful core doesn't expose gets that data
-**recovered at the source layer first** — never faked in the renderer
-(pitfall #18). The same boundary applies whether authoritative state is still
-DOS-memory-backed or has moved into detached objects.
+## Verification
 
-The seam enhancements attach to is a **semantic render-intent model** emitted
-by the faithful renderer (sprites, camera, palette, transition state) —
-*derived from* the canonical state capture, never a second parallel truth.
-Frame interpolation then needs only a rolling two-snapshot window (pre2's
-`frame_capture.py` pattern) and lerps presentation, not simulation.
+For the same replay identity and interval:
 
-## The widescreen lesson (why "just render wider" is wrong)
+1. run the selected authoritative composition with the enhancement disabled;
+2. run it with the enhancement enabled;
+3. compare complete authoritative continuation state or the declared canonical
+   semantic projection;
+4. exclude only the enhancement's declared presentation outputs;
+5. test enable/disable transitions and neutral/default settings when supported.
 
-True widescreen is not drawing a wider background. Before widening anything,
-answer from the oracle:
+An intended framebuffer, audio, window, controller, or host-UI difference is
+acceptable only inside the declared output domain. Any authoritative
+difference remains a failure. A visual parity check alone cannot prove the
+enhancement contract.
 
-- Are objects/projectiles/particles **culled at the 320-px window** by the
-  original code? Drawing the margins then shows pop-in — or nothing.
-- Does the original **producer/spawner** only create entities near the
-  window? *Advancing the producer to fill the margins changes gameplay* —
-  that is a simulation mutation wearing a presentation costume. Forbidden.
-- Are foreground overlays and HUD chrome still clipped correctly?
-- Some content genuinely can't widen (pre2's gorilla-boss levels draw from
-  off-screen tiles); the honest answer there is 4:3 content with a wide HUD.
+## Common design boundaries
 
-So widescreen decomposes into: safely-widenable layers (real extra tilemap
-columns), presentation-only choices (HUD placement, edge treatment), and
-untouchable simulation (producers, culling that feeds back into state). Pre2's
-"true widescreen" mode draws already-simulated objects out into the margins —
-it never simulates more of the world.
+- Widescreen presentation may reveal already-authoritative world state; it
+  must not advance producers, extend collision ranges, or simulate additional
+  entities merely to fill the new area.
+- Interpolation blends presentation samples and must not advance simulation or
+  write interpolated values back into authoritative state.
+- Display scaling and pixel-aspect correction operate after the authoritative
+  framebuffer or render intent used by verification.
+- Modern audio output may transform a declared audio stream, but must not alter
+  authoritative mixer, timing, or interrupt state.
+- Gamepad or host input integration normalizes into the same deterministic
+  input semantics used by replay.
 
-## The pixel-aspect lesson
-
-320×200 DOS games were displayed on 4:3 CRTs — pixels 1.2× tall (`par=1.2` in
-`dos_re.display`). But internal effects were often authored in raw square-
-pixel coordinates. Both presentations are legitimate:
-
-- **4:3 (par=1.2)** — historically authentic display shape.
-- **Square pixels (par=1.0)** — preserves raw internal pixel geometry.
-
-Make it a user-selectable presentation option. Neither affects gameplay or any
-verification: frame verification compares the framebuffer *before*
-presentation scaling.
-
-## Status labeling
-
-Declare enhanced code as a non-authoritative enhancement in the unified
-override registry and keep it out of generated baseline directories. Anything
-that writes authoritative game state is not an enhancement: it is either a
-faithful replacement or an explicitly declared behavioral modification.
+Historical port-specific lessons are preserved separately in
+[`history/enhancements_2.0.md`](history/enhancements_2.0.md).

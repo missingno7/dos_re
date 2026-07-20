@@ -4,7 +4,8 @@
 how far the INTERPRETER advances IP in one step. For a SEQ instruction that delta IS the encoded
 length, so a disagreement means the static decode is wrong (an operand-length bug, or a transfer
 misclassified as SEQ) and the function is refused ``decoder-mismatch``. That refusal is deliberately
-fatal: silently lifting a mis-decoded instruction stream is the worst failure this pipeline has.
+fatal: silently lifting a mis-decoded instruction stream invalidates every
+artifact derived from that scan.
 
 WHY THE PROBE MUST RESTORE MEMORY
 ---------------------------------

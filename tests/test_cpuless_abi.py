@@ -1,4 +1,4 @@
-"""CPU-ABI inference basics (dos_re.lift.cpuless) -- the M3 analysis layer.
+"""CPU-ABI inference basics (dos_re.lift.cpuless).
 
 Locks the per-instruction register-effects table and the per-function ABI
 aggregation on small synthetic functions, so census results stay stable while
@@ -72,13 +72,13 @@ def test_bp_frame_ea_defaults_to_ss():
 
 def test_int_effect_and_vectored_int_and_indirect():
     # A native DOS/BIOS INT is a PLATFORM EFFECT (explicit reg bundle), not a
-    # refusal (tier 8).
+    # refusal.
     e = register_effects(Inst(ip=0, length=2, kind="int", mnemonic="int",
                               raw=b"\xcd\x21", op=0xCD, int_no=0x21))
     assert e.refusal is None and e.int_effect == 0x21
     assert {"ax", "bx", "cx", "dx", "ds", "es"} <= set(e.reads) <= set(e.writes | e.reads)
     # A game-installed vector (INT 61h sound driver) is a CALL INTO GAME
-    # CODE through the runtime IVT (tier 12): full-bundle effect, the
+    # CODE through the runtime IVT: full-bundle effect, the
     # recovered IRET-contract handler composes -- no refusal.
     ev = register_effects(Inst(ip=0, length=2, kind="int", mnemonic="int",
                                raw=b"\xcd\x61", op=0xCD, int_no=0x61))
@@ -97,14 +97,14 @@ def test_int_effect_and_vectored_int_and_indirect():
                                 raw=b"\xcd\x62", op=0xCD, int_no=0x62))
     assert ev2.refusal == "vectored-int-call"
     # NEAR indirect transfers are runtime-resolved recovered dispatch
-    # (tier 9): conservative full-bundle dataflow, no refusal.
+    # with conservative full-bundle dataflow and no refusal.
     e2 = register_effects(Inst(ip=0, length=2, kind="jmp_ind", mnemonic="jmp",
                                raw=b"\xff\xe0", op=0xFF, modrm=0xE0))
     assert e2.refusal is None
     assert {"ax", "bx", "ds", "es", "ss"} <= set(e2.reads)
     assert "ss" not in e2.writes and "ax" in e2.writes
     # FAR indirect jmp chains to a saved interrupt vector: the ISR-chain
-    # tail (tier 13) -- full-bundle effect dispatched through HANDLERS on
+    # tail -- full-bundle effect dispatched through HANDLERS on
     # the invoker's interrupt frame, no refusal.
     e3 = register_effects(Inst(ip=0, length=4, kind="jmp_ind", mnemonic="jmp",
                                raw=b"\xff\x2e\xbe\x1f", op=0xFF, modrm=0x2E,

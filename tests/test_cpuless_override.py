@@ -1,12 +1,11 @@
-"""An AUTHORITATIVE OVERRIDE composes byte-for-byte -- the unified override-graph
-seam (impl = overrides.get(addr, generated[addr])).
+"""A selected authored implementation composes byte-for-byte through an adapter.
 
 A consumer with a verified hand-recovered body supplies its CONTRACT (ret_kind,
 inputs, outputs, ret_pop, ...) and the body itself (import_base.<name>, obeying
 the CPUless body ABI ``func(mem[, plat], *, **inputs) -> (outputs, compat)``);
-dos_re seeds the contract so callers compose the override exactly like a
-generated callee, and emits ONLY the identity-preserving CPU-ABI adapter
-(:func:`emit_override_adapter`) -- the body is authoritative, never regenerated.
+The catalog and execution plan own selection. This test exercises the generic
+identity-preserving CPU-ABI adapter (:func:`emit_override_adapter`) after
+selection; generated-promotion tools do not own an override registry.
 
 This is a DIFFERENTIAL regression on the SEAM, not on a body the strict emitter
 produced:
@@ -20,11 +19,9 @@ produced:
     the override entry (a far frame on the stack), reproduces the same effect
     and applies the historical far RET -- proving the lifted-slot bridge.
 
-Virtual time is the ISLAND convention (the override is one dispatch step, like
-every hand-recovered island since the first) -- NOT the generated body's
-instruction-exact timeline; the boot-image gate samples at API boundaries where
-that difference is not observable, and this test asserts STATE equality, not
-cost equality.
+This test asserts state equality. Timing equality is covered independently by
+``test_cpuless_override_vtime`` and remains part of complete continuation
+verification.
 """
 from __future__ import annotations
 

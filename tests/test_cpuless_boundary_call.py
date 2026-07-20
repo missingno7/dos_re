@@ -43,7 +43,7 @@ def test_boundary_head_on_a_composed_call_promotes():
     scan = _scan(_CODE)
     spec = check_promotable(scan, callees=_CALLEE, boundary_addrs=frozenset({0x0000}))
     assert spec is not None
-    assert spec.parks                       # a boundary head makes it standalone-only
+    assert spec.parks                       # boundary head: direct-graph-only
 
     src = emit_recovered(scan, abi_scan(scan, callee_effects={
         0x0010: (frozenset(), frozenset({"ax"}))}), "1010:0100",

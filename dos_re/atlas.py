@@ -1,13 +1,20 @@
-"""Persistent, evidence-backed map of a recovered program.
+"""Persistent query projection over evidence about a recovered program.
 
-The Atlas consumes retained Recovery IR and oracle ReplayArtifact evidence.
-It stores normalized source records separately from deterministic derived
-indexes and implements :class:`dos_re.execution.CoverageSource`.
+An Atlas can grow from any useful subset of retained Recovery IR, oracle
+ReplayArtifact observations, runtime-code facts, or explicit manual facts.
+Recovery IR is the strongest static skeleton when it exists, but it is not a
+prerequisite: observed execution points and transfers can form a useful map
+before function boundaries are known.
+
+Source records remain independently attributable.  The Atlas stores normalized
+copies beside deterministic derived indexes and implements
+:class:`dos_re.execution.CoverageSource`; it does not become the decoder,
+replay, implementation-selection, or runtime-dispatch authority.
 """
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import os
@@ -27,7 +34,7 @@ from .identity import (
     real_mode_address,
 )
 from .lift.ir import load_recovery_ir
-from .replay import ExecutionProfile, ReplayArtifact, ReplayPoint
+from .replay import ReplayArtifact, ReplayExecutionIdentity, ReplayPoint
 from .runtime_code import RuntimeCodeSlot
 
 ATLAS_FORMAT_VERSION = 1
@@ -49,6 +56,8 @@ class AtlasNode:
     label: str
     metadata: Mapping[str, Any]
     evidence: tuple[str, ...]
+    conflicts: Mapping[str, tuple[Mapping[str, Any], ...]] = field(
+        default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -59,6 +68,9 @@ class AtlasEdge:
     status: str
     observation_count: int
     evidence: tuple[str, ...]
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    conflicts: Mapping[str, tuple[Mapping[str, Any], ...]] = field(
+        default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -70,10 +82,17 @@ class ReplayCoverage:
     last_exit: ReplayPoint | None
     cached_at_or_before_entry: ReplayPoint | None
     cached_at_or_before_exit: ReplayPoint | None
+    runtime_variants: tuple[str, ...] = ()
+    incomplete: bool = False
+    annotations: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def complete(self) -> bool:
-        return self.first_entry is not None and self.last_exit is not None
+        return (
+            not self.incomplete
+            and self.first_entry is not None
+            and self.last_exit is not None
+        )
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -134,6 +153,43 @@ def _portable(value: Any) -> Any:
 
 def _point(raw: Mapping[str, Any] | None) -> ReplayPoint | None:
     return None if raw is None else ReplayPoint.from_json(raw)
+
+
+def _claim(
+    item: dict[str, Any], field_name: str, value: Any, source_id: str,
+) -> None:
+    """Retain one attributable metadata/label claim for materialization."""
+    claim = {"source": source_id, "value": _portable(value)}
+    claims = item.setdefault("_claims", {}).setdefault(field_name, [])
+    if claim not in claims:
+        claims.append(claim)
+
+
+def _materialize_claims(item: dict[str, Any]) -> None:
+    """Expose disagreements instead of silently choosing a source's metadata."""
+    conflicts: dict[str, list[dict[str, Any]]] = {}
+    for field_name, claims in sorted(item.pop("_claims", {}).items()):
+        ordered = sorted(
+            claims,
+            key=lambda claim: (
+                str(claim["source"]), _canonical_json(claim["value"])),
+        )
+        distinct = {
+            _canonical_json(claim["value"]): claim["value"] for claim in ordered
+        }
+        if len(distinct) == 1:
+            value = next(iter(distinct.values()))
+            if field_name == "label":
+                item["label"] = value
+            else:
+                item["metadata"][field_name] = value
+            continue
+        conflicts[field_name] = ordered
+        if field_name == "label":
+            item["label"] = ordered[0]["value"]
+        else:
+            item["metadata"].pop(field_name, None)
+    item["conflicts"] = conflicts
 
 
 class ExecutionAtlas:
@@ -427,8 +483,9 @@ class ExecutionAtlas:
                 "label": slot.name,
                 "metadata": {
                     "image_id": str(image), "address_space": address_space,
-                    "address": address, "island": slot.island, "role": slot.role,
-                    "installer_status": slot.installer_status,
+                    "address": address, "subsystem": slot.subsystem,
+                    "role": slot.role,
+                    "writer_status": slot.writer_status,
                     "staticized": slot.is_staticized,
                 },
                 "evidence": [source_id],
@@ -496,6 +553,24 @@ class ExecutionAtlas:
             choices = [item for item in cached if item.ordinal <= point.ordinal]
             return max(choices, key=lambda item: item.ordinal) if choices else None
 
+        annotations = artifact.point_annotations()
+
+        def interval_annotations(
+            first: ReplayPoint | None, last: ReplayPoint | None,
+        ) -> list[dict[str, Any]]:
+            if first is None:
+                return []
+            return [
+                annotation for annotation in annotations
+                if ReplayPoint.from_json(annotation["point"]).ordinal
+                >= first.ordinal
+                and (
+                    last is None
+                    or ReplayPoint.from_json(annotation["point"]).ordinal
+                    <= last.ordinal
+                )
+            ]
+
         visits = []
         for visit in artifact.function_visits():
             visits.append({
@@ -510,6 +585,9 @@ class ExecutionAtlas:
                 "cached_at_or_before_exit": (
                     None if nearest(visit.last_exit) is None
                     else nearest(visit.last_exit).to_json()),
+                "annotations": interval_annotations(
+                    visit.first_entry, visit.last_exit),
+                "incomplete": visit.incomplete,
             })
         replay_id = f"replay:{artifact.identity_digest}"
         source = {
@@ -533,22 +611,26 @@ class ExecutionAtlas:
                 [] if evidence is None else list(evidence.runtime_variants)),
             "incomplete_functions": (
                 [] if evidence is None else list(evidence.incomplete_functions)),
-            "annotations": list(artifact.point_annotations()),
+            "annotations": list(annotations),
         }
         return self._store_source(source)
 
     def add_manual_facts(
-        self, identity: str, *, nodes: Iterable[Mapping[str, Any]] = (),
+        self, identity: str, *, provenance: Mapping[str, Any],
+        nodes: Iterable[Mapping[str, Any]] = (),
         edges: Iterable[Mapping[str, Any]] = (),
     ) -> str:
         """Add explicit recovered facts with their own cited source identity."""
         if not identity:
             raise ValueError("manual evidence identity must not be empty")
+        if not provenance:
+            raise ValueError("manual evidence requires source provenance")
         source = {
             "format_version": ATLAS_FORMAT_VERSION,
             "kind": "manual",
             "identity": f"manual:{identity}",
             "program_id": str(self.program),
+            "provenance": _portable(dict(provenance)),
             "nodes": [dict(item) for item in nodes],
             "edges": [dict(item) for item in edges],
         }
@@ -580,6 +662,7 @@ class ExecutionAtlas:
         nodes: dict[str, dict[str, Any]] = {}
         edge_map: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         replay_rows: list[dict[str, Any]] = []
+        replay_sources: list[dict[str, Any]] = []
         for entry, source in self._sources():
             source_id = str(entry["identity"])
             if source["kind"] in {"static", "manual"}:
@@ -593,9 +676,11 @@ class ExecutionAtlas:
                     if node["kind"] != str(raw["kind"]):
                         raise AtlasError(f"conflicting node kinds for {identity}")
                     if node["metadata"].get("observed_only"):
-                        node["label"] = str(raw.get("label", identity))
                         node["metadata"].pop("observed_only", None)
-                    node["metadata"].update(raw.get("metadata", {}))
+                    _claim(
+                        node, "label", str(raw.get("label", identity)), source_id)
+                    for name, value in raw.get("metadata", {}).items():
+                        _claim(node, str(name), value, source_id)
                     node["evidence"] = sorted(set(node["evidence"]) | {source_id})
                 for raw in source.get("edges", ()):
                     key = (
@@ -607,9 +692,32 @@ class ExecutionAtlas:
                         "status": key[3], "observation_count": 0,
                         "metadata": {}, "evidence": [],
                     })
-                    edge["metadata"].update(raw.get("metadata", {}))
+                    for name, value in raw.get("metadata", {}).items():
+                        _claim(edge, str(name), value, source_id)
                     edge["evidence"] = sorted(set(edge["evidence"]) | {source_id})
             elif source["kind"] == "replay":
+                runtime_variants = tuple(sorted(map(
+                    str, source.get("runtime_variants", ()))))
+                incomplete_functions = frozenset(map(
+                    str, source.get("incomplete_functions", ())))
+                annotations = tuple(source.get("annotations", ()))
+                replay_sources.append({
+                    "replay_id": source_id,
+                    "artifact": source["artifact"],
+                    "runtime_variants": list(runtime_variants),
+                    "incomplete_functions": sorted(incomplete_functions),
+                    "annotations": list(annotations),
+                })
+                for variant_id in runtime_variants:
+                    variant = nodes.setdefault(variant_id, {
+                        "id": variant_id,
+                        "kind": "runtime-code-variant",
+                        "label": variant_id,
+                        "metadata": {"observed_only": True},
+                        "evidence": [],
+                    })
+                    variant["evidence"] = sorted(
+                        set(variant["evidence"]) | {source_id})
                 for visit in source.get("visits", ()):
                     function_id = str(visit["function_id"])
                     nodes.setdefault(function_id, {
@@ -622,6 +730,11 @@ class ExecutionAtlas:
                     replay_rows.append({
                         "replay_id": source_id, **visit,
                         "artifact": source["artifact"],
+                        "runtime_variants": list(runtime_variants),
+                        "incomplete": (
+                            bool(visit.get("incomplete", False))
+                            or function_id in incomplete_functions
+                        ),
                     })
                 for raw in source.get("transfers", ()):
                     key = (
@@ -643,6 +756,10 @@ class ExecutionAtlas:
                     "label": endpoint, "metadata": {"observed_only": True},
                     "evidence": list(edge["evidence"]),
                 })
+        for node in nodes.values():
+            _materialize_claims(node)
+        for edge in edge_map.values():
+            _materialize_claims(edge)
         graph = {
             "format_version": ATLAS_FORMAT_VERSION,
             "program_id": str(self.program),
@@ -653,6 +770,8 @@ class ExecutionAtlas:
         replay_index = {
             "format_version": ATLAS_FORMAT_VERSION,
             "program_id": str(self.program),
+            "replays": sorted(
+                replay_sources, key=lambda item: item["replay_id"]),
             "coverage": sorted(replay_rows, key=lambda item: (
                 item["function_id"], item["replay_id"])),
         }
@@ -703,7 +822,11 @@ class ExecutionAtlas:
         return tuple(
             AtlasNode(
                 str(item["id"]), str(item["kind"]), str(item["label"]),
-                dict(item.get("metadata", {})), tuple(item.get("evidence", ())))
+                dict(item.get("metadata", {})), tuple(item.get("evidence", ())),
+                {
+                    str(name): tuple(dict(claim) for claim in claims)
+                    for name, claims in item.get("conflicts", {}).items()
+                })
             for item in graph["nodes"]
             if kind is None or item["kind"] == kind
         )
@@ -741,7 +864,12 @@ class ExecutionAtlas:
             AtlasEdge(
                 str(item["source"]), str(item["target"]), str(item["kind"]),
                 str(item["status"]), int(item.get("observation_count", 0)),
-                tuple(item.get("evidence", ())))
+                tuple(item.get("evidence", ())),
+                dict(item.get("metadata", {})),
+                {
+                    str(name): tuple(dict(claim) for claim in claims)
+                    for name, claims in item.get("conflicts", {}).items()
+                })
             for item in graph["edges"]
         )
 
@@ -794,6 +922,10 @@ class ExecutionAtlas:
                 _point(item.get("first_entry")), _point(item.get("last_exit")),
                 _point(item.get("cached_at_or_before_entry")),
                 _point(item.get("cached_at_or_before_exit")),
+                tuple(map(str, item.get("runtime_variants", ()))),
+                bool(item.get("incomplete", False)),
+                tuple(dict(annotation)
+                      for annotation in item.get("annotations", ())),
             )
             for item in replays["coverage"] if item["function_id"] == function_id
         )
@@ -822,7 +954,9 @@ class ExecutionAtlas:
         outgoing: dict[str, list[str]] = {}
         for edge in self.edges():
             if edge.status in {"resolved", "observed"} \
-                    and node_kinds.get(edge.target) == "function":
+                    and node_kinds.get(edge.target) in {
+                        "function", "execution-point", "runtime-code-variant",
+                    }:
                 outgoing.setdefault(edge.source, []).append(edge.target)
         reachable: set[str] = set()
         queue = deque(roots)

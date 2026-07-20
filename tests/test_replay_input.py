@@ -14,7 +14,7 @@ from dos_re.replay_input import (
 )
 from dos_re.replay import (
     ContinuationState,
-    ExecutionProfile,
+    ReplayExecutionIdentity,
     ReplayArtifact,
     ReplayRecording,
 )
@@ -30,7 +30,7 @@ class DummyRuntime:
 
 
 def _profile():
-    return ExecutionProfile(
+    return ReplayExecutionIdentity(
         "real-oracle", "oracle", "interpreter", "image", "runtime", "devices",
         "dos-re-real-mode-continuation-v1", "machine-v1")
 

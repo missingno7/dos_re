@@ -56,7 +56,7 @@ def flat_address(address: int, *, width: int = 8) -> str:
 class ProgramIdentity:
     """One recovered program/product.
 
-    ``key`` preserves an existing project identity such as ``skyroads:1.0``.
+    ``key`` preserves an existing project identity such as ``game:1.0``.
     It is opaque: only the structured child components are escaped.
     """
 

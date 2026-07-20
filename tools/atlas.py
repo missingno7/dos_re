@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -29,6 +30,10 @@ def _edge(edge: AtlasEdge) -> dict[str, object]:
         "source": edge.source, "target": edge.target, "kind": edge.kind,
         "status": edge.status, "observation_count": edge.observation_count,
         "evidence": list(edge.evidence),
+        "metadata": dict(edge.metadata),
+        "conflicts": {
+            name: list(claims) for name, claims in edge.conflicts.items()
+        },
     }
 
 
@@ -44,19 +49,29 @@ def main(argv=None) -> int:
     create.add_argument("atlas")
     create.add_argument("--program", required=True)
 
-    build = commands.add_parser("build", help="import retained Recovery IR")
-    build.add_argument("atlas")
-    build.add_argument("--ir", required=True)
-    build.add_argument("--program", required=True)
-    build.add_argument("--image-label", required=True)
-    build.add_argument("--image-sha256", required=True)
-    build.add_argument("--address-space", default="real-mode")
-    build.add_argument("--root", action="append", default=[])
-    build.add_argument("--product-profile", action="append", default=[])
+    ingest_ir = commands.add_parser(
+        "ingest-ir", help="import retained Recovery IR as one evidence source")
+    ingest_ir.add_argument("atlas")
+    ingest_ir.add_argument("--ir", required=True)
+    ingest_ir.add_argument("--program", required=True)
+    ingest_ir.add_argument("--image-label", required=True)
+    ingest_ir.add_argument("--image-sha256", required=True)
+    ingest_ir.add_argument("--address-space", default="real-mode")
+    ingest_ir.add_argument("--root", action="append", default=[])
+    ingest_ir.add_argument("--product-profile", action="append", default=[])
 
     ingest = commands.add_parser("ingest-replay", help="import oracle replay evidence")
     ingest.add_argument("atlas")
     ingest.add_argument("replay")
+
+    facts = commands.add_parser(
+        "ingest-facts", help="import explicit identity-based node/edge evidence")
+    facts.add_argument("atlas")
+    facts.add_argument("facts")
+    facts.add_argument(
+        "--identity",
+        help="stable evidence-source identity (defaults to the JSON identity field)",
+    )
 
     for name in ("validate", "show", "callers", "callees", "coverage",
                  "best-replay", "unresolved", "path"):
@@ -76,7 +91,7 @@ def main(argv=None) -> int:
         atlas = ExecutionAtlas.create(args.atlas, program=ProgramIdentity(args.program))
         print(atlas.identity_digest)
         return 0
-    if args.command == "build":
+    if args.command == "ingest-ir":
         path = Path(args.atlas)
         program = ProgramIdentity(args.program)
         atlas = (
@@ -98,6 +113,28 @@ def main(argv=None) -> int:
     if args.command == "ingest-replay":
         print(_atlas(args.atlas).ingest_replay(args.replay))
         return 0
+    if args.command == "ingest-facts":
+        document = json.loads(Path(args.facts).read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise SystemExit("manual facts document must be a JSON object")
+        identity = args.identity or document.get("identity")
+        if not isinstance(identity, str) or not identity:
+            raise SystemExit(
+                "manual facts require --identity or a non-empty JSON identity field")
+        nodes, edges = document.get("nodes", ()), document.get("edges", ())
+        if not isinstance(nodes, list) or not isinstance(edges, list):
+            raise SystemExit("manual facts nodes and edges must be JSON arrays")
+        facts_path = Path(args.facts)
+        print(_atlas(args.atlas).add_manual_facts(
+            identity,
+            provenance={
+                "artifact": facts_path.name,
+                "sha256": hashlib.sha256(facts_path.read_bytes()).hexdigest(),
+            },
+            nodes=nodes,
+            edges=edges,
+        ))
+        return 0
 
     atlas = _atlas(args.atlas)
     as_json = bool(getattr(args, "json", False))
@@ -108,6 +145,9 @@ def main(argv=None) -> int:
         _emit({
             "identity": node.identity, "kind": node.kind, "label": node.label,
             "metadata": dict(node.metadata), "evidence": list(node.evidence),
+            "conflicts": {
+                name: list(claims) for name, claims in node.conflicts.items()
+            },
         }, as_json)
     elif args.command == "callers":
         _emit([_edge(edge) for edge in atlas.callers(args.identity)], as_json)
@@ -131,6 +171,9 @@ def main(argv=None) -> int:
             "cached_at_or_before_entry": (
                 None if item.cached_at_or_before_entry is None
                 else item.cached_at_or_before_entry.to_json()),
+            "runtime_variants": list(item.runtime_variants),
+            "incomplete": item.incomplete,
+            "annotations": list(item.annotations),
         }, as_json)
     elif args.command == "unresolved":
         _emit([_edge(edge) for edge in atlas.unresolved()], as_json)

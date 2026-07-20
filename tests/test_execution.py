@@ -45,6 +45,52 @@ def _services(*items):
     return RuntimeServiceCatalog(tuple(items))
 
 
+def test_implementation_origin_and_category_are_not_parallel_taxonomies():
+    with pytest.raises(ValueError, match="authored implementations require"):
+        _implementation(
+            "unclassified", (ROOT,), origin=ImplementationOrigin.AUTHORED)
+    with pytest.raises(ValueError, match="use baseline category"):
+        _implementation(
+            "generated-enhancement", (ROOT,),
+            origin=ImplementationOrigin.GENERATED,
+            category=OverrideCategory.ENHANCEMENT,
+        )
+
+
+def test_selected_executable_components_require_stable_content_digests():
+    with pytest.raises(ValueError, match="selected implementations require"):
+        plan_execution(
+            profile_configuration("development", program_identity=PROGRAM),
+            COVERAGE,
+            _catalog(_implementation("generated", (ROOT, CALLEE), digest="")),
+        )
+
+    with pytest.raises(ValueError, match="bootstrap providers require"):
+        plan_execution(
+            profile_configuration(
+                "development",
+                program_identity=PROGRAM,
+                bootstrap_provider=NativeBootstrapProvider(
+                    "unstable-bootstrap", ("state",),
+                ),
+            ),
+            COVERAGE,
+            _catalog(_implementation("generated", (ROOT, CALLEE))),
+        )
+
+    with pytest.raises(ValueError, match="runtime services require"):
+        plan_execution(
+            profile_configuration(
+                "development",
+                program_identity=PROGRAM,
+                product_services=("display",),
+            ),
+            COVERAGE,
+            _catalog(_implementation("generated", (ROOT, CALLEE))),
+            _services(RuntimeServiceDescriptor("display", product_safe=True)),
+        )
+
+
 def _implementation(
     implementation_id: str,
     targets,
@@ -90,6 +136,81 @@ def test_development_plan_may_mix_interpreted_and_generated():
     assert not plan.report.is_detached_from(DependencyCapability.ORIGINAL_EXE)
 
 
+def test_selected_enhancement_attaches_without_claiming_authoritative_coverage():
+    enhancement = _implementation(
+        "wide-presenter", (ROOT,),
+        origin=ImplementationOrigin.AUTHORED,
+        category=OverrideCategory.ENHANCEMENT,
+        services=("display",),
+    )
+    plan = plan_execution(
+        profile_configuration(
+            "development",
+            program_identity=PROGRAM,
+            selected_overrides=("wide-presenter",),
+            provider_preference=("generated",),
+        ),
+        COVERAGE,
+        _catalog(
+            _implementation("generated", (ROOT, CALLEE)),
+            enhancement,
+        ),
+        _services(RuntimeServiceDescriptor(
+            "display", product_safe=True, implementation_digest="display-v1",
+        )),
+    )
+
+    assert {binding.implementation_id for binding in plan.bindings} == {
+        "generated",
+    }
+    assert {item.implementation_id for item in plan.implementations} == {
+        "generated", "wide-presenter",
+    }
+    assert plan.report.required_services == ("display",)
+
+
+def test_enhancement_attachment_must_be_inside_conservative_coverage():
+    enhancement = _implementation(
+        "wide-presenter", ("function:not-reachable",),
+        origin=ImplementationOrigin.AUTHORED,
+        category=OverrideCategory.ENHANCEMENT,
+    )
+    with pytest.raises(ValueError, match="outside conservative coverage"):
+        plan_execution(
+            profile_configuration(
+                "development",
+                program_identity=PROGRAM,
+                selected_overrides=("wide-presenter",),
+            ),
+            COVERAGE,
+            _catalog(
+                _implementation("generated", (ROOT, CALLEE)),
+                enhancement,
+            ),
+        )
+
+
+def test_standard_differential_profile_rejects_behavioral_modification():
+    behavior = _implementation(
+        "changed-physics", (ROOT,),
+        origin=ImplementationOrigin.AUTHORED,
+        category=OverrideCategory.BEHAVIORAL,
+    )
+    with pytest.raises(ValueError, match="cannot select behavioral"):
+        plan_execution(
+            profile_configuration(
+                "verification",
+                program_identity=PROGRAM,
+                selected_overrides=("changed-physics",),
+            ),
+            COVERAGE,
+            _catalog(
+                _implementation("generated", (ROOT, CALLEE)),
+                behavior,
+            ),
+        )
+
+
 def test_detached_rejects_exe_only_frontier_with_actionable_report():
     config = profile_configuration("detached", program_identity=PROGRAM)
     with pytest.raises(ExecutionPlanError) as caught:
@@ -131,7 +252,9 @@ def test_release_rejects_development_only_service():
     implementation = _implementation("external", (ROOT, CALLEE), services=("trace",))
     with pytest.raises(ExecutionPlanError) as caught:
         plan_execution(config, COVERAGE, _catalog(implementation), _services(
-            RuntimeServiceDescriptor("trace", product_safe=False),
+            RuntimeServiceDescriptor(
+                "trace", product_safe=False, implementation_digest="trace-v1",
+            ),
         ))
     assert caught.value.report.development_only_services == ("trace",)
 
@@ -146,11 +269,13 @@ def test_detached_allows_diagnostics_but_rejects_profiler_capability():
             "diagnostic",
             product_safe=False,
             required_capabilities=frozenset({"diagnostics"}),
+            implementation_digest="diagnostic-v1",
         ),
         RuntimeServiceDescriptor(
             "profiler",
             product_safe=False,
             required_capabilities=frozenset({"profiling"}),
+            implementation_digest="profiler-v1",
         ),
     )
     with pytest.raises(ExecutionPlanError) as caught:
@@ -194,11 +319,13 @@ def test_dependency_closure_combines_implementation_product_and_service_requirem
             product_safe=True,
             required_capabilities=frozenset({"host-display"}),
             dependencies=frozenset({"storage"}),
+            implementation_digest="display-v1",
         ),
         RuntimeServiceDescriptor(
             "storage",
             product_safe=True,
             required_capabilities=frozenset({"host-filesystem"}),
+            implementation_digest="storage-v1",
         ),
     ))
     assert plan.report.required_services == ("display", "storage")
@@ -231,6 +358,7 @@ def test_release_rejects_oracle_capability_even_when_service_is_product_safe():
                 required_capabilities=frozenset({
                     DependencyCapability.ORACLE.value,
                 }),
+                implementation_digest="oracle-v1",
             ),
         ))
     assert caught.value.report.policy_forbidden_capabilities == (
@@ -250,6 +378,7 @@ def test_release_rejects_exe_runtime_bootstrap_even_with_native_coverage(tmp_pat
             "GAME.EXE",
             str(exe),
         ),),
+        provider_digest="exe-loader-v1",
     )
     with pytest.raises(ExecutionPlanError) as caught:
         plan_execution(
@@ -293,6 +422,7 @@ def test_build_image_bootstrap_retains_build_exe_but_not_runtime_exe(tmp_path):
             DependencyCapability.DOS_MEMORY.value,
         }),
         valid_profiles=frozenset({"detached", "release"}),
+        provider_digest="build-image-v1",
     )
     plan = plan_execution(
         profile_configuration(
@@ -323,6 +453,7 @@ def test_missing_bootstrap_artifact_fails_with_generation_instruction(tmp_path):
             generation_instruction="run: python scripts/build_boot_image.py",
         ),),
         valid_profiles=frozenset({"release"}),
+        provider_digest="missing-image-v1",
     )
     with pytest.raises(ExecutionPlanError) as caught:
         plan_execution(
@@ -342,16 +473,19 @@ def test_composite_bootstrap_unifies_component_state_and_capabilities():
     bootstrap = CompositeBootstrapProvider(
         "composite",
         ("product ready",),
+        provider_digest="composite-v1",
         providers=(
             NativeBootstrapProvider(
                 "native-state",
                 ("gameplay state",),
                 initialized_capabilities=frozenset({"native-state"}),
+                provider_digest="native-state-v1",
             ),
             NativeBootstrapProvider(
                 "device-state",
                 ("device state",),
                 runtime_required_capabilities=frozenset({"host-audio"}),
+                provider_digest="device-state-v1",
             ),
         ),
     )

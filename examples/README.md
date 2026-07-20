@@ -18,12 +18,11 @@ What's here:
 
 | Directory | Role |
 |---|---|
-| [`minimal_adapter/`](minimal_adapter/example.py) | 5-minute replay of the hook → verify → snapshot loop on a straight-line program. |
-| [`tiny_frame_game/`](tiny_frame_game/README.md) | The whole lifecycle on a synthetic frame-loop game (oracle boot, cold-start `ReplayArtifact`, both verification oracles, state mirror). Doubles as the repo's full-stack integration test. |
+| [`minimal_adapter/`](minimal_adapter/example.py) | A narrow CPU-backed implementation-adapter and focused-verifier example on a straight-line program. |
+| [`tiny_frame_game/`](tiny_frame_game/README.md) | Several independent capabilities combined on a synthetic frame-loop game. Doubles as the repository integration test. |
 
 To start a real game port, do NOT copy files from here: scaffold a port repo
 with `python tools/new_project.py --game mygame --output ../mygame_port`
 (docs/getting_started.md) — this repo (`dos_re`) is the framework only,
 consumed as a git submodule.  Your adapter package lives **at the port repo's
-root, next to its `dos_re/` submodule** (e.g. `mygame/`); the Lemmings pilot
-(`lemmings_port`) is the worked reference.
+root, next to its `dos_re/` submodule** (for example `mygame/`).

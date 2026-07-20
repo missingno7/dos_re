@@ -65,7 +65,7 @@ def write_snapshot(rt: Runtime, out_dir: str | Path, *, status: str, steps: int,
         "cpu_snapshot": rt.cpu.s.snapshot(),
         "program": {
             # A headless (EXE-free) runtime has no ``exe`` — a snapshot saved
-            # from a strict-VMless session is itself data-only.
+            # from a detached generated-graph session is itself data-only.
             "path": str(rt.program.exe.path) if rt.program.exe is not None
             else "<generated data-only boot image>",
             "psp_segment": rt.program.psp_segment,
@@ -198,9 +198,9 @@ def capture_runtime_continuation(rt: Runtime, *, event_cursor: int):
     """Capture real-mode runtime state for a 3.0 replay profile.
 
     Unlike :func:`write_snapshot`, this returns the common in-memory
-    ``ContinuationState`` consumed by replay caches.  Static executable and
-    installed-hook identities belong to ``ExecutionProfile`` rather than the
-    mutable continuation payload.
+    ``ContinuationState`` consumed by replay caches. Static executable and
+    selected implementation identities belong to ``ReplayExecutionIdentity``
+    rather than the mutable continuation payload.
     """
     from .replay import ContinuationState
 

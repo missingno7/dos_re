@@ -237,7 +237,7 @@ class StateComparison:
 
 
 @dataclass(frozen=True)
-class ExecutionProfile:
+class ReplayExecutionIdentity:
     """Stable identity of one oracle or candidate execution configuration."""
 
     profile_id: str
@@ -248,16 +248,14 @@ class ExecutionProfile:
     devices: str
     continuation_schema: str
     projection_schema: str
-    overrides: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.role not in ("oracle", "candidate"):
-            raise ValueError("execution profile role must be 'oracle' or 'candidate'")
+            raise ValueError("replay execution role must be 'oracle' or 'candidate'")
         for name in ("profile_id", "implementation", "image", "runtime", "devices",
                      "continuation_schema", "projection_schema"):
             if not getattr(self, name):
-                raise ValueError(f"execution profile {name} must not be empty")
-        object.__setattr__(self, "overrides", tuple(sorted(map(str, self.overrides))))
+                raise ValueError(f"replay execution identity {name} must not be empty")
 
     @property
     def identity_digest(self) -> str:
@@ -274,16 +272,23 @@ class ExecutionProfile:
             "runtime": self.runtime, "devices": self.devices,
             "continuation_schema": self.continuation_schema,
             "projection_schema": self.projection_schema,
-            "overrides": list(self.overrides),
         }
 
     @classmethod
-    def from_json(cls, raw: Mapping[str, Any]) -> "ExecutionProfile":
+    def from_json(cls, raw: Mapping[str, Any]) -> "ReplayExecutionIdentity":
+        expected = {
+            "profile_id", "role", "implementation", "image", "runtime",
+            "devices", "continuation_schema", "projection_schema",
+        }
+        if set(raw) != expected:
+            raise ValueError(
+                "replay execution identity fields do not match the current "
+                f"schema: expected {sorted(expected)}, got {sorted(raw)}"
+            )
         return cls(
             str(raw["profile_id"]), str(raw["role"]), str(raw["implementation"]),
             str(raw["image"]), str(raw["runtime"]), str(raw["devices"]),
             str(raw["continuation_schema"]), str(raw["projection_schema"]),
-            tuple(raw.get("overrides", ())),
         )
 
 
@@ -293,6 +298,7 @@ class FunctionVisit:
     invocation_count: int = 0
     first_entry: ReplayPoint | None = None
     last_exit: ReplayPoint | None = None
+    incomplete: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -300,6 +306,7 @@ class FunctionVisit:
             "invocation_count": self.invocation_count,
             "first_entry": None if self.first_entry is None else self.first_entry.to_json(),
             "last_exit": None if self.last_exit is None else self.last_exit.to_json(),
+            "incomplete": self.incomplete,
         }
 
     @classmethod
@@ -309,6 +316,7 @@ class FunctionVisit:
             str(raw["function_id"]), int(raw["invocation_count"]),
             None if first is None else ReplayPoint.from_json(first),
             None if last is None else ReplayPoint.from_json(last),
+            bool(raw.get("incomplete", False)),
         )
 
 
@@ -331,6 +339,7 @@ class FunctionVisitIndex:
             _same_timeline(visit.first_entry, point_before)
         visit.invocation_count += 1
         self._depth[function_id] = depth + 1
+        visit.incomplete = True
 
     def exit(self, function_id: str, point_after: ReplayPoint) -> None:
         function_id = str(function_id)
@@ -346,6 +355,7 @@ class FunctionVisitIndex:
         self._depth[function_id] = depth
         if depth == 0:
             visit.last_exit = point_after
+            visit.incomplete = False
 
     def records(self) -> tuple[FunctionVisit, ...]:
         return tuple(self._visits[key] for key in sorted(self._visits))
@@ -476,10 +486,10 @@ class ReplayEvidenceRecorder:
             raise ValueError("runtime variant identity must not be empty")
         self._runtime_variants.add(str(variant_id))
 
-    def evidence(self, profile: ExecutionProfile) -> ReplayExecutionEvidence:
+    def evidence(self, profile: ReplayExecutionIdentity) -> ReplayExecutionEvidence:
         incomplete = tuple(
             record.function_id for record in self.visits.records()
-            if record.invocation_count and record.last_exit is None
+            if record.invocation_count and record.incomplete
         )
         return ReplayExecutionEvidence(
             profile.identity_digest, tuple(self._transfers.values()),
@@ -490,7 +500,7 @@ class ReplayDriver(Protocol):
     """Adapter implemented by each interpreter, override, or native profile."""
 
     @property
-    def profile(self) -> ExecutionProfile: ...
+    def profile(self) -> ReplayExecutionIdentity: ...
     @property
     def current_point(self) -> ReplayPoint: ...
     def capture(self) -> ContinuationState: ...
@@ -501,7 +511,7 @@ class ReplayDriver(Protocol):
 
 @dataclass(frozen=True)
 class IntervalRun:
-    profile: ExecutionProfile
+    profile: ReplayExecutionIdentity
     restored_from: ReplayPoint
     start: ReplayPoint
     end: ReplayPoint
@@ -531,7 +541,7 @@ class ReplayRecording:
 
     def __init__(
         self, directory: str | Path, *, timeline_id: str,
-        profile: ExecutionProfile, base_state: ContinuationState,
+        profile: ReplayExecutionIdentity, base_state: ContinuationState,
         metadata: Mapping[str, Any] | None = None,
     ):
         self.directory = Path(directory)
@@ -700,7 +710,7 @@ class ReplayArtifact:
         }))
 
     def register_profile(
-        self, profile: ExecutionProfile, *, base_point: ReplayPoint,
+        self, profile: ReplayExecutionIdentity, *, base_point: ReplayPoint,
         base_state: ContinuationState,
     ) -> None:
         with self._locked_mutation():
@@ -710,7 +720,7 @@ class ReplayArtifact:
                 raise ValueError("base continuation schema does not match execution profile")
             existing = self._manifest["profiles"].get(profile.profile_id)
             if existing is not None:
-                stored = ExecutionProfile.from_json(existing["identity"])
+                stored = ReplayExecutionIdentity.from_json(existing["identity"])
                 if stored != profile:
                     raise StaleReplayError(
                         f"profile {profile.profile_id!r} is already registered with another identity")
@@ -728,40 +738,45 @@ class ReplayArtifact:
             }
             self._write()
 
-    def require_profile(self, profile: ExecutionProfile) -> dict[str, Any]:
+    def require_profile(self, profile: ReplayExecutionIdentity) -> dict[str, Any]:
         record = self._manifest["profiles"].get(profile.profile_id)
         if record is None:
             raise StaleReplayError(f"unregistered execution profile: {profile.profile_id!r}")
-        stored = ExecutionProfile.from_json(record["identity"])
+        stored = ReplayExecutionIdentity.from_json(record["identity"])
         if stored != profile or record.get("identity_digest") != profile.identity_digest:
             raise StaleReplayError(f"execution profile identity changed: {profile.profile_id!r}")
         return record
 
-    def cached_points(self, profile: ExecutionProfile) -> tuple[ReplayPoint, ...]:
+    def cached_points(self, profile: ReplayExecutionIdentity) -> tuple[ReplayPoint, ...]:
         record = self.require_profile(profile)
         points = [ReplayPoint.from_json(record["base_point"])]
         points.extend(ReplayPoint.from_json(item["point"])
                       for item in record["boundaries"].values())
         return tuple(sorted(points, key=lambda point: point.ordinal))
 
-    def profiles(self) -> tuple[tuple[ExecutionProfile, int], ...]:
+    def profiles(self) -> tuple[tuple[ReplayExecutionIdentity, int], ...]:
         """Return registered profile identities and persistent boundary counts."""
         return tuple(
-            (ExecutionProfile.from_json(record["identity"]), len(record["boundaries"]))
+            (ReplayExecutionIdentity.from_json(record["identity"]),
+             len(record["boundaries"]))
             for _, record in sorted(self._manifest["profiles"].items())
         )
 
-    def nearest_cached(self, profile: ExecutionProfile, point: ReplayPoint) -> ReplayPoint:
+    def nearest_cached(
+        self, profile: ReplayExecutionIdentity, point: ReplayPoint,
+    ) -> ReplayPoint:
         self._point(point)
         eligible = [item for item in self.cached_points(profile) if item.ordinal <= point.ordinal]
         if not eligible:
             raise ReplayError(f"profile {profile.profile_id!r} has no state before point {point.ordinal}")
         return max(eligible, key=lambda item: item.ordinal)
 
-    def has_cached(self, profile: ExecutionProfile, point: ReplayPoint) -> bool:
+    def has_cached(self, profile: ReplayExecutionIdentity, point: ReplayPoint) -> bool:
         return point in self.cached_points(profile)
 
-    def restore(self, profile: ExecutionProfile, point: ReplayPoint) -> ContinuationState:
+    def restore(
+        self, profile: ReplayExecutionIdentity, point: ReplayPoint,
+    ) -> ContinuationState:
         self._point(point)
         record = self.require_profile(profile)
         base_point = ReplayPoint.from_json(record["base_point"])
@@ -803,7 +818,8 @@ class ReplayArtifact:
         return state
 
     def cache(
-        self, profile: ExecutionProfile, point: ReplayPoint, state: ContinuationState,
+        self, profile: ReplayExecutionIdentity, point: ReplayPoint,
+        state: ContinuationState,
         *, metadata: Mapping[str, Any] | None = None,
     ) -> bool:
         with self._locked_mutation():
@@ -921,7 +937,7 @@ class ReplayArtifact:
             self._write()
 
     def set_execution_evidence(
-        self, profile: ExecutionProfile, evidence: ReplayExecutionEvidence,
+        self, profile: ReplayExecutionIdentity, evidence: ReplayExecutionEvidence,
     ) -> None:
         """Persist authoritative observations from this artifact's oracle run."""
         with self._locked_mutation():
@@ -955,13 +971,13 @@ class ReplayArtifact:
         if not matches:
             raise KeyError(f"function was not visited by this replay: {function_id!r}")
         visit = matches[0]
-        if visit.first_entry is None or visit.last_exit is None:
+        if visit.first_entry is None or visit.last_exit is None or visit.incomplete:
             raise ReplayError(f"function has no completed replay interval: {function_id!r}")
         return visit.first_entry, visit.last_exit
 
     def _write_full_state(
         self, root: Path, point: ReplayPoint, state: ContinuationState,
-        profile: ExecutionProfile,
+        profile: ReplayExecutionIdentity,
     ) -> Path:
         directory = self.directory / root
         directory.mkdir(parents=True, exist_ok=False)
@@ -987,7 +1003,8 @@ class ReplayArtifact:
         return manifest
 
     def _read_full_state(
-        self, relative: str | Path, point: ReplayPoint, profile: ExecutionProfile,
+        self, relative: str | Path, point: ReplayPoint,
+        profile: ReplayExecutionIdentity,
     ) -> ContinuationState:
         manifest = _read_json(self._resolve(relative))
         if manifest.get("profile_identity_digest") != profile.identity_digest:
@@ -1114,7 +1131,7 @@ class ReplayArtifact:
                 pending.pop(key, None)
                 changed = True
 
-            identity = ExecutionProfile.from_json(record["identity"])
+            identity = ReplayExecutionIdentity.from_json(record["identity"])
             boundary_root = (
                 self.directory / "profiles" / identity.storage_key / "boundaries")
             if boundary_root.exists():
@@ -1125,15 +1142,10 @@ class ReplayArtifact:
                         continue
                     if not child.is_dir() or child.name in boundaries:
                         continue
-                    state_path = child / "state.json"
-                    if not state_path.exists():
-                        raise ReplayError(f"incomplete orphan replay boundary: {child}")
-                    self._validate_boundary_manifest(record, child.name, state_path)
-                    raw = _read_json(state_path)
-                    boundaries[child.name] = {
-                        "point": raw["point"],
-                        "manifest": state_path.relative_to(self.directory).as_posix(),
-                    }
+                    # Boundaries are derived caches. A current publication is
+                    # always indexed as pending before its final directory is
+                    # published, so an unindexed directory has no authority.
+                    shutil.rmtree(child)
                     changed = True
         if changed:
             self._write()
@@ -1143,13 +1155,13 @@ class ReplayArtifact:
     ) -> None:
         raw = _read_json(path)
         point = ReplayPoint.from_json(raw["point"])
-        identity = ExecutionProfile.from_json(record["identity"])
+        identity = ReplayExecutionIdentity.from_json(record["identity"])
         if point.key != key:
             raise ReplayError(f"boundary directory key mismatch: {path.parent}")
         if raw.get("profile_identity_digest") != identity.identity_digest:
-            raise ReplayError(f"orphan boundary profile mismatch: {path.parent}")
+            raise ReplayError(f"cached boundary profile mismatch: {path.parent}")
         if raw.get("base_state_sha256") != record.get("base_state_sha256"):
-            raise ReplayError(f"orphan boundary base mismatch: {path.parent}")
+            raise ReplayError(f"cached boundary base mismatch: {path.parent}")
 
     def _publication_stage(self, stage: str) -> None:
         """Test seam called after each durable cache-publication stage."""

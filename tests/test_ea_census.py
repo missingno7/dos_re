@@ -4,7 +4,7 @@ Written against KNOWN encodings rather than against whatever the corpus
 happens to produce -- a census validated by its own output would agree with
 itself no matter what it decoded.
 
-The alias test is the one that already changed a plan: the M4 design record
+The alias test records the evidence that changed the original design:
 prescribed a first region on the belief that it had "no aliasing question",
 and the census is what disproves that class of claim.
 """
@@ -116,7 +116,7 @@ def test_indexed_sites_cluster_by_base_and_index():
 
 
 def test_the_same_offset_through_two_segments_is_reported_as_an_alias():
-    """THE check that changed the M4 plan.  A region reached as both ds:X and
+    """A region reached as both ds:X and
     ss:X is not the small slice its byte extent suggests."""
     c = Census(sites=[_expr("ds", 0x00), _expr("ss", 0x00),
                       _expr("ss", 0x00, key="1010:0100"),
@@ -150,7 +150,7 @@ def test_every_modrm16_form_decodes(rm, base, index):
 # movs/stos/lods/cmps/scas reach ds:si and es:di with NO modrm byte.  Site
 # discovery keys off modrm, so before these were named the census skipped them
 # silently -- returning [], not even a Blocker.  A census that under-reports
-# touchers understates an ownership closure, and an M4 promotion decision
+# touchers understates an ownership closure, and a representation decision
 # trusts exactly that number.  The Lemmings corpus has 814 such instructions
 # across 99 functions, so this is not a theoretical encoding.
 @pytest.mark.parametrize("code,mnem", [

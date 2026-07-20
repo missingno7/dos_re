@@ -130,7 +130,8 @@ def self_disable_if_patched(cpu: CPU8086, ip: int, expected: bytes | tuple[bytes
     signature is fine; raises RuntimeError on an unknown variant.
     """
     # Under a poisoned data-only boot image the recovered code bytes are zeroed
-    # by design (the EXE-independence wall); the lifted host function is the
+    # by design for this detached execution diagnostic; the lifted host
+    # function is the
     # authoritative implementation, so the entry-signature comparison is both
     # meaningless and prone to false-alarm on the poisoned bytes.  Skip it.
     if getattr(cpu, "code_poisoned", False):

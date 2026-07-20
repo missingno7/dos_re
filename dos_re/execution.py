@@ -288,6 +288,18 @@ class ImplementationDescriptor:
     implementation_digest: str = ""
     region_id: str | None = None
 
+    def __post_init__(self) -> None:
+        if not self.implementation_id:
+            raise ValueError("implementation ID must not be empty")
+        if self.origin is ImplementationOrigin.AUTHORED:
+            if self.category is OverrideCategory.BASELINE:
+                raise ValueError(
+                    "authored implementations require faithful, enhancement, "
+                    "or behavioral category")
+        elif self.category is not OverrideCategory.BASELINE:
+            raise ValueError(
+                "interpreted and generated implementations use baseline category")
+
 
 @dataclass(frozen=True)
 class RuntimeServiceDescriptor:
@@ -869,6 +881,14 @@ def _bootstrap_status(
     provider_ids = [item.provider_id for item in components]
     if len(set(provider_ids)) != len(provider_ids):
         raise ValueError("bootstrap provider component IDs must be unique")
+    missing_provider_digests = [
+        item.provider_id for item in components if not item.provider_digest
+    ]
+    if missing_provider_digests:
+        raise ValueError(
+            "selected bootstrap providers require stable content digests: "
+            + ", ".join(missing_provider_digests)
+        )
     artifacts = tuple(
         artifact for item in components for artifact in item.artifacts
     )
@@ -968,9 +988,32 @@ def plan_execution(
         or item.implementation_id in configuration.selected_overrides
     )
     selected_override_set = set(configuration.selected_overrides)
+    selected_enhancements = tuple(
+        item for item in implementation_items
+        if item.implementation_id in selected_override_set
+        and item.category is OverrideCategory.ENHANCEMENT
+    )
+    for enhancement in selected_enhancements:
+        if enhancement.origin is not ImplementationOrigin.AUTHORED:
+            raise ValueError(
+                f"enhancement {enhancement.implementation_id!r} must be authored")
+        if not enhancement.targets:
+            raise ValueError(
+                f"enhancement {enhancement.implementation_id!r} requires an "
+                "attachment target")
+        missing_targets = enhancement.targets - coverage.reachable
+        if missing_targets:
+            raise ValueError(
+                f"enhancement {enhancement.implementation_id!r} attaches outside "
+                "conservative coverage: " + ", ".join(sorted(missing_targets))
+            )
+    authoritative_items = tuple(
+        item for item in implementation_items
+        if item.category is not OverrideCategory.ENHANCEMENT
+    )
     for target in sorted(coverage.reachable):
         owners = [
-            item.implementation_id for item in implementation_items
+            item.implementation_id for item in authoritative_items
             if target in item.targets and item.implementation_id in selected_override_set
         ]
         if len(owners) > 1:
@@ -982,7 +1025,9 @@ def plan_execution(
     service_by_id = {service.service_id: service for service in service_items}
 
     bindings: list[PlanBinding] = []
-    selected_by_id: dict[str, ImplementationDescriptor] = {}
+    selected_by_id: dict[str, ImplementationDescriptor] = {
+        item.implementation_id: item for item in selected_enhancements
+    }
     unresolved: list[str] = []
     blocked_capabilities: dict[str, set[str]] = {}
     packaging_incompatible: list[str] = []
@@ -992,7 +1037,7 @@ def plan_execution(
             if item not in configuration.selected_overrides
         )
         candidates = _ordered_candidates(
-            target, implementation_items, selected_first
+            target, authoritative_items, selected_first
         )
         selected = next(
             (candidate for candidate in candidates
@@ -1027,6 +1072,29 @@ def plan_execution(
         selected_by_id[selected.implementation_id] = selected
 
     selected = tuple(sorted(selected_by_id.values(), key=lambda item: item.implementation_id))
+    missing_implementation_digests = tuple(
+        item.implementation_id for item in selected
+        if not item.implementation_digest
+    )
+    if missing_implementation_digests:
+        raise ValueError(
+            "selected implementations require stable content digests: "
+            + ", ".join(missing_implementation_digests)
+        )
+    if (
+        configuration.verification_policy.mode == "differential"
+        and any(
+            item.category is OverrideCategory.BEHAVIORAL for item in selected
+        )
+    ):
+        behavioral = ", ".join(
+            item.implementation_id for item in selected
+            if item.category is OverrideCategory.BEHAVIORAL
+        )
+        raise ValueError(
+            "faithful differential verification cannot select behavioral "
+            f"modifications: {behavioral}"
+        )
     required_service_set = (
         set(configuration.product_services)
         | set(bootstrap_services)
@@ -1053,6 +1121,16 @@ def plan_execution(
         for service_id in required_service_ids
         if service_id in service_by_id
     )
+    missing_service_digests = tuple(
+        service.service_id
+        for service in selected_services
+        if not service.implementation_digest
+    )
+    if missing_service_digests:
+        raise ValueError(
+            "selected runtime services require stable content digests: "
+            + ", ".join(missing_service_digests)
+        )
     required_assets = tuple(sorted(
         {
             asset

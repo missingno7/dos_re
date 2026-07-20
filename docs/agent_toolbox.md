@@ -1,6 +1,6 @@
 # Agent toolbox
 
-This is the task-to-command index for the current dos_re 3.0 lifecycle.
+This is the task-to-command index for composable dos_re 3.0 operations.
 Tool-specific arguments are documented by `python tools/NAME.py --help`.
 
 ## Validate the framework
@@ -19,7 +19,7 @@ declared generated clutter.
 ## Inspect an original program
 
 ```bash
-python tools/view.py GAME.EXE
+python tools/view.py --exe GAME.EXE
 python tools/le_info.py GAME.EXE
 python tools/lindis.py GAME.EXE SNAPSHOT CS START END
 python tools/codemap.py ...
@@ -40,16 +40,17 @@ python tools/liftlink.py ...
 python tools/pmlift.py ...
 ```
 
-`irgen.py` creates canonical Recovery IR. The lift tools analyze, emit, and
-link generated implementations; `pmlift.py` is the protected-mode pipeline.
-Do not parse generated Python to reconstruct facts already owned by IR.
+`irgen.py` retains reusable static evidence. The lift tools analyze, emit, and
+link optional generated implementations; `pmlift.py` provides corresponding
+protected-mode operations. A focused lift may scan a snapshot directly. Do not
+parse generated Python to reconstruct facts already retained by IR.
 
 Supporting recovery commands are `contract_census.py`, `cpuless_census.py`,
 `cpuless_closure.py`, `cpuless_promote.py`, `abi_blockers.py`,
 `abi_core_verify.py`, `abi_gate.py`, and `abi_promote.py`. They produce or
 validate per-implementation recovery evidence; they do not select a player.
-`gen_island_manifest.py` and `audit_layers.py` inspect recovered dependency
-islands and layer boundaries.
+`audit_layers.py` checks a source directory that explicitly claims
+machine-runtime independence.
 
 ## Record and inspect replays
 
@@ -58,28 +59,29 @@ Port launchers pass replay operations to the unified player:
 ```bash
 python scripts/play.py --record-replay artifacts/replays/gameplay
 python scripts/play.py --play-replay artifacts/replays/gameplay
-python scripts/play.py --replay-continue artifacts/replays/gameplay
+python scripts/play.py --play-replay artifacts/replays/gameplay --replay-continue
 python tools/replay_info.py artifacts/replays/gameplay
 ```
 
 Real-mode and protected-mode adapters normalize inputs into ReplayArtifact.
-No suffix replay, standalone repro, or separate snapshot recording format is a
-current authority.
+ReplayArtifact owns immutable events, cached boundaries, and replay evidence.
 
 ## Build and query the Execution Atlas
 
 ```bash
-python tools/atlas.py build artifacts/atlas --ir recovery_ir.json \
+python tools/atlas.py create artifacts/atlas --program my-game:1
+python tools/atlas.py ingest-replay artifacts/atlas artifacts/replays/gameplay
+python tools/atlas.py ingest-facts artifacts/atlas atlas_facts.json
+python tools/atlas.py ingest-ir artifacts/atlas --ir recovery_ir.json \
   --program my-game:1 --image-label GAME.EXE --image-sha256 SHA256 \
   --root FUNCTION_ID --product-profile game
-python tools/atlas.py ingest-replay artifacts/atlas artifacts/replays/gameplay
 python tools/atlas.py validate artifacts/atlas
 python tools/atlas.py coverage artifacts/atlas game
 python tools/atlas.py show artifacts/atlas FUNCTION_ID
 ```
 
-The Atlas consumes IR and replay evidence and returns conservative coverage.
-It does not install implementations.
+The Atlas materializes a query projection from whichever cited sources exist.
+Recovery IR is optional. The Atlas does not install implementations.
 
 ## Verify candidates
 
@@ -115,7 +117,7 @@ detachment authorities. `export.py` accepts only a package-ready release plan;
 ## Project scaffolding
 
 ```bash
-python tools/new_project.py my_game_port
+python tools/new_project.py --game mygame --output ../mygame_port
 ```
 
 The scaffold is a port-side adapter and artifact layout, not a fork of the

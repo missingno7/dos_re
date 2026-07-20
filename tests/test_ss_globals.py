@@ -1,4 +1,4 @@
-"""slice 9: `ss:[const]` globals inside a function that also uses the stack.
+"""`ss:[const]` globals inside a function that also uses the stack.
 
 `ss_is_data_segment` refuses a function that does BOTH stack traffic and
 ss-addressed data, because in the MECHANICAL form the two share one segment
@@ -114,7 +114,7 @@ def test_a_function_with_no_ss_override_does_not_qualify():
 
 
 def test_stack_offset_is_far_above_the_floor():
-    """Sanity-check the premise the tier rests on: Lemmings boots sp=0x4AF4,
+    """Sanity-check the address-space premise: Lemmings boots sp=0x4AF4,
     so the live stack cannot collide with a sub-0x200 global."""
     assert 0x4AF4 > SS_GLOBALS_FLOOR * 2
 

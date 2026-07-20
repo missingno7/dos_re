@@ -1,10 +1,9 @@
-"""lint_independence.py -- STATIC proof that a strict-VMless runtime cannot
-reach the original executable or the loader that parses it.
+"""lint_independence.py -- audit a selected source closure for EXE access.
 
-Generic, game-agnostic (docs/history/dos_re_2.0.md section 1a').  The runtime
+Generic and game-agnostic. The runtime
 file-access guard (``dos_re.independence.exe_access_guard``) is the dynamic
 backstop; this is the static one.  It walks the IMPORT GRAPH rooted at the
-port's VMless runner + boot module (not a flat text grep) and fails if any
+selected launcher and bootstrap modules (not a flat text grep) and fails if any
 module on the MODULE-LEVEL graph imports a loader/oracle symbol or names an
 executable path:
 
@@ -14,8 +13,8 @@ executable path:
     forbidden literals  a hard-coded ``*.exe``/``*.com`` path literal
 
 A function-local (lazy) import is a deferred capability that does not execute
-unless the function is called; the strict-VMless frontend overrides the
-methods that hold such imports, so they are reported as INFO, not failures.
+unless the function is called; they are reported as deferred capabilities,
+not module-load failures.
 
 Usage (from a port):
     python dos_re/tools/lint_independence.py \
@@ -32,7 +31,7 @@ import ast
 import sys
 from pathlib import Path
 
-# EXE-loading / loader-driving framework entry points no VMless runtime may
+# EXE-loading / loader-driving framework entry points a detached closure may
 # import at module level.  Ports add their own adapter names via --forbidden.
 DEFAULT_FORBIDDEN = {
     "create_runtime",            # the EXE MZ loader (create_runtime_from_image is fine)
@@ -188,7 +187,7 @@ def run_lint(roots: list[Path], repo_root: Path, forbidden: set[str],
         for o in sorted(set(offenders)):
             print(f"  {o}")
         return 1
-    print("PASS -- the strict-VMless runtime import graph is EXE/loader-free.")
+    print("PASS -- the selected runtime import graph is EXE/loader-free.")
     return 0
 
 

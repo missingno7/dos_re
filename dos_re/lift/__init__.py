@@ -1,4 +1,4 @@
-"""dos_re.lift — automatic literal lifting of 16-bit x86 functions (M0: census).
+"""Automatic literal lifting and analysis of 16-bit x86 functions.
 
 See docs/lifting_design.md for the full design. This subpackage is the OS-free
 part of the lifter: a static decoder (`decode`) self-checkable against the

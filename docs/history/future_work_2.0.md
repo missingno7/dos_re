@@ -1,4 +1,4 @@
-# Future work — examined, deferred, and why
+# Historical staged future-work notes (dos_re 2.0)
 
 Ideas that survived review but are **not** on the roadmap.  Nothing here is an
 active milestone; nothing here should be cited as a plan of record.

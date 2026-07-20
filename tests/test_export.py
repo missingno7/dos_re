@@ -140,6 +140,7 @@ def test_export_requires_release_profile(tmp_path: Path):
     coverage = ProgramCoverage(("root",), frozenset({"root"}))
     catalog = ImplementationCatalog((ImplementationEntry(ImplementationDescriptor(
         "product", frozenset({"root"}), ImplementationOrigin.GENERATED,
+        implementation_digest="product-v1",
     )),))
     plan = plan_execution(
         profile_configuration("detached", program_identity="game"),
@@ -237,6 +238,7 @@ def test_export_requires_exact_declared_asset_closure(tmp_path: Path):
         frozenset({"root"}),
         ImplementationOrigin.GENERATED,
         required_assets=frozenset({"levels"}),
+        implementation_digest="product-v1",
     )),))
     plan = plan_execution(
         profile_configuration(
@@ -281,6 +283,7 @@ def test_export_materializes_declared_bootstrap_artifacts(tmp_path: Path):
             str(state),
         ),),
         valid_profiles=frozenset({"release"}),
+        provider_digest="image-v1",
     )
     launcher = tmp_path / "launch.py"
     launcher.write_text("print('game')\n", encoding="utf-8")
@@ -312,6 +315,7 @@ def test_export_can_generate_bootstrap_artifact(tmp_path: Path):
             materializer=lambda path: path.write_bytes(b"generated"),
         ),),
         valid_profiles=frozenset({"release"}),
+        provider_digest="generated-image-v1",
     )
     launcher = tmp_path / "launch.py"
     launcher.write_text("print('game')\n", encoding="utf-8")

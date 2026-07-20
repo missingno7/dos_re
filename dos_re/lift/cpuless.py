@@ -1,7 +1,7 @@
-"""CPU-ABI inference -- the first CPUless de-carrier analysis (M3, stage 2).
+"""CPU-ABI inference for generated CPUless implementations.
 
-The CPUless wall (docs/history/dos_re_2.0.md section 1a) removes the CPU-shaped
-carrier: generated functions stop communicating through emulated registers,
+For a selected function, CPUless generation removes the CPU-shaped carrier:
+the implementation stops communicating through emulated registers,
 flags, and the machine stack, and use arguments/returns/locals instead.  The
 transformation is driven by ANALYSES OVER THE SHARED RECOVERY IR -- never by
 parsing generated Python.  This module supplies the foundational analyses:
@@ -14,10 +14,10 @@ parsing generated Python.  This module supplies the foundational analyses:
     register the function may write -- the differential compares the FULL
     register file at boundaries, so scratch writes are observable and must be
     reproduced), stack discipline, and the promotability classification;
-  * :func:`classify_corpus` -- the promotion census over a whole recovery IR:
-    which functions the CPUless emitter can take TODAY (tier "leaf"), which
-    need call-ABI composition, and which need new capabilities (each refusal
-    names the missing capability -- the M3 work list).
+  * :func:`classify_corpus` -- the promotion census over a whole Recovery IR:
+    which functions the CPUless emitter can take directly, which need call-ABI
+    composition, and which need new capabilities (each refusal names the
+    missing capability).
 
 Everything here is game-agnostic; concrete addresses arrive only inside the
 IR being analyzed.
@@ -226,10 +226,9 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         return Effects(frozenset(R), frozenset(W), True, mw, +2)
 
     # --- 80186 frame + bulk stack ops ---------------------------------------
-    # The Borland/Turbo frame. Nearly every function of a Borland-compiled DOS
-    # program opens `enter N,0` and closes `leave`, so leaving these unmodelled
-    # refuses the whole program: skyroads (Borland) had 85 functions blocked on
-    # each, which was its single largest M3 blocker.
+    # The Borland/Turbo frame. Many compiler-generated functions open
+    # `enter N,0` and close `leave`, so leaving these unmodelled can block a
+    # large region of an otherwise recoverable program.
     if op == 0xC8:                       # enter imm16, imm8
         size, level = inst.raw[-3] | (inst.raw[-2] << 8), inst.raw[-1]
         if level != 0:
@@ -470,7 +469,7 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
     if inst.kind in (CALL_IND, JMP_IND):
         r = ((inst.modrm >> 3) & 7) if inst.modrm is not None else None
         if r in (2, 4):
-            # NEAR indirect call/jmp (tier 9): runtime-resolved RECOVERED
+            # NEAR indirect call/jmp: runtime-resolved recovered
             # DISPATCH -- the target is computed from registers/memory (fully
             # modelled), then dispatched through the generated registry to a
             # direct recovered callee (or an intra-function block leader).
@@ -481,7 +480,7 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
             return Effects(reads=allr, writes=allr - frozenset({"ss"}),
                            mem_read=True, mem_write=True, stack_delta=0)
         if r == 5:
-            # far indirect jmp through a memory vector (tier 13): the ISR
+            # Far indirect jmp through a memory vector: the ISR
             # CHAIN tail -- the saved vector's recovered handler runs on our
             # interrupt frame and ITS iret ends our interrupt.  Full-bundle
             # conservative dataflow; must run at depth 0 (tail rule).
@@ -508,7 +507,7 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         if n == 0x20:
             return Effects(refusal="program-terminate")
         if n in (3, 0x60, 0x61):
-            # a GAME-INSTALLED (or debug-trap) vector (tier 12): dispatched
+            # A GAME-INSTALLED (or debug-trap) vector: dispatched
             # as a CALL INTO GAME CODE through the runtime IVT -- the
             # interrupt frame (flags/cs/ip) is written literally, the
             # recovered handler (IRET contract) composes, and the frame pop
@@ -520,7 +519,7 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
         return Effects(refusal="vectored-int-call")   # other installed ints
     if inst.kind == HLT:
         return Effects(refusal="hlt")
-    # port I/O -> a platform effect (tier 6): real dataflow + the port_io flag.
+    # Port I/O becomes a platform effect: real dataflow plus the port_io flag.
     if op in (0xE4, 0xE5):               # in al/ax, imm8
         W.add("ax")
         if op == 0xE4:
@@ -605,7 +604,7 @@ def abi_scan(scan, callee_effects=None, far_callee_effects=None,
     in-function CFG (a register read on SOME path before being written).
     OUTPUTS = every register any instruction may write (the boundary
     differential observes the full register file, so scratch counts).
-    Refusal sites are aggregated by capability -- the M3 work list.
+    Refusal sites are aggregated by capability.
 
     ``callee_effects`` (call-ABI composition): maps a direct near-call target
     ip to ``(reads, writes)`` -- the callee's composed register contract.  A
@@ -730,7 +729,7 @@ def abi_scan(scan, callee_effects=None, far_callee_effects=None,
 
 def classify_corpus(ir: dict) -> dict:
     """The promotion census over a whole recovery IR: per-function ABI reports
-    plus the tier summary (the M3 work list, most-promotable first)."""
+    plus a capability-class summary (most-promotable first)."""
     from .ir import scan_from_ir_record
 
     reports: dict[str, AbiReport] = {}
@@ -753,7 +752,7 @@ def classify_corpus(ir: dict) -> dict:
             capability_counts[cap] = capability_counts.get(cap, 0) + len(ips)
     return {
         "_notice": "GENERATED by dos_re.lift.cpuless.classify_corpus -- the "
-                   "M3 promotion census. Regenerate, do not hand-edit.",
+                   "CPUless capability census. Regenerate, do not hand-edit.",
         "tiers": {k: sorted(v) for k, v in tiers.items()},
         "tier_counts": {k: len(v) for k, v in tiers.items()},
         "missing_capabilities": dict(sorted(capability_counts.items(),

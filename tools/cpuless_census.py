@@ -1,9 +1,8 @@
-"""cpuless_census.py -- the M3 promotion census over a recovery IR.
+"""cpuless_census.py -- CPUless implementation capability census.
 
 Runs the CPU-ABI inference (dos_re.lift.cpuless) over every censused function
 and reports which functions the CPUless emitter can take today and which
-capabilities are missing, ranked by how much corpus they unblock -- the M3
-work list (docs/history/dos_re_2.0.md section 1, stage 2).
+capabilities are missing, ranked by how much selected corpus they unblock.
 
 Tiers:
     leaf        no refusals at all: fully analyzed straight-line/branchy code
@@ -15,7 +14,7 @@ Tiers:
 
 Usage:
     python dos_re/tools/cpuless_census.py --ir artifacts/lift/recovery_ir.json \
-        --out artifacts/m3/abi_census.json
+        --out artifacts/analysis/cpuless_census.json
 """
 from __future__ import annotations
 

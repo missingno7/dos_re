@@ -483,12 +483,9 @@ class DOSMachine:
         """Bytes an open(3D) should serve, or None if the file does not exist.
 
         The whole read-your-writes overlay is gated on persistence being ON
-        (``save_dir`` set).  When it is OFF (replays/tests/headless replay) this is
-        byte-for-byte the legacy behaviour: writes never survive close, so a
-        re-open always reads the pristine game file -- which is what every replay
-        was recorded under.  (Consulting the overlay unconditionally silently
-        diverged any replay where the game rewrites then re-reads a file, e.g.
-        Skyroads reloading SKYROADS.CFG after saving progress at a level break.)
+        (``save_dir`` set). When it is off (replays/tests/headless replay),
+        writes never survive close, so a re-open reads the pristine game file.
+        This keeps persistent host state outside deterministic execution.
 
         With persistence ON: (1) the in-run overlay -- the freshest thing the
         program wrote this run; (2) the ``save_dir`` sink -- progress saved by an
@@ -1260,8 +1257,7 @@ class DOSMachine:
             # ONLY when persistence is on (save_dir set) is that buffer also
             # registered in the cross-close overlay so a later open of the same
             # file reads what was written; with persistence off the buffer is
-            # dropped on close and a re-open reads the pristine file -- the
-            # legacy behaviour every replay was recorded under.
+            # dropped on close and a re-open reads the pristine file.
             buf = bytearray()
             if self.save_dir is not None:
                 self.file_overlay[self._overlay_key(path)] = buf

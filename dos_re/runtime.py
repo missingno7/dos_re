@@ -8,7 +8,7 @@ from .dos import DOSMachine
 from .memory import LoadedProgram, load_mz_program
 # The Runtime shell + the EXE-FREE image constructor live in runtime_core so an
 # EXE-independent import graph can reach them without reaching this module's
-# load_mz_program loader edge (dos_re_2.0 §"The EXE-independence wall").
+# load_mz_program loader edge, which detached runtime checks must not import.
 # enable_sound_blaster lives in runtime_core (loader-free) and is re-exported
 # here: it attaches hardware to a Runtime and has no loader dependency, but
 # THIS module does (create_runtime -> load_mz_program), so detached composition

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""codemap — derive a whole-program function-entry list from observed execution.
+"""codemap — derive function-entry evidence from observed execution.
 
-The whole-program discovery step of the automatic recovery pipeline
-(native-recovery pilot; see the port repo's docs).  A game-side probe drives
-the game under a step wrapper and dumps an ``observed.json``:
+A game-side probe may drive any relevant scenario under a step wrapper and
+dump an ``observed.json``:
 
     {
       "executed":            ["CS:IP", ...],   # every stepped instruction start
@@ -13,15 +12,15 @@ the game under a step wrapper and dumps an ``observed.json``:
       ...
     }
 
-This tool turns that into a function-entry list for ``liftgen``'s census /
-``liftverify``'s batch lift:
+This tool projects those observations into an entry list that static analysis
+or generation commands may consume:
 
     entries = (call_targets that were actually entered)
             | int_entries | ivt_game_vectors | --extra entries
 
-Dynamic evidence beats static analysis here: an indirect call's targets are
-unresolvable statically but appear in ``call_targets`` for free.  Every kept
-entry was *executed*, so the census decodes real code, never data.
+Dynamic evidence complements static analysis: an indirect call's observed
+targets appear in ``call_targets`` even when a static analysis cannot resolve
+them. Every kept entry was executed in the contributing observations.
 
 Usage:
     python tools/codemap.py --observed artifacts/codemap/observed.json \

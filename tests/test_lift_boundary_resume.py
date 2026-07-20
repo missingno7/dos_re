@@ -12,8 +12,8 @@ head itself:
   * an IRET returning to the head, when an IRQ landed on that instruction.
 
 Neither could dispatch: the head was forced as a block leader but never
-exported, so no hook existed at it. Behind the strict-VMless wall that is a
-violation at frame 0 -- on the address the game is most often found at, in a
+exported, so no implementation existed at it. When interpreter fallback is
+forbidden that fails at frame 0 -- on the address the game is most often found at, in a
 function that WAS lifted and does contain it, which reads like a census bug and
 is not one.
 """

@@ -1,10 +1,9 @@
-"""contract_census.py -- the M3b ABI-contract census over a recovery IR.
+"""contract_census.py -- ABI-contract evidence over Recovery IR.
 
 Runs the ABI-contract inference (dos_re.lift.contracts) over every censused
 function: proposed real parameters (from register/stack live-ins),
 caller-observed return values (interprocedural exit-liveness narrowing),
-stack-argument evidence, pointer-pair evidence, and structured refusals --
-the ABI-recovered CPUless work list (docs/history/dos_re_2.0.md, Stage 2b / M3b).
+stack-argument evidence, pointer-pair evidence, and structured refusals.
 
 Externally-reachable functions (roots, dynamic-dispatch targets, vectored
 handlers) keep conservative return sets; supply them so the narrowing never
@@ -14,7 +13,7 @@ Usage:
     python dos_re/tools/contract_census.py --ir artifacts/lift/recovery_ir.json \
         --roots 1010:0000 --dyn-evidence artifacts/lift/indirect_sites.json \
         --vector-evidence artifacts/lift/vector_sites.json \
-        --names lemmings/recovery_facts/recovery_facts.json \
+        --names game/recovery_facts/recovery_facts.json \
         --out artifacts/abi/contract_census.json
 """
 from __future__ import annotations
@@ -109,7 +108,7 @@ def main(argv=None) -> int:
     census["ss_globals_floor"] = floor
 
     s = census["summary"]
-    print(f"M3b ABI-contract census over {s['total']} functions:")
+    print(f"ABI-contract census over {s['total']} functions:")
     print(f"  contract-promotable       {s['contract_promotable']:4d}")
     print(f"  returns narrowed          {s['returns_narrowed']:4d}")
     print(f"  dropped register outputs  {s['dropped_output_total']:4d}")

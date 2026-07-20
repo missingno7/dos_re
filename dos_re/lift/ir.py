@@ -5,7 +5,7 @@ consumer can reconstruct fetch/probe from the record and let the ONE
 decoder/scanner re-elaborate it — no second decode path anywhere.  Both
 ``tools/liftemit.py --from-ir`` and ``tools/liftlink.py --from-ir`` build
 their ``FunctionScan`` objects through this module, which is what makes the
-IR the single code-identity authority for the whole pipeline.
+IR the code-identity authority for every consumer of this static artifact.
 """
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ def scan_from_ir_record(rec: dict) -> FunctionScan:
     # truth): irgen marked each yield site ``boundary_effect``.  Re-supplying
     # them keeps the re-scan identical to the original -- a boundary-delimited
     # main loop stays liftable instead of re-refusing no-exit (cfg.scan_function,
-    # dos_re_2.0.md §6a).
+    # static and observed dynamic-transfer evidence).
     heads = frozenset(int(inst["ip"], 16)
                       for blk in rec.get("blocks", ())
                       for inst in blk["instructions"]

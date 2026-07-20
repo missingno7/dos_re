@@ -1,8 +1,7 @@
-"""In-game overlay settings menu — the NATIVE product's F10 menu (tabbed, mouse+keyboard, pygame-injected).
+"""Optional in-game presentation settings menu (tabbed, mouse/keyboard, pygame-injected).
 
-Promoted from the first completed port's `overlay_menu.py`. This is a POST-ENDGAME widget: it belongs to
-the native product only — the hybrid/VM runtimes are recovery instruments and stay pristine (their F10 is
-a screenshot key). See docs/post_endgame.md for when and how to use it.
+This is a non-authoritative enhancement. A product profile may select it when
+its presentation seam and host-input policy satisfy ``docs/enhancements.md``.
 
 Host-presentation layer ONLY — the determinism firewall is structural:
   * the menu is MODAL: while open the caller freezes the game tick (like a pause) and routes every key

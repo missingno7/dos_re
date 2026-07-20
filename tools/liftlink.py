@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """liftlink — batch linker: ``emulate_call`` edges become direct lifted-to-lifted calls.
 
-The VM-detachment linking pass of the DOS_RE 2.0 pipeline
-(docs/history/dos_re_2.0.md): after ``liftemit`` produces the VMless lifted corpus,
-this tool turns interpreter-mediated near CALLs between lifted functions into
-direct Python calls, producing the structurally linked VMless graph.
+Given a set of generated functions, this tool turns structurally eligible
+interpreter-mediated CALLs into direct Python calls. It is a reproducible
+graph-generation recipe, not a required global operation: a program may
+select linked and unlinked implementations independently through its execution
+configuration.
 ``emit_function`` already knows how to emit a linked direct call (``link_map``
 → ``call_installed_hook_like_near_call``); this tool computes WHICH edges
 qualify and re-emits every caller that gains one.
 
-Edge rule (STRUCTURAL — the 2.0 default):
+Edge rule:
 
     caller scan is liftable, the near-CALL target is itself a census entry in
     the SAME segment (near calls guarantee that), and EVERY callee exit is a
@@ -19,13 +20,12 @@ Edge rule (STRUCTURAL — the 2.0 default):
     Tail-exit / iret / mixed-exit callees stay ``emulate_call``, as do retf
     callees whose sites lack the provable push.
 
-Correctness of the linked graph is judged END-TO-END: full-state oracle
-comparison at tick boundaries over the assembled graph, with
+Correctness is judged by replay verification of the selected composition:
+full-state oracle comparison at stable points, with
 ``dos_re.replay.bisect_divergence`` localizing any divergence to a stable
-timeline transition. Per-function ORACLE_PASSING is NOT a link precondition —
-``--proven-edges`` restores that 1.x conservative gate for the hybrid tier or
-for debugging, but it must not be the default posture (oracle-guided
-convergence, docs/history/dos_re_2.0.md §2).
+timeline transition. A prior per-function proof is evidence, but it is not a
+structural link precondition and does not replace verification of the composed
+implementation.
 
 Everything is rescanned from the snapshot (``scan_function`` with the
 interpreter probe, exactly as liftverify does) — stale census artifacts are
@@ -36,10 +36,10 @@ one directory and are loaded via ``spec_from_file_location`` (see
 ``dos_re.lift.install._load_module``), which supports no package-relative
 imports.  A linked caller therefore carries a module-level
 ``LINKS = {"CS:IP": None}`` table and each linked CALL site evaluates
-``LINKS["CS:IP"]`` late-bound at call time.  ``resolve_links`` (the
-installer's second pass) fills the table with the callees' functions; until
-then the module still LOADS standalone, and under the hybrid the installed
-hook set takes precedence anyway (``call_installed_hook_like_near_call``
+``LINKS["CS:IP"]`` late-bound at call time. ``resolve_links`` (the backend
+activator's second pass) fills the table with the callees' functions; until
+then the module still loads independently, and the CPU backend's replacement
+hook set takes precedence (``call_installed_hook_like_near_call``
 prefers ``cpu.replacement_hooks``).
 
 Callers are re-emitted, so their previous proof no longer covers the new
@@ -47,7 +47,7 @@ body: re-verify the linked set with liftverify along a drive afterwards.
 
 Usage:
     python tools/liftlink.py --exe GAME.EXE --snapshot DIR \
-        --entries-file entries.txt --board manifest.json [--board ...] \
+        --entries-file entries.txt \
         [--emit-dir lifted] [--out-dir lifted] [--json report.json]
 """
 from __future__ import annotations
@@ -66,9 +66,6 @@ from dos_re.lift.emit import EmitUnsupported, emit_function  # noqa: E402
 from dos_re.snapshot import clone_runtime_state  # noqa: E402
 from dos_re.snapshot import load_snapshot, parse_addr  # noqa: E402
 
-PASSING = "ORACLE_PASSING"
-
-
 def _probe(rt, cs):
     """Interpreter length-probe over a scratch clone (same as liftverify)."""
     scratch = clone_runtime_state(rt)
@@ -85,27 +82,6 @@ def _probe(rt, cs):
             return None
         return ((cpu.s.ip - ip) & 0xFFFF) or None
     return probe
-
-
-def load_statuses(board_paths) -> dict[str, str]:
-    """Merge proof boards / lift manifests → {"CS:IP": best status}.
-
-    ORACLE_PASSING from ANY pass wins (the same merge rule as
-    ``install.passing_entries``: the drive corpora are complementary)."""
-    statuses: dict[str, str] = {}
-    for path in board_paths:
-        data = json.loads(Path(path).read_text())
-        items = data.items() if isinstance(data, dict) else ((None, r) for r in data)
-        for key, rec in items:
-            if not isinstance(rec, dict):
-                continue
-            entry = rec.get("entry") or key
-            status = rec.get("status")
-            if not entry or not status:
-                continue
-            if statuses.get(entry) != PASSING:
-                statuses[entry] = status
-    return statuses
 
 
 def all_near_ret_exits(scan: FunctionScan) -> bool:
@@ -167,7 +143,7 @@ def compute_far_link_edges(scans: dict[tuple[int, int], FunctionScan],
                            *, exclude: frozenset[str] = frozenset(),
                            computed_return_far: frozenset[str] = frozenset()):
     """The far-linkable edge set: direct far CALLs between census entries whose
-    callee exits are all ``retf``.  Structural rule only (the 2.0 posture);
+    callee exits are all ``retf``. This is structural evidence only, with the
     same exclusion semantics as near edges.
 
     ``computed_return_far`` — port-declared COMPUTED-RETURN facts (see
@@ -196,12 +172,11 @@ def compute_far_link_edges(scans: dict[tuple[int, int], FunctionScan],
     return edges, blocked
 
 
-def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
-                       statuses: dict[str, str], *, structural: bool = True,
+def compute_link_edges(scans: dict[tuple[int, int], FunctionScan], *,
                        exclude: frozenset[str] = frozenset(),
                        computed_return_near: frozenset[str] = frozenset(),
                        computed_return_far: frozenset[str] = frozenset()):
-    """The linkable edge set from fresh scans (+ proof statuses if gated).
+    """The linkable edge set from fresh scans.
 
     ``computed_return_near`` / ``computed_return_far`` are port-declared
     COMPUTED-RETURN recovery facts ("CS:IP" strings): callees whose every exit
@@ -223,27 +198,16 @@ def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
     for the report — every near-call edge between census entries is accounted
     for, linked or not.
 
-    Two edge rules:
+    A callee qualifies on structural evidence alone (liftable census entry
+    with a compatible return shape). Correctness is established separately by
+    oracle comparison over the selected composition, which can localize the
+    first bad stable transition.
 
-    * ``structural=True`` (DEFAULT — oracle-guided convergence): a callee
-      qualifies on the STRUCTURAL criterion alone (liftable census entry,
-      all-near-``ret`` exits).  Correctness is guaranteed not per-callee but
-      by END-TO-END oracle comparison over the assembled graph, which
-      localizes the first bad transition (dos_re.replay.bisect_divergence).
-    * ``structural=False`` (1.x conservative, ``--proven-edges``) — a callee
-      must additionally be ORACLE_PASSING on some board.  Safe standalone (a
-      linked call reaches only proven code); useful for the hybrid tier and
-      for debugging, but it is not the assembly posture.
-
-    ``exclude`` ("CS:IP" strings) blocks edges INTO entries the port keeps
-    interpreted (boundary-shadowing functions, env-wait recovery facts).  This
-    matters because a linked call binds the callee's lifted body DIRECTLY
-    (``LINKS`` default in ``call_installed_hook_like_near_call``), bypassing
-    the installation skip entirely — an excluded callee reached through a
-    linked edge would run lifted anyway, skipping its boundary sentinels and
-    pacing waits (the Lemmings fade-crawl failure).  Blocking the edge makes
-    callers ``emulate_call`` the excluded callee, so the interpreter's
-    sentinel hooks, wait pacing, and IRQ machinery all apply."""
+    ``exclude`` ("CS:IP" strings) defines entries outside this generated graph
+    descriptor. This matters because a linked call binds the generated callee
+    directly, bypassing backend dispatch at that identity. Blocking the edge
+    preserves the composition seam so another plan-selected implementation can
+    own the callee."""
     edges: list[tuple[str, str]] = []
     blocked: list[tuple[str, str, str]] = []
     for (cs, ip), scan in sorted(scans.items()):
@@ -259,8 +223,6 @@ def compute_link_edges(scans: dict[tuple[int, int], FunctionScan],
                 blocked.append((caller_key, callee_key, "not-an-entry"))
             elif not callee.liftable:
                 blocked.append((caller_key, callee_key, "callee-not-liftable"))
-            elif not structural and statuses.get(callee_key) != PASSING:
-                blocked.append((caller_key, callee_key, "not-passing"))
             elif all_near_ret_exits(callee) or callee_key in computed_return_near:
                 edges.append((caller_key, callee_key))
             elif (all_far_ret_exits(callee) or callee_key in computed_return_far) \
@@ -368,11 +330,6 @@ def main(argv=None) -> int:
                          "exe+snapshot+entries (docs/recovery_ir.md): scans "
                          "are re-elaborated from the IR's pinned bytes by the "
                          "one decoder; no snapshot rescans")
-    ap.add_argument("--board", action="append", default=[], metavar="JSON",
-                    help="proof board / lift manifest JSON (repeatable). "
-                         "Optional under the structural default; required "
-                         "with --proven-edges, where ORACLE_PASSING on any "
-                         "board qualifies a callee.")
     ap.add_argument("--emit-dir", default="lifted",
                     help="where the current emitted modules live (signatures / "
                          "iteration budgets / before-counts are read from here)")
@@ -381,15 +338,6 @@ def main(argv=None) -> int:
                          "overwriting the unlinked callers in place)")
     ap.add_argument("--json", default=None, metavar="REPORT",
                     help="write the machine-readable link report here")
-    ap.add_argument("--structural-edges", action="store_true",
-                    help="(default since DOS_RE 2.0; flag kept for "
-                         "compatibility) link on the structural criterion "
-                         "alone: liftable entry + all-near-ret exits.")
-    ap.add_argument("--proven-edges", action="store_true",
-                    help="1.x conservative gate: additionally require the "
-                         "callee to be ORACLE_PASSING on some --board. For "
-                         "the hybrid tier / debugging only -- graph assembly "
-                         "is judged end-to-end (docs/history/dos_re_2.0.md section 2).")
     ap.add_argument("--boundary-heads", default=None, metavar="@FILE",
                     help="boundary-head addresses (one CS:IP per line); must "
                          "match the liftemit setting for a consistent corpus")
@@ -402,11 +350,9 @@ def main(argv=None) -> int:
     ap.add_argument("--exclude-callees", action="append", default=[],
                     metavar="CS:IP|@FILE",
                     help="block edges INTO these entries (repeatable; @FILE = "
-                         "one CS:IP per line, # comments). Use for entries "
-                         "the port keeps interpreted -- boundary-shadowing "
-                         "functions, env-wait recovery facts -- because a "
-                         "linked edge would bypass the install skip and run "
-                         "the excluded lifted body anyway.")
+                         "one CS:IP per line, # comments). These identities "
+                         "remain backend-dispatch seams for implementations "
+                         "outside this generated graph descriptor.")
     ap.add_argument("--computed-return-near", action="append", default=[],
                     metavar="CS:IP|@FILE",
                     help="COMPUTED-RETURN recovery facts, near shape "
@@ -424,8 +370,6 @@ def main(argv=None) -> int:
                          "__setargv).  Linked like all-retf callees (push-cs "
                          "idiom near sites, or direct far calls).")
     args = ap.parse_args(argv)
-    if args.proven_edges and not args.board:
-        ap.error("--proven-edges requires at least one --board")
     if not args.from_ir and not (args.exe and args.snapshot and args.entries_file):
         ap.error("either --from-ir IR.json or --exe + --snapshot + --entries-file")
 
@@ -493,14 +437,11 @@ def main(argv=None) -> int:
     computed_near = _read_keys(args.computed_return_near)
     computed_far = _read_keys(args.computed_return_far)
 
-    statuses = load_statuses(args.board)
-    edges, blocked = compute_link_edges(scans, statuses,
-                                        structural=not args.proven_edges,
-                                        exclude=exclude,
+    edges, blocked = compute_link_edges(scans, exclude=exclude,
                                         computed_return_near=computed_near,
                                         computed_return_far=computed_far)
 
-    # A linked call needs its callee module ON DISK for the installer's
+    # A linked call needs its callee module on disk for the backend activator's
     # resolution pass — a proven callee that was never emitted cannot be
     # linked (it can still be emulate_call'd, so just drop the edge, loudly).
     kept: list[tuple[str, str]] = []
@@ -602,16 +543,14 @@ def main(argv=None) -> int:
           f"emulate_call sites in re-emitted callers: {total_before} -> {total_after}")
     if reasons:
         print("blocked edges: " + ", ".join(f"{r}={n}" for r, n in sorted(reasons.items())))
-    print("NOTE: re-emitted callers carry NEW bodies -- the linked graph is "
-          "judged END-TO-END (tick-boundary oracle comparison over the "
-          "assembled VMless graph; replay bisection localizes any divergence). "
-          "liftverify along a drive remains available for per-function "
-          "diagnostics and the hybrid tier.")
+    print("NOTE: re-emitted callers carry NEW bodies. Verify the selected "
+          "composition end-to-end at stable replay points; replay bisection "
+          "localizes any divergence. liftverify remains available for "
+          "per-function diagnostics.")
 
     if args.json:
         report = {
             "snapshot": str(args.snapshot),
-            "boards": list(args.board),
             "entries": len(scans),
             "edges": [list(e) for e in edges],
             "far_edges": [list(e) for e in far_edges],

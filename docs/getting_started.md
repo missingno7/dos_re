@@ -1,123 +1,149 @@
 # Getting started with dos_re 3.0
 
-dos_re recovers one original program into a graph whose regions may have
-different implementations. Development keeps the original executable as an
-oracle and may use interpreter fallback. Release is the same graph under a
-strict policy that requires complete non-EXE coverage and a closed-world
-export.
+dos_re is a workspace of composable recovery operations, not a fixed sequence.
+Start with the question you need to answer and add only the evidence and
+representation depth that helps answer it.
 
-## 1. Validate the framework
+## Validate the framework
 
 ```bash
 python -m pytest -q
 python tools/lint.py
-python tools/check_undefined.py
+python tools/check_undefined_names.py
 python tools/check_doc_links.py
 python examples/tiny_frame_game/walkthrough.py
 ```
 
-## 2. Create a port repository
+## Create a port
 
 ```bash
-python tools/new_project.py my_game_port
+python tools/new_project.py --game mygame --output ../mygame_port
 ```
 
-The port owns its original inputs, recovered facts, replay corpus, generated
-outputs, authored implementations, assets, bootstrap materialization, and
-profile factory. Keep generated artifacts reproducible and do not hand-edit
-them.
+The port owns original inputs, recovered facts, replays, generated and authored
+implementations, assets, bootstrap materialization, and its configuration
+factory. Generated artifacts stay reproducible and are never hand-edited.
 
-## 3. Retain program structure
+## Choose useful operations
 
-Load the executable through the appropriate real-mode or protected-mode
-adapter. Recover functions, regions, transfers, data facts, refused areas, and
-runtime-code variants into canonical Recovery IR. Name them with the stable
-types from `dos_re.identity`; generated Python names and raw addresses are not
-cross-artifact identities.
+These can happen in any evidence-supported order:
 
-Unknown structure stays explicit. A refused function or unresolved transfer is
-evidence, not an invitation to assume the code is unreachable.
+### Observe the original
 
-## 4. Record deterministic oracle replays
+Run the original program through a real-mode or protected-mode adapter. Use
+focused probes to identify entries, transfers, effects, runtime-written code,
+and failures. Record every claim with its program/image identity and
+provenance; an observed path is evidence of presence, not absence elsewhere.
 
-The unified player exposes replay operations:
+### Retain static structure
+
+Recovery IR stores pinned function/block/instruction structure, transfers,
+effects, refusals, runtime-code facts, and provenance. It is valuable for
+repeatable corpus analysis, but a targeted scan can be used without first
+building whole-program IR.
+
+See [Recovery IR](recovery_ir.md).
+
+### Record deterministic replays
+
+The unified player exposes ReplayArtifact operations:
 
 ```bash
 python scripts/play.py --record-replay artifacts/replays/gameplay
 python scripts/play.py --play-replay artifacts/replays/gameplay
-python scripts/play.py --replay-continue artifacts/replays/gameplay
+python scripts/play.py --play-replay artifacts/replays/gameplay --replay-continue
 ```
 
-A `ReplayArtifact` owns a base continuation state, immutable normalized events,
-stable `ReplayPoint`s, function visits, runtime transfers, and base-relative
-`CachedBoundary` deltas. It is the only persistent record/replay format.
+A replay owns immutable normalized events, stable points, complete continuation
+bases, function visits, observed transfers, annotations, and base-relative
+cached boundaries. It is the only persistent deterministic replay format.
 
-## 5. Build the Execution Atlas
+### Create or enrich an Atlas
+
+An Atlas can begin empty and accept whichever evidence exists:
 
 ```bash
-python tools/atlas.py build artifacts/atlas --ir recovery_ir.json \
-  --program my-game:1 --image-label GAME.EXE --image-sha256 SHA256 \
-  --root FUNCTION_ID --product-profile game
+python tools/atlas.py create artifacts/atlas --program my-game:1
 python tools/atlas.py ingest-replay artifacts/atlas artifacts/replays/gameplay
+python tools/atlas.py ingest-facts artifacts/atlas atlas_facts.json
+```
+
+Retained IR is optional:
+
+```bash
+python tools/atlas.py ingest-ir artifacts/atlas \
+  --ir recovery_ir.json \
+  --program my-game:1 \
+  --image-label GAME.EXE \
+  --image-sha256 SHA256 \
+  --root FUNCTION_ID \
+  --product-profile game
+```
+
+Then query or validate the materialized projection:
+
+```bash
 python tools/atlas.py validate artifacts/atlas
+python tools/atlas.py show artifacts/atlas FUNCTION_ID
+python tools/atlas.py best-replay artifacts/atlas FUNCTION_ID
+python tools/atlas.py unresolved artifacts/atlas
 python tools/atlas.py coverage artifacts/atlas game
 ```
 
-Recovery IR provides the static skeleton; replays add observed paths, counts,
-and reproducible intervals. The Atlas retains provenance and exposes
-conservative `ProgramCoverage`. It never selects or installs implementations.
+Observed-only nodes are valid. Static evidence can enrich them later without
+changing their stable identities.
 
-## 6. Add implementations
+### Add implementations
 
-Register every original, generated, or authored candidate in one
-`ImplementationCatalog`. Recovery level is descriptor metadata on a function
-or region, not a player mode. Authored alternatives are categorized as faithful
+Register interpreted, generated, or authored alternatives in one
+`ImplementationCatalog`. Representation depth is descriptor metadata on a
+function or region, not a player mode. Authored alternatives are faithful
 replacements, non-authoritative enhancements, or behavioral modifications.
 
-The semantic implementation uses a backend-neutral override context. Backend
-adapters handle registers, stack, memory, arguments, returns, and control
-transfer without duplicating authored logic.
+Backend activators marshal the selected semantic implementation to machine or
+native state. They do not duplicate its behavior.
 
-## 7. Configure and plan
+### Plan and run
 
-An `ExecutionConfiguration` selects:
+An `ExecutionConfiguration` selects composition, execution policy, verification
+policy, runtime/product services, one bootstrap provider, and an optional build
+target. `plan_execution` consumes any conservative `CoverageSource` and returns
+an immutable `ExecutionPlan` plus `DetachmentReport`.
 
-- product roots and implementation composition;
-- execution policy;
-- verification policy;
-- runtime/product services;
-- one `BootstrapProvider`;
-- build target.
+Development, verification, detached, and release are policy presets over the
+same mixed program. They are not recovery levels or separate players.
 
-The planner combines Atlas coverage, the implementation catalog, service
-closure, bootstrap requirements, and policy into an immutable `ExecutionPlan`
-and `DetachmentReport`. The unified player executes this plan; it does not
-reconstruct one or fall back around it.
+### Verify a change
 
-Use `development` while recovery is incomplete, `verification` for oracle
-comparison, `detached` to prove non-EXE execution, and `release` for a
-package-ready closed world. These are policy presets, not separate players.
+Use a focused call verifier for fast local diagnosis or select a stable
+ReplayArtifact interval for reusable oracle-versus-candidate evidence. Compare
+complete continuation state when representations match, or a shared canonical
+authoritative projection when they do not.
 
-## 8. Verify and export
+Enabling a presentation enhancement excludes only its declared output.
+Behavioral modifications are tested against their declared divergence scope.
 
-Faithful code is verified over replay intervals against the original oracle.
-Compare complete continuation state for compatible representations or a
-canonical authoritative projection for detached native state. Enhancements
-exclude only their declared presentation output; behavioral modifications use
-tests for their declared divergence.
-
-Export only an exact package-ready release plan:
+### Export a closed world
 
 ```bash
 python tools/export.py --factory project.release:build_export --output dist/game
 python tools/verify_export.py --artifact dist/game -- python launch.py
 ```
 
-Export requires complete reachable coverage, no unresolved frontier, a
-materialized release-valid bootstrap, product-safe services, and no forbidden
-development dependency. It packages an explicit file closure and validates a
-hermetic cold start.
+Export accepts only a package-ready release plan. Missing coverage, unresolved
+transfers, forbidden capabilities, missing bootstrap artifacts, and undeclared
+files fail before packaging. A useful project does not need to detach from
+every low-level representation unless its selected release policy requires it.
 
-Continue with [execution planning](execution_planner.md), [override
-architecture](override_architecture.md), [the Atlas](execution_atlas.md), and
-[replay architecture](replay_architecture.md).
+## A practical AI loop
+
+For a targeted change:
+
+- query a function, region, or observed point;
+- inspect its static, dynamic, manual, and implementation evidence;
+- choose the smallest useful representation or override;
+- restore the nearest replay boundary and reproduce the relevant interval;
+- verify the change locally and at the appropriate broader scope;
+- retain new facts, results, and unresolved questions under the same identities.
+
+Repeat only where further recovery has practical value.

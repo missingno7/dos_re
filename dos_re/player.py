@@ -36,6 +36,7 @@ from dos_re.execution import (
     ImplementationDescriptor,
     ImplementationEntry,
     ImplementationOrigin,
+    OverrideCategory,
     ProgramCoverage,
     RuntimeServiceCatalog,
     RuntimeServiceDescriptor,
@@ -58,7 +59,7 @@ from dos_re.x86 import HaltExecution, UnsupportedInstruction
 # frontend can therefore construct its selected runtime without importing the
 # interpreter loader. ``write_snapshot`` itself is EXE-free.
 from dos_re.replay import (
-    ExecutionProfile,
+    ReplayExecutionIdentity,
     ReplayArtifact,
     ReplayDriver,
     ReplayPoint,
@@ -134,7 +135,9 @@ class _RealReplayRecorder:
 
 
 class _RealReplayPlayback:
-    def __init__(self, artifact: ReplayArtifact, profile: ExecutionProfile):
+    def __init__(
+        self, artifact: ReplayArtifact, profile: ReplayExecutionIdentity,
+    ):
         self.artifact = artifact
         self.profile = profile
         self.adapter = RealModeInputAdapter(artifact.events)
@@ -362,6 +365,11 @@ class GameFrontend:
             targets_by_implementation.setdefault(
                 binding.implementation_id, []
             ).append(binding.target)
+        for descriptor in plan.implementations:
+            if descriptor.category is OverrideCategory.ENHANCEMENT:
+                targets_by_implementation.setdefault(
+                    descriptor.implementation_id, []
+                ).extend(descriptor.targets)
         descriptors = {
             item.implementation_id: item for item in plan.implementations
         }
@@ -454,7 +462,9 @@ class GameFrontend:
         if "timer_irqs_per_frame" in meta:
             args.timer_irqs_per_frame = int(meta["timer_irqs_per_frame"])
 
-    def replay_profile(self, args: argparse.Namespace, rt) -> ExecutionProfile:
+    def replay_profile(
+        self, args: argparse.Namespace, rt,
+    ) -> ReplayExecutionIdentity:
         """Stable identity used to invalidate profile-local replay caches."""
         plan = args.execution_plan
         only_interpreted = bool(plan.implementations) and all(
@@ -467,19 +477,14 @@ class GameFrontend:
             else "candidate"
         )
         mode = plan.configuration.profile
-        overrides = tuple(sorted(
-            f"{key!r}:{value}" for key, value in rt.cpu.hook_names.items()))
-        plan = getattr(args, "execution_plan", None)
-        composition_digest = (
-            execution_composition_digest(plan) if plan is not None else ""
-        )
+        composition_digest = execution_composition_digest(plan)
         implementation = hashlib.sha256(
             f"{_implementation_identity(self)}:{composition_digest}".encode("utf-8")
         ).hexdigest()
         key = hashlib.sha256(
-            ("\n".join((mode, implementation, *overrides))).encode("utf-8")
+            f"{mode}\n{implementation}".encode("utf-8")
         ).hexdigest()[:12]
-        return ExecutionProfile(
+        return ReplayExecutionIdentity(
             profile_id=f"real-mode-{mode}-{key}",
             role=role,
             implementation=implementation,
@@ -488,7 +493,6 @@ class GameFrontend:
             devices="dos-re-real-mode-devices-v1",
             continuation_schema="dos-re-real-mode-continuation-v1",
             projection_schema="dos-re-complete-machine-v1",
-            overrides=overrides,
         )
 
     def capture_replay_state(self, rt, *, event_cursor: int):

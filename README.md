@@ -1,173 +1,153 @@
 # dos_re 3.0
 
-dos_re is an oracle-driven framework for recovering DOS games into maintainable
-programs. It keeps the original executable runnable as a reference, extracts
-canonical program structure into Recovery IR, records deterministic execution
-evidence, and lets generated and authored implementations replace original
-regions incrementally. The result is one mixed implementation graph—not a
-choice between unrelated “emulated”, “VMless”, or “native” games.
+dos_re is a modular, evidence-driven workspace for recovering and modifying DOS
+games. It keeps the original program available as an oracle during development,
+combines static and observed facts under stable identities, and lets generated
+and authored implementations coexist at any useful recovery depth.
 
-Unlike an emulator, dos_re is designed to remove its own lower-level
-dependencies over time. Unlike a decompiler, it keeps executable evidence and
-verification attached to stable program identities. Unlike a manual port, it
-can compare every faithful replacement with the original oracle at reproducible
-runtime intervals.
+There is no required decompilation ladder. One function may remain interpreted,
+another may use generated instruction-shaped code, a third may have a recovered
+ABI, and a renderer may be replaced with authored native code. A project can
+stop wherever the result is useful.
 
-## The dos_re 3.0 model
+## The model
 
 ```text
-original program
-      |
-      +-- Recovery IR -------------------+
-      +-- deterministic ReplayArtifacts -+
-                                         v
-                                  Execution Atlas
-                                         |
-                              conservative ProgramCoverage
-                                         v
- implementations + services + bootstrap + explicit policy
-                                         |
-                                         v
-                                  ExecutionPlan
-                         +---------------+---------------+
-                         v                               v
-              development / verification        detached / release
-                         |                               |
-                  oracle comparison               closed-world export
+stable program / image / function / region / point identities
+                 |
+       +---------+----------+----------------+----------------+
+       |                    |                |                |
+  static recovery      observed runs    manual facts    implementation
+  and Recovery IR      and replays      and contracts   descriptors
+       |                    |                |                |
+       +--------------------+----------------+                |
+                            |                                 |
+                 Execution Atlas projection                  |
+                 navigation + conservative coverage          |
+                            |                                 |
+                            +------ CoverageSource -----------+
+                                              |
+                     configuration + services + bootstrap
+                                              |
+                                      ExecutionPlan
+                              +---------------+---------------+
+                              |                               |
+                  development and verification        closed-world export
 ```
 
-Recovery IR owns recovered static structure. `ReplayArtifact` owns deterministic
-events, continuation state, cached boundaries, and observed execution.
-The Execution Atlas combines that evidence for navigation and conservative
-coverage; it is not an execution engine. `ImplementationCatalog` describes the
-available original, generated, and authored implementations.
-`ExecutionPlanner` selects exactly one implementation for every reachable
-identity and computes the full dependency closure. The unified player executes
-that immutable plan through a backend adapter. Export accepts only a complete,
-package-ready release plan and physically includes its declared closure.
+The arrows are dependency boundaries, not a mandatory workflow. The Atlas can
+grow from observed execution or explicit facts before complete static recovery
+exists. Planning accepts any conservative `CoverageSource`; it does not require
+Atlas storage. Lifting and authored reconstruction can start with a targeted
+function and later contribute their facts to the same identity and provenance
+model.
 
-Interpreted, VMless, CPUless, ABI-recovered, DOS-memory-backed, memoryless, and
-native are properties of individual implementations. A single recovered game
-can use several of them at once. A fully native port is simply a complete
-selection whose dependency closure no longer contains the original executable,
-CPU model, DOS memory, or dos_re runtime.
+## What can be combined
 
-## Recovery lifecycle
+The workspace provides optional, composable operations:
 
-1. Load the original program and retain recovered facts as Recovery IR with
-   stable program, image, function, region, execution-point, and runtime-code
-   identities.
-2. Record oracle-verifiable `ReplayArtifact`s. Replays provide deterministic
-   input, persistent base-relative boundaries, function visits, transfers, and
-   exact verification intervals.
-3. Build or update the Execution Atlas from Recovery IR and replay evidence.
-   Unknown control flow remains explicitly unresolved.
-4. Register generated implementations and authored overrides in one
-   `ImplementationCatalog`.
-5. Create an `ExecutionConfiguration` selecting composition, execution policy,
-   verification policy, bootstrap provider, runtime services, and build target.
-6. Plan once. The resulting `ExecutionPlan` and `DetachmentReport` are the only
-   runtime selection and dependency authorities.
-7. Verify faithful replacements against the oracle. Where representations
-   match, compare complete continuation state; where they differ, compare a
-   canonical authoritative-state projection.
-8. Export only a package-ready release plan, then prove the artifact can start
-   and run without development paths or detached components.
+- execute the original EXE through the real-mode or protected-mode runtime;
+- retain decoded structure and machine facts in Recovery IR;
+- record deterministic `ReplayArtifact`s with reusable continuation boundaries;
+- collect observed functions, transfers, runtime-code variants, and failures;
+- generate VMless, CPUless, or ABI-recovered implementations;
+- author faithful replacements, presentation enhancements, or behavioral
+  modifications;
+- query the Execution Atlas for relevant code, evidence, replays, and unresolved
+  uncertainty;
+- verify a selected implementation locally or over a replay interval;
+- plan a mixed implementation graph under explicit dependency policy;
+- export a closed-world product when its selected coverage and dependencies are
+  complete.
 
-Authored alternatives have explicit policy:
+VMless, CPUless, ABI-recovered, DOS-memory-backed, memoryless, and native are
+properties of individual implementations. They are not player modes or
+universal project stages.
 
-- a **faithful replacement** preserves observable authoritative behavior and is
-  differentially verified;
-- a **non-authoritative enhancement** may replace presentation or host
-  integration but must not mutate authoritative gameplay state;
-- a **behavioral modification** declares its intended divergence scope and is
-  tested as changed behavior.
+## Evidence and navigation
 
-## Authorities
+Facts remain owned by the artifact or declaration that produced them:
 
-| Authority | Owns |
-|---|---|
-| Recovery IR | Canonical recovered static structure and machine facts |
-| Stable identities | Backend-independent names for program entities and points |
-| `ReplayArtifact` | Immutable events, continuation state, cached boundaries, visits, transfers, verification intervals |
-| Execution Atlas | Persistent evidence aggregation, navigation, graph queries, inverse replay coverage, conservative coverage |
-| `ImplementationCatalog` | Available generated, interpreted, authored, and region implementations |
-| `RuntimeServiceCatalog` | Runtime and product services plus their transitive dependencies |
-| `ExecutionConfiguration` | Composition, execution policy, verification policy, bootstrap, and build target |
-| `ExecutionPlanner` | Selection, dependency closure, unresolved frontiers, and detachment proof |
-| `BootstrapProvider` | The declared source and materialization of initial runtime state |
-| Unified player | Execution of an already validated plan through backend adapters |
-| Verification | Comparison of oracle and candidate plans; never implementation selection |
-| Export | Physical closed-world packaging of one exact release plan |
+- Recovery IR retains static decoded structure and its provenance;
+- `ReplayArtifact` retains events, continuation state, observed visits and
+  transfers, annotations, and derived cached boundaries;
+- implementation descriptors retain availability, requirements, digests, and
+  verification references;
+- explicit fact documents retain reviewed manual claims.
 
-No player, backend, replay, or Atlas query may silently select an implementation
-or fall back outside the plan.
+The Execution Atlas is a deterministic, queryable projection over those
+sources. It does not decode code, execute replays, select implementations, or
+turn absence of observation into proof. Conflicting and unresolved evidence
+stays visible.
 
-## Detached and standalone
+## Execution and release
 
-**EXE-detached** means the selected runtime closure does not require the
-original executable or original code. A build image may have been produced from
-the EXE during development while remaining EXE-detached at runtime.
+`ImplementationCatalog` is the available implementation inventory.
+`ExecutionConfiguration` selects composition, policy, bootstrap, services, and
+build target. `ExecutionPlanner` binds one implementation to each reachable
+identity and computes the dependency closure. The unified player executes that
+validated plan through a backend adapter without fallback outside it.
 
-**Standalone** is stronger: a closed-world export has complete reachable
-coverage, no unresolved frontier, an allowed bootstrap and service closure, no
-development-only imports or files, and a hermetically validated launcher.
-CPU-model, DOS-memory, DOS-services, and dos_re-runtime detachment are separate
-milestones; a useful release does not have to achieve all of them at once.
+Development may retain the EXE, interpreter, oracle comparison, replay,
+instrumentation, and diagnostics. A release configuration is a closed world:
+unknown reachable transfers fail planning, forbidden dependencies are excluded,
+bootstrap artifacts are materialized before launch, and export packages only
+the selected closure.
 
-## What dos_re is—and is not
+EXE-detached, CPU-model-detached, DOS-memory-detached, and dos_re-runtime-
+detached are independent properties of a selection. None is the universal
+definition of a “finished” recovered game.
 
-dos_re currently provides an 8086 real-mode runtime and a flat 386 DOS/4GW path,
-lifting and recovery tools, replay and snapshot infrastructure, Atlas storage,
-mixed-implementation planning, differential verification, and closed-world
-export controls. It is a recovery framework, not a universal DOS emulator or a
-turnkey decompiler. Hardware models, protected-mode behavior, and automatic ABI
-recovery are deliberately incomplete; a port must model the devices and
-runtime services its program actually uses. Atlas evidence is conservative:
-unobserved execution is never treated as proof of absence.
+## Authored alternatives
 
-Verification claims are scoped. dos_re can prove machine-state equivalence when
-oracle and candidate share a representation, canonical authoritative-state
-equivalence when they do not, declared output differences for enhancements,
-and declared divergence scopes for behavioral modifications. It does not claim
-universal byte identity for intentionally different representations or output.
+- A **faithful replacement** claims equivalent authoritative behavior and needs
+  oracle evidence.
+- A **non-authoritative enhancement** changes presentation or host integration
+  while treating authoritative game state as read-only.
+- A **behavioral modification** declares intentional divergence and is tested
+  against its own contract.
 
-## Sanity check
+These categories are metadata on the same generic implementation mechanism.
 
-From a supported Python 3.11+ environment:
+## Validate the checkout
+
+From Python 3.11 or newer:
 
 ```bash
 python -m pytest -q
 python tools/lint.py
-python tools/check_undefined.py
+python tools/check_undefined_names.py
 python tools/check_doc_links.py
+python examples/minimal_adapter/example.py
 python examples/tiny_frame_game/walkthrough.py
 ```
 
-The tiny-frame example walks through stable identities, retained structure,
-ReplayArtifact creation, Atlas coverage, catalog/configuration planning,
-development execution, verification, detachment reporting, and the release
-boundary.
+The examples are independent teaching slices. `tiny_frame_game` runs several
+capabilities in one convenient order; that order is not a required port
+workflow.
 
-## Using dos_re from a port repository
+## Start a port
 
-A port owns game-specific recovery facts, configuration, authored
-implementations, services, bootstrap materialization, assets, and replay
-corpus. dos_re owns the generic authorities above. Keep the framework as an
-ordinary dependency or submodule; do not copy its execution planner or invent a
-project-local replay, coverage, hook registry, or release authority.
+```bash
+python tools/new_project.py --game mygame --output ../mygame_port
+```
 
-Start with [Getting started](docs/getting_started.md), then follow the
-[documentation map](docs/README.md). Tool commands are indexed in
+A port owns game-specific inputs, facts, implementations, services, assets,
+bootstrap materialization, and replay corpus. Keep dos_re as a dependency or
+submodule; do not copy its planner or invent project-local replay, coverage, or
+implementation-selection authorities.
+
+Read [Getting started](docs/getting_started.md) and the
+[documentation map](docs/README.md). Commands are indexed in
 [tools/README.md](tools/README.md).
 
-## Legal boundary and license
+## Scope and license
 
-dos_re contains framework code, not redistributed proprietary game binaries or
-assets. Port repositories must obtain and manage their own lawful inputs.
-Generated boot images, snapshots, replays, and recovered assets may contain
-original-game material and should not be published without the relevant rights.
+dos_re is a recovery framework, not a universal DOS emulator or turnkey
+decompiler. Hardware behavior and automatic recovery are intentionally
+incomplete; add only evidence-backed behavior required by a concrete target.
 
-The framework is licensed under the [MIT License](LICENSE). Third-party code
-with incompatible licensing remains isolated under `graveyard/` for explicit
-technical provenance and is not imported by the active package.
+The repository contains framework code, not proprietary game binaries or
+assets. Generated boot images, snapshots, replays, and recovered assets may
+contain original-game material and must be handled under the relevant rights.
+The framework is licensed under the [MIT License](LICENSE).

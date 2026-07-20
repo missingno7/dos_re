@@ -9,3 +9,17 @@ commands, file formats, migration guides, or agent workflows.
   the ABI-recovered CPUless end-state criteria.
 - [`dead_code_analysis.md`](dead_code_analysis.md) — a SkyRoads-specific
   reachability investigation that informed later coverage interfaces.
+- [`lifting_design_2.0.md`](lifting_design_2.0.md) — the original staged
+  automatic-lifting proposal and dated milestone record.
+- [`memory_schema_2.0.md`](memory_schema_2.0.md) — the former M3/M4/M5
+  memory-detachment roadmap.
+- [`future_work_2.0.md`](future_work_2.0.md) — deferred work written against
+  that staged roadmap.
+- [`performance_2.0.md`](performance_2.0.md) — dated runtime and suite
+  measurements that informed the current measurement contract.
+- [`raster_effects_2.0.md`](raster_effects_2.0.md) — the original
+  port-specific raster-palette investigation and measurements.
+- [`enhancements_2.0.md`](enhancements_2.0.md) — port-specific widescreen,
+  pixel-aspect, and interpolation lessons behind the enhancement policy.
+- [`desmc_2.0.md`](desmc_2.0.md) — the self-modifying decoder incident and
+  validation that motivated the optional de-SMC transform.

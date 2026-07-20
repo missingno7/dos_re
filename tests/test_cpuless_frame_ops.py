@@ -4,7 +4,7 @@
 program opens and closes. Unmodelled, the ABI analysis refuses each one
 (`unanalyzed-opcode-C8`/`-C9`) and the refusal blocks the containing function --
 so it is not 85 stray instructions, it is 85 FUNCTIONS, which was skyroads' single
-largest M3 blocker. The Lemmings pilot never needed them.
+a major CPUless-generation blocker. The Lemmings pilot never needed them.
 
 This is the ABI/stack analysis only. The VMless emitter has always had native
 forms for all of these -- the corpus contains zero interp_one.

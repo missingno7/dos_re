@@ -14,7 +14,7 @@ from dos_re.replay import (
     CanonicalState,
     ConcurrentReplayWriterError,
     ContinuationState,
-    ExecutionProfile,
+    ReplayExecutionIdentity,
     FunctionVisitIndex,
     ReplayArtifact,
     ReplayError,
@@ -36,8 +36,9 @@ def point(n: int) -> ReplayPoint:
 
 
 def profile(profile_id: str, role: str, implementation: str,
-            continuation_schema: str, *, runtime: str = "runtime-a") -> ExecutionProfile:
-    return ExecutionProfile(
+            continuation_schema: str, *,
+            runtime: str = "runtime-a") -> ReplayExecutionIdentity:
+    return ReplayExecutionIdentity(
         profile_id=profile_id,
         role=role,
         implementation=implementation,
@@ -46,7 +47,6 @@ def profile(profile_id: str, role: str, implementation: str,
         devices="devices-a",
         continuation_schema=continuation_schema,
         projection_schema="game-state-v1",
-        overrides=() if role == "oracle" else ("func:a", "func:b"),
     )
 
 
@@ -54,10 +54,21 @@ ORACLE = profile("oracle", "oracle", "interpreter", "machine-v1")
 NATIVE = profile("native", "candidate", "detached-native", "native-v1")
 
 
+def test_replay_execution_identity_rejects_obsolete_or_unknown_fields():
+    with pytest.raises(ValueError, match="current schema"):
+        ReplayExecutionIdentity.from_json({
+            **ORACLE.to_json(),
+            "overrides": [],
+        })
+
+
 class CounterDriver:
     """Same logical program with deliberately different continuation layouts."""
 
-    def __init__(self, execution_profile: ExecutionProfile, *, bug_at: int | None = None):
+    def __init__(
+        self, execution_profile: ReplayExecutionIdentity, *,
+        bug_at: int | None = None,
+    ):
         self._profile = execution_profile
         self._point = point(0)
         self.cursor = 0
@@ -70,7 +81,7 @@ class CounterDriver:
         self.calls: list[tuple[int, int]] = []
 
     @property
-    def profile(self) -> ExecutionProfile:
+    def profile(self) -> ReplayExecutionIdentity:
         return self._profile
 
     @property
@@ -294,6 +305,23 @@ def test_interrupted_boundary_publication_recovers(tmp_path):
         assert reopened.restore(ORACLE, point(3)).digest == driver.capture().digest
 
 
+def test_unindexed_derived_boundary_is_discarded_and_cannot_poison_cache(tmp_path):
+    artifact = make_artifact(tmp_path)
+    directory = (
+        artifact.directory / "profiles" / ORACLE.storage_key
+        / "boundaries" / point(3).key
+    )
+    directory.mkdir(parents=True)
+    (directory / "partial").write_text("not authoritative", encoding="utf-8")
+
+    reopened = ReplayArtifact.open(artifact.directory)
+    assert not directory.exists()
+    driver = CounterDriver(ORACLE)
+    driver.replay_to(reopened, point(3))
+    assert reopened.cache(ORACLE, point(3), driver.capture())
+    assert reopened.restore(ORACLE, point(3)).digest == driver.capture().digest
+
+
 def test_live_concurrent_writer_is_rejected_without_manifest_damage(tmp_path):
     artifact = make_artifact(tmp_path)
     lock = artifact.directory / ".replay-writer.lock"
@@ -351,3 +379,18 @@ def test_function_visit_interval_handles_recursive_calls(tmp_path):
     assert record.first_entry == point(2)
     assert record.last_exit == point(9)
     assert artifact.function_interval("image-a:function-1") == (point(2), point(9))
+
+
+def test_final_incomplete_invocation_invalidates_a_prior_completed_interval(tmp_path):
+    artifact = make_artifact(tmp_path)
+    visits = FunctionVisitIndex()
+    visits.enter("image-a:function-1", point(2))
+    visits.exit("image-a:function-1", point(5))
+    visits.enter("image-a:function-1", point(8))
+    artifact.set_function_visits(visits)
+
+    record = artifact.function_visits()[0]
+    assert record.last_exit == point(5)
+    assert record.incomplete is True
+    with pytest.raises(ReplayError, match="no completed replay interval"):
+        artifact.function_interval("image-a:function-1")

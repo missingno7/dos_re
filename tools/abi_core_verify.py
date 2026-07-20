@@ -1,5 +1,5 @@
 """abi_core_verify.py -- run the seeded mechanical-vs-ABI differential over
-every emitted de-stacked core (M3b slice 2 verification).
+generated de-stacked cores.
 
 For each core in cores_manifest.json, the MECHANICAL reference is emitted
 FRESH from the recovery IR with the current emitter and compared against
@@ -18,7 +18,7 @@ authority is the replay acceptance gate, not this tool.
 Run from the game root:
     python dos_re/tools/abi_core_verify.py \
         --ir artifacts/lift/recovery_ir.json \
-        --abi-dir lemmings/recovered_abi --abi-base lemmings.recovered_abi \
+        --abi-dir game/recovered_abi --abi-base game.recovered_abi \
         --census artifacts/abi/contract_census.json [--states 64]
 """
 from __future__ import annotations

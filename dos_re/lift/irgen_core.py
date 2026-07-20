@@ -64,7 +64,7 @@ def signature_for(fetch: Callable[[int], int], ip: int,
 
 def function_record(scan: FunctionScan, cs: int, ip: int,
                     fetch: Callable[[int], int],
-                    keep_interpreted: set[str],
+                    environment_wait_entries: set[str],
                     boundary_heads: frozenset = frozenset(),
                     dispatch_entries: frozenset = frozenset(),
                     effect_tagger: Callable = dos_effect_tag,
@@ -133,7 +133,7 @@ def function_record(scan: FunctionScan, cs: int, ip: int,
     }
     if embed_blocks:
         rec["signature"] = signature_for(fetch, ip, scan).hex()
-    if entry_key in keep_interpreted:
+    if entry_key in environment_wait_entries:
         rec["platform_effect"] = "env_wait"
     return rec
 
@@ -144,7 +144,7 @@ def build_document(entries, *,
                    effect_tagger: Callable = dos_effect_tag,
                    provenance: dict,
                    notice: str,
-                   keep_interpreted: set[str] = frozenset(),
+                   environment_wait_entries: set[str] = frozenset(),
                    boundary_heads: frozenset = frozenset(),
                    dispatch_entries: frozenset = frozenset(),
                    identity_for: Callable[[int, int], dict] | None = None
@@ -162,7 +162,7 @@ def build_document(entries, *,
     unliftable entries land in the fail-loud ``unsupported`` ledger, never
     silently dropped.
     """
-    keep = set(keep_interpreted)
+    environment_waits = set(environment_wait_entries)
     functions: dict[str, dict] = {}
     unsupported: list[dict] = []
 
@@ -211,7 +211,7 @@ def build_document(entries, *,
     for cs, ip, scan in scans:
         fetch = fetch_for(cs)
         verdict = smc_verdicts.get((cs, ip))
-        rec = function_record(scan, cs, ip, fetch, keep,
+        rec = function_record(scan, cs, ip, fetch, environment_waits,
                               boundary_heads=boundary_heads,
                               dispatch_entries=dispatch_entries,
                               effect_tagger=effect_tagger,
@@ -240,7 +240,7 @@ def build_document(entries, *,
         "provenance": provenance,
         "functions": functions,
         "facts_applied": {
-            "keep_interpreted": sorted(keep),
+            "environment_wait_entries": sorted(environment_waits),
             "boundary_heads": sorted("%04X:%04X" % k for k in boundary_heads),
             "dispatch_entries": sorted("%04X:%04X" % k
                                        for k in dispatch_entries),

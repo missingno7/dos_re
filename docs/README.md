@@ -1,37 +1,39 @@
 # dos_re 3.0 documentation
 
-The [repository README](../README.md) is the human introduction. The active
-reading path is:
+The [repository README](../README.md) introduces the workspace. The active
+documents are grouped by concern rather than recovery stage.
 
-1. [Getting started](getting_started.md) — the end-to-end port workflow.
-2. [Execution planning](execution_planner.md) — configuration, dependency
-   closure, bootstrap, detachment, and release.
-3. [Override architecture](override_architecture.md) — generated and authored
-   implementations and their verification policies.
-4. [Execution Atlas](execution_atlas.md) — retained evidence, navigation, and
-   conservative coverage.
-5. [Replay architecture](replay_architecture.md) — deterministic replay,
-   continuation state, cached boundaries, and verification intervals.
-6. [Architecture](architecture.md) — module ownership and dependency rules.
-7. [Glossary](glossary.md) and [agent toolbox](agent_toolbox.md).
-
-## Specialized mechanism references
+## Core contracts
 
 | Document | Scope |
 |---|---|
-| [Recovery IR](recovery_ir.md) | Canonical retained static recovery structure |
-| [Lifting design](lifting_design.md) | Generated implementation pipeline |
-| [Hooks and verification](hooks_and_verification.md) | Low-level interception and comparison mechanisms |
-| [Memory schema](memory_schema.md) | Typed views over original memory layouts |
+| [Getting started](getting_started.md) | Choosing and combining recovery operations |
+| [Architecture](architecture.md) | Authority ownership and dependency direction |
+| [Glossary](glossary.md) | Current terminology |
+| [Execution planning](execution_planner.md) | Composition, policy, bootstrap, dependency closure, release |
+| [Execution Atlas](execution_atlas.md) | Materialized evidence projection and navigation |
+| [Replay architecture](replay_architecture.md) | Deterministic replay, continuation state, cached boundaries |
+| [Override architecture](override_architecture.md) | Generated and authored implementations |
+
+## Optional mechanism references
+
+| Document | Scope |
+|---|---|
+| [Recovery IR](recovery_ir.md) | Retained static evidence |
+| [Generated implementations](lifting_design.md) | Literal, CPUless, and ABI-recovered generation |
+| [Memory schemas](memory_schema.md) | Optional per-region state ownership and codecs |
+| [Backend adapters and verification](hooks_and_verification.md) | Low-level interception and comparison |
+| [State mirrors](state_mirrors.md) | Typed views over historical layouts |
 | [Performance](performance.md) | Measurement and optimization |
-| [Hardware status](hardware_support.md) | Device-model coverage and known limits |
-| [Enhancements](enhancements.md) | Read-only presentation and host integrations |
-| [Future work](future_work.md) | Explicitly unimplemented proposals |
+| [Hardware status](hardware_support.md) | Device-model coverage |
+| [Enhancements](enhancements.md) | Presentation and host integrations |
+| [Agent toolbox](agent_toolbox.md) | Task-to-command index |
 
-Other files in this directory are focused mechanism notes and must be read in
-the context of the authorities above. Documents under [`history/`](history/)
-are non-normative design records. They may contain retired names and commands;
-they are not onboarding material.
+Other active files are focused mechanism notes and must follow the same
+identity, evidence, catalog, planning, replay, and verification contracts.
 
-Runnable examples live under [`examples/`](../examples/). Current command-line
-tools are indexed in [`tools/README.md`](../tools/README.md).
+Documents under [`history/`](history/) are non-normative records. They contain
+retired stage names and commands and are not onboarding guidance.
+
+Runnable examples live under [`examples/`](../examples/). Current commands are
+indexed in [`tools/README.md`](../tools/README.md).

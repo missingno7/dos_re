@@ -1,4 +1,4 @@
-"""The CPUless emitter (M3, stage 2) -- recovered function + CPU-ABI adapter.
+"""CPUless emitter -- recovered function plus generated CPU-ABI adapter.
 
 Emits, for one promotable function, TWO generated artifacts from the shared
 recovery IR (never from generated Python):
@@ -17,7 +17,7 @@ recovery IR (never from generated Python):
   the inferred outputs back, reproduces the exit FLAGS word from the compat
   channel, applies the historical RET ABI and the exact per-path virtual-time
   cost, and preserves the lifted module interface (ENTRY / SIGNATURE /
-  ``owns_time``) so the existing VMless graph, linker and installer are
+  ``owns_time``) so mixed generated graphs, the linker, and backend activator are
   untouched.  The recovered body is authoritative; the lifted entry becomes
   its generated adapter -- no duplicate implementation survives.
 
@@ -59,7 +59,7 @@ _JCC_READS = {
 }
 _ALU = ("add", "or", "adc", "sbb", "and", "sub", "xor", "cmp")
 _INT_REGS = ("ax", "bx", "cx", "dx", "si", "di", "bp", "ds", "es")
-#: the full bundle a runtime-dispatched callee may read/write (tier 9).
+#: The full bundle a runtime-dispatched callee may read or write.
 _DYN_REGS = ("ax", "cx", "dx", "bx", "sp", "bp", "si", "di", "ds", "es", "ss")
 #: safety net for the recovered block-dispatch loop -- a spin-wait on a wrong
 #: port or an interrupt-only flag would otherwise hang forever.  Set far above
@@ -592,7 +592,7 @@ def _translate(inst, lines, flag_written, cs=0x1010):
             lines.extend(body)
         return
 
-    # stack ops (tier 2) -----------------------------------------------------
+    # literal stack operations -----------------------------------------------
     # LITERAL SS:SP memory traffic: the pushed bytes are observable state (the
     # boundary differential hashes full memory, and stack residue below SP
     # persists after return), so push/pop write/read the real guest stack.
@@ -690,7 +690,7 @@ def _translate(inst, lines, flag_written, cs=0x1010):
         lines.append("sp = (sp + 2) & 0xFFFF")
         lines.extend(_rm_write_lines(inst, True, "_t"))
         return
-    # pushf / popf (tier 12: the FLAGS word as literal stack data) ------------
+    # pushf / popf: the FLAGS word as literal stack data ----------------------
     if op == 0x9C:                                        # pushf
         fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
                         for f in ("cf", "pf", "af", "zf", "sf", "of",
@@ -742,7 +742,7 @@ def _translate(inst, lines, flag_written, cs=0x1010):
         lines.append(_r8_write(0, f"mem.rb({seg}, (bx + (ax & 0xFF)) & 0xFFFF)"))
         return
     # cmps / scas (compare string ops; repe/repne terminate on ZF; a REP
-    # instruction is ONE instruction of virtual time -- tier-5 cost rule).
+    # instruction is ONE instruction of virtual time).
     # Flags ride a runtime _fmask update inside the body: a rep with cx=0
     # executes zero iterations and touches NOTHING. ---------------------------
     if op in (0xA6, 0xA7, 0xAE, 0xAF):
@@ -851,9 +851,9 @@ class CalleeContract:
                                     # caller's depth-set tracker forks on
                                     # each (runtime sp flows via outputs)
     flags_livein: bool = False      # takes the caller's full FLAGS word
-                                    # (_flags_in compat input, tier 12)
+                                    # through the _flags_in compat input
     parks: bool = False             # contains a boundary head (or composes a
-                                    # callee that does): STANDALONE-ONLY --
+                                    # callee that does): DIRECT-GRAPH-ONLY --
                                     # its adapter must not enter the VMless
                                     # replay graph (a park unwind would lose
                                     # composed caller locals)
@@ -910,8 +910,8 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     """The strict promotion gate.  Returns a :class:`PromotionSpec` or
     raises :class:`Refusal` with the census reason.
 
-    ``callees`` (call-ABI composition, tier 4): maps a direct near-call
-    target ip to its :class:`CalleeContract`.  ``far_callees`` (tier 9) is
+    ``callees`` maps a direct near-call target ip to its
+    :class:`CalleeContract` for call-ABI composition. ``far_callees`` is
     the same map for direct FAR calls, keyed by the static (seg, off)
     target.  A CALL/CALL FAR whose target is present composes; any other
     call still refuses.
@@ -925,7 +925,7 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     boundary segment with NO contract entry REFUSES ``platform-farcall-
     contract-unknown`` -- fail loud, never guess the arg count.
 
-    ``dispatch_addrs`` (tier 9): recorded dynamic-arrival addresses in this
+    ``dispatch_addrs``: recorded dynamic-arrival addresses in this
     segment.  One that falls inside this scan becomes an ALTERNATE ENTRY of
     the recovered function (a generated ``_entry_ip`` compatibility channel;
     the dispatcher/installer enters the shared blocks there) -- the contract
@@ -1000,7 +1000,7 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     # return-kind discipline: one uniform exit ABI per function (the adapter
     # emits exactly one RET variant); a near call must compose a near callee
     # and a far call a far callee -- the machine frame sizes differ.  An
-    # IRET exit (tier 12) makes the function an interrupt handler: invoked
+    # An IRET exit makes the function an interrupt handler: invoked
     # only through the vector-dispatch path, never near/far-composed.
     # a runtime-DEAD exit (never executed; --observed evidence) does not
     # constrain the exit ABI -- the emitter turns it into a fail-loud raise,
@@ -1011,7 +1011,7 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     ret_kinds = {_KIND[i.kind] for i in scan.insts.values()
                  if i.kind in (RET, RETF, IRET) and i.ip not in dead_exits}
     # an ISR-chain tail exits through the chained handler's iret: the
-    # function IS an interrupt handler (tier 13).
+    # function IS an interrupt handler.
     if any(_is_isr_chain(i) for i in scan.insts.values()):
         ret_kinds.add("iret")
     if len(ret_kinds) > 1:
@@ -1087,18 +1087,18 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     # (None) tail depth -- no runtime sp to defer to.
     if any(i.ip in excluded_addrs for i in scan.insts.values()):
         raise Refusal("boundary-or-dispatch-address")
-    # flag live-ins: DF alone rides the _df compat input (tier 9); ANY other
+    # Flag live-ins: DF alone rides the _df compat input; ANY other
     # flag read while undefined (jcc, cmc, rcl/rcr, adc/sbb) makes the whole
     # FLAGS word the _flags_in compat input, and every flag local
-    # initializes from it -- machine-correct caller values (tier 13).
+    # initializes from it using machine-correct caller values.
     exit_flags, df_livein, fl_needed = _check_flag_liveins(
         scan, callees, far_callees, alt_entries, plat_farcalls)
     needs_plat = _func_needs_plat(scan, callees, far_callees, plat_farcalls)
     # the full FLAGS word is ALSO a compat input when a game-INT frame or
     # pushf writes it here (untracked bits ride the caller word) or a
-    # composed callee needs it -- transitive, like _df (tier 12).
+    # composed callee needs it -- transitive, like _df.
     # A near-DYNAMIC site needs it for the same reason a vectored one does
-    # (tier 14): the target is unknown at emit time, so the site must be able
+    # because the target is unknown at emit time, so the site must be able
     # to hand the callee a full FLAGS word -- reconstructing it needs the
     # untracked bits, which only _flags_in carries.  Without this a
     # flags-livein function could not be a dispatch target at all.
@@ -1127,8 +1127,8 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
         or any(i.kind == CALL_FAR and i.far_target in far_callees
                and far_callees[i.far_target].flags_livein
                for i in scan.insts.values())
-    # a parking function (or one composing a parking callee) is
-    # STANDALONE-ONLY: the replay graph keeps its original lifted module.
+    # A parking function (or one composing a parking callee) is
+    # DIRECT-GRAPH-ONLY: a mixed replay graph keeps its original lifted module.
     parks = bool(heads) \
         or any(i.kind == CALL and i.target in callees
                and callees[i.target].parks
@@ -1228,10 +1228,9 @@ def _check_frame_pointer(scan, callees=None, far_callees=None) -> None:
                 and "bp" in register_effects(i).writes]
     if not clobbers:
         return {}                          # bp is never repurposed: invariant holds
-    # bp IS used as scratch (a compiler's spare pointer -- skyroads' tile renderer
-    # 2D1F loads bp with the road[] base and indexes through it). That is fine
-    # PROVIDED bp is saved (`push bp`) and restored (`pop bp`) around the clobber,
-    # so it holds the frame base again at each teardown. Prove it.
+    # bp may be used as a compiler scratch pointer. That is fine provided it is
+    # saved (`push bp`) and restored (`pop bp`) around the clobber, so it holds
+    # the frame base again at each teardown. Prove it.
     return _prove_bp_framebase_at_teardowns(scan, callees or {},
                                             far_callees or {})
 
@@ -1402,7 +1401,7 @@ def _is_stack_family(i) -> bool:
             or op in (0xC8, 0xC9)                  # enter/leave: the frame ops
             or op in (0x60, 0x61)                  # pusha/popa
             or op in (0x06, 0x0E, 0x16, 0x1E)      # push seg
-            or op in (0x9C, 0x9D)                  # pushf/popf (tier 12)
+            or op in (0x9C, 0x9D)                  # pushf/popf FLAGS data
             or op in (0x07, 0x17, 0x1F)            # pop seg (pop ss refuses
                                                     # earlier via ss-mutation)
             or op in (0x68, 0x6A)
@@ -1523,13 +1522,13 @@ def _is_frame_restore(i) -> bool:
 
 def _is_dyn(i) -> bool:
     """A NEAR indirect call/jmp -- emitted as runtime-resolved recovered
-    dispatch (tier 9).  Far variants stay refusals (isr-chain tier)."""
+    dispatch. Far variants stay refusals unless they are ISR-chain tails."""
     return i.kind in (CALL_IND, JMP_IND) and i.modrm is not None \
         and ((i.modrm >> 3) & 7) in (2, 4)
 
 
 def _is_game_int(i) -> bool:
-    """A game-vectored INT (tier 12): dispatched through the runtime IVT to
+    """A game-vectored INT dispatched through the runtime IVT to
     a recovered IRET-contract handler -- a call into game code, never a
     platform effect.  int3 (a debug trap in dead paths) rides the same
     mechanism: its runtime vector is the promoted BIOS dummy-IRET stub."""
@@ -1753,7 +1752,7 @@ def _is_nonlocal_exit(scan, i) -> bool:
 
 def _is_desmc_far_chain(i) -> bool:
     """A de-SMC'd DIRECT far jmp (EA ptr16:16) whose target operand is
-    runtime-patched (tier 13): the ISR installer wrote the CHAINED (previous)
+    runtime-patched: the ISR installer wrote the CHAINED (previous)
     handler into the jmp's ptr16:16 at hook time.  The chained handler is
     OUTSIDE the recovered corpus (the prior INT owner -- BIOS, or a TSR), so it
     is modelled as an explicit platform effect (``plat.chain_interrupt``), NOT
@@ -1763,7 +1762,7 @@ def _is_desmc_far_chain(i) -> bool:
 
 
 def _is_isr_chain(i) -> bool:
-    """An ISR chain tail (tier 13): the chained handler's iret ends THIS
+    """An ISR chain tail: the chained handler's iret ends THIS
     function's interrupt (the function's exit kind is iret).  Two forms:
       * FF /5 far indirect jmp through a memory vector -- a game/BIOS vector
         slot, dispatched to a recovered handler through HANDLERS;
@@ -1778,11 +1777,11 @@ def _is_isr_chain(i) -> bool:
 def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
                         far_callees=None, plat_farcalls=None,
                         dead_exits=frozenset(), bp_bias=None) -> tuple:
-    """Static stack-discipline verification (tiers 2 + 11): every address has
+    """Static stack-discipline verification: every address has
     ONE net push depth (bytes) from entry, consistent at every join.
 
-    The depth MAY go negative and a RET may happen at ANY depth (tier 11,
-    stack-args ABI): pops below the entry depth read the caller's frame --
+    The depth MAY go negative and a RET may happen at ANY depth for a
+    stack-argument ABI: pops below the entry depth read the caller's frame --
     literal, byte-exact memory the recovered body computes over -- and an
     unbalanced exit simply makes ``sp`` a real contract OUTPUT (the adapter
     pops the return address at the runtime sp).  ``ret N`` is legal when the
@@ -2022,7 +2021,7 @@ def _check_flag_liveins(scan, callees=None, far_callees=None,
     composed CALL defines its callee's must-defined exit flags -- what makes
     the ubiquitous ``call G; jnz ...`` idiom promotable.
 
-    DF is special-cased (tier 9): a string op -- or a composed callee that
+    DF is special-cased: a string op -- or a composed callee that
     itself needs the caller's DF, or a dynamic dispatch -- reached with DF
     not yet defined does not refuse; it makes DF a hidden compat INPUT of
     this function (``_df``; the adapter passes the machine DF, composed
@@ -2233,7 +2232,7 @@ def _emit_boundary_observer(blk, cs, i, count):
     """Emit the boundary-head observer AFTER the head instruction: pass the
     full live bundle + composed flags word + the absolute virtual time to
     plat.boundary; merge back the (possibly parked-and-resumed) bundle,
-    flags, and the extra time the delivered ISRs executed (tier 13)."""
+    flags, and the extra time the delivered ISRs executed."""
     fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
                     for f in ("cf", "pf", "af", "zf", "sf", "of",
                               "df", "intf"))
@@ -2261,12 +2260,12 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                    plat_farcalls=None, dead_exits=frozenset()) -> str:
     """Generate the recovered module source for one promotable function.
 
-    ``callees`` (tier 4): CalleeContract per direct near-call target -- the
+    ``callees``: CalleeContract per direct near-call target -- the
     recovered body calls the recovered callee DIRECTLY (composition at the
     recovered level); the machine call's return-address bytes are written
     literally (observable stack residue), the callee's exit flags merge
     through the compat mask, and its virtual-time cost accumulates.
-    ``far_callees`` (tier 9): the same per static far-call (seg, off) target;
+    ``far_callees``: the same per static far-call (seg, off) target;
     the 4-byte far frame (static CS + return offset) is written literally.
     ``plat_farcalls``: (seg, off) -> :class:`PlatformFarCall` for a far-call
     into a platform-boundary segment -- emitted as a ``plat.farcall`` platform
@@ -2291,7 +2290,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
     L: list[str] = []
     A = L.append
     A('"""AUTOGENERATED by dos_re.lift.emit_cpuless -- CPUless recovered')
-    A(f"function for {key} (DOS_RE 2.0 stage 2).  DO NOT hand-edit; regenerate.")
+    A(f"function for {key}. DO NOT hand-edit; regenerate.")
     A("")
     A("Public contract (semantic): the returned dict of live outputs.")
     A("The second return value (_compat) is generated compatibility metadata")
@@ -2358,11 +2357,11 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
     B("cf = pf = af = zf = sf = of = df = intf = False")
     if flags_livein:
         # every flag local starts MACHINE-CORRECT from the caller word --
-        # nothing is ever "undefined" in a flags-livein body (tier 13).
+        # Nothing is ever "undefined" in a flags-livein body.
         for fname, fbit in sorted(_FLAG_BITS.items()):
             B(f"{fname} = (_flags_in & 0x{fbit:X}) != 0")
     if df_livein:
-        B("df = _df != 0    # caller DF (hidden compat input, tier 9)")
+        B("df = _df != 0    # caller DF (hidden compatibility input)")
     B("_fmask = 0")
     # CS is the function's fixed code segment -- a compile-time CONSTANT, never a
     # runtime input (the ABI carries ds/es/ss, not cs).  A `cs:[...]` access
@@ -2416,7 +2415,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                     # a runtime-dead return (never executed; --observed): the
                     # function's only LIVE exit is a platform effect elsewhere
                     # (int 21/4C terminate; an external ISR chain). Fail loud if
-                    # this dead path is ever reached -- the hard wall.
+                    # this dead path is ever reached: a fail-loud unresolved edge.
                     blk.append(f"raise RuntimeError('CPUless: runtime-dead exit "
                                f"at {cs:04X}:{i.ip:04X} reached -- frontier "
                                f"witness (untested exit path)')")
@@ -2460,7 +2459,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 terminated = True
                 break
             if _is_isr_chain(i):
-                # tier 13: the ISR CHAIN tail -- read the chained handler's far
+                # ISR CHAIN tail: read the chained handler's far
                 # vector, run it on OUR interrupt frame; its iret ends this
                 # interrupt, so this is the function's exit.
                 off = count - 1
@@ -2516,7 +2515,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 terminated = True
                 break
             if _is_dyn(i):
-                # tier 9: runtime-resolved recovered dispatch (near indirect
+                # Runtime-resolved recovered dispatch (near indirect
                 # call/jmp).  Target computed from regs/memory, resolved
                 # through the generated registry; an intra-function landing
                 # (jump table) becomes a direct block transfer; an unknown
@@ -2552,7 +2551,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                     blk.append(f"mem.ww(ss, sp, 0x{i.next_ip:04X})")
                 # near dispatch stays in this segment, so the callee's CS is
                 # this function's static CS (cs-as-data contracts need it).
-                # The bundle carries the full FLAGS word (tier 14, same
+                # The bundle carries the full FLAGS word (the same
                 # reconstruction as the vectored site above): bits this
                 # function never wrote ride _flags_in, the rest are packed
                 # from the live flag vars.  _exec forwards it only to a
@@ -2689,8 +2688,8 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                     # runtime (a never-taken branch, or a census gap in an
                     # untested code path). Rather than block this runtime-reached
                     # function on dead code, emit a fail-loud stub: if the call
-                    # is ever reached, raise -- the hard wall, not a silent
-                    # fallback. The composition analysis modelled it as an
+                    # is ever reached, raise a fail-loud unresolved edge, not a
+                    # silent fallback. The composition analysis modelled it as an
                     # empty-effect balanced callee, so the depth/ABI are sound
                     # for every path that does NOT reach here.
                     blk.append(f"raise RuntimeError('CPUless: unrecovered call to "
@@ -2774,7 +2773,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                     break
                 continue
             if _is_game_int(i):
-                # tier 12: a GAME-VECTORED interrupt is a call into game
+                # A GAME-VECTORED interrupt is a call into game
                 # code.  Push the literal interrupt frame (full flags word
                 # composed from runtime-defined bits + the caller word),
                 # read the runtime IVT vector, dispatch to the recovered
@@ -2933,7 +2932,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
 #: no CPU object, no interpreter -- ever.
 DYNCALL_SUPPORT_SRC = '''\
 """AUTOGENERATED by dos_re.lift.emit_cpuless -- runtime dispatch support for
-recovered dynamic transfers (DOS_RE 2.0 stage 2, tier 9).
+recovered dynamic transfers.
 
 A recovered indirect call/jmp resolves its runtime CS:IP selector through the
 generated DISPATCH table (.dispatch) to a DIRECT recovered call -- possibly at
@@ -3007,7 +3006,7 @@ def dyn_exec(key, mem, plat, base, regs):
 
 
 def ivec_exec(key, mem, plat, base, regs):
-    """Dispatch one game-vectored interrupt (tier 12) to its recovered
+    """Dispatch one game-vectored interrupt to its recovered
     IRET-contract handler.  The CALLER owns the interrupt frame (already
     pushed; popped after); the handler is an ordinary recovered function
     whose iret exits are plain returns.
@@ -3047,7 +3046,7 @@ def emit_dispatch_table(entries: dict, handlers: dict | None = None) -> str:
         return out
 
     L = ['"""AUTOGENERATED by dos_re.lift.emit_cpuless -- the recovered',
-         "dynamic-dispatch registry (tiers 9/12): runtime CS:IP selector ->",
+         "dynamic-dispatch registry: runtime CS:IP selector ->",
          "(module, function, alternate-entry ip, contract inputs, needs_plat,",
          "df_livein, flags_livein).  DISPATCH serves near indirect transfers",
          "(balanced near-return functions only); HANDLERS serves game-vectored",
@@ -3077,7 +3076,7 @@ def emit_adapter(scan, abi, key: str, *, signature: bytes,
 
     L: list[str] = []
     A = L.append
-    A('"""AUTOGENERATED by dos_re.lift.emit_cpuless -- CPU-ABI adapter (stage 2).')
+    A('"""AUTOGENERATED by dos_re.lift.emit_cpuless -- CPU-ABI adapter.')
     A("")
     A(f"The recovered implementation ({recovered_import_base}.{rec}) is")
     A("authoritative; this generated adapter restores the historical machine")
@@ -3164,7 +3163,7 @@ def emit_override_adapter(key: str, contract: "CalleeContract", *,
     generated body for the SAME address is kept available for a differential
     cross-check (the override is what RUNS); this adapter is the identity-
     preserving bridge that lets the override occupy the function's lifted slot
-    in the VMless graph, byte-for-byte where :func:`emit_adapter` would place a
+    in a generated graph, byte-for-byte where :func:`emit_adapter` would place a
     generated twin.
 
     The whole adapter is driven by the supplied :class:`CalleeContract` (inputs,
@@ -3184,7 +3183,7 @@ def emit_override_adapter(key: str, contract: "CalleeContract", *,
     L: list[str] = []
     A = L.append
     A('"""AUTOGENERATED by dos_re.lift.emit_cpuless -- CPU-ABI adapter for an')
-    A("AUTHORITATIVE OVERRIDE (the unified override-graph seam, stage 2).")
+    A("AUTHORITATIVE OVERRIDE (the unified override-registry seam).")
     A("")
     A(f"The override implementation ({recovered_import_base}.{rec}) is the")
     A("authoritative hand-recovered body; this generated adapter restores the")

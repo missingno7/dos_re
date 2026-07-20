@@ -133,7 +133,7 @@ def _assert_fpu_equivalent(code: bytes, *, cases: int = 40, seed: int = 0xF80,
 # --- the scan-level gate: x87 no longer refuses ----------------------------------
 
 def test_x87_function_scans_liftable_and_emits_native():
-    # The former 32-entry keep-interpreted queue's shape: MSC FP runtime code
+    # The observed MSC floating-point runtime-code shape
     # mixing mem and register forms.  Scans clean, emits with NO interpreter
     # fallback — every x87 line is a native call into the shared FPU helpers.
     code = bytes.fromhex(

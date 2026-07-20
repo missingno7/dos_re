@@ -1,6 +1,6 @@
-"""Fail-loud stub for a runtime-dead near call (the CPUless hard wall).
+"""Fail-loud unresolved edge for a runtime-dead near call.
 
-For a STANDALONE CPUless corpus (`cpuless_promote --observed`), a near call to
+For a direct generated CPUless graph (`cpuless_promote --observed`), a near call to
 a target that is neither an IR function nor ever executed is runtime-dead: a
 never-taken branch, or a census gap in an untested code path.  Rather than let
 that dead call block a runtime-reached CALLER from promoting, the promoter

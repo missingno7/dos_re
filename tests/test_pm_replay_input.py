@@ -12,14 +12,14 @@ from dos_re.pm_replay_input import (
 )
 from dos_re.replay import (
     ContinuationState,
-    ExecutionProfile,
+    ReplayExecutionIdentity,
     ReplayArtifact,
     ReplayRecording,
 )
 
 
 def _profile():
-    return ExecutionProfile(
+    return ReplayExecutionIdentity(
         "pm-candidate", "candidate", "pm-interpreter", "image", "runtime",
         "devices", "dos-re-pm-continuation-v1", "machine-v1")
 

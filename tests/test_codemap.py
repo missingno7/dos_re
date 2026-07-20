@@ -1,6 +1,6 @@
 """Focused tests for tools/codemap.py — observed-execution → entry derivation.
 
-The discovery step of the automatic recovery pipeline: dynamic call targets,
+Observed entry evidence: dynamic call targets,
 INT-vectored ISR entries, and installed IVT vectors become the census entry
 list; addresses that were never executed are rejected (a target that never
 ran is a mis-observed transfer, not a function)."""

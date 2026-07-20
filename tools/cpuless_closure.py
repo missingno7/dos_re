@@ -1,18 +1,17 @@
-"""cpuless_closure.py -- runtime-closure measurement for CPU-independent regions.
+"""cpuless_closure.py -- CPUless coverage for declared roots.
 
-Completion of the CPUless runtime is measured by the REQUIRED RUNTIME CLOSURE
-from declared startup/gameplay roots, NOT by "all named functions promoted"
-(dos_re_2.0.md section 6; owner directive).  From each root this walks the
-static near-call graph (recovery IR) and partitions every reachable function:
+For a profile or subsystem that requests CPU-independent execution from
+declared roots, this walks the static near-call graph in Recovery IR and
+partitions every reachable function:
 
     promoted   -- a recovered CPUless implementation exists
     frontier   -- reachable but NOT yet promoted; the next work, each tagged
                   with the promotion-census refusal reason
 
-A root/edge into a far call, an interrupt, or an indirect transfer is itself a
-frontier item (the call graph cannot be followed statically past it until that
-construct is recovered).  The closure is COMPLETE when the frontier is empty:
-every function reachable from the roots is CPUless.
+A root/edge into a far call, interrupt, or indirect transfer is a frontier item
+when the available evidence cannot follow it. An empty frontier proves the
+requested property for these roots; it does not prescribe how unrelated
+regions must be implemented.
 """
 from __future__ import annotations
 
@@ -69,8 +68,8 @@ def walk_closure(ir: dict, roots: list[str], promoted: set[str],
                  refusals: dict[str, str],
                  dyn_evidence: dict[str, list[str]] | None = None,
                  observed: set[str] | None = None) -> dict:
-    """``dyn_evidence`` (tier 9): "CS:IP" site -> observed dynamic target
-    keys (lemmings-style indirect_sites.json), so the walk follows dynamic
+    """``dyn_evidence``: "CS:IP" site -> observed dynamic target
+    keys from an indirect-transfer evidence file, so the walk follows dynamic
     dispatch and static far calls, not just near calls.
 
     ``observed`` (function entries the game ACTUALLY executed, from the census
@@ -82,7 +81,7 @@ def walk_closure(ir: dict, roots: list[str], promoted: set[str],
     untaken call -- no runtime evidence it is live). The runtime frontier is the
     honest completion target; static-only items are REPORTED, never dropped
     (replay coverage is not proof of deadness -- each still owes an explanation
-    or a lift before the wall can call itself closed)."""
+    or another implementation before this closure can be considered complete)."""
     dyn_evidence = dyn_evidence or {}
     # A resume/head address (a boundary head, a snapshot entry, a dispatch
     # arrival) is NOT its own IR function -- it is an offset INSIDE one. When
@@ -348,7 +347,7 @@ def composable_closure(ir, roots, *, promoted, body_clean, resolved=frozenset(),
                 if cj is None:            # edge outside the reached graph
                     ok = False; break
                 if cj != ci and not comp_composable[cj]:
-                    ok = False; break     # a leaving edge lands on a wall
+                    ok = False; break     # a leaving edge is unresolved
             if not ok:
                 break
         comp_composable[ci] = ok
@@ -417,7 +416,8 @@ def main(argv=None) -> int:
                          "atomically. Needs --body-clean-census.")
     ap.add_argument("--body-clean-census", default=None,
                     help="a classify_corpus census JSON: body_clean = the leaf + "
-                         "calls-only tiers (functions whose OWN body passes the "
+                         "calls-only capability classes (functions whose OWN "
+                         "body passes the "
                          "gate; they compose iff their callees do)")
     ap.add_argument("--resolved", default=None,
                     help="@FILE of CS:IP keys that compose WITHOUT an IR body "

@@ -15,8 +15,9 @@ data-only boot image:
   canonical entry, the exact poison ranges, the preserved code_as_data ranges,
   and a region classification of the whole image.
 
-The optional runtime counterpart (loading the image, arming the walls) is
-:mod:`dos_re.independence`; the audit is ``tools/audit_boot_image.py``.
+The optional runtime consumer is :mod:`dos_re.independence`; the audit is
+``tools/audit_boot_image.py``. Release validity still comes from the selected
+bootstrap provider and exported dependency closure, not from poisoning alone.
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from .independence import BOOT_MANIFEST_SCHEMA
+BOOT_IMAGE_FORMAT = "dos-re-build-image/v1"
 
 
 def sha256_file(path: Path | str) -> str:
@@ -151,10 +152,10 @@ def poison_snapshot_to_boot_image(
 
     poison_runs = coalesce(poison_offsets)
     manifest = {
-        "_notice": "GENERATED data-only boot image -- the strict-VMless runtime "
-                   "loads THIS, never the original executable "
-                   "(dos_re_2.0 section 1a').",
-        "schema": BOOT_MANIFEST_SCHEMA,
+        "_notice": "GENERATED build image for an explicitly selected "
+                   "BuildImageBootstrapProvider; runtime use does not require "
+                   "the original executable.",
+        "schema": BOOT_IMAGE_FORMAT,
         "source_exe": {
             "name": source_exe.name,
             "sha256": sha256_file(source_exe),

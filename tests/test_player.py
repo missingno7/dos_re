@@ -20,6 +20,7 @@ from dos_re.execution import (
     ImplementationDescriptor,
     ImplementationEntry,
     ImplementationOrigin,
+    OverrideCategory,
     ProgramCoverage,
     profile_configuration,
 )
@@ -125,6 +126,7 @@ def test_frontend_can_declare_exe_free_implementation_for_same_player():
                 bootstrap_provider=NativeBootstrapProvider(
                     "test-native",
                     ("test state",),
+                    provider_digest="test-native-v1",
                 ),
             )
 
@@ -240,6 +242,7 @@ def test_selected_implementation_activator_is_the_only_binding_authority():
                 implementation_id="native-frame",
                 targets=frozenset({"frame"}),
                 origin=ImplementationOrigin.AUTHORED,
+                category=OverrideCategory.FAITHFUL,
                 implementation_digest="native-v1",
             )
             return ImplementationCatalog((ImplementationEntry(
@@ -256,3 +259,57 @@ def test_selected_implementation_activator_is_the_only_binding_authority():
     runtime = object()
     frontend.bind_execution_plan(runtime, plan)
     assert activated == [(runtime, ("frame",))]
+
+
+def test_selected_enhancement_activates_at_its_seam_without_owning_it():
+    activated = []
+
+    class Fe(GameFrontend):
+        def execution_configuration(self, args):
+            return profile_configuration(
+                args.profile,
+                program_identity=self.program_identity(args),
+                selected_overrides=("wide-presenter",),
+                provider_preference=("generated-frame",),
+            )
+
+        def execution_coverage(self, args):
+            return ProgramCoverage(
+                roots=("frame",), reachable=frozenset({"frame"}),
+                evidence_identity="frame-v1",
+            )
+
+        def execution_implementations(self, args):
+            entries = []
+            for implementation_id, origin, category in (
+                ("generated-frame", ImplementationOrigin.GENERATED,
+                 OverrideCategory.BASELINE),
+                ("wide-presenter", ImplementationOrigin.AUTHORED,
+                 OverrideCategory.ENHANCEMENT),
+            ):
+                descriptor = ImplementationDescriptor(
+                    implementation_id=implementation_id,
+                    targets=frozenset({"frame"}),
+                    origin=origin,
+                    category=category,
+                    implementation_digest=implementation_id,
+                )
+                entries.append(ImplementationEntry(
+                    descriptor,
+                    activate=lambda runtime, targets, name=implementation_id:
+                    activated.append((name, runtime, targets)),
+                ))
+            return ImplementationCatalog(tuple(entries))
+
+    frontend = Fe(ROOT)
+    args = _parse(frontend, [])
+    plan = frontend.resolve_execution_plan(args)
+    assert [(item.target, item.implementation_id) for item in plan.bindings] == [
+        ("frame", "generated-frame"),
+    ]
+    runtime = object()
+    frontend.bind_execution_plan(runtime, plan)
+    assert activated == [
+        ("generated-frame", runtime, ("frame",)),
+        ("wide-presenter", runtime, ("frame",)),
+    ]

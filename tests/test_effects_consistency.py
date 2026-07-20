@@ -1,4 +1,4 @@
-"""The shadow gate: the effects layer must agree with every table it replaces.
+"""The effects layer must agree with every table it replaces.
 
 No consumer is switched over until this passes.  A disagreement here is
 EVIDENCE about one of the two descriptions, never permission to relax the
@@ -6,7 +6,7 @@ comparison -- the whole point of the exercise is that two sources of truth
 had already drifted, so a test that shrugs at a mismatch would reintroduce
 exactly the defect being removed.
 
-Where the effects layer deliberately differs from a legacy table, the case is
+Where the effects layer deliberately differs from an incumbent table, the case is
 named individually with the reason, and the difference is asserted in BOTH
 directions: what the old table said, and what the new layer says.  A silent
 allow-list would be indistinguishable from a bug.
@@ -41,7 +41,7 @@ def _scan(code: bytes) -> FunctionScan:
 
 
 # A modrm byte with mod=00 rm=110 -> [disp16], so every opcode below gets a
-# real memory operand with a static address, which is the case all the legacy
+# real memory operand with a static address, which is the case all the incumbent
 # tables were written to describe.
 def _mem_form(op: int, reg: int = 0, imm: bytes = b"") -> bytes:
     modrm = bytes([(reg << 3) | 0x06])

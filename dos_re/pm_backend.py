@@ -36,12 +36,21 @@ import time
 from pathlib import Path
 
 from .dos4gw import DosInputExhausted, render_pm_frame
-from .execution import ExecutionPlan, execution_composition_digest
+from .execution import (
+    ExecutionPlan,
+    ImplementationOrigin,
+    execution_composition_digest,
+)
 from .frame_verify import write_rgb_png
 from .replay_input import MOUSE_CHANNEL, mouse_payload
 from .pm_snapshot import apply_pm_continuation, capture_pm_continuation
 from .player import GameFrontend
-from .replay import ExecutionProfile, ReplayArtifact, ReplayPoint, ReplayRecording
+from .replay import (
+    ReplayArtifact,
+    ReplayExecutionIdentity,
+    ReplayPoint,
+    ReplayRecording,
+)
 
 try:                       # numpy is a first-class dep; audio resampling needs it
     import numpy as _np
@@ -89,7 +98,9 @@ def _file_identity(path: str | Path) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _pm_profile(exe: str | Path, rt, plan: ExecutionPlan) -> ExecutionProfile:
+def _pm_profile(
+    exe: str | Path, rt, plan: ExecutionPlan,
+) -> ReplayExecutionIdentity:
     implementation = hashlib.sha256()
     implementation.update(execution_composition_digest(plan).encode("ascii"))
     runtime = hashlib.sha256()
@@ -97,15 +108,18 @@ def _pm_profile(exe: str | Path, rt, plan: ExecutionPlan) -> ExecutionProfile:
     for name in ("cpu386.py", "dos4gw.py", "runtime.py", "pm_snapshot.py", "replay.py"):
         runtime.update(name.encode("utf-8"))
         runtime.update((root / name).read_bytes())
-    overrides = tuple(sorted(
-        f"{key!r}:{value}" for key, value in rt.cpu.hook_names.items()
-        if value != "frame_clock"))
-    role = "candidate" if overrides else "oracle"
+    only_interpreted = bool(plan.implementations) and all(
+        implementation.origin is ImplementationOrigin.INTERPRETED
+        for implementation in plan.implementations
+    )
+    role = (
+        "oracle"
+        if only_interpreted and not plan.configuration.selected_overrides
+        else "candidate"
+    )
     implementation_digest = implementation.hexdigest()
-    key = hashlib.sha256(
-        "\n".join((implementation_digest, *overrides)).encode("utf-8")
-    ).hexdigest()[:12]
-    return ExecutionProfile(
+    key = implementation_digest[:12]
+    return ReplayExecutionIdentity(
         profile_id=f"protected-mode-{role}-{key}",
         role=role,
         implementation=implementation_digest,
@@ -114,7 +128,6 @@ def _pm_profile(exe: str | Path, rt, plan: ExecutionPlan) -> ExecutionProfile:
         devices="dos-re-protected-mode-devices-v1",
         continuation_schema="dos-re-pm-continuation-v1",
         projection_schema="dos-re-complete-machine-v1",
-        overrides=overrides,
     )
 
 
@@ -340,7 +353,7 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                artifacts_dir: str | Path = "artifacts",
                frame_tick_addr: int | None = None,
                record_replay: str | None = None,
-               replay_profile: ExecutionProfile | None = None) -> int:
+               replay_profile: ReplayExecutionIdentity | None = None) -> int:
     import pygame
     from .pm_replay_input import FrameClock, FramePaced, KEY_CHANNEL, key_payload
 
@@ -644,7 +657,7 @@ def run_replay(rt, replay_path, *, boot_keys=(), extra_frames: int = 30,
                max_steps: int = 200_000_000, snapshot_dir: str | None = None,
                png: str = "", show: bool = False, scale: int = 3,
                title: str = "dos_re PM (replay)",
-               replay_profile: ExecutionProfile | None = None) -> int:
+               replay_profile: ReplayExecutionIdentity | None = None) -> int:
     """Replay an input replay deterministically (no wall-clock pacing).
 
     Re-injects each frame's recorded input at the game's own frame boundary,

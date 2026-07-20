@@ -10,8 +10,8 @@ The interpreter honours it for free -- it just executes whatever is at CS:IP
 again. A lifted function does not: the raise unwinds the entire Python call
 chain, and the host's resume lands on an address in the middle of a lifted
 block. Before the rule these tests pin, that address had no hook, so the retry
-fell through to the INTERPRETER -- a VMless wall violation, and, wherever the
-wall is not armed, a silent divergence with no symptom at all.
+fell through to the interpreter -- invalid when the selected plan forbids
+fallback, and otherwise a silent divergence with no symptom at all.
 
 Found by skyroads' menu loop (1010:5FEB: `mov ah,07 / int 21h`), which blocks
 on every single keypress wait. The emitted RESUME_ENTRIES there listed 5FEF --

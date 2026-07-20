@@ -150,24 +150,23 @@ class CPU8086:
     #: (re-pointing CS:IP at the RESUME entry before raising).  None = no
     #: observation cost.
     boundary_hook: Callable[["CPU8086", int, int, int], None] | None = None
-    #: THE VMLESS WALL POISON (docs/history/dos_re_2.0.md §1a): when True, any step
-    #: that would fetch/decode/execute an original instruction (i.e. no
-    #: replacement hook at CS:IP) raises immediately — interpretation is
-    #: IMPOSSIBLE, not merely unused.  Armed by wall-gated runners on the
-    #: candidate; never on the oracle.
+    #: Generated-graph diagnostic: when True, any step that would
+    #: fetch/decode/execute an original instruction (i.e. no selected
+    #: implementation at CS:IP) raises immediately. Armed only when the
+    #: execution plan forbids interpreter fallback; never on the oracle.
     interp_forbidden: bool = False
     #: diagnostic: when a set, ``interp_forbidden`` RECORDS uncovered
     #: (cs,ip) here and interprets instead of raising — one run enumerates
     #: the whole interpreted frontier (the census-closure work list).
     interp_frontier: set | None = None
-    #: EXE-INDEPENDENCE (docs/history/dos_re_2.0.md §"The EXE-independence wall"): when
+    #: Runtime detachment diagnostic: when
     #: True, the lifted entry guard ``self_disable_if_patched`` is a no-op.  A
     #: data-only boot image has the recovered code ZEROED (poisoned), so an
     #: entry-signature comparison against the live bytes is meaningless — the
     #: lifted host function IS the authoritative implementation, and the byte
     #: check would false-alarm on the intentionally-poisoned bytes.  Set only
-    #: by the strict-VMless boot path (lemmings.vmless_boot); never armed when
-    #: the original code is present.
+    #: by a generated-graph build-image bootstrap; never armed when original
+    #: code is the selected implementation.
     code_poisoned: bool = False
     hook_verifier: Callable[["CPU8086", tuple[int, int], Callable[["CPU8086"], None], str], None] | None = None
     hook_verifier_passthrough: set[tuple[int, int]] = field(default_factory=set)
@@ -187,7 +186,7 @@ class CPU8086:
     hook_verifier_live_yield_callback: Callable[[], None] | None = None
     # When a lifted parent executes an original bounded CALL or directly invokes
     # an installed child hook, keep differential verification active at the
-    # nested hook boundary.  This makes child addresses real oracle checkpoints
+    # nested hook boundary.  This makes child addresses real oracle boundaries
     # instead of shared black boxes inside a larger parent transaction.
     hook_verifier_verify_nested_calls: bool = True
     # Optional real-time pacer invoked once per modelled timer tick (the game's
@@ -202,7 +201,7 @@ class CPU8086:
     pending_irq: "Callable[[], int | None] | None" = None
     max_rep_count: int = 1_000_000
     # Optional generic execution telemetry sink. The CPU emits only raw events;
-    # game-specific island classification lives outside the interpreter.
+    # game-specific identity classification lives outside the interpreter.
     coverage_telemetry: Any | None = None
 
     def addr(self) -> tuple[int, int]:
@@ -586,12 +585,12 @@ class CPU8086:
                 frontier.add((start_cs, start_ip))
             else:
                 raise RuntimeError(
-                    f"VMLESS WALL VIOLATION: attempted to interpret an original "
+                    f"INTERPRETER FALLBACK FORBIDDEN: attempted to interpret an original "
                     f"instruction at {start_cs:04X}:{start_ip:04X} -- no lifted "
                     f"hook covers this address.  The candidate must never "
                     f"fetch/decode/execute x86; register a resume entry, lift "
                     f"the code, or record the recovery fact that explains this "
-                    f"address (docs/history/dos_re_2.0.md section 1a).")
+                    f"address.")
 
         seg_override: str | None = None
         rep: int | None = None
