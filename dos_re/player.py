@@ -1062,6 +1062,7 @@ def _run_differential_verification(
             "--profile verification requires --verify-start and --verify-end"
         )
     artifact = ReplayArtifact.open(args.play_replay)
+    frontend.apply_replay_metadata(args, artifact.metadata)
     start = ReplayPoint(args.verify_start, artifact.timeline_id)
     end = ReplayPoint(args.verify_end, artifact.timeline_id)
     oracle, candidate = frontend.verification_drivers(args, plan, artifact)

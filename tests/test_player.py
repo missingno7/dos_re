@@ -10,6 +10,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -214,6 +215,43 @@ def test_verification_profile_dispatches_before_runtime_boot(monkeypatch):
         "--exe", str(Path(__file__)), "--profile", "verification",
     ]) == 7
     assert seen[0].configuration.verification_policy.mode == "differential"
+
+
+def test_differential_verification_restores_recorded_pacing_before_drivers(
+    monkeypatch,
+):
+    artifact = SimpleNamespace(
+        metadata={"steps_per_frame": 123},
+        timeline_id="timeline-v1",
+    )
+    monkeypatch.setattr(
+        player.ReplayArtifact, "open", lambda path: artifact)
+    monkeypatch.setattr(
+        player,
+        "verify_interval",
+        lambda *args: SimpleNamespace(
+            equivalent=True,
+            comparison=SimpleNamespace(oracle_digest="digest"),
+        ),
+    )
+
+    class Fe:
+        def apply_replay_metadata(self, args, metadata):
+            args.steps_per_frame = metadata["steps_per_frame"]
+
+        def verification_drivers(self, args, plan, opened):
+            assert opened is artifact
+            assert args.steps_per_frame == 123
+            return object(), object()
+
+    args = SimpleNamespace(
+        play_replay="replay",
+        verify_start=0,
+        verify_end=1,
+        bisect=False,
+        steps_per_frame=1,
+    )
+    assert player._run_differential_verification(Fe(), args, object()) == 0
 
 
 def test_selected_implementation_activator_is_the_only_binding_authority():
