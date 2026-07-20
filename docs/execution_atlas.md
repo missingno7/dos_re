@@ -47,8 +47,11 @@ content-hashed variant. Symbols and generated filenames are display metadata.
 
 ### Observed execution and replay
 
-Replay ingestion accepts oracle-owned function visits and actual observed
-transfers. It can create observed-only function or execution-point nodes when
+Replay ingestion accepts trusted artifacts enriched with oracle-owned function
+visits and actual observed transfers. Capture itself may have used a candidate
+composition; full oracle/candidate validation establishes artifact trust, and
+post-hoc oracle replay supplies edge evidence hidden by hooks. It can create
+observed-only function or execution-point nodes when
 no static function boundary exists. It also retains:
 
 - invocation count, first entry, and final completed last exit;
@@ -57,6 +60,7 @@ no static function boundary exists. It also retains:
 - encountered runtime-code variants;
 - incomplete-function markers;
 - replay and execution identity digests.
+- capture-plan identity, validation count, and observer provenance.
 
 Consecutive visits are not assumed to be edges. Observers report actual
 transfers. An observed indirect target extends the graph but does not prove the
@@ -161,6 +165,10 @@ Named source materializations are independently replaceable. Indexes rebuild
 deterministically from all current sources. JSON ordering, source digests, and
 index validation make unchanged inputs byte-stable and stale materializations
 detectable.
+
+`ingest-replay --json` reports intrinsic visits, invocations, observed edges
+and transfer counts plus the exact nodes and edges added to or removed from the
+current corpus. Re-ingesting unchanged evidence reports an empty corpus delta.
 
 Program mismatch, unsupported schemas, changed source digests, and stale replay
 execution identities fail loudly. A runtime-code byte change creates another

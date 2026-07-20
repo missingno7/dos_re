@@ -17,6 +17,7 @@ from dos_re.replay import (
     ReplayExecutionIdentity,
     FunctionVisitIndex,
     ReplayArtifact,
+    ReplayEvidenceRecorder,
     ReplayError,
     ReplayEvent,
     ReplayPoint,
@@ -151,7 +152,12 @@ def make_artifact(tmp_path, *, candidate=NATIVE):
               for i, value in enumerate(VALUES)]
     artifact = ReplayArtifact.create(
         tmp_path / "replay", timeline_id=TIMELINE, events=events,
-        metadata={"purpose": "hook-verification"}, page_size=8,
+        metadata={
+            "purpose": "hook-verification",
+            "recording_profile_id": candidate.profile_id,
+            "end_point": point(len(VALUES)).to_json(),
+        },
+        page_size=8,
     )
     oracle = CounterDriver(ORACLE)
     native = CounterDriver(candidate)
@@ -177,6 +183,64 @@ def test_semantic_projection_verifies_native_candidate_and_caches_each_profile(t
     manifest = json.loads((tmp_path / "replay" / "replay.json").read_text())
     assert set(manifest["profiles"]) == {"oracle", "native"}
     assert manifest["points"][point(9).key]["annotations"][0]["kind"] == "verified-endpoint"
+    assert len(artifact.validations()) == 1
+    assert not artifact.trusted
+
+
+def test_candidate_capture_becomes_trusted_only_after_full_validation(tmp_path):
+    artifact = make_artifact(tmp_path)
+    assert artifact.capture_profile() == NATIVE
+    assert not artifact.trusted
+
+    result = verify_interval(
+        artifact,
+        CounterDriver(ORACLE),
+        CounterDriver(NATIVE),
+        point(0),
+        point(len(VALUES)),
+    )
+
+    assert result.equivalent
+    assert artifact.trusted
+    assert len(artifact.validations()) == 1
+    revision = json.loads(artifact.path.read_text())["revision"]
+    assert not artifact.record_validation(result)
+    assert json.loads(artifact.path.read_text())["revision"] == revision
+
+
+def test_execution_enrichment_is_idempotent_and_detects_nondeterminism(tmp_path):
+    artifact = make_artifact(tmp_path)
+    recorder = ReplayEvidenceRecorder()
+    recorder.enter("function:a", point(1))
+    recorder.observe_transfer("function:a", "function:b", "call", point(2))
+    recorder.exit("function:a", point(3))
+    evidence = recorder.evidence(
+        ORACLE,
+        provenance={
+            "kind": "post-hoc-oracle-replay",
+            "observer_digest": "observer-a",
+            "event_stream_sha256": artifact.event_stream_sha256,
+        },
+    )
+
+    assert artifact.set_execution_evidence(
+        ORACLE, evidence, visits=recorder.visits)
+    revision = json.loads(artifact.path.read_text())["revision"]
+    assert not artifact.set_execution_evidence(
+        ORACLE, evidence, visits=recorder.visits)
+    assert json.loads(artifact.path.read_text())["revision"] == revision
+
+    changed = ReplayEvidenceRecorder()
+    changed.enter("function:a", point(1))
+    changed.observe_transfer("function:a", "function:b", "call", point(2))
+    changed.observe_transfer("function:a", "function:b", "call", point(3))
+    changed.exit("function:a", point(4))
+    with pytest.raises(ReplayError, match="different observations"):
+        artifact.set_execution_evidence(
+            ORACLE,
+            changed.evidence(ORACLE, provenance=evidence.provenance),
+            visits=changed.visits,
+        )
 
 
 def test_repeated_interval_uses_nearest_profile_specific_boundary(tmp_path):

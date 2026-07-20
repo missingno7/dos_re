@@ -9,6 +9,8 @@
 | **Evidence source** | The artifact or declaration that owns a fact, such as Recovery IR, ReplayArtifact, an explicit fact document, or an implementation descriptor. |
 | **Execution Atlas** | Deterministic materialized projection and query index over cited evidence sources. It does not execute, decode, or select code. |
 | **ReplayArtifact** | Sole persistent deterministic replay format: base continuation state, immutable events, points, metadata, visits, transfers, annotations, and derived boundaries. |
+| **Capture profile** | Exact execution composition used to record a ReplayArtifact's immutable input stream. It may be an oracle or candidate and is provenance, not a correctness claim. |
+| **Trusted replay** | An oracle-captured artifact, or a candidate-captured artifact whose complete timeline has passed equivalent oracle/candidate validation for the same capture execution. |
 | **ReplayExecutionIdentity** | Immutable identity of one oracle or candidate execution composition used to validate replay continuation caches. It is distinct from execution-policy profiles. |
 | **ReplayPoint** | Stable position on a replay timeline whether or not a snapshot is cached there. |
 | **CachedBoundary** | Independently restorable continuation at a ReplayPoint, stored as metadata plus pages changed from the replay base. |

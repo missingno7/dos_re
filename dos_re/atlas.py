@@ -34,7 +34,12 @@ from .identity import (
     real_mode_address,
 )
 from .lift.ir import load_recovery_ir
-from .replay import ReplayArtifact, ReplayExecutionIdentity, ReplayPoint
+from .replay import (
+    ReplayArtifact,
+    ReplayError,
+    ReplayExecutionIdentity,
+    ReplayPoint,
+)
 from .runtime_code import RuntimeCodeSlot
 
 ATLAS_FORMAT_VERSION = 1
@@ -93,6 +98,41 @@ class ReplayCoverage:
             and self.first_entry is not None
             and self.last_exit is not None
         )
+
+
+@dataclass(frozen=True)
+class ReplayContribution:
+    """Exact intrinsic and corpus-relative contribution of one replay."""
+
+    replay_id: str
+    artifact_label: str
+    evidence_profile_identity_digest: str
+    visited_function_ids: tuple[str, ...]
+    invocation_count: int
+    observed_edges: tuple[str, ...]
+    observation_count: int
+    new_node_ids: tuple[str, ...]
+    new_edges: tuple[str, ...]
+    removed_node_ids: tuple[str, ...] = ()
+    removed_edges: tuple[str, ...] = ()
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "replay_id": self.replay_id,
+            "artifact_label": self.artifact_label,
+            "evidence_profile_identity_digest": (
+                self.evidence_profile_identity_digest),
+            "visited_function_ids": list(self.visited_function_ids),
+            "visited_function_count": len(self.visited_function_ids),
+            "invocation_count": self.invocation_count,
+            "observed_edges": list(self.observed_edges),
+            "observed_edge_count": len(self.observed_edges),
+            "observation_count": self.observation_count,
+            "new_node_ids": list(self.new_node_ids),
+            "new_edges": list(self.new_edges),
+            "removed_node_ids": list(self.removed_node_ids),
+            "removed_edges": list(self.removed_edges),
+        }
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -535,15 +575,37 @@ class ExecutionAtlas:
         return self._store_source(source)
 
     def ingest_replay(self, artifact_path: str | Path) -> str:
-        """Import oracle-owned visits and observed transfers by reference."""
+        """Import trusted oracle-owned visits and observed transfers."""
+        return self.ingest_replay_with_report(artifact_path).replay_id
+
+    def ingest_replay_with_report(
+        self, artifact_path: str | Path,
+    ) -> ReplayContribution:
+        """Import a replay and report its exact corpus delta."""
         artifact = ReplayArtifact.open(artifact_path)
-        recording_profile_id = str(artifact.metadata.get("recording_profile_id", ""))
-        profiles = {profile.profile_id: profile for profile, _ in artifact.profiles()}
-        profile = profiles.get(recording_profile_id)
-        if profile is None or profile.role != "oracle":
-            raise AtlasError("Atlas replay evidence requires the recording oracle profile")
+        if not artifact.trusted:
+            raise AtlasError(
+                "Atlas replay evidence requires a complete equivalent "
+                "oracle/capture validation"
+            )
         evidence = artifact.execution_evidence()
-        if evidence is not None and evidence.profile_identity_digest != profile.identity_digest:
+        if evidence is None:
+            raise AtlasError(
+                "Atlas replay evidence requires post-hoc oracle execution "
+                "evidence"
+            )
+        try:
+            profile = artifact.profile_by_digest(
+                evidence.profile_identity_digest)
+        except ReplayError as exc:
+            raise AtlasError(
+                "replay execution evidence names an absent profile"
+            ) from exc
+        if profile.role != "oracle":
+            raise AtlasError(
+                "Atlas execution evidence must come from an oracle profile"
+            )
+        if evidence.profile_identity_digest != profile.identity_digest:
             raise StaleAtlasSourceError("replay execution evidence has a stale oracle identity")
         cached = artifact.cached_points(profile)
 
@@ -590,6 +652,7 @@ class ExecutionAtlas:
                 "incomplete": visit.incomplete,
             })
         replay_id = f"replay:{artifact.identity_digest}"
+        capture = artifact.capture_profile()
         source = {
             "format_version": ATLAS_FORMAT_VERSION,
             "kind": "replay",
@@ -600,8 +663,11 @@ class ExecutionAtlas:
                 "identity_digest": artifact.identity_digest,
                 "timeline_id": artifact.timeline_id,
                 "event_stream_sha256": artifact.event_stream_sha256,
+                "capture_profile": capture.to_json(),
+                "capture_profile_identity_digest": capture.identity_digest,
                 "oracle_profile": profile.to_json(),
                 "oracle_profile_identity_digest": profile.identity_digest,
+                "validation_count": len(artifact.validations()),
             },
             "visits": sorted(visits, key=lambda item: item["function_id"]),
             "transfers": (
@@ -610,10 +676,48 @@ class ExecutionAtlas:
             "runtime_variants": (
                 [] if evidence is None else list(evidence.runtime_variants)),
             "incomplete_functions": (
-                [] if evidence is None else list(evidence.incomplete_functions)),
+                list(evidence.incomplete_functions)),
+            "evidence_provenance": evidence.provenance,
+            "evidence_identity_digest": evidence.evidence_identity_digest,
             "annotations": list(annotations),
         }
-        return self._store_source(source)
+        before_nodes = {node.identity for node in self.nodes()}
+        before_edges = {
+            self._edge_report_identity(edge) for edge in self.edges()
+        }
+        self._store_source(source)
+        after_nodes = {node.identity for node in self.nodes()}
+        after_edges = {
+            self._edge_report_identity(edge) for edge in self.edges()
+        }
+        visits_by_id = {
+            visit.function_id: visit for visit in artifact.function_visits()
+        }
+        observed_edges = tuple(sorted(
+            f"{item.source_id} --{item.kind}--> {item.target_id} "
+            f"(count={item.count})"
+            for item in evidence.transfers
+        ))
+        return ReplayContribution(
+            replay_id=replay_id,
+            artifact_label=Path(artifact_path).name,
+            evidence_profile_identity_digest=profile.identity_digest,
+            visited_function_ids=tuple(sorted(visits_by_id)),
+            invocation_count=sum(
+                visit.invocation_count for visit in visits_by_id.values()),
+            observed_edges=observed_edges,
+            observation_count=sum(item.count for item in evidence.transfers),
+            new_node_ids=tuple(sorted(after_nodes - before_nodes)),
+            new_edges=tuple(sorted(after_edges - before_edges)),
+            removed_node_ids=tuple(sorted(before_nodes - after_nodes)),
+            removed_edges=tuple(sorted(before_edges - after_edges)),
+        )
+
+    @staticmethod
+    def _edge_report_identity(edge: AtlasEdge) -> str:
+        return (
+            f"{edge.source} --{edge.kind}/{edge.status}--> {edge.target}"
+        )
 
     def add_manual_facts(
         self, identity: str, *, provenance: Mapping[str, Any],
@@ -643,11 +747,22 @@ class ExecutionAtlas:
         filename = (
             f"{source['kind']}-{_sha256(str(source['identity']).encode())[:20]}.json")
         relative = Path("sources") / filename
-        _write_json(self.directory / relative, source)
         entry = {
             "kind": source["kind"], "identity": source["identity"],
             "path": relative.as_posix(), "source_digest": source["source_digest"],
         }
+        existing = next((
+            item for item in self._manifest["sources"]
+            if item["kind"] == entry["kind"]
+            and item["identity"] == entry["identity"]
+        ), None)
+        if (
+            existing is not None
+            and existing.get("source_digest") == entry["source_digest"]
+            and (self.directory / existing["path"]).is_file()
+        ):
+            return str(source["identity"])
+        _write_json(self.directory / relative, source)
         current = [
             item for item in self._manifest["sources"]
             if not (item["kind"] == entry["kind"] and item["identity"] == entry["identity"])

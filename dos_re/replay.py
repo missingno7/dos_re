@@ -265,6 +265,29 @@ class ReplayExecutionIdentity:
     def storage_key(self) -> str:
         return f"{_safe_name(self.profile_id)}-{self.identity_digest[:16]}"
 
+    def same_execution_as(self, other: "ReplayExecutionIdentity") -> bool:
+        """Return whether two profiles select the same deterministic runtime.
+
+        Profile names and roles describe how an execution is being used.  They
+        do not change the selected implementation, image, runtime, devices, or
+        state schemas that determine replay compatibility.
+        """
+        return (
+            self.implementation,
+            self.image,
+            self.runtime,
+            self.devices,
+            self.continuation_schema,
+            self.projection_schema,
+        ) == (
+            other.implementation,
+            other.image,
+            other.runtime,
+            other.devices,
+            other.continuation_schema,
+            other.projection_schema,
+        )
+
     def to_json(self) -> dict[str, Any]:
         return {
             "profile_id": self.profile_id, "role": self.role,
@@ -417,6 +440,7 @@ class ReplayExecutionEvidence:
     transfers: tuple[ObservedTransfer, ...] = ()
     runtime_variants: tuple[str, ...] = ()
     incomplete_functions: tuple[str, ...] = ()
+    provenance: Mapping[str, Any] = field(default_factory=dict)
     version: int = 1
 
     def __post_init__(self) -> None:
@@ -434,6 +458,24 @@ class ReplayExecutionEvidence:
         object.__setattr__(self, "runtime_variants", tuple(sorted(set(self.runtime_variants))))
         object.__setattr__(
             self, "incomplete_functions", tuple(sorted(set(self.incomplete_functions))))
+        object.__setattr__(
+            self, "provenance",
+            _json_value(self.provenance, "execution evidence provenance"),
+        )
+
+    @property
+    def evidence_identity_digest(self) -> str:
+        """Identity of one reproducible observation recipe.
+
+        Observed counts are deliberately excluded. Re-running the same plan
+        and observer over the same artifact must reproduce the same content or
+        be rejected as non-deterministic evidence.
+        """
+        return _sha256(_canonical_json({
+            "version": self.version,
+            "profile_identity_digest": self.profile_identity_digest,
+            "provenance": self.provenance,
+        }))
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -442,6 +484,7 @@ class ReplayExecutionEvidence:
             "transfers": [item.to_json() for item in self.transfers],
             "runtime_variants": list(self.runtime_variants),
             "incomplete_functions": list(self.incomplete_functions),
+            "provenance": self.provenance,
         }
 
     @classmethod
@@ -451,6 +494,7 @@ class ReplayExecutionEvidence:
             tuple(ObservedTransfer.from_json(item) for item in raw.get("transfers", ())),
             tuple(map(str, raw.get("runtime_variants", ()))),
             tuple(map(str, raw.get("incomplete_functions", ()))),
+            raw.get("provenance", {}),
             int(raw.get("version", 0)),
         )
 
@@ -486,14 +530,19 @@ class ReplayEvidenceRecorder:
             raise ValueError("runtime variant identity must not be empty")
         self._runtime_variants.add(str(variant_id))
 
-    def evidence(self, profile: ReplayExecutionIdentity) -> ReplayExecutionEvidence:
+    def evidence(
+        self,
+        profile: ReplayExecutionIdentity,
+        *,
+        provenance: Mapping[str, Any] | None = None,
+    ) -> ReplayExecutionEvidence:
         incomplete = tuple(
             record.function_id for record in self.visits.records()
             if record.invocation_count and record.incomplete
         )
         return ReplayExecutionEvidence(
             profile.identity_digest, tuple(self._transfers.values()),
-            tuple(self._runtime_variants), incomplete)
+            tuple(self._runtime_variants), incomplete, provenance or {})
 
 
 class ReplayDriver(Protocol):
@@ -529,6 +578,61 @@ class VerificationResult:
     @property
     def equivalent(self) -> bool:
         return self.comparison.equivalent
+
+
+@dataclass(frozen=True)
+class ReplayValidation:
+    """One persisted oracle/candidate interval comparison."""
+
+    oracle_profile_identity_digest: str
+    candidate_profile_identity_digest: str
+    start: ReplayPoint
+    end: ReplayPoint
+    equivalent: bool
+    oracle_digest: str
+    candidate_digest: str
+    version: int = 1
+
+    def __post_init__(self) -> None:
+        if self.version != 1:
+            raise ValueError("unsupported replay-validation version")
+        if (
+            not self.oracle_profile_identity_digest
+            or not self.candidate_profile_identity_digest
+            or not self.oracle_digest
+            or not self.candidate_digest
+        ):
+            raise ValueError("replay validation identities must not be empty")
+        _ordered_interval(self.start, self.end)
+
+    @property
+    def identity_digest(self) -> str:
+        return _sha256(_canonical_json(self.to_json()))
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "oracle_profile_identity_digest": self.oracle_profile_identity_digest,
+            "candidate_profile_identity_digest": self.candidate_profile_identity_digest,
+            "start": self.start.to_json(),
+            "end": self.end.to_json(),
+            "equivalent": bool(self.equivalent),
+            "oracle_digest": self.oracle_digest,
+            "candidate_digest": self.candidate_digest,
+        }
+
+    @classmethod
+    def from_json(cls, raw: Mapping[str, Any]) -> "ReplayValidation":
+        return cls(
+            str(raw["oracle_profile_identity_digest"]),
+            str(raw["candidate_profile_identity_digest"]),
+            ReplayPoint.from_json(raw["start"]),
+            ReplayPoint.from_json(raw["end"]),
+            bool(raw["equivalent"]),
+            str(raw["oracle_digest"]),
+            str(raw["candidate_digest"]),
+            int(raw.get("version", 0)),
+        )
 
 
 class ReplayRecording:
@@ -646,6 +750,7 @@ class ReplayArtifact:
             "profiles": {},
             "function_visits": [],
             "execution_evidence": None,
+            "validations": [],
             "points": {},
         }
         artifact = cls(directory, manifest)
@@ -692,7 +797,7 @@ class ReplayArtifact:
 
     @property
     def identity_digest(self) -> str:
-        """Stable identity of the immutable timeline and its oracle base."""
+        """Stable identity of the immutable timeline and its capture base."""
         recording_profile_id = str(self._manifest.get("metadata", {}).get(
             "recording_profile_id", ""))
         profile = self._manifest.get("profiles", {}).get(recording_profile_id)
@@ -708,6 +813,88 @@ class ReplayArtifact:
             "recording_profile_id": recording_profile_id,
             "recording_profile": record,
         }))
+
+    def capture_profile(self) -> ReplayExecutionIdentity:
+        """Return the execution profile that captured the immutable inputs."""
+        profile_id = str(self.metadata.get("recording_profile_id", ""))
+        profiles = {
+            profile.profile_id: profile for profile, _ in self.profiles()
+        }
+        try:
+            return profiles[profile_id]
+        except KeyError as exc:
+            raise ReplayError(
+                f"capture profile is absent from artifact: {profile_id!r}"
+            ) from exc
+
+    def profile_by_digest(
+        self, identity_digest: str,
+    ) -> ReplayExecutionIdentity:
+        matches = [
+            profile for profile, _ in self.profiles()
+            if profile.identity_digest == str(identity_digest)
+        ]
+        if len(matches) != 1:
+            raise ReplayError(
+                "replay profile identity is absent or ambiguous: "
+                f"{identity_digest}"
+            )
+        return matches[0]
+
+    def validations(self) -> tuple[ReplayValidation, ...]:
+        return tuple(
+            ReplayValidation.from_json(raw)
+            for raw in self._manifest.get("validations", ())
+        )
+
+    def record_validation(self, result: VerificationResult) -> bool:
+        """Persist a comparison once; identical reruns are idempotent."""
+        validation = ReplayValidation(
+            result.oracle.profile.identity_digest,
+            result.candidate.profile.identity_digest,
+            result.start,
+            result.end,
+            result.equivalent,
+            result.comparison.oracle_digest,
+            result.comparison.candidate_digest,
+        )
+        with self._locked_mutation():
+            self.require_profile(result.oracle.profile)
+            self.require_profile(result.candidate.profile)
+            self._point(result.start)
+            self._point(result.end)
+            records = self._manifest.setdefault("validations", [])
+            encoded = validation.to_json()
+            if encoded in records:
+                return False
+            records.append(encoded)
+            records.sort(key=lambda raw: ReplayValidation.from_json(
+                raw).identity_digest)
+            self._write()
+        return True
+
+    @property
+    def trusted(self) -> bool:
+        """Whether the complete captured timeline is oracle-backed evidence."""
+        capture = self.capture_profile()
+        if capture.role == "oracle":
+            return True
+        end_raw = self.metadata.get("end_point")
+        if not isinstance(end_raw, Mapping):
+            return False
+        end = ReplayPoint.from_json(end_raw)
+        start = ReplayPoint(0, self.timeline_id)
+        for validation in self.validations():
+            if (
+                validation.equivalent
+                and validation.start == start
+                and validation.end == end
+            ):
+                candidate = self.profile_by_digest(
+                    validation.candidate_profile_identity_digest)
+                if capture.same_execution_as(candidate):
+                    return True
+        return False
 
     def register_profile(
         self, profile: ReplayExecutionIdentity, *, base_point: ReplayPoint,
@@ -926,26 +1113,38 @@ class ReplayArtifact:
                 })
         return tuple(result)
 
-    def set_function_visits(self, index: FunctionVisitIndex) -> None:
+    def set_function_visits(self, index: FunctionVisitIndex) -> bool:
         with self._locked_mutation():
             for visit in index.records():
                 if visit.first_entry is not None:
                     self._point(visit.first_entry)
                 if visit.last_exit is not None:
                     self._point(visit.last_exit)
-            self._manifest["function_visits"] = index.to_json()
+            encoded = index.to_json()
+            if self._manifest["function_visits"] == encoded:
+                return False
+            self._manifest["function_visits"] = encoded
             self._write()
+        return True
 
     def set_execution_evidence(
-        self, profile: ReplayExecutionIdentity, evidence: ReplayExecutionEvidence,
-    ) -> None:
-        """Persist authoritative observations from this artifact's oracle run."""
+        self,
+        profile: ReplayExecutionIdentity,
+        evidence: ReplayExecutionEvidence,
+        *,
+        visits: FunctionVisitIndex | None = None,
+    ) -> bool:
+        """Persist post-hoc oracle observations with idempotence guarantees.
+
+        The oracle that enriches a replay need not be the profile that captured
+        its input stream. A candidate-captured artifact becomes Atlas-eligible
+        only after full validation, while its function/edge evidence remains
+        owned by this explicitly identified oracle observation run.
+        """
         with self._locked_mutation():
             record = self.require_profile(profile)
             if profile.role != "oracle":
                 raise ValueError("execution evidence must be recorded by an oracle profile")
-            if self.metadata.get("recording_profile_id") != profile.profile_id:
-                raise ValueError("execution evidence profile is not the recording oracle")
             if evidence.profile_identity_digest != profile.identity_digest:
                 raise StaleReplayError("execution evidence profile identity changed")
             for transfer in evidence.transfers:
@@ -953,8 +1152,41 @@ class ReplayArtifact:
                 self._point(transfer.last_observed)
             if record.get("identity_digest") != evidence.profile_identity_digest:
                 raise StaleReplayError("registered oracle identity changed")
-            self._manifest["execution_evidence"] = evidence.to_json()
+            encoded_evidence = evidence.to_json()
+            encoded_visits = (
+                self._manifest["function_visits"]
+                if visits is None else visits.to_json()
+            )
+            for visit in encoded_visits:
+                first, last = visit.get("first_entry"), visit.get("last_exit")
+                if first is not None:
+                    self._point(ReplayPoint.from_json(first))
+                if last is not None:
+                    self._point(ReplayPoint.from_json(last))
+            existing_raw = self._manifest.get("execution_evidence")
+            if existing_raw is not None:
+                existing = ReplayExecutionEvidence.from_json(existing_raw)
+                if (
+                    existing.evidence_identity_digest
+                    == evidence.evidence_identity_digest
+                    and (
+                        existing_raw != encoded_evidence
+                        or self._manifest["function_visits"] != encoded_visits
+                    )
+                ):
+                    raise ReplayError(
+                        "the same execution plan and evidence provenance "
+                        "produced different observations"
+                    )
+            if (
+                existing_raw == encoded_evidence
+                and self._manifest["function_visits"] == encoded_visits
+            ):
+                return False
+            self._manifest["function_visits"] = encoded_visits
+            self._manifest["execution_evidence"] = encoded_evidence
             self._write()
+        return True
 
     def execution_evidence(self) -> ReplayExecutionEvidence | None:
         raw = self._manifest.get("execution_evidence")
@@ -1223,6 +1455,7 @@ def verify_interval(
         candidate.profile, candidate_restored, start, end, _project(candidate))
     comparison = oracle_run.projection.compare(candidate_run.projection)
     result = VerificationResult(start, end, oracle_run, candidate_run, comparison)
+    artifact.record_validation(result)
     if comparison.equivalent:
         artifact.annotate(end, kind="verified-endpoint", metadata={
             "oracle_profile": oracle.profile.profile_id,

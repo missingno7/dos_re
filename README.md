@@ -80,6 +80,11 @@ sources. It does not decode code, execute replays, select implementations, or
 turn absence of observation into proof. Conflicting and unresolved evidence
 stays visible.
 
+Replay capture may use a responsive generated or verified-override
+composition. The artifact records that exact capture identity; full
+oracle/candidate validation establishes trust, and post-hoc oracle replay can
+attach function and transfer evidence independently for Atlas ingestion.
+
 ## Execution and release
 
 `ImplementationCatalog` is the available implementation inventory.

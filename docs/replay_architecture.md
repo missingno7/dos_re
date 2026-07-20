@@ -40,6 +40,14 @@ policy profiles in `dos_re.execution`. A policy profile constrains allowed
 capabilities; a `ReplayExecutionIdentity` keys the exact continuation semantics
 of one selected mixed plan.
 
+The capture profile is provenance, not an assertion of correctness. Interactive
+capture may select already-verified performance overrides or a provisional
+candidate plan. An oracle capture is trusted immediately. A candidate capture
+becomes trusted only after an equivalent `0 -> end_point` validation whose
+candidate execution identity selects the same implementation, image, runtime,
+devices, and schemas as the capture profile. Partial green intervals remain
+useful verification records but do not promote the whole replay to evidence.
+
 ## Stable points and events
 
 A replay chooses one canonical monotonic timeline. `ReplayPoint` is
@@ -59,6 +67,11 @@ the complete base continuation and optional cached endpoint. Real-mode
 keyboard/mouse normalization and application, plus the PM stable frame seam.
 They define no file names, manifests, versions, snapshots, or compatibility
 branches.
+
+Recording does not require an untouched interpreter plan. Capture composition
+and device identity are retained so the same plan can be validated later.
+Frontend metadata must also retain every deterministic knob needed to recreate
+that topology.
 
 ## Continuation state is not comparison state
 
@@ -190,6 +203,20 @@ ends marks the visit incomplete and invalidates interval verification, even if
 an earlier invocation completed; no exit is fabricated for the active call.
 These records become the execution atlas's inverse index from function to
 covering replay artifacts.
+
+Visit and transfer collection is independent of input capture. A project may
+observe them inline when measured overhead is negligible, but the authoritative
+path is replaying any existing artifact on the untouched oracle. Post-hoc
+evidence records the exact oracle `ReplayExecutionIdentity`, event-stream hash,
+observer identity/digest, and observed interval. Repeating the same recipe is
+idempotent; different results under the same evidence identity are rejected as
+non-deterministic.
+
+Atlas ingestion accepts only a trusted artifact with oracle-produced execution
+evidence. This preserves useful fast or provisional capture without allowing
+its unverified observations to become program facts. Hooks can hide transfers
+inside replaced bodies, so a post-hoc oracle run remains authoritative even
+when lightweight inline observation is enabled.
 
 ## Runtime adapters
 

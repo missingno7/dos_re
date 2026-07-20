@@ -84,10 +84,6 @@ class _RealReplayRecorder:
     def __init__(self, frontend, args, rt, *, root: Path, name: str, metadata: dict):
         directory = _timestamp_dir(root, f"replay_{_safe_name(name)}")
         profile = frontend.replay_profile(args, rt)
-        if profile.role != "oracle":
-            raise RuntimeError(
-                "ReplayArtifact recording requires the untouched oracle plan"
-            )
         base = frontend.capture_replay_state(rt, event_cursor=0)
         timeline = f"real-mode-frame-boundaries:{frontend.name}:v1"
         self.recording = ReplayRecording(
@@ -546,18 +542,32 @@ class GameFrontend:
         implementation = hashlib.sha256(
             f"{_implementation_identity(self)}:{composition_digest}".encode("utf-8")
         ).hexdigest()
+        image = _content_identity(args.exe)
+        runtime = _runtime_identity()
+        devices = self.replay_device_identity(args, rt)
+        continuation_schema = "dos-re-real-mode-continuation-v1"
+        projection_schema = "dos-re-complete-machine-v1"
         key = hashlib.sha256(
-            f"{mode}\n{implementation}".encode("utf-8")
+            repr((
+                mode,
+                role,
+                implementation,
+                image,
+                runtime,
+                devices,
+                continuation_schema,
+                projection_schema,
+            )).encode("utf-8")
         ).hexdigest()[:12]
         return ReplayExecutionIdentity(
             profile_id=f"real-mode-{mode}-{key}",
             role=role,
             implementation=implementation,
-            image=_content_identity(args.exe),
-            runtime=_runtime_identity(),
-            devices=self.replay_device_identity(args, rt),
-            continuation_schema="dos-re-real-mode-continuation-v1",
-            projection_schema="dos-re-complete-machine-v1",
+            image=image,
+            runtime=runtime,
+            devices=devices,
+            continuation_schema=continuation_schema,
+            projection_schema=projection_schema,
         )
 
     def capture_replay_state(self, rt, *, event_cursor: int):
