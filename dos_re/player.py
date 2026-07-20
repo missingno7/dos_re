@@ -18,6 +18,7 @@ headless execution, and verification do not import numpy or pygame.
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import inspect
 import sys
@@ -193,14 +194,32 @@ def _implementation_identity(frontend) -> str:
     return h.hexdigest()
 
 
-def _runtime_identity() -> str:
-    root = Path(__file__).parent
+def _source_tree_identity(root: Path) -> str:
+    """Content identity for a Python source tree, independent of its location."""
     h = hashlib.sha256()
-    for name in ("cpu.py", "dos.py", "runtime.py", "snapshot.py", "replay.py"):
-        path = root / name
-        h.update(name.encode("utf-8"))
-        h.update(path.read_bytes())
+    paths = sorted(
+        (path for path in root.rglob("*.py") if path.is_file()),
+        key=lambda path: path.relative_to(root).as_posix(),
+    )
+    if not paths:
+        raise ValueError(f"runtime source tree contains no Python files: {root}")
+    for path in paths:
+        name = path.relative_to(root).as_posix().encode("utf-8")
+        content = path.read_bytes()
+        h.update(len(name).to_bytes(8, "big"))
+        h.update(name)
+        h.update(len(content).to_bytes(8, "big"))
+        h.update(content)
     return h.hexdigest()
+
+
+@functools.lru_cache(maxsize=1)
+def _runtime_identity() -> str:
+    # Replay validity depends on the complete framework implementation, not
+    # only the five most obvious runtime modules. Interrupt delivery, optional
+    # devices, snapshot adapters and lifted-call mechanics can all affect
+    # deterministic continuation.
+    return _source_tree_identity(Path(__file__).parent)
 
 
 class GameFrontend:

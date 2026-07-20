@@ -47,6 +47,26 @@ def test_import_stays_lazy_about_viewer_deps():
     assert result.returncode == 0, result.stderr[-2000:]
 
 
+def test_source_tree_identity_is_location_independent_and_byte_sensitive(
+    tmp_path,
+):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    for root in (first, second):
+        (root / "nested").mkdir(parents=True)
+        (root / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (root / "nested" / "device.py").write_text(
+            "DEVICE = 'pic'\n", encoding="utf-8"
+        )
+
+    original = player._source_tree_identity(first)
+    assert original == player._source_tree_identity(second)
+    (second / "nested" / "device.py").write_text(
+        "DEVICE = 'sound-blaster'\n", encoding="utf-8"
+    )
+    assert original != player._source_tree_identity(second)
+
+
 def test_standard_cli_defaults():
     fe = GameFrontend(ROOT)
     args = _parse(fe, [])
