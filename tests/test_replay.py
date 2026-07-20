@@ -315,6 +315,57 @@ def test_changed_base_snapshot_identity_rejects_cached_boundary(tmp_path):
         reopened.restore(NATIVE, point(2))
 
 
+def test_boundary_delta_supports_added_removed_and_resized_regions(tmp_path):
+    artifact = ReplayArtifact.create(
+        tmp_path / "variable-regions",
+        timeline_id=TIMELINE,
+        events=(),
+        metadata={"recording_profile_id": ORACLE.profile_id},
+        page_size=4,
+    )
+    base = ContinuationState(
+        "machine-v1",
+        {"phase": "base"},
+        {
+            "grown": b"abcdefgh",
+            "removed": b"gone",
+            "shrunk": b"12345678",
+        },
+        0,
+    )
+    target = ContinuationState(
+        "machine-v1",
+        {"phase": "target"},
+        {
+            "added": b"new-region",
+            "grown": b"abXXefgh-more",
+            "shrunk": b"1234",
+        },
+        0,
+    ).normalized()
+    artifact.register_profile(
+        ORACLE, base_point=point(0), base_state=base)
+
+    assert artifact.cache(ORACLE, point(1), target)
+
+    reopened = ReplayArtifact.open(artifact.directory)
+    assert reopened.restore(ORACLE, point(1)) == target
+    record = reopened.require_profile(ORACLE)
+    boundary = json.loads(
+        reopened._resolve(
+            record["boundaries"][point(1).key]["manifest"]
+        ).read_text(encoding="utf-8")
+    )
+    assert boundary["regions"] == [
+        {"name": "added", "size": 10},
+        {"name": "grown", "size": 13},
+        {"name": "shrunk", "size": 4},
+    ]
+    assert {page["region"] for page in boundary["changed_pages"]} == {
+        "added", "grown",
+    }
+
+
 def test_artifact_metadata_is_returned_as_a_detached_copy(tmp_path):
     artifact = make_artifact(tmp_path)
     metadata = artifact.metadata

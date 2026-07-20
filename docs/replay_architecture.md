@@ -125,6 +125,13 @@ Boundaries never form delta chains. Restoration always loads the identity's base
 and applies one boundary's changed pages. The closest cached point at or before
 X is restored, replay advances to X, X is cached lazily, and only X→Y executes.
 
+The boundary also declares its target region layout. Regions created after the
+base—such as a newly opened DOS file—are stored as wholly changed pages;
+removed regions are omitted; grown or shrunk regions reuse their matching base
+prefix and store only changed or added pages. This remains one independent
+base-relative delta and allows ordinary dynamic resources without a checkpoint
+chain or fixed-region assumption.
+
 The on-disk shape is:
 
 ```text

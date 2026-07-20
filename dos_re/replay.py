@@ -987,7 +987,24 @@ class ReplayArtifact:
             raise StaleReplayError("cached boundary belongs to another base snapshot")
         if ReplayPoint.from_json(manifest["point"]) != point:
             raise ReplayError("cached boundary point mismatch")
-        regions = {name: bytearray(data) for name, data in base.regions.items()}
+        layout = manifest.get("regions")
+        if layout is None:
+            # Boundaries written before variable-region support always had the
+            # exact base layout.
+            regions = {
+                name: bytearray(data) for name, data in base.regions.items()
+            }
+        else:
+            regions = {}
+            for item in layout:
+                name, size = str(item["name"]), int(item["size"])
+                if not name or name in regions or size < 0:
+                    raise ReplayError("invalid cached boundary region layout")
+                original = base.regions.get(name, b"")
+                data = bytearray(original[:size])
+                if len(data) < size:
+                    data.extend(b"\x00" * (size - len(data)))
+                regions[name] = data
         for page in manifest["changed_pages"]:
             name, index = str(page["region"]), int(page["index"])
             if name not in regions or index < 0:
@@ -1026,11 +1043,6 @@ class ReplayArtifact:
             base = self._read_full_state(record["base"], base_point, profile)
             if base.digest != record.get("base_state_sha256"):
                 raise StaleReplayError("profile base snapshot identity changed")
-            if set(state.regions) != set(base.regions):
-                raise ValueError("continuation region set differs from profile base")
-            for name in base.regions:
-                if len(state.regions[name]) != len(base.regions[name]):
-                    raise ValueError(f"continuation region size differs from base: {name!r}")
             root = Path("profiles") / profile.storage_key / "boundaries" / point.key
             final = self.directory / root
             final.parent.mkdir(parents=True, exist_ok=True)
@@ -1040,10 +1052,15 @@ class ReplayArtifact:
             pages: list[dict[str, Any]] = []
             try:
                 for region_no, name in enumerate(sorted(state.regions)):
-                    current, original = state.regions[name], base.regions[name]
+                    current = state.regions[name]
+                    original = base.regions.get(name, b"")
                     for index, start in enumerate(range(0, len(current), self.page_size)):
                         payload = current[start:start + self.page_size]
-                        if payload == original[start:start + self.page_size]:
+                        original_page = original[start:start + len(payload)]
+                        if (
+                            len(original_page) == len(payload)
+                            and payload == original_page
+                        ):
                             continue
                         rel = Path("pages") / f"{region_no:04d}" / f"{index:08x}.zlib"
                         path = temp / rel
@@ -1060,6 +1077,10 @@ class ReplayArtifact:
                     "schema_id": state.schema_id, "metadata": state.metadata,
                     "event_cursor": state.event_cursor, "state_sha256": state.digest,
                     "boundary_metadata": _json_value(metadata or {}, "boundary metadata"),
+                    "regions": [
+                        {"name": name, "size": len(state.regions[name])}
+                        for name in sorted(state.regions)
+                    ],
                     "changed_pages": pages,
                 })
                 self._publication_stage("prepared")
