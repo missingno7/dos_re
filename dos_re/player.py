@@ -246,15 +246,27 @@ class GameFrontend:
         """Stable plan identity; ports override with their recovery-IR identity."""
         return f"frontend:{self.name}"
 
-    def execution_configuration(self, args: argparse.Namespace) -> ExecutionConfiguration:
-        requested_capabilities: set[str] = set()
+    def requested_capabilities(
+        self, args: argparse.Namespace,
+    ) -> frozenset[str]:
+        """Capabilities implied by standard player options.
+
+        Project frontends that replace :meth:`execution_configuration` must
+        pass this set into their own configuration factory.  This keeps replay
+        and snapshot policy attached to the canonical execution plan instead
+        of re-deriving it in individual launch paths.
+        """
+        requested: set[str] = set()
         if args.record_replay or args.play_replay:
-            requested_capabilities.update({
+            requested.update({
                 DependencyCapability.REPLAY.value,
                 DependencyCapability.SNAPSHOTS.value,
             })
         if args.snapshot or args.save_snapshot:
-            requested_capabilities.add(DependencyCapability.SNAPSHOTS.value)
+            requested.add(DependencyCapability.SNAPSHOTS.value)
+        return frozenset(requested)
+
+    def execution_configuration(self, args: argparse.Namespace) -> ExecutionConfiguration:
         exe_path = str(args.exe or "")
         bootstrap = ExeBootstrapProvider(
             provider_id="original-exe-loader",
@@ -290,7 +302,7 @@ class GameFrontend:
             program_identity=self.program_identity(args),
             product_profile="default",
             provider_preference=self.default_provider_preference,
-            requested_capabilities=requested_capabilities,
+            requested_capabilities=self.requested_capabilities(args),
             bootstrap_provider=bootstrap,
         )
 
@@ -462,6 +474,40 @@ class GameFrontend:
         if "timer_irqs_per_frame" in meta:
             args.timer_irqs_per_frame = int(meta["timer_irqs_per_frame"])
 
+    def replay_device_identity(self, args: argparse.Namespace, rt) -> str:
+        """Identify the concrete deterministic device topology.
+
+        Runtime and implementation source digests identify device *code*; this
+        identity also records which optional devices were attached and their
+        immutable configuration.  A sound-disabled runtime must never reuse a
+        cache captured with PIC/Sound Blaster continuation state, or vice
+        versa.
+        """
+        dos = getattr(rt, "dos", None)
+        pic = getattr(dos, "pic", None)
+        sound_blaster = getattr(dos, "sound_blaster", None)
+
+        def type_name(value) -> str:
+            if value is None:
+                return "absent"
+            cls = type(value)
+            return f"{cls.__module__}.{cls.__qualname__}"
+
+        topology = (
+            ("dos", type_name(dos)),
+            ("pic", type_name(pic)),
+            ("sound_blaster", type_name(sound_blaster)),
+            ("sound_blaster.base", getattr(sound_blaster, "base", None)),
+            ("sound_blaster.irq", getattr(sound_blaster, "irq", None)),
+            ("sound_blaster.dma", getattr(sound_blaster, "dma", None)),
+            (
+                "sound_blaster.detection_only",
+                getattr(sound_blaster, "detection_only", None),
+            ),
+        )
+        digest = hashlib.sha256(repr(topology).encode("utf-8")).hexdigest()
+        return f"dos-re-real-mode-devices-v2:{digest}"
+
     def replay_profile(
         self, args: argparse.Namespace, rt,
     ) -> ReplayExecutionIdentity:
@@ -490,7 +536,7 @@ class GameFrontend:
             implementation=implementation,
             image=_content_identity(args.exe),
             runtime=_runtime_identity(),
-            devices="dos-re-real-mode-devices-v1",
+            devices=self.replay_device_identity(args, rt),
             continuation_schema="dos-re-real-mode-continuation-v1",
             projection_schema="dos-re-complete-machine-v1",
         )
@@ -1097,7 +1143,7 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
     args = build_arg_parser(frontend, description).parse_args(argv)
     try:
         args.execution_plan = frontend.resolve_execution_plan(args)
-    except ExecutionPlanError as exc:
+    except (ExecutionPlanError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if args.plan_only:

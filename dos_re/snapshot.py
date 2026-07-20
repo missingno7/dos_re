@@ -247,24 +247,37 @@ def apply_runtime_continuation(rt: Runtime, state) -> None:
         raise ValueError("real-mode continuation requires the memory region")
     if len(state.regions["memory"]) != len(rt.program.memory.data):
         raise ValueError("real-mode continuation memory size mismatch")
+    dos_state = state.metadata["dos"]
+    for state_key, runtime_attribute in (
+        ("pic", "pic"),
+        ("sound_blaster", "sound_blaster"),
+    ):
+        state_has_device = dos_state.get(state_key) is not None
+        runtime_has_device = getattr(rt.dos, runtime_attribute, None) is not None
+        if state_has_device != runtime_has_device:
+            raise ValueError(
+                "real-mode continuation device topology mismatch for "
+                f"{state_key}: state={'present' if state_has_device else 'absent'}, "
+                f"runtime={'present' if runtime_has_device else 'absent'}"
+            )
     rt.program.memory.data[:] = state.regions["memory"]
     rt.cpu.mem = rt.program.memory
     rt.cpu.s = CPUState(**state.metadata["cpu"])
     rt.cpu.instruction_count = int(state.metadata["instruction_count"])
     rt.cpu.halted = bool(state.metadata["halted"])
     rt.cpu.call_depth = int(state.metadata["call_depth"])
-    _restore_dos_state(rt, state.metadata["dos"])
-    for handle_text, region_name in state.metadata["dos"].get("file_regions", {}).items():
+    _restore_dos_state(rt, dos_state)
+    for handle_text, region_name in dos_state.get("file_regions", {}).items():
         handle = int(handle_text)
         if handle not in rt.dos.files or region_name not in state.regions:
             raise ValueError(f"missing continuation state for DOS file handle {handle}")
         rt.dos.files[handle].data[:] = state.regions[region_name]
-    pic_state = state.metadata["dos"].get("pic")
+    pic_state = dos_state.get("pic")
     if pic_state is not None and getattr(rt.dos, "pic", None) is not None:
         rt.dos.pic.imr = int(pic_state["imr"])
         rt.dos.pic.irr = int(pic_state["irr"])
         rt.dos.pic.isr = int(pic_state["isr"])
-    sb_state = state.metadata["dos"].get("sound_blaster")
+    sb_state = dos_state.get("sound_blaster")
     sb = getattr(rt.dos, "sound_blaster", None)
     if sb_state is not None and sb is not None:
         sb.restore_state(sb_state)

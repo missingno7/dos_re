@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from dos_re.runtime_core import enable_sound_blaster
 from dos_re.snapshot_runtime import load_snapshot_headless
 from dos_re.snapshot import capture_runtime_continuation, apply_runtime_continuation
 
@@ -120,10 +123,23 @@ def test_real_mode_replay_continuation_restores_device_and_cursor_state(tmp_path
 
 
 def test_real_mode_replay_continuation_rejects_wall_clock(tmp_path):
-    import pytest
-
     _write_min_snapshot(tmp_path, steps=0)
     rt = load_snapshot_headless(tmp_path, game_root=tmp_path)
     rt.dos.time_source = lambda: 1.0
     with pytest.raises(ValueError, match="wall-clock"):
         capture_runtime_continuation(rt, event_cursor=0)
+
+
+def test_real_mode_continuation_rejects_incompatible_device_topology(tmp_path):
+    _write_min_snapshot(tmp_path, steps=0)
+    with_devices = load_snapshot_headless(tmp_path, game_root=tmp_path)
+    enable_sound_blaster(with_devices, detection_only=True)
+    device_state = capture_runtime_continuation(with_devices, event_cursor=0)
+
+    without_devices = load_snapshot_headless(tmp_path, game_root=tmp_path)
+    with pytest.raises(ValueError, match="device topology mismatch for pic"):
+        apply_runtime_continuation(without_devices, device_state)
+
+    plain_state = capture_runtime_continuation(without_devices, event_cursor=0)
+    with pytest.raises(ValueError, match="device topology mismatch for pic"):
+        apply_runtime_continuation(with_devices, plain_state)

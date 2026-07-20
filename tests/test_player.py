@@ -16,6 +16,7 @@ import pytest
 
 from dos_re import player
 from dos_re.execution import (
+    DependencyCapability,
     NativeBootstrapProvider,
     ImplementationCatalog,
     ImplementationDescriptor,
@@ -92,6 +93,52 @@ def test_replay_metadata_roundtrip():
     assert fresh.steps_per_frame == 555 and fresh.timer_irqs_per_frame == 3
 
 
+def test_standard_io_options_declare_plan_capabilities():
+    fe = GameFrontend(ROOT)
+    replay_args = _parse(fe, ["--play-replay", "replay"])
+    assert fe.requested_capabilities(replay_args) == frozenset({
+        DependencyCapability.REPLAY.value,
+        DependencyCapability.SNAPSHOTS.value,
+    })
+
+    snapshot_args = _parse(fe, ["--snapshot", "snapshot"])
+    assert fe.requested_capabilities(snapshot_args) == frozenset({
+        DependencyCapability.SNAPSHOTS.value,
+    })
+
+
+def test_replay_device_identity_includes_optional_device_topology():
+    class Device:
+        base = 0x220
+        irq = 7
+        dma = 1
+
+        def __init__(self, *, detection_only=False):
+            self.detection_only = detection_only
+
+    fe = GameFrontend(ROOT)
+    args = _parse(fe, [])
+    silent = SimpleNamespace(
+        dos=SimpleNamespace(pic=None, sound_blaster=None),
+    )
+    detected = SimpleNamespace(
+        dos=SimpleNamespace(
+            pic=Device(), sound_blaster=Device(detection_only=True),
+        ),
+    )
+    captured = SimpleNamespace(
+        dos=SimpleNamespace(
+            pic=Device(), sound_blaster=Device(detection_only=False),
+        ),
+    )
+    assert fe.replay_device_identity(args, silent) != fe.replay_device_identity(
+        args, detected
+    )
+    assert fe.replay_device_identity(args, detected) != fe.replay_device_identity(
+        args, captured
+    )
+
+
 class _StubCPU:
     def __init__(self):
         self.replacement_hooks = {}
@@ -115,6 +162,18 @@ def test_detached_profile_fails_before_runtime_construction(capsys):
     assert player.main(fe, ["--profile", "detached", "--headless"]) == 2
     assert not fe.created
     assert "required capabilities forbidden" in capsys.readouterr().err
+
+
+def test_configuration_errors_are_reported_without_a_traceback(capsys):
+    class Fe(GameFrontend):
+        def resolve_execution_plan(self, args):
+            raise ValueError("invalid implementation composition")
+
+    assert player.main(Fe(ROOT), ["--headless"]) == 2
+    assert (
+        capsys.readouterr().err
+        == "error: invalid implementation composition\n"
+    )
 
 
 def test_frontend_can_declare_exe_free_implementation_for_same_player():
