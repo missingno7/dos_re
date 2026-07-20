@@ -664,3 +664,21 @@ def test_authored_implementation_requires_explicit_selection():
         (item.target, item.implementation_id) for item in with_selected.bindings
     )[ROOT] == "handwritten"
     assert with_selected.report.faithful_override_coverage == (ROOT,)
+
+
+def test_selected_authored_override_must_attach_within_coverage():
+    authored = _implementation(
+        "handwritten",
+        ("function:outside-coverage",),
+        origin=ImplementationOrigin.AUTHORED,
+        category=OverrideCategory.FAITHFUL,
+    )
+    baseline = _implementation("generated", (ROOT, CALLEE))
+    config = profile_configuration(
+        "detached",
+        program_identity=PROGRAM,
+        selected_overrides=("handwritten",),
+    )
+
+    with pytest.raises(ValueError, match="outside conservative coverage"):
+        plan_execution(config, COVERAGE, _catalog(authored, baseline))
