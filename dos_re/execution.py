@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import json
+from pathlib import Path
 from typing import Callable, Iterable, Protocol
 
 
@@ -122,12 +123,129 @@ class BuildTarget:
     package_format: str = ""
 
 
+class BootstrapExportMode(str, Enum):
+    INCLUDE = "include"
+    GENERATE = "generate"
+
+
+@dataclass(frozen=True)
+class BootstrapArtifact:
+    """One file a bootstrap provider needs in the packaged runtime."""
+
+    artifact_id: str
+    runtime_path: str
+    source_path: str = ""
+    export_mode: BootstrapExportMode = BootstrapExportMode.INCLUDE
+    expected_sha256: str = ""
+    generation_instruction: str = ""
+    materializer: Callable[[Path], None] | None = None
+
+
+@dataclass(frozen=True)
+class BootstrapProvider:
+    """Declared source of the initial continuation/runtime state."""
+
+    provider_id: str
+    state_outputs: tuple[str, ...]
+    artifacts: tuple[BootstrapArtifact, ...] = ()
+    build_required_capabilities: frozenset[str] = frozenset()
+    runtime_required_capabilities: frozenset[str] = frozenset()
+    initialized_capabilities: frozenset[str] = frozenset()
+    required_services: frozenset[str] = frozenset()
+    valid_profiles: frozenset[str] = frozenset({
+        "development", "verification", "detached", "release",
+    })
+    provider_digest: str = ""
+
+    @property
+    def kind(self) -> str:
+        return "bootstrap"
+
+    def components(self) -> tuple["BootstrapProvider", ...]:
+        return (self,)
+
+
+@dataclass(frozen=True)
+class ExeBootstrapProvider(BootstrapProvider):
+    """Load initial state by executing/loading the original program at runtime."""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "build_required_capabilities",
+            self.build_required_capabilities
+            | {DependencyCapability.ORIGINAL_EXE.value},
+        )
+        object.__setattr__(
+            self,
+            "runtime_required_capabilities",
+            self.runtime_required_capabilities
+            | {
+                DependencyCapability.ORIGINAL_EXE.value,
+                DependencyCapability.ORIGINAL_CODE.value,
+            },
+        )
+
+    @property
+    def kind(self) -> str:
+        return "exe"
+
+
+@dataclass(frozen=True)
+class BuildImageBootstrapProvider(BootstrapProvider):
+    """Restore a generated/packageable state image without its build inputs."""
+
+    @property
+    def kind(self) -> str:
+        return "build-image"
+
+
+@dataclass(frozen=True)
+class NativeBootstrapProvider(BootstrapProvider):
+    """Construct initial state directly in Python or native product code."""
+
+    @property
+    def kind(self) -> str:
+        return "native"
+
+
+@dataclass(frozen=True)
+class CompositeBootstrapProvider(BootstrapProvider):
+    """Combine image, asset, device, and native-state bootstrap providers."""
+
+    providers: tuple[BootstrapProvider, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.providers:
+            raise ValueError("composite bootstrap provider requires components")
+
+    @property
+    def kind(self) -> str:
+        return "composite"
+
+    def components(self) -> tuple[BootstrapProvider, ...]:
+        items: list[BootstrapProvider] = [self]
+        for provider in self.providers:
+            items.extend(provider.components())
+        return tuple(items)
+
+
+def default_bootstrap_provider() -> BootstrapProvider:
+    """State-less default for planner-only/library compositions."""
+    return NativeBootstrapProvider(
+        provider_id="native-empty",
+        state_outputs=("caller-owned initial state",),
+        provider_digest="dos-re-native-empty-v1",
+    )
+
+
 @dataclass(frozen=True)
 class ExecutionConfiguration:
     program_identity: str
     profile: str
     product_profile: str
     execution_policy: ExecutionPolicy
+    bootstrap_provider: BootstrapProvider
     verification_policy: VerificationPolicy = VerificationPolicy()
     provider_preference: tuple[str, ...] = ()
     selected_overrides: tuple[str, ...] = ()
@@ -247,6 +365,16 @@ class DetachmentMilestone:
 
 
 @dataclass(frozen=True)
+class BootstrapArtifactStatus:
+    artifact_id: str
+    runtime_path: str
+    source_path: str
+    export_mode: BootstrapExportMode
+    materializable: bool
+    generation_instruction: str
+
+
+@dataclass(frozen=True)
 class DetachmentReport:
     reachable: tuple[str, ...]
     bindings: tuple[PlanBinding, ...]
@@ -266,6 +394,15 @@ class DetachmentReport:
     capability_blockers: tuple[CapabilityBlocker, ...]
     policy_forbidden_capabilities: tuple[str, ...]
     detachment_milestones: tuple[DetachmentMilestone, ...]
+    bootstrap_provider_id: str
+    bootstrap_kind: str
+    bootstrap_state_outputs: tuple[str, ...]
+    bootstrap_build_capabilities: tuple[str, ...]
+    bootstrap_runtime_capabilities: tuple[str, ...]
+    bootstrap_initialized_capabilities: tuple[str, ...]
+    bootstrap_artifacts: tuple[BootstrapArtifactStatus, ...]
+    missing_bootstrap_artifacts: tuple[str, ...]
+    bootstrap_profile_valid: bool
     package_ready: bool
 
     def requires(self, capability: str | DependencyCapability) -> bool:
@@ -296,6 +433,16 @@ class DetachmentReport:
                 "required capabilities forbidden by execution policy: "
                 + ", ".join(self.policy_forbidden_capabilities)
             )
+        if not self.bootstrap_profile_valid:
+            lines.append(
+                f"bootstrap provider {self.bootstrap_provider_id!r} is not valid "
+                "for this execution profile"
+            )
+        if self.missing_bootstrap_artifacts:
+            lines.append(
+                "missing bootstrap artifacts: "
+                + ", ".join(self.missing_bootstrap_artifacts)
+            )
         if self.development_only_services:
             lines.append(
                 "development-only services: " + ", ".join(self.development_only_services)
@@ -311,6 +458,7 @@ class DetachmentReport:
 @dataclass(frozen=True)
 class ExecutionPlan:
     configuration: ExecutionConfiguration
+    bootstrap_provider: BootstrapProvider
     coverage_identity: str
     bindings: tuple[PlanBinding, ...]
     implementations: tuple[ImplementationDescriptor, ...]
@@ -318,6 +466,30 @@ class ExecutionPlan:
     services: tuple[RuntimeServiceDescriptor, ...]
     report: DetachmentReport
     plan_digest: str
+
+    def bootstrap_artifact_paths(
+        self,
+        *,
+        packaged: bool = False,
+        root: str | Path | None = None,
+    ) -> dict[str, Path]:
+        """Resolve selected bootstrap artifacts for a backend launch."""
+        base = Path(root) if root is not None else Path()
+        paths: dict[str, Path] = {}
+        for provider in self.bootstrap_provider.components():
+            for artifact in provider.artifacts:
+                value = artifact.runtime_path if packaged else artifact.source_path
+                if not value:
+                    raise RuntimeCapabilityViolation(
+                        f"bootstrap-artifact:{artifact.artifact_id}",
+                        f"bootstrap:{self.bootstrap_provider.provider_id}",
+                        self.plan_digest,
+                    )
+                path = Path(value)
+                paths[artifact.artifact_id] = (
+                    base / path if packaged and not path.is_absolute() else path
+                )
+        return paths
 
     def require_capability(
         self,
@@ -364,6 +536,7 @@ def format_execution_plan(plan: ExecutionPlan) -> str:
         f"execution profile: {plan.configuration.profile}",
         f"program: {plan.configuration.program_identity}",
         f"plan digest: {plan.plan_digest}",
+        f"bootstrap provider: {report.bootstrap_provider_id} ({report.bootstrap_kind})",
         f"reachable identities: {len(report.reachable)}",
         f"bound identities: {len(report.bindings)}",
         "required capabilities: "
@@ -387,6 +560,7 @@ def profile_configuration(
     selected_overrides: Iterable[str] = (),
     product_services: Iterable[str] = (),
     requested_capabilities: Iterable[str] = (),
+    bootstrap_provider: BootstrapProvider | None = None,
     build_target: BuildTarget | None = None,
 ) -> ExecutionConfiguration:
     """Construct one of the standard policy presets.
@@ -402,6 +576,7 @@ def profile_configuration(
         selected_overrides=tuple(selected_overrides),
         product_services=frozenset(product_services),
         requested_capabilities=frozenset(requested_capabilities),
+        bootstrap_provider=bootstrap_provider or default_bootstrap_provider(),
         build_target=build_target,
     )
     development = (
@@ -532,6 +707,8 @@ def _plan_digest(
     selected: tuple[ImplementationDescriptor, ...],
     services: tuple[RuntimeServiceDescriptor, ...],
 ) -> str:
+    bootstrap = configuration.bootstrap_provider
+    bootstrap_components = bootstrap.components()
     payload = {
         "program": configuration.program_identity,
         "profile": configuration.profile,
@@ -545,6 +722,41 @@ def _plan_digest(
         },
         "product_services": sorted(configuration.product_services),
         "requested_capabilities": sorted(configuration.requested_capabilities),
+        "bootstrap": {
+            "selected": bootstrap.provider_id,
+            "kind": bootstrap.kind,
+            "components": [
+                {
+                    "id": item.provider_id,
+                    "kind": item.kind,
+                    "outputs": list(item.state_outputs),
+                    "build_capabilities": sorted(
+                        item.build_required_capabilities
+                    ),
+                    "runtime_capabilities": sorted(
+                        item.runtime_required_capabilities
+                    ),
+                    "initialized_capabilities": sorted(
+                        item.initialized_capabilities
+                    ),
+                    "services": sorted(item.required_services),
+                    "profiles": sorted(item.valid_profiles),
+                    "digest": item.provider_digest,
+                    "artifacts": [
+                        {
+                            "id": artifact.artifact_id,
+                            "runtime_path": artifact.runtime_path,
+                            "source_path": artifact.source_path,
+                            "mode": artifact.export_mode.value,
+                            "sha256": artifact.expected_sha256,
+                            "instruction": artifact.generation_instruction,
+                        }
+                        for artifact in item.artifacts
+                    ],
+                }
+                for item in bootstrap_components
+            ],
+        },
         "verification": configuration.verification_policy.mode,
         "build": (
             None if configuration.build_target is None else
@@ -590,6 +802,67 @@ def _plan_digest(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _bootstrap_status(
+    provider: BootstrapProvider,
+    profile: str,
+) -> tuple[
+    tuple[BootstrapProvider, ...],
+    tuple[BootstrapArtifactStatus, ...],
+    tuple[str, ...],
+    bool,
+]:
+    components = provider.components()
+    provider_ids = [item.provider_id for item in components]
+    if len(set(provider_ids)) != len(provider_ids):
+        raise ValueError("bootstrap provider component IDs must be unique")
+    artifacts = tuple(
+        artifact for item in components for artifact in item.artifacts
+    )
+    artifact_ids = [item.artifact_id for item in artifacts]
+    runtime_paths = [Path(item.runtime_path).as_posix() for item in artifacts]
+    if len(set(artifact_ids)) != len(artifact_ids):
+        raise ValueError("bootstrap artifact IDs must be unique")
+    if len(set(runtime_paths)) != len(runtime_paths):
+        raise ValueError("bootstrap artifact runtime paths must be unique")
+    statuses: list[BootstrapArtifactStatus] = []
+    missing: list[str] = []
+    for artifact in artifacts:
+        source = Path(artifact.source_path) if artifact.source_path else None
+        materializable = False
+        reason = ""
+        if artifact.export_mode is BootstrapExportMode.INCLUDE:
+            if source is None or not source.is_file():
+                reason = f"{artifact.artifact_id} ({artifact.source_path or 'no source path'})"
+            elif artifact.expected_sha256:
+                digest = hashlib.sha256(source.read_bytes()).hexdigest()
+                if digest != artifact.expected_sha256:
+                    reason = (
+                        f"{artifact.artifact_id} (hash mismatch at {source})"
+                    )
+                else:
+                    materializable = True
+            else:
+                materializable = True
+        elif artifact.materializer is None:
+            reason = f"{artifact.artifact_id} (no export materializer)"
+        else:
+            materializable = True
+        if reason:
+            if artifact.generation_instruction:
+                reason += f"; {artifact.generation_instruction}"
+            missing.append(reason)
+        statuses.append(BootstrapArtifactStatus(
+            artifact_id=artifact.artifact_id,
+            runtime_path=Path(artifact.runtime_path).as_posix(),
+            source_path=artifact.source_path,
+            export_mode=artifact.export_mode,
+            materializable=materializable,
+            generation_instruction=artifact.generation_instruction,
+        ))
+    profile_valid = all(profile in item.valid_profiles for item in components)
+    return components, tuple(statuses), tuple(missing), profile_valid
+
+
 def plan_execution(
     configuration: ExecutionConfiguration,
     coverage_source: CoverageSource,
@@ -597,6 +870,40 @@ def plan_execution(
     service_catalog: RuntimeServiceCatalog = RuntimeServiceCatalog(),
 ) -> ExecutionPlan:
     """Resolve an immutable plan or fail a strict profile before execution."""
+    (
+        bootstrap_components,
+        bootstrap_artifacts,
+        missing_bootstrap_artifacts,
+        bootstrap_profile_valid,
+    ) = _bootstrap_status(
+        configuration.bootstrap_provider,
+        configuration.profile,
+    )
+    bootstrap_build_capabilities = frozenset(
+        capability
+        for provider in bootstrap_components
+        for capability in provider.build_required_capabilities
+    )
+    bootstrap_runtime_capabilities = frozenset(
+        capability
+        for provider in bootstrap_components
+        for capability in provider.runtime_required_capabilities
+    )
+    bootstrap_initialized_capabilities = frozenset(
+        capability
+        for provider in bootstrap_components
+        for capability in provider.initialized_capabilities
+    )
+    bootstrap_services = frozenset(
+        service
+        for provider in bootstrap_components
+        for service in provider.required_services
+    )
+    bootstrap_state_outputs = tuple(sorted({
+        output
+        for provider in bootstrap_components
+        for output in provider.state_outputs
+    }))
     coverage = coverage_source.coverage_for(configuration.product_profile)
     all_implementation_items = implementation_catalog.implementations
     known_ids = {item.implementation_id for item in all_implementation_items}
@@ -668,9 +975,13 @@ def plan_execution(
         selected_by_id[selected.implementation_id] = selected
 
     selected = tuple(sorted(selected_by_id.values(), key=lambda item: item.implementation_id))
-    required_service_set = set(configuration.product_services) | {
+    required_service_set = (
+        set(configuration.product_services)
+        | set(bootstrap_services)
+        | {
         service_id for item in selected for service_id in item.required_services
-    }
+        }
+    )
     pending_services = list(required_service_set)
     while pending_services:
         service_id = pending_services.pop()
@@ -732,11 +1043,17 @@ def plan_execution(
         )
     for capability in configuration.requested_capabilities:
         capability_consumers.setdefault(capability, set()).add("configuration")
+    for provider in bootstrap_components:
+        for capability in provider.runtime_required_capabilities:
+            capability_consumers.setdefault(capability, set()).add(
+                f"bootstrap:{provider.provider_id}"
+            )
     for capability, consumers in blocked_capabilities.items():
         capability_consumers.setdefault(capability, set()).update(consumers)
     required_capability_set = (
         set(configuration.execution_policy.required_capabilities)
         | set(configuration.requested_capabilities)
+        | set(bootstrap_runtime_capabilities)
         | set(blocked_capabilities)
         | {
             capability
@@ -833,6 +1150,8 @@ def plan_execution(
         and not coverage.unresolved_edges
         and not missing_services
         and not packaging_incompatible_items
+        and bootstrap_profile_valid
+        and not missing_bootstrap_artifacts
         and not policy_forbidden_capabilities
         and not development_only_services
         and not policy_forbidden_services
@@ -858,6 +1177,21 @@ def plan_execution(
         capability_blockers=capability_blockers,
         policy_forbidden_capabilities=policy_forbidden_capabilities,
         detachment_milestones=milestones,
+        bootstrap_provider_id=configuration.bootstrap_provider.provider_id,
+        bootstrap_kind=configuration.bootstrap_provider.kind,
+        bootstrap_state_outputs=bootstrap_state_outputs,
+        bootstrap_build_capabilities=tuple(sorted(
+            bootstrap_build_capabilities
+        )),
+        bootstrap_runtime_capabilities=tuple(sorted(
+            bootstrap_runtime_capabilities
+        )),
+        bootstrap_initialized_capabilities=tuple(sorted(
+            bootstrap_initialized_capabilities
+        )),
+        bootstrap_artifacts=bootstrap_artifacts,
+        missing_bootstrap_artifacts=missing_bootstrap_artifacts,
+        bootstrap_profile_valid=bootstrap_profile_valid,
         package_ready=package_ready,
     )
 
@@ -867,6 +1201,8 @@ def plan_execution(
         or bool(unresolved)
         or bool(missing_services)
         or bool(packaging_incompatible_items)
+        or not bootstrap_profile_valid
+        or bool(missing_bootstrap_artifacts)
         or bool(policy_forbidden_services)
         or (policy.strict_coverage and bool(coverage.unresolved_edges))
         or (
@@ -882,6 +1218,7 @@ def plan_execution(
     )
     return ExecutionPlan(
         configuration=configuration,
+        bootstrap_provider=configuration.bootstrap_provider,
         coverage_identity=coverage.evidence_identity,
         bindings=binding_items,
         implementations=selected,

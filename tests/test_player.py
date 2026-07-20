@@ -15,6 +15,7 @@ import pytest
 
 from dos_re import player
 from dos_re.execution import (
+    NativeBootstrapProvider,
     ExecutionPlanError,
     ImplementationCatalog,
     ImplementationDescriptor,
@@ -118,6 +119,17 @@ def test_detached_profile_fails_before_runtime_construction():
 
 def test_frontend_can_declare_exe_free_implementation_for_same_player():
     class Fe(GameFrontend):
+        def execution_configuration(self, args):
+            return profile_configuration(
+                args.profile,
+                program_identity=self.program_identity(args),
+                provider_preference=self.default_provider_preference,
+                bootstrap_provider=NativeBootstrapProvider(
+                    "test-native",
+                    ("test state",),
+                ),
+            )
+
         def execution_coverage(self, args):
             return ProgramCoverage(
                 roots=("root",),
@@ -149,7 +161,9 @@ def test_plan_only_reports_without_runtime_construction(capsys):
         def create_runtime(self, args):
             raise AssertionError("--plan-only must not construct a runtime")
 
-    assert player.main(Fe(ROOT), ["--plan-only"]) == 0
+    assert player.main(
+        Fe(ROOT), ["--exe", str(Path(__file__)), "--plan-only"]
+    ) == 0
     output = capsys.readouterr().out
     assert "execution profile: development" in output
     assert "original-exe detached: false" in output
@@ -180,7 +194,9 @@ def test_run_headless_respects_frame_budget(capsys):
 
 def test_verification_profile_requires_an_explicit_interval():
     with pytest.raises(SystemExit, match="requires --play-demo"):
-        player.main(GameFrontend(ROOT), ["--profile", "verification"])
+        player.main(GameFrontend(ROOT), [
+            "--exe", str(Path(__file__)), "--profile", "verification",
+        ])
 
 
 def test_verification_profile_dispatches_before_runtime_boot(monkeypatch):
@@ -194,7 +210,9 @@ def test_verification_profile_dispatches_before_runtime_boot(monkeypatch):
         "_run_differential_verification",
         lambda frontend, args, plan: seen.append(plan) or 7,
     )
-    assert player.main(Fe(ROOT), ["--profile", "verification"]) == 7
+    assert player.main(Fe(ROOT), [
+        "--exe", str(Path(__file__)), "--profile", "verification",
+    ]) == 7
     assert seen[0].configuration.verification_policy.mode == "differential"
 
 

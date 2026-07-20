@@ -3,7 +3,11 @@ import sys
 
 import pytest
 
+from dos_re.bootstrap_runtime import packaged_bootstrap_artifacts
 from dos_re.execution import (
+    BootstrapArtifact,
+    BootstrapExportMode,
+    BuildImageBootstrapProvider,
     BuildTarget,
     DependencyCapability,
     ImplementationCatalog,
@@ -22,7 +26,7 @@ from dos_re.export import (
 )
 
 
-def _release_plan(*, capabilities=()):
+def _release_plan(*, capabilities=(), bootstrap=None):
     coverage = ProgramCoverage(("root",), frozenset({"root"}), evidence_identity="v1")
     catalog = ImplementationCatalog((ImplementationEntry(ImplementationDescriptor(
         "product", frozenset({"root"}), ImplementationOrigin.GENERATED,
@@ -32,6 +36,7 @@ def _release_plan(*, capabilities=()):
     return plan_execution(
         profile_configuration(
             "release", program_identity="game",
+            bootstrap_provider=bootstrap,
             build_target=BuildTarget("windows", "directory"),
         ),
         coverage,
@@ -244,3 +249,59 @@ def test_export_requires_exact_declared_asset_closure(tmp_path: Path):
         tmp_path / "complete",
         launcher="launch.py",
     )
+
+
+def test_export_materializes_declared_bootstrap_artifacts(tmp_path: Path):
+    state = tmp_path / "state.json"
+    state.write_text('{"boot": true}\n', encoding="utf-8")
+    bootstrap = BuildImageBootstrapProvider(
+        "image",
+        ("machine state",),
+        artifacts=(BootstrapArtifact(
+            "state",
+            "bootstrap/state.json",
+            str(state),
+        ),),
+        valid_profiles=frozenset({"release"}),
+    )
+    launcher = tmp_path / "launch.py"
+    launcher.write_text("print('game')\n", encoding="utf-8")
+    output = tmp_path / "dist"
+    manifest = export_release(
+        _release_plan(bootstrap=bootstrap),
+        (ExportFile(launcher, "launch.py"),),
+        output,
+        launcher="launch.py",
+    )
+    assert (output / "bootstrap" / "state.json").read_bytes() == state.read_bytes()
+    assert manifest.bootstrap_provider_id == "image"
+    assert packaged_bootstrap_artifacts(
+        output,
+        expected_provider="image",
+    )["state"] == output / "bootstrap" / "state.json"
+    payload = (output / "dos_re_release.json").read_text(encoding="utf-8")
+    assert '"bootstrap_provider": "image"' in payload
+
+
+def test_export_can_generate_bootstrap_artifact(tmp_path: Path):
+    bootstrap = BuildImageBootstrapProvider(
+        "generated-image",
+        ("native state",),
+        artifacts=(BootstrapArtifact(
+            "generated-state",
+            "bootstrap/state.bin",
+            export_mode=BootstrapExportMode.GENERATE,
+            materializer=lambda path: path.write_bytes(b"generated"),
+        ),),
+        valid_profiles=frozenset({"release"}),
+    )
+    launcher = tmp_path / "launch.py"
+    launcher.write_text("print('game')\n", encoding="utf-8")
+    output = tmp_path / "dist"
+    export_release(
+        _release_plan(bootstrap=bootstrap),
+        (ExportFile(launcher, "launch.py"),),
+        output,
+        launcher="launch.py",
+    )
+    assert (output / "bootstrap" / "state.bin").read_bytes() == b"generated"

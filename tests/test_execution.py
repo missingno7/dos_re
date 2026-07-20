@@ -4,13 +4,18 @@ from __future__ import annotations
 import pytest
 
 from dos_re.execution import (
+    BootstrapArtifact,
+    BuildImageBootstrapProvider,
     BuildTarget,
+    CompositeBootstrapProvider,
     DependencyCapability,
     ExecutionPlanError,
     ImplementationCatalog,
     ImplementationDescriptor,
     ImplementationEntry,
     ImplementationOrigin,
+    ExeBootstrapProvider,
+    NativeBootstrapProvider,
     OverrideCategory,
     ProgramCoverage,
     RuntimeServiceCatalog,
@@ -231,6 +236,140 @@ def test_release_rejects_oracle_capability_even_when_service_is_product_safe():
         DependencyCapability.ORACLE.value,
     )
     assert caught.value.report.policy_forbidden_services == ("oracle",)
+
+
+def test_release_rejects_exe_runtime_bootstrap_even_with_native_coverage(tmp_path):
+    exe = tmp_path / "GAME.EXE"
+    exe.write_bytes(b"MZ")
+    bootstrap = ExeBootstrapProvider(
+        "exe-loader",
+        ("machine state",),
+        artifacts=(BootstrapArtifact(
+            "game-exe",
+            "GAME.EXE",
+            str(exe),
+        ),),
+    )
+    with pytest.raises(ExecutionPlanError) as caught:
+        plan_execution(
+            profile_configuration(
+                "release",
+                program_identity=PROGRAM,
+                bootstrap_provider=bootstrap,
+                build_target=BuildTarget("windows", "zip"),
+            ),
+            COVERAGE,
+            _catalog(_implementation("native", (ROOT, CALLEE))),
+        )
+    report = caught.value.report
+    assert report.bootstrap_provider_id == "exe-loader"
+    assert report.policy_forbidden_capabilities == (
+        DependencyCapability.ORIGINAL_CODE.value,
+        DependencyCapability.ORIGINAL_EXE.value,
+    )
+
+
+def test_build_image_bootstrap_retains_build_exe_but_not_runtime_exe(tmp_path):
+    state = tmp_path / "state.json"
+    state.write_text("{}", encoding="utf-8")
+    bootstrap = BuildImageBootstrapProvider(
+        "build-image",
+        ("CPU registers", "DOS memory"),
+        artifacts=(BootstrapArtifact(
+            "boot-state",
+            "bootstrap/state.json",
+            str(state),
+            generation_instruction="python scripts/build_boot_image.py",
+        ),),
+        build_required_capabilities=frozenset({
+            DependencyCapability.ORIGINAL_EXE.value,
+        }),
+        runtime_required_capabilities=frozenset({
+            DependencyCapability.DOS_MEMORY.value,
+        }),
+        initialized_capabilities=frozenset({
+            DependencyCapability.CPU_MODEL.value,
+            DependencyCapability.DOS_MEMORY.value,
+        }),
+        valid_profiles=frozenset({"detached", "release"}),
+    )
+    plan = plan_execution(
+        profile_configuration(
+            "release",
+            program_identity=PROGRAM,
+            bootstrap_provider=bootstrap,
+            build_target=BuildTarget("windows", "zip"),
+        ),
+        COVERAGE,
+        _catalog(_implementation("native", (ROOT, CALLEE))),
+    )
+    assert plan.report.bootstrap_build_capabilities == (
+        DependencyCapability.ORIGINAL_EXE.value,
+    )
+    assert plan.report.is_detached_from(DependencyCapability.ORIGINAL_EXE)
+    assert not plan.report.is_detached_from(DependencyCapability.DOS_MEMORY)
+    assert plan.report.package_ready
+
+
+def test_missing_bootstrap_artifact_fails_with_generation_instruction(tmp_path):
+    bootstrap = BuildImageBootstrapProvider(
+        "missing-image",
+        ("machine state",),
+        artifacts=(BootstrapArtifact(
+            "boot-state",
+            "bootstrap/state.json",
+            str(tmp_path / "missing.json"),
+            generation_instruction="run: python scripts/build_boot_image.py",
+        ),),
+        valid_profiles=frozenset({"release"}),
+    )
+    with pytest.raises(ExecutionPlanError) as caught:
+        plan_execution(
+            profile_configuration(
+                "release",
+                program_identity=PROGRAM,
+                bootstrap_provider=bootstrap,
+                build_target=BuildTarget("windows", "zip"),
+            ),
+            COVERAGE,
+            _catalog(_implementation("native", (ROOT, CALLEE))),
+        )
+    assert "python scripts/build_boot_image.py" in str(caught.value)
+
+
+def test_composite_bootstrap_unifies_component_state_and_capabilities():
+    bootstrap = CompositeBootstrapProvider(
+        "composite",
+        ("product ready",),
+        providers=(
+            NativeBootstrapProvider(
+                "native-state",
+                ("gameplay state",),
+                initialized_capabilities=frozenset({"native-state"}),
+            ),
+            NativeBootstrapProvider(
+                "device-state",
+                ("device state",),
+                runtime_required_capabilities=frozenset({"host-audio"}),
+            ),
+        ),
+    )
+    plan = plan_execution(
+        profile_configuration(
+            "development",
+            program_identity=PROGRAM,
+            bootstrap_provider=bootstrap,
+        ),
+        COVERAGE,
+        _catalog(_implementation("native", (ROOT, CALLEE))),
+    )
+    assert plan.report.bootstrap_kind == "composite"
+    assert plan.report.bootstrap_state_outputs == (
+        "device state",
+        "gameplay state",
+        "product ready",
+    )
+    assert plan.report.requires("host-audio")
 
 
 def test_runtime_capability_guard_rejects_undeclared_fallback():

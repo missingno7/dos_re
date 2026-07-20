@@ -26,7 +26,9 @@ from pathlib import Path
 
 from dos_re.dos import ConsoleInputWouldBlock
 from dos_re.execution import (
+    BootstrapArtifact,
     DependencyCapability,
+    ExeBootstrapProvider,
     ExecutionConfiguration,
     ExecutionPlan,
     ImplementationCatalog,
@@ -248,12 +250,43 @@ class GameFrontend:
             })
         if args.snapshot or args.save_snapshot:
             requested_capabilities.add(DependencyCapability.SNAPSHOTS.value)
+        exe_path = str(args.exe or "")
+        bootstrap = ExeBootstrapProvider(
+            provider_id="original-exe-loader",
+            state_outputs=(
+                "initial machine state",
+                "DOS process state",
+                "loaded executable image",
+            ),
+            artifacts=(BootstrapArtifact(
+                artifact_id="original-executable",
+                source_path=exe_path,
+                runtime_path=Path(exe_path).name or "PROGRAM.EXE",
+                generation_instruction="provide --exe with the original program path",
+            ),),
+            runtime_required_capabilities=frozenset({
+                DependencyCapability.ORIGINAL_CODE.value,
+                DependencyCapability.INTERPRETER.value,
+                DependencyCapability.CPU_MODEL.value,
+                DependencyCapability.DOS_MEMORY.value,
+                DependencyCapability.DOS_SERVICES.value,
+                DependencyCapability.DOS_RE_RUNTIME.value,
+            }),
+            initialized_capabilities=frozenset({
+                DependencyCapability.CPU_MODEL.value,
+                DependencyCapability.DOS_MEMORY.value,
+                DependencyCapability.DOS_SERVICES.value,
+            }),
+            valid_profiles=frozenset({"development", "verification"}),
+            provider_digest="dos-re-original-exe-loader-v1",
+        )
         return profile_configuration(
             args.profile,
             program_identity=self.program_identity(args),
             product_profile="default",
             provider_preference=self.default_provider_preference,
             requested_capabilities=requested_capabilities,
+            bootstrap_provider=bootstrap,
         )
 
     def execution_coverage(self, args: argparse.Namespace) -> ProgramCoverage:

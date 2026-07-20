@@ -45,6 +45,7 @@ view (which tool for which recovery step, with context) is
 | `lint.py` | `python tools/lint.py` | Game knowledge or third-party imports leaking into the `dos_re/` core; syntax errors. |
 | `audit_layers.py` | `python tools/audit_layers.py <game>/recovered` | VM imports creeping into the pure recovered layer (the mistake that makes logic unmigratable). |
 | `export.py` | `python tools/export.py --factory MODULE:CALLABLE --output dist` | Export and audit the exact file closure of a package-ready release plan. |
+| `verify_export.py` | `python tools/verify_export.py --artifact dist -- TARGET_RUNNER LAUNCHER` | Recheck hashes/file closure and cold-start the packaged product with development Python paths removed. |
 | `check_undefined_names.py` | `python tools/check_undefined_names.py [pkg]` | Latent NameErrors (F821) on paths tests didn't reach. |
 | `check_doc_links.py` | `python tools/check_doc_links.py [root …] [--exclude NAME]` | Broken relative markdown links — run after any doc edit; porting repos run it as `python dos_re/tools/check_doc_links.py . --exclude dos_re`. |
 | `run_tests.py` | `python tools/run_tests.py` | Pytest-free fallback test runner for constrained sandboxes. |

@@ -11,10 +11,16 @@ import shutil
 import subprocess
 import tempfile
 
-from .execution import DependencyCapability, ExecutionPlan
+from .execution import (
+    BootstrapArtifact,
+    BootstrapExportMode,
+    DependencyCapability,
+    ExecutionPlan,
+)
 
 
 IMPORT_CAPABILITIES = {
+    "dos_re.bootstrap_runtime": DependencyCapability.DOS_RE_RUNTIME.value,
     "dos_re.cpu": DependencyCapability.CPU_MODEL.value,
     "dos_re.cpu386": DependencyCapability.CPU_MODEL.value,
     "dos_re.execution": DependencyCapability.DEVELOPMENT_TOOLING.value,
@@ -45,6 +51,8 @@ class ExportManifest:
     plan_digest: str
     target: str
     launcher: str
+    bootstrap_provider_id: str
+    bootstrap_artifacts: tuple[tuple[str, str], ...]
     required_capabilities: tuple[str, ...]
     files: tuple[tuple[str, str], ...]
 
@@ -138,6 +146,8 @@ def _validate_files(
     plan: ExecutionPlan,
     files: tuple[ExportFile, ...],
     launcher: str,
+    *,
+    generated_destinations: tuple[str, ...] = (),
 ) -> None:
     destinations: set[str] = set()
     packaged_assets: set[str] = set()
@@ -186,6 +196,14 @@ def _validate_files(
                 f"{source} uses release-forbidden dynamic loading/evaluation: "
                 + ", ".join(dynamic_calls)
             )
+    for generated in generated_destinations:
+        destination = Path(generated)
+        if destination.is_absolute() or ".." in destination.parts:
+            raise ExportError(f"bootstrap destination escapes artifact: {generated}")
+        normalized = destination.as_posix()
+        if normalized in destinations:
+            raise ExportError(f"duplicate export destination: {normalized}")
+        destinations.add(normalized)
     if Path(launcher).as_posix() not in destinations:
         raise ExportError(f"launcher {launcher!r} is not in the export closure")
     missing_assets = set(plan.report.required_assets) - packaged_assets
@@ -197,6 +215,14 @@ def _validate_files(
             + ", undeclared="
             + repr(sorted(undeclared_assets))
         )
+
+
+def _bootstrap_artifacts(plan: ExecutionPlan) -> tuple[BootstrapArtifact, ...]:
+    return tuple(
+        artifact
+        for provider in plan.bootstrap_provider.components()
+        for artifact in provider.artifacts
+    )
 
 
 def export_release(
@@ -216,7 +242,25 @@ def export_release(
         raise ExportError("only a release-profile plan may be exported")
     if not plan.report.package_ready:
         raise ExportError("release plan is not package-ready")
-    _validate_files(plan, files, launcher)
+    bootstrap_artifacts = _bootstrap_artifacts(plan)
+    included_bootstrap = tuple(
+        ExportFile(Path(item.source_path), item.runtime_path)
+        for item in bootstrap_artifacts
+        if item.export_mode is BootstrapExportMode.INCLUDE
+    )
+    generated_bootstrap = tuple(
+        item for item in bootstrap_artifacts
+        if item.export_mode is BootstrapExportMode.GENERATE
+    )
+    files = files + included_bootstrap
+    _validate_files(
+        plan,
+        files,
+        launcher,
+        generated_destinations=tuple(
+            item.runtime_path for item in generated_bootstrap
+        ),
+    )
 
     destination = Path(destination)
     if destination.exists():
@@ -233,6 +277,43 @@ def export_release(
             shutil.copyfile(item.source, target)
             digest = hashlib.sha256(target.read_bytes()).hexdigest()
             hashes.append((Path(item.destination).as_posix(), digest))
+        for artifact in sorted(
+            generated_bootstrap,
+            key=lambda item: item.runtime_path,
+        ):
+            if artifact.materializer is None:
+                raise ExportError(
+                    f"bootstrap artifact {artifact.artifact_id!r} has no materializer"
+                )
+            target = staging / artifact.runtime_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            artifact.materializer(target)
+            if not target.is_file():
+                raise ExportError(
+                    f"bootstrap materializer did not create "
+                    f"{artifact.runtime_path!r}"
+                )
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            if artifact.expected_sha256 and digest != artifact.expected_sha256:
+                raise ExportError(
+                    f"generated bootstrap artifact {artifact.artifact_id!r} "
+                    "does not match its declared hash"
+                )
+            hashes.append((Path(artifact.runtime_path).as_posix(), digest))
+        expected_bootstrap_hashes = {
+            Path(item.runtime_path).as_posix(): item.expected_sha256
+            for item in bootstrap_artifacts
+            if item.expected_sha256
+        }
+        for relative, digest in hashes:
+            if (
+                relative in expected_bootstrap_hashes
+                and digest != expected_bootstrap_hashes[relative]
+            ):
+                raise ExportError(
+                    f"bootstrap artifact hash mismatch: {relative}"
+                )
+        hashes.sort()
         target_name = plan.configuration.build_target
         manifest = ExportManifest(
             plan_digest=plan.plan_digest,
@@ -241,6 +322,14 @@ def export_release(
                 f"{target_name.platform}:{target_name.package_format}"
             ),
             launcher=Path(launcher).as_posix(),
+            bootstrap_provider_id=plan.bootstrap_provider.provider_id,
+            bootstrap_artifacts=tuple(sorted(
+                (
+                    artifact.artifact_id,
+                    Path(artifact.runtime_path).as_posix(),
+                )
+                for artifact in bootstrap_artifacts
+            )),
             required_capabilities=plan.report.required_capabilities,
             files=tuple(hashes),
         )
@@ -250,6 +339,8 @@ def export_release(
                 "plan_digest": manifest.plan_digest,
                 "target": manifest.target,
                 "launcher": manifest.launcher,
+                "bootstrap_provider": manifest.bootstrap_provider_id,
+                "bootstrap_artifacts": dict(manifest.bootstrap_artifacts),
                 "required_capabilities": list(manifest.required_capabilities),
                 "files": dict(manifest.files),
             }, indent=2, sort_keys=True) + "\n",
