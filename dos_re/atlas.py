@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -125,9 +125,10 @@ def _portable(value: Any) -> Any:
     if isinstance(value, list):
         return [_portable(item) for item in value]
     if isinstance(value, str):
-        candidate = Path(value)
-        if candidate.is_absolute():
-            return candidate.name
+        for path_type in (PurePosixPath, PureWindowsPath):
+            candidate = path_type(value)
+            if candidate.is_absolute():
+                return candidate.name
     return value
 
 
