@@ -162,8 +162,11 @@ class ContinuationState:
     metadata: Mapping[str, Any]
     regions: Mapping[str, bytes]
     event_cursor: int
+    _is_normalized: bool = field(default=False, repr=False, compare=False)
 
     def normalized(self) -> "ContinuationState":
+        if self._is_normalized:
+            return self
         if not self.schema_id:
             raise ValueError("continuation schema_id must not be empty")
         cursor = int(self.event_cursor)
@@ -176,7 +179,8 @@ class ContinuationState:
                 raise ValueError(f"invalid continuation region name: {name!r}")
             regions[name] = bytes(data)
         return ContinuationState(
-            self.schema_id, _json_value(self.metadata, "continuation metadata"), regions, cursor)
+            self.schema_id, _json_value(self.metadata, "continuation metadata"),
+            regions, cursor, True)
 
     @property
     def digest(self) -> str:
@@ -198,8 +202,11 @@ class CanonicalState:
     event_cursor: int
     fields: Mapping[str, Any] = field(default_factory=dict)
     regions: Mapping[str, bytes] = field(default_factory=dict)
+    _is_normalized: bool = field(default=False, repr=False, compare=False)
 
     def normalized(self) -> "CanonicalState":
+        if self._is_normalized:
+            return self
         if not self.schema_id:
             raise ValueError("canonical schema_id must not be empty")
         cursor = int(self.event_cursor)
@@ -212,7 +219,8 @@ class CanonicalState:
                 raise ValueError(f"invalid canonical region name: {name!r}")
             regions[name] = bytes(data)
         return CanonicalState(
-            self.schema_id, cursor, _json_value(self.fields, "canonical fields"), regions)
+            self.schema_id, cursor,
+            _json_value(self.fields, "canonical fields"), regions, True)
 
     @property
     def digest(self) -> str:
@@ -269,6 +277,7 @@ def machine_projection(state: ContinuationState, *, schema_id: str) -> Canonical
             "metadata": state.metadata,
         },
         regions=state.regions,
+        _is_normalized=True,
     )
 
 
