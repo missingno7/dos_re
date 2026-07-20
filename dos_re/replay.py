@@ -225,12 +225,8 @@ class CanonicalState:
     @property
     def digest(self) -> str:
         state = self.normalized()
-        h = hashlib.sha256(_canonical_json({
-            "schema_id": state.schema_id, "event_cursor": state.event_cursor,
-            "fields": state.fields,
-        }))
-        _hash_regions(h, state.regions)
-        return h.hexdigest()
+        return canonical_state_digest(
+            state.schema_id, state.event_cursor, state.fields, state.regions)
 
     def compare(self, other: "CanonicalState") -> "StateComparison":
         left, right = self.normalized(), other.normalized()
@@ -279,6 +275,27 @@ def machine_projection(state: ContinuationState, *, schema_id: str) -> Canonical
         regions=state.regions,
         _is_normalized=True,
     )
+
+
+def canonical_state_digest(
+    schema_id: str,
+    event_cursor: int,
+    fields: Mapping[str, Any],
+    regions: Mapping[str, bytes | bytearray | memoryview],
+) -> str:
+    """Stream the canonical projection digest without materializing regions.
+
+    Machine adapters use this for point fingerprints over live bytearrays.  It
+    is exactly the digest produced by :class:`CanonicalState`, not a weaker
+    summary; tests require the fast and materialized paths to agree.
+    """
+    h = hashlib.sha256(_canonical_json({
+        "schema_id": str(schema_id),
+        "event_cursor": int(event_cursor),
+        "fields": fields,
+    }))
+    _hash_regions(h, regions)
+    return h.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -1933,16 +1950,22 @@ def _observe_segment(
             candidate.replay_to(artifact, point)
             _driver_at(oracle, point, "semantic observation")
             _driver_at(candidate, point, "semantic observation")
-            oracle_projection = _project(oracle)
-            candidate_projection = _project(candidate)
+            if ordinal == end.ordinal:
+                oracle_projection = _project(oracle)
+                candidate_projection = _project(candidate)
+                oracle_digest = oracle_projection.digest
+                candidate_digest = candidate_projection.digest
+            else:
+                oracle_digest = _point_digest(oracle)
+                candidate_digest = _point_digest(candidate)
             oracle_boundaries.record_bytes(
                 SEMANTIC_BOUNDARY,
-                bytes.fromhex(oracle_projection.digest),
+                bytes.fromhex(oracle_digest),
                 identity=ordinal,
             )
             candidate_boundaries.record_bytes(
                 SEMANTIC_BOUNDARY,
-                bytes.fromhex(candidate_projection.digest),
+                bytes.fromhex(candidate_digest),
                 identity=ordinal,
             )
     finally:
@@ -2098,6 +2121,16 @@ def _project(driver: ReplayDriver) -> CanonicalState:
     return projection
 
 
+def _point_digest(driver: ReplayDriver) -> str:
+    fast = getattr(driver, "point_digest", None)
+    if callable(fast):
+        digest = str(fast())
+        if len(digest) != 64:
+            raise ReplayError("replay driver returned an invalid point digest")
+        return digest
+    return _project(driver).digest
+
+
 def _diff_json(a: Any, b: Any, path: str) -> list[str]:
     if type(a) is not type(b):
         return [f"{path}: oracle type {type(a).__name__} != candidate {type(b).__name__}"]
@@ -2124,7 +2157,9 @@ def _diff_json(a: Any, b: Any, path: str) -> list[str]:
     return [] if a == b else [f"{path}: oracle {a!r} != candidate {b!r}"]
 
 
-def _hash_regions(h, regions: Mapping[str, bytes]) -> None:
+def _hash_regions(
+    h, regions: Mapping[str, bytes | bytearray | memoryview],
+) -> None:
     for name in sorted(regions):
         encoded, payload = name.encode("utf-8"), regions[name]
         h.update(len(encoded).to_bytes(4, "little")); h.update(encoded)

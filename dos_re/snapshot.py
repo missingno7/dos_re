@@ -242,6 +242,54 @@ def capture_runtime_continuation(rt: Runtime, *, event_cursor: int):
     ).normalized()
 
 
+def runtime_machine_projection_digest(
+    rt: Runtime, *, event_cursor: int, projection_schema: str,
+) -> str:
+    """Digest the live real-mode projection without copying memory/regions.
+
+    This is the per-semantic-point fast path used by long replay verification.
+    Its construction intentionally mirrors :func:`capture_runtime_continuation`
+    and :func:`dos_re.replay.machine_projection`; a focused parity test locks
+    the streamed digest to the materialized reference.
+    """
+    from .replay import canonical_state_digest
+
+    if rt.dos.time_source is not None:
+        raise ValueError(
+            "cannot fingerprint deterministic replay state with a wall-clock time source")
+    dos_state = capture_dos_state(rt.dos, rt.program.memory)
+    dos_state["save_dir"] = None
+    sb = getattr(rt.dos, "sound_blaster", None)
+    if sb is not None:
+        dos_state["sound_blaster"] = sb.snapshot_state()
+    pic = getattr(rt.dos, "pic", None)
+    if pic is not None:
+        dos_state["pic"] = {"imr": pic.imr, "irr": pic.irr, "isr": pic.isr}
+    regions = {"memory": rt.program.memory.data}
+    file_regions: dict[str, str] = {}
+    for handle, file_handle in sorted(rt.dos.files.items()):
+        name = f"dos-file-{handle}"
+        regions[name] = file_handle.data
+        file_regions[str(handle)] = name
+    dos_state["file_regions"] = file_regions
+    metadata = {
+        "cpu": asdict(rt.cpu.s),
+        "instruction_count": rt.cpu.instruction_count,
+        "halted": rt.cpu.halted,
+        "call_depth": rt.cpu.call_depth,
+        "dos": dos_state,
+    }
+    return canonical_state_digest(
+        projection_schema,
+        event_cursor,
+        {
+            "continuation_schema": "dos-re-real-mode-continuation-v1",
+            "metadata": metadata,
+        },
+        regions,
+    )
+
+
 def apply_runtime_continuation(rt: Runtime, state) -> None:
     """Apply :func:`capture_runtime_continuation` to an existing runtime shell."""
     from .cpu import CPUState

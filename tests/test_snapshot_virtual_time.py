@@ -21,8 +21,12 @@ import pytest
 
 from dos_re.runtime_core import enable_sound_blaster
 from dos_re.snapshot_runtime import load_snapshot_headless
-from dos_re.replay import ContinuationState
-from dos_re.snapshot import capture_runtime_continuation, apply_runtime_continuation
+from dos_re.replay import ContinuationState, machine_projection
+from dos_re.snapshot import (
+    apply_runtime_continuation,
+    capture_runtime_continuation,
+    runtime_machine_projection_digest,
+)
 
 
 def _write_min_snapshot(tmp_path, steps: int):
@@ -127,6 +131,26 @@ def test_real_mode_replay_continuation_restores_device_and_cursor_state(tmp_path
     assert rt.dos.file_overlay == {"SAVE.DAT": bytearray(b"saved")}
     assert rt.dos.stdout == ["before\ncheckpoint"]
     assert rt.dos.port_log == [("out", 0x388, 0x20, 8), ("in", 0x388, 0x06, 8)]
+
+
+def test_streamed_machine_point_digest_matches_materialized_projection(tmp_path):
+    _write_min_snapshot(tmp_path, steps=98765)
+    rt = load_snapshot_headless(tmp_path, game_root=tmp_path)
+    rt.cpu.s.ax = 0xBEEF
+    rt.dos.file_overlay["SAVE.DAT"] = bytearray(b"state")
+    rt.dos.port_log = [("out", 0x389, 0x42, 8)]
+    rt.program.memory.data[0x12345:0x12349] = b"test"
+    state = capture_runtime_continuation(rt, event_cursor=11)
+    reference = machine_projection(
+        state, schema_id="test-complete-machine-v1").digest
+
+    streamed = runtime_machine_projection_digest(
+        rt,
+        event_cursor=11,
+        projection_schema="test-complete-machine-v1",
+    )
+
+    assert streamed == reference
 
 
 def test_replay_continuation_detaches_host_save_directory(tmp_path):
