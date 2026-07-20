@@ -1,10 +1,10 @@
 # dos_re architecture
 
-`dos_re` is a reusable, oracle-driven DOS game recovery framework. The framework
-runs an original DOS binary inside a deterministic real-mode VM, lets you replace
-one original routine at a time with native code, and proves every replacement
-byte-exact against the original — until the recovered code can stand alone as a
-native source port and the VM is demoted to an offline proof harness.
+`dos_re` is a reusable, oracle-driven DOS game recovery framework. The
+unchanged original program can run through interpreted, generated VMless, or
+generated CPUless/ABI-recovered baseline backends. Optional authored code is
+selected through the separate override model defined in
+[`override_architecture.md`](override_architecture.md).
 
 ## The package boundary (the one hard rule)
 
@@ -117,21 +117,22 @@ tools/        lint, test runner, cleaner, linear disassembler, hotspot profiler,
               a back-compat shim — both now live in the package)
 ```
 
-## Execution modes (no silent fallbacks)
+## Execution configuration (no silent fallbacks)
 
-Every game port built on this framework runs in one of four explicit modes:
+An execution configuration has two independent choices:
 
-| Mode | What runs | Use |
-|------|-----------|-----|
-| **oracle / original** | pure original ASM in the VM | reference, observation, capturing oracles |
-| **hybrid (workbench)** | recovered native replacements over the VM | preparing/recording new islands against the live ASM |
-| **verify** | ASM oracle + recovered logic, diffed at contract boundaries | offline proof against recorded demos/snapshots |
-| **native (product)** | recovered source only, NO VM | the standalone source port; shipping |
+| Dimension | Choices |
+|---|---|
+| **baseline backend** | interpreted original EXE; generated VMless graph; generated CPUless or ABI-recovered graph |
+| **override profile** | none; selected faithful replacements; optional non-authoritative enhancements; optional behavioral modifications |
 
-**No silent fallbacks.** If the hybrid runtime reaches unrecovered behaviour it
-must fail loud with a precise gap report, turning the gap into the next task
-instead of hiding it. An unrecovered path is never silently faked and never
-silently falls back to ASM.
+Oracle and candidate are verification roles, not additional implementation
+layers. The oracle uses the untouched interpreted baseline. A candidate uses a
+declared baseline backend plus an immutable selected override plan.
+
+**No silent fallbacks.** A strict generated baseline that reaches uncovered
+behavior fails loud with a precise gap report. A stale or unsupported override
+target fails during plan construction. Neither case silently switches backend.
 
 **2.0 stage runners are stricter still** (docs/dos_re_2.0.md section 1a): a
 strict-VMless runner does not merely avoid interpretation -- it makes it
@@ -141,21 +142,20 @@ original binary physically absent (section 1a').
 
 ## Layering inside a game adapter
 
-High = closest to ASM, low = closest to pure source. Dependencies point down
-only; the pure layer never imports the VM.
+Dependencies point downward; authored semantic code never imports a CPU or
+interpreter:
 
 | Layer | Role | May depend on |
 |-------|------|---------------|
-| **vm / orchestration** | `dos_re`: interpreter, verifiers, snapshots, demos | anything |
-| **hook_boundary** | thin `@registry.replace` wrappers — no game logic | lifted, bridge, pure, vm |
-| **lifted** | VM-aware Python reproducing an original routine byte/flag-exact | bridge, pure, vm |
-| **backend** | rendering / sound / file I/O implementations | pure, bridge, vm |
-| **bridge** | typed views projecting VM/DOS memory ⇄ named fields | pure, vm |
-| **pure** | portable, VM-free game logic and data records | pure only |
+| **orchestration / proof** | players, replay drivers, verifiers, snapshots, execution-plan selection | backend adapters, generated baselines, override registry |
+| **backend adapter** | marshal registers, stack, memory, arguments, returns, time, and control flow | selected override contracts, backend runtime |
+| **authored overrides** | CPUless faithful, enhancement, or behavioral implementations | recovered contracts, state views, declared platform capabilities |
+| **generated baseline** | reproducible interpreted/VMless/CPUless/ABI implementation of unchanged code | generated runtime support only |
+| **state / capability seam** | DOS-memory views, detached state, read-only presentation projections, platform services | lower-level data representations |
 
 See [`state_mirrors.md`](state_mirrors.md) for the bridge/view seam and
-the retired 1.0 starter's methodology docs (historical) for the naming/altitude discipline that
-keeps each layer honest.
+[`override_architecture.md`](override_architecture.md) for category-specific
+capabilities and verification.
 
 ## Third-party code and dependencies
 

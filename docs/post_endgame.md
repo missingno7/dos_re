@@ -11,6 +11,9 @@
 > go back to the checklist; pitfall #24 is how projects drown. The *rules*
 > (sequencing, the read-only boundary, the parity gate) are
 > [`enhancements.md`](enhancements.md) — this is the workflow on top of them.
+> This is an optional late-product workflow, not an architectural prerequisite
+> for non-authoritative enhancements. The override architecture permits an
+> enhancement earlier once its authoritative read-only seam is verified.
 >
 > Every game's post-endgame is different; this file deliberately carries only
 > the **sterile core ideas** that survived a completed port, not a feature
@@ -18,9 +21,10 @@
 
 ## The three structural rules
 
-**1. Enhancements go to the NATIVE product only.** The hybrid/VM runtimes are
-recovery instruments — they stay pristine (their F10 remains a screenshot
-key). Never grow presentation features on the workbench.
+**1. This playbook installs enhancements only in the shipped product profile.**
+The interpreted oracle stays pristine. Earlier incremental enhancement work,
+when useful, follows the same registry category and verified read-only seam;
+it does not modify the baseline backend.
 
 **2. Everything is a toggle with a faithful default, behind the in-game
 menu.** One settings dict, persisted next to the game data, edited live. The

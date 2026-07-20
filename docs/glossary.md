@@ -44,15 +44,15 @@ authority; "native" is banned as a bare term):**
 | **Continuation / HookStop** | A hook's declared legitimate end (near RET, far RET, IRET, fixed IP, computed dispatch). |
 | **Strict mode** | Auto-continuation verification: no metadata; the hook's final address becomes the only accepted target. |
 | **State mirror / bridge** | Human-named typed views over the byte-exact original memory layout; offsets quarantined in one module, `memcmp` verification preserved. ([`state_mirrors.md`](state_mirrors.md)) |
-| **Boot constants** | The post-bootstrap initialized state extracted into native data, so the native game cold-boots with no EXE and no snapshot. |
-| **Heartbeat** | The game's fixed tick cadence, preserved explicitly in the native port — as opposed to the DOS waiting machinery (busy-waits, retrace polls), which is never ported. |
+| **Boot constants** | The post-bootstrap initialized state extracted into generated product data, so an EXE-independent backend cold-boots with no EXE and no snapshot. |
+| **Heartbeat** | The game's fixed tick cadence, preserved explicitly in a detached product — as opposed to the DOS waiting machinery (busy-waits, retrace polls), which is never ported. |
 | **Env wait** | A hardware wait (PIT tick, CRT retrace) the interpreter must keep hooked so the oracle doesn't spin on a flag a real IRQ would clear. |
 | **Frontier** | The residue of never-hooked addresses late in a port, each explicitly triaged (`dos_re/frontier.py`). |
 | **Fail loud / HybridGap** | The no-silent-fallback rule made executable: unrecovered behaviour raises with precise context; it is never faked and never silently handed back to ASM. |
 | **Transition signal** | A `HybridGap` subclass that is a control-flow signal, not an error: the per-frame step reached a multi-frame sequence (respawn, level end) the flow driver must drive. |
 | **Status ladder** | GUESS → OBSERVED → RECOVERED → ASM_MATCHED → VERIFIED → CANONICAL — the only way names earn confidence (`dos_re/islands.py`, the retired 1.0 starter's methodology docs (historical)). |
-| **Faithful core / enhanced layer** | The verified game vs the presentation-only comfort layer that reads state and writes none. The enhanced layer is built LAST — lifecycle Stage 6, after the faithful game is complete. ([`enhancements.md`](enhancements.md)) |
-| **Cyborgization** | The deprecated early-P2 experiment of growing faithful/enhanced viewer backends alongside recovery, before the native game was complete. Retrospective verdict: not recommended (pitfall #24). |
+| **Faithful baseline / non-authoritative enhancement** | The unchanged program under a selected baseline backend vs an optional presentation or host-integration override that reads authoritative state and writes none. It may attach once that state seam is verified; the whole game need not be memoryless. ([`override_architecture.md`](override_architecture.md)) |
+| **Cyborgization** | The deprecated experiment of growing presentation alongside recovery without one enforced, verified read-only state seam. The problem was parallel authority, not simply when presentation work began (pitfall #24). |
 | **Crystallization** | Letting higher-level meaning *emerge* from verified lower-level facts instead of naming by guess. (the retired 1.0 starter's methodology docs (historical)) |
 | **Staticization** | The discipline for runtime-patched code: observed live bytes → named variant → signature guard → explicit static Python. |
-| **Adapter** | The per-game package holding everything that knows the game: addresses, formats, hooks, views, recovered logic. The framework core never learns a game. |
+| **Adapter** | Backend- or project-specific marshalling for addresses, formats, invocation contracts, views, and platform capabilities. Semantic override bodies remain CPUless and backend-neutral; the framework core never learns a game. |

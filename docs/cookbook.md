@@ -374,16 +374,18 @@ Worked examples of a long campaign's brief evolving:
 invariants are already in `START_HERE.md`; this is the harness that
 enforced them for months.
 
-**Shipping the finished native port.**
-→ Deployment pattern: copy the import-closure of the native entry point into a
+**Shipping the finished detached product.**
+→ Deployment pattern: copy the import-closure of the product entry point into a
 standalone folder, prove every import resolves *inside* that tree, smoke-run
 it, optionally wrap with PyInstaller. Worked example:
 `pre2_port/scripts/deploy_native.py`.
 
-## Presentation (Stage 6 — only after the faithful game is complete)
+## Presentation over a verified authoritative seam
 
 **Making it look/feel modern without touching gameplay.**
-→ [`enhancements.md`](enhancements.md) has the rules; the worked examples are
+→ [`enhancements.md`](enhancements.md) has the rules. The enhancement may
+attach before the whole game is memoryless, but its authoritative input must
+already be verified and read-only. Worked examples are
 P2's enhanced layer: render-intent model (`pre2_port/docs/pre2/render_model.md`,
 `enhanced_renderer_design.md`), frame interpolation over a two-snapshot rolling
 window (`pre2/bridge/frame_capture.py`), smooth transitions

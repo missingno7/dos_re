@@ -29,7 +29,7 @@ The unit of progress is no longer "another routine recovered by hand" — it is
 
 | 1.0 artifact / habit | 2.0 replacement |
 |---|---|
-| Handwritten Python hook for a game routine | Temporary recovery override at best; the real fix is a missing emitter/linker capability or a recovery fact — regenerate, don't hand-carry |
+| Handwritten Python hook for a game routine | A CPUless authored override body plus generated backend adapters. Keep it separate from the reproducible baseline; classify it as faithful, enhancement, or behavioral. Emitter/linker workarounds still belong in tooling or recovery facts. |
 | Interpreter fallback inside the recovered corpus | HARD-WALL VIOLATION: the strict runner poisons interpretation (`cpu.interp_forbidden`); uncovered addresses fail loud and become census/closure work |
 | Project-local patch of framework behavior | Generic `dos_re` capability, contributed upstream (the framework must never import from a port) |
 | Original EXE loaded at runtime by the "native" runner | Recovery-time input only: build a data-only boot image (`dos_re.bootimage`), boot EXE-free (`dos_re.independence`), lint + audit + clean-room test the independence |
@@ -44,10 +44,11 @@ The unit of progress is no longer "another routine recovered by hand" — it is
    `liftlink`, `bootimage`, and `independence`).
 2. Record a real `ReplayArtifact` on the interpreted oracle; make it replay
    deterministically.  This is your safety net for every later step.
-3. Convert hand-hooks' KNOWLEDGE into `recovery_facts.json` entries (with
-   evidence), then delete the hooks and regenerate the corpus from the IR.
-   A hook that cannot be expressed as a fact is a missing tool capability —
-   file/build that instead.
+3. Separate each hand hook's semantic body from its CPU/register/stack wrapper.
+   Put genuine program facts into `recovery_facts.json`, fix generic
+   analysis/emitter gaps in the toolchain, and register any intentional
+   handwritten implementation as an authored override. Never edit generated
+   baseline output.
 4. Assemble the full lifted graph, converge under the demo differential, and
    close the VMless wall (poison on, boundary heads as facts, zero
    `interp_one` sites — checked by `liftemit --require-vmless-wall`).

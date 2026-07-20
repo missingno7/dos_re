@@ -14,7 +14,8 @@ recurring recovery job.
 
 Reading order for the framework itself: the repo [README](../README.md) →
 `dos_re_2.0.md` → `agent_toolbox.md` → `architecture.md` →
-`hooks_and_verification.md` → `demos_and_snapshots.md` → `state_mirrors.md` →
+`override_architecture.md` → `hooks_and_verification.md` →
+`demos_and_snapshots.md` → `state_mirrors.md` →
 `hardware_support.md`.
 
 | Doc | What it covers |
@@ -23,6 +24,7 @@ Reading order for the framework itself: the repo [README](../README.md) →
 | [`recovery_ir.md`](recovery_ir.md) | **Recovery IR v0 spec**: the shared representation every stage consumes (CFG + machine ops + calls + effects + provenance + facts + fail-loud unsupported ledger); `irgen` → IR → analyses → selected emitter; the IR-path equivalence gate. |
 | [`agent_toolbox.md`](agent_toolbox.md) | **The task index**: boot an EXE, diagnose fail-louds, snapshots, traces, frame boundaries, wait loops, demos, profiling, hooks, oracle verification, the lifter, LIFTED-vs-RECOVERED, progress metrics, guardrails — each with the command and when to use it. |
 | [`architecture.md`](architecture.md) | The package boundary, the framework module map, execution modes, adapter layering, dependencies. |
+| [`override_architecture.md`](override_architecture.md) | **dos_re 3.0 execution model:** reproducible baseline backends plus one backend-neutral authored override registry; stable targets, faithful/enhancement/behavioral categories, verification policies, adapter boundary, and migration order. |
 | [`hooks_and_verification.md`](hooks_and_verification.md) | Hook registration and return mechanics, the differential hook oracle (metadata + strict modes), the frame oracle, hook taxonomy. |
 | [`demos_and_snapshots.md`](demos_and_snapshots.md) | **dos_re 3.0 replay architecture:** one oracle/candidate replay artifact, stable points, profile-local continuation caches, machine or semantic canonical projections, persistent bisection boundaries, and function visits. No legacy formats or migration paths. |
 | [`state_mirrors.md`](state_mirrors.md) | The state-view seam: human-named views over the DOS memory image with swappable backends, without weakening byte-exact verification. |

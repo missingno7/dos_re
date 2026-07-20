@@ -1,16 +1,24 @@
 # Hooks and verification
 
-The heart of the method: replace one original routine at a time with native
-code, and let the framework prove — not assume — that the replacement is exact.
+> **dos_re 3.0 architecture:** [`override_architecture.md`](override_architecture.md)
+> defines the target baseline-plus-overrides model. This document describes
+> the currently implemented CPU-backed hook mechanics and differential
+> engines that will become backend adapters. New project architecture should
+> use the three override categories and must not treat generated lifts,
+> framework interceptors, and authored overrides as one hook layer.
+
+The currently implemented hook oracle lets a faithful authored replacement run
+at one original routine boundary and proves—rather than assumes—that its
+behavior is exact.
 
 ## What a hook is (and is not)
 
-A hook is a **minimal boundary adapter, not a place where logic accumulates**.
-A good hook only:
+A CPU-backed hook is a **minimal backend adapter, not a place where logic
+accumulates**. A good hook only:
 
-1. reads the relevant state from original memory/registers,
-2. calls a clean native recovered function (which knows nothing about the CPU,
-   segment:offset, or the VM),
+1. marshals the recovered contract from memory, registers, and stack state,
+2. calls the CPUless authored body with natural arguments and only its declared
+   capabilities (which may include DOS memory, but never a CPU/interpreter),
 3. writes the result back to original memory/registers,
 4. returns to the original control flow with **exact** return mechanics:
 
@@ -104,20 +112,17 @@ chains into one native flow is desirable — but only with evidence from the rea
 original call graph, and with correctness protected by the frame/state verifier
 rather than by preserving historical hook boundaries.
 
-## One recovered leaf, many adapters
+## One authored body, many backend adapters
 
-The recovered function is the **single implementation**; everything else is a
-thin adapter over it — never a second copy:
+The override body is the **single implementation**. Interpreter, VMless,
+CPUless, and ABI-recovered execution use backend-specific wrappers over that
+same body. The differential verifier observes the faithful body through those
+wrappers; it does not require a verification-only implementation.
 
-1. the **live replacement** (the hybrid runtime skips the ASM body),
-2. the **verify checkpoint** (diff vs the oracle at the boundary),
-3. the **native runtime consumer** (the VM-less game composes the same leaf),
-4. the enhanced backend — but only in lifecycle Stage 6, after the faithful
-   game is complete (never during recovery; pitfall #24).
-
-Ground the live hook + verifier *first*; the native side absorbs the grounded
-leaf *last*. Duplicating logic between a hook and the native backend is how a
-port silently forks from its own proof.
+Duplicating semantic logic between a CPU hook and a detached backend silently
+forks the program from its own proof. See
+[`override_architecture.md`](override_architecture.md) for the shared registry
+and category policies.
 
 Beyond the confidence ladder on each function
 (the retired 1.0 starter's methodology docs (historical)), track which **adapter state** each piece
