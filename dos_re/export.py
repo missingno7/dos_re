@@ -30,7 +30,7 @@ IMPORT_CAPABILITIES = {
     "dos_re.replay": DependencyCapability.REPLAY.value,
     "dos_re.runtime": DependencyCapability.DOS_RE_RUNTIME.value,
     "dos_re.snapshot": DependencyCapability.SNAPSHOTS.value,
-    "dos_re.snapshot_headless": DependencyCapability.SNAPSHOTS.value,
+    "dos_re.snapshot_headless": DependencyCapability.DOS_RE_RUNTIME.value,
     "dos_re.snapshot_runtime": DependencyCapability.DOS_RE_RUNTIME.value,
     "dos_re.verification": DependencyCapability.ORACLE.value,
     "dos_re.pm_verification": DependencyCapability.ORACLE.value,

@@ -170,6 +170,24 @@ def test_export_allows_runtime_dependency_present_in_selected_closure(tmp_path: 
     )
 
 
+def test_export_treats_headless_state_restore_as_product_runtime(tmp_path: Path):
+    launcher = tmp_path / "launch.py"
+    launcher.write_text(
+        "from dos_re.snapshot_headless import _restore_dos_state\n",
+        encoding="utf-8",
+    )
+    export_release(
+        _release_plan(capabilities=(DependencyCapability.DOS_RE_RUNTIME.value,)),
+        (ExportFile(
+            launcher,
+            "launch.py",
+            frozenset({DependencyCapability.DOS_RE_RUNTIME.value}),
+        ),),
+        tmp_path / "dist",
+        launcher="launch.py",
+    )
+
+
 def test_export_rejects_file_for_detached_component(tmp_path: Path):
     launcher = tmp_path / "launch.py"
     launcher.write_text("print('game')\n", encoding="utf-8")
