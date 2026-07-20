@@ -5,7 +5,7 @@ override admissible to an instruction-count-keyed differential.
 State is not the whole contract: a composed callee also returns a virtual-time
 ``cost`` in the compat channel, and the caller accumulates it into ``_cost``,
 which anchors every downstream platform effect (``plat.farcall``/``intr``/
-``boundary``) and -- for a consumer whose demo/gate is keyed on instruction
+``boundary``) and -- for a consumer whose replay/gate is keyed on instruction
 count -- decides WHERE recorded input lands.  A GENERATED body is
 instruction-exact by construction (per-block ``_cost += count``).  A
 hand-recovered OVERRIDE is not: it does not execute the original's control flow,

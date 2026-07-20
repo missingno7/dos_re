@@ -80,7 +80,7 @@ def test_exe_runtime_installs_the_same_bios_hooks(tmp_path: Path) -> None:
 
 def test_snapshot_resume_installs_the_same_bios_hooks(tmp_path: Path) -> None:
     """A snapshot resume is a THIRD load path (it goes through create_runtime
-    and then overwrites memory + CPU state), and it is the one the VMless demo
+    and then overwrites memory + CPU state), and it is the one the VMless replay
     differential uses. Restoring the image must not cost the machine its BIOS
     hooks."""
     from dos_re.runtime import create_runtime

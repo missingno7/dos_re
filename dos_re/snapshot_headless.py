@@ -88,7 +88,7 @@ def capture_dos_state(dos, memory) -> dict:
         "file_overlay": {name: bytes(data).hex()
                          for name, data in sorted(getattr(dos, "file_overlay", {}).items())},
         "save_dir": None if getattr(dos, "save_dir", None) is None else str(dos.save_dir),
-        # Console input state IS machine state: a demo recorded across a
+        # Console input state IS machine state: a replay recorded across a
         # console-read boot (Lemmings' machine-type menu) replays from its
         # start snapshot and blocks forever if the queued keys vanish.
         "key_queue": list(getattr(dos, "key_queue", ())),

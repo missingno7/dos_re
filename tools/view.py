@@ -4,7 +4,7 @@ This command uses ``dos_re.player`` directly. The default
 :class:`~dos_re.player.GameFrontend` boots any EXE with the
 generic runtime and the simple deterministic pacing model, so you get the full
 standard CLI — viewer by default (``--headless`` to disable), snapshot
-save/resume, demo record/replay (F11), F12 snapshots, F10 screenshots — with no
+save/resume, replay record/replay (F11), F12 snapshots, F10 screenshots — with no
 game adapter at all. A game project's single ``scripts/play.py`` subclasses
 GameFrontend instead.
 
@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     protected = "--protected-mode" in arguments
     if protected:
         arguments.remove("--protected-mode")
-        from dos_re.pm_player import PMFrontend
+        from dos_re.pm_backend import PMFrontend
         frontend = PMFrontend(ROOT)
     else:
         frontend = GameFrontend(ROOT)

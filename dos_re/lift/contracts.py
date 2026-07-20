@@ -1,6 +1,6 @@
 """ABI-contract inference -- the M3b (ABI-recovered CPUless) analysis.
 
-Stage 2b (docs/dos_re_2.0.md) removes the historical CPU CALLING CONVENTION
+Stage 2b (docs/history/dos_re_2.0.md) removes the historical CPU CALLING CONVENTION
 from the public recovered contracts while the memory image stays
 authoritative.  This module supplies the deterministic, game-agnostic
 inference the transformation is driven by -- over the shared recovery IR and

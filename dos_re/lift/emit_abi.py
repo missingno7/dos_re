@@ -19,7 +19,7 @@ mechanical CPUless recovered function -- no duplicate implementation):
   preserves the exact mechanical ABI but XOR-PERTURBS every register output
   the census proved unobserved.  Substituting the shadow module for the
   mechanical one (sys.modules pre-registration) and replaying the canonical
-  demo through the acceptance gate proves the narrowed contract END TO END:
+  replay through the acceptance gate proves the narrowed contract END TO END:
   if anything -- a caller, a boundary register digest -- actually observes
   a "dropped" output, the perturbation surfaces and the oracle comparison
   fails loudly at that boundary.  XOR (not a constant) guarantees the value
@@ -150,7 +150,7 @@ def emit_abi_module(key: str, proposal: dict, *, import_base: str,
         f'Public contract: {public}({sig_line}) -> {ret_doc}',
         f'Shadow {mech} preserves the mechanical ABI and XOR-perturbs the',
         f'proven-unobserved outputs {tuple(dropped)!r} -- the end-to-end',
-        'contract proof when substituted into the acceptance demo.',
+        'contract proof when substituted into the acceptance replay.',
         '"""',
         '',
         f'from {import_base}.{mech} import {mech} as _core',
@@ -1020,7 +1020,7 @@ def emit_integration_adapter(key: str, contract: CoreContract,
     deliberately does not (the census proved no caller observes them).  The
     adapter returns the ENTRY value for those -- a pass-through.  That is
     exactly what the poison shadows validated: they XOR-perturbed the same
-    registers and the demo stayed oracle-clean over 964 boundaries, so no
+    registers and the replay stayed oracle-clean over 964 boundaries, so no
     observer exists to notice either substitution.
 
     The adapter is MIGRATION SCAFFOLDING: it reintroduces the register-dict
@@ -1043,7 +1043,7 @@ def emit_integration_adapter(key: str, contract: CoreContract,
     A('    Integration scaffolding -- delete when the closure is all cores.')
     A('    Registers the core does not return are passed through: the census')
     A('    proved no caller observes them, and the poison shadows confirmed')
-    A('    it end to end on the demo."""')
+    A('    it end to end on the replay."""')
     # forward only what the core actually takes
     fwd = list(contract.inputs)
     missing = [r for r in fwd if r not in shape.inputs]

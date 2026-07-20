@@ -1,33 +1,33 @@
-# tiny_frame_game — the whole method in ten minutes
+# tiny_frame_game — dos_re 3.0 in one run
 
-A synthetic DOS "game" small enough to read in one sitting (18 instructions:
-a retrace-wait frame loop, an INT 09h keyboard ISR, and a framebuffer row
-painted with `counter + keystate`), driven through **every core mechanism of
-the framework** in one runnable script:
+This synthetic DOS game is small enough to read in one sitting: a retrace-wait
+frame loop, keyboard ISR, and framebuffer row painted from two state bytes.
 
-```
+```bash
 python examples/tiny_frame_game/walkthrough.py
 ```
 
+The walkthrough demonstrates the complete authority chain:
+
 | Stage | What it proves |
 |---|---|
-| oracle | the EXE boots in the VM (mode 13h via INT 10h, ISR installed via the IVT) and the framebuffer follows the frame counter; frames are stepped with `dos_re.checkpoints` |
-| cold-start replay | one `ReplayArtifact` embeds its base continuation state and immutable input events, then replays byte-identically for 10 frames—with a key press visibly changing the output |
-| snapshot | freeze mid-run, restore, both continuations agree frame-for-frame |
-| hook oracle | a draw hook that fills **319 of 320** pixels — registers all correct — is caught by the strict differential verifier's full-memory diff at the exact byte; the correct hook then runs verified on every call |
-| frame oracle | `run_frame_verifier` locksteps a pure-ASM reference against the hooked candidate: 6 frames, 0 divergences; the wrong candidate is detected at frame 1 with diff artifacts dumped |
-| state mirror | a `StructView` gives the game's state human names (`view.counter`, `view.keystate`) over the exact bytes the oracle verifies |
+| stable identity | the program image and recovered draw function have shared backend-independent identities |
+| Recovery IR | retained static structure is imported without Atlas decoding the EXE again |
+| ReplayArtifact | one base continuation and immutable events replay deterministically; function visits are lightweight timeline evidence |
+| Execution Atlas | IR and replay evidence produce conservative ProgramCoverage |
+| planning | one ImplementationCatalog and identity set produce development and package-ready release plans |
+| detachment | DetachmentReport proves the release selection does not require the original EXE |
+| continuation | a captured machine continuation restores deterministically |
+| verification | a one-byte-short faithful replacement is caught; the correct replacement passes call and frame comparison |
+| state view | named authoritative fields project the same DOS-memory bytes verified by the oracle |
 
-The point is onboarding, not realism: [`game.py`](game.py) is the "original
-binary" (its docstring is the disassembly), and [`walkthrough.py`](walkthrough.py)
-is the whole lifecycle. For a real game, continue with
-[`../../docs/getting_started.md`](../../docs/getting_started.md).
+The development and release plans are not different games. They select from the
+same implementation catalog under different policies. The example’s release
+plan uses a native bootstrap declaration and complete coverage; a real port
+would also provide the explicit file closure consumed by closed-world export.
 
-Two details worth noticing:
+The low-level CPU hook in the verifier stage is intentionally shown as backend
+machinery. The authored draw function itself is natural Python; its adapter
+handles registers, memory, return control, and hook installation.
 
-- **One boundary driver.** Recording and replay share `run_session()` — a
-  single definition of this example's stable frame point. Real backends may use
-  different stop seams, but must map them to the same semantic replay points
-  ([`../../docs/demos_and_snapshots.md`](../../docs/demos_and_snapshots.md)).
-- **The wrong hook has correct registers.** Only the default full-memory diff
-  catches it. That is why narrowing the diff is pitfall #7.
+See [Getting started](../../docs/getting_started.md) for the real port workflow.

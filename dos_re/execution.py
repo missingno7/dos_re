@@ -1,7 +1,7 @@
 """Execution composition and dependency-policy planning for dos_re 3.0.
 
-This module is deliberately backend-neutral.  It does not import a CPU,
-interpreter, player, replay implementation, or the future Execution Atlas.
+This module is deliberately backend-neutral. It does not import a CPU,
+interpreter, player, replay implementation, or Execution Atlas storage.
 Ports describe coverage, implementations, and services as immutable records;
 the planner selects one implementation per reachable identity and fails before
 runtime construction when a strict profile cannot be satisfied.
@@ -268,7 +268,7 @@ class ProgramCoverage:
 
 
 class CoverageSource(Protocol):
-    """Interface current IR adapters and the future Execution Atlas implement."""
+    """Backend-neutral coverage interface implemented by IR and Atlas adapters."""
 
     def coverage_for(self, product_profile: str) -> ProgramCoverage: ...
 
@@ -808,6 +808,51 @@ def _plan_digest(
         ],
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def execution_composition_digest(plan: ExecutionPlan) -> str:
+    """Identify selected executable code and runtime services, not plan evidence.
+
+    Replay execution profiles feed dynamic observations back into coverage
+    sources such as the Execution Atlas. Hashing ``plan_digest`` into a replay
+    profile would therefore create a cycle: replay evidence changes coverage,
+    coverage changes the plan, and the unchanged runtime acquires a new replay
+    identity. This digest deliberately excludes coverage, policy, verification,
+    packaging, and bootstrap metadata while retaining every selected
+    implementation binding and executable service digest.
+    """
+    implementations = {
+        item.implementation_id: item for item in plan.implementations
+    }
+    payload = {
+        "bindings": sorted(
+            (item.target, item.implementation_id) for item in plan.bindings
+        ),
+        "implementations": [
+            {
+                "id": item.implementation_id,
+                "digest": item.implementation_digest,
+                "origin": item.origin.value,
+                "category": item.category.value,
+                "region": item.region_id,
+            }
+            for item in sorted(
+                implementations.values(),
+                key=lambda value: value.implementation_id,
+            )
+        ],
+        "services": [
+            {
+                "id": item.service_id,
+                "digest": item.implementation_digest,
+            }
+            for item in sorted(plan.services, key=lambda value: value.service_id)
+        ],
+    }
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 

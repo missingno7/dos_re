@@ -1,4 +1,4 @@
-> Framework method reference. Authority: [`execution_planner.md`](execution_planner.md)
+> Framework method reference. Authority: [`execution_planner.md`](../execution_planner.md)
 > defines execution and release closure; [`dos_re_2.0.md`](dos_re_2.0.md)
 > defines generated recovery techniques. Promoted from the
 > DOS_RE 1.0 starter (template_dos_port, retired) because the mechanics remain valid.
@@ -37,7 +37,8 @@ site.* (`dos_re.state_view` supports this directly.)
 lifetimes or merge targets until `hooks.py` reached 4106 lines *of gameplay
 logic*. → The VM-shaped hook pile became the de facto architecture; every later
 refactor had to first extract logic back out of glue. → *Every hook declares a
-role (`dos_re.hook_taxonomy`) and a merge target (`@oracle_link`); hooks stay
+role (the backend's declared checkpoint set) and a merge target
+(`@oracle_link`); low-level hooks stay
 registration + adapter only. "A hook without a lifetime is suspicious; a hook
 without a merge target is suspicious." Falling glue-hook count IS progress.*
 
@@ -60,10 +61,10 @@ the execution plan keeps the boundary explicit.*
 **6. Trusting per-hook oracles alone.** [OK] A contact predicate was never
 exercised by its hook's captured oracle (callers passed a stub), so three
 different visible bugs all traced to one unverified branch. → Divergences only
-surfaced in long demo replays, far from the cause. → *Per-hook oracles are
-scaffolding; demo-replay equivalence is the real gate — and only counts if the
+surfaced in long replay replays, far from the cause. → *Per-hook oracles are
+scaffolding; replay-replay equivalence is the real gate — and only counts if the
 routine is actually exercised. For every hook: a focused oracle, evidence it
-runs in a real demo, and zero demo-suite divergence.*
+runs in a real replay, and zero replay-suite divergence.*
 
 **7. Narrowing the diff.** [both] Restricting verification to "the registers
 that matter" or a memory window. → Freed-stack scratch words, flag shapes, and
@@ -74,10 +75,10 @@ make a change pass.*
 
 **8. Refactoring away "dead" flag writes.** [OK] Flag-setting helpers that
 *looked* dead were removed; one EGA marker-byte bit-test was reversed in an
-"optimization". → Demo divergence; visibly corrupted menu assets. The hook
+"optimization". → Replay divergence; visibly corrupted menu assets. The hook
 oracle passed because it never exercised the branch. → *The boundary contract
 is law. Before deleting a state write, prove it dead: instrument with a counter
-and demo-replay; if the demo suite never reaches it (count = 0), the change is
+and replay-replay; if the replay suite never reaches it (count = 0), the change is
 UNVERIFIABLE — revert it, don't keep it.*
 
 ## State capture and rendering fidelity
@@ -112,7 +113,7 @@ verifier uses, then letting the wait exit naturally. No game state is faked;
 only the delivery point is synthetic.*
 
 **13. Skipping across IRQ-due boundaries.** [P2] A wait-loop skip jumped past
-points where a PIT tick was due. → The tick counter diverged and demos forked.
+points where a PIT tick was due. → The tick counter diverged and replays forked.
 → *Only collapse provably-identical poll iterations BETWEEN pump boundaries;
 re-emit every due IRQ at its emulated-time point. The step budget is
 `cpu.step()` invocations, not `instruction_count` — an IRQ entry is one step.*
@@ -167,7 +168,7 @@ attempted multi-subsystem refactors or "fixed" a divergence by weakening the
 oracle. → Reverts, wasted effort, and near-miss silent regressions. → *The
 smallest coherent unit per iteration; never commit red; a blocked slice is
 fully reverted and logged as a blocker, not worked around. See
-[`getting_started.md`](getting_started.md) for the current workflow.*
+[`getting_started.md`](../getting_started.md) for the current workflow.*
 
 **20. Stopping at the symptom.** [OK] A long-open "player death divergence"
 blocker was attacked at the death logic repeatedly. → No progress until the
@@ -183,24 +184,24 @@ hypothesis generator, never a source. Semantics are earned per the status
 ladder (multiple independent evidence paths), and the oracle is the only
 judge. This is WHY the framework constrains AI rather than trusting it.*
 
-**22. A demo corpus that flatters the code.** [both] Early demo suites
+**22. A replay corpus that flatters the code.** [both] Early replay suites
 exercised the happy path (short runs, few transitions). → Divergences in
 death/respawn, level-end, game-over, and rare spawns survived long past the
 point they "should" have been caught; cold-start testing later exposed paths
-no bounded demo reached. → *Corpus coverage is a measured artifact: track
-which levels, transitions, behaviours, and RNG paths the demos exercise, and
+no bounded replay reached. → *Corpus coverage is a measured artifact: track
+which levels, transitions, behaviours, and RNG paths the replays exercise, and
 treat the blind spots as open risks in every status report. Record death,
-game-over, and full-playthrough demos early — they are the proof spine's
+game-over, and full-playthrough replays early — they are the proof spine's
 spine.*
 
 **23. Presentation quietly mutating the simulation.** [P2] The tempting
 widescreen shortcut — advancing the object producer/spawner so entities exist
 in the margins — changes gameplay state; camera/render helpers "just poking"
 one state byte have the same shape. → The enhanced build silently forks from
-the verified game; demos recorded on one desync on the other. → *Enhancements
+the verified game; replays recorded on one desync on the other. → *Enhancements
 read state and write none, enforced by a parity gate (enhanced-at-neutral ≡
 faithful, pixel- and state-exact). Anything that needs to write is not an
-enhancement. See [`enhancements.md`](enhancements.md).*
+enhancement. See [`enhancements.md`](../enhancements.md).*
 
 **24. Building presentation over an unverified state seam.** [P2]
 Early faithful/enhanced viewer backends grew alongside hook-based recovery
@@ -209,5 +210,5 @@ state ledgers and one-implementation audits to stop parallel truths. → *A
 non-authoritative enhancement may land incrementally, but only after the state
 it consumes has a verified read-only seam. It never invents missing gameplay
 state and never writes the authoritative model. See
-[`enhancements.md`](enhancements.md) and
-[`override_architecture.md`](override_architecture.md).*
+[`enhancements.md`](../enhancements.md) and
+[`override_architecture.md`](../override_architecture.md).*

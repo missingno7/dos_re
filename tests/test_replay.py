@@ -139,7 +139,7 @@ def make_artifact(tmp_path, *, candidate=NATIVE):
     events = [ReplayEvent(point(i), i, "input", {"value": value})
               for i, value in enumerate(VALUES)]
     artifact = ReplayArtifact.create(
-        tmp_path / "demo", timeline_id=TIMELINE, events=events,
+        tmp_path / "replay", timeline_id=TIMELINE, events=events,
         metadata={"purpose": "hook-verification"}, page_size=8,
     )
     oracle = CounterDriver(ORACLE)
@@ -163,7 +163,7 @@ def test_semantic_projection_verifies_native_candidate_and_caches_each_profile(t
     assert artifact.restore(ORACLE, point(4)).schema_id == "machine-v1"
     assert artifact.restore(NATIVE, point(4)).schema_id == "native-v1"
 
-    manifest = json.loads((tmp_path / "demo" / "replay.json").read_text())
+    manifest = json.loads((tmp_path / "replay" / "replay.json").read_text())
     assert set(manifest["profiles"]) == {"oracle", "native"}
     assert manifest["points"][point(9).key]["annotations"][0]["kind"] == "verified-endpoint"
 
@@ -194,7 +194,7 @@ def test_interval_rejects_diverged_start_without_caching_candidate(tmp_path):
         )
 
     assert not artifact.has_cached(buggy, point(4))
-    manifest = json.loads((tmp_path / "demo" / "replay.json").read_text())
+    manifest = json.loads((tmp_path / "replay" / "replay.json").read_text())
     kinds = [entry["kind"] for entry in manifest["points"][point(4).key]["annotations"]]
     assert "invalid-interval-start" in kinds
 
@@ -212,7 +212,7 @@ def test_bisection_persists_latest_valid_point_not_diverged_candidate(tmp_path):
     before, after, result = found
     assert (before, after) == (point(6), point(7))
     assert not result.equivalent
-    manifest = json.loads((tmp_path / "demo" / "replay.json").read_text())
+    manifest = json.loads((tmp_path / "replay" / "replay.json").read_text())
     kinds = [entry["kind"] for entry in manifest["points"][point(6).key]["annotations"]]
     assert "latest-valid-before-divergence" in kinds
     assert "bisected-pre-divergence" in kinds
@@ -230,12 +230,12 @@ def test_profile_identity_change_rejects_cache(tmp_path):
 def test_changed_base_snapshot_identity_rejects_cached_boundary(tmp_path):
     artifact = make_artifact(tmp_path)
     verify_interval(artifact, CounterDriver(ORACLE), CounterDriver(NATIVE), point(2), point(4))
-    manifest_path = tmp_path / "demo" / "replay.json"
+    manifest_path = tmp_path / "replay" / "replay.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["profiles"]["native"]["base_state_sha256"] = "0" * 64
     manifest_path.write_text(json.dumps(manifest))
 
-    reopened = ReplayArtifact.open(tmp_path / "demo")
+    reopened = ReplayArtifact.open(tmp_path / "replay")
     with pytest.raises(StaleReplayError, match="base snapshot identity"):
         reopened.restore(NATIVE, point(2))
 

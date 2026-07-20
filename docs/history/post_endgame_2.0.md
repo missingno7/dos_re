@@ -1,4 +1,4 @@
-> Framework method reference. Authority: [`execution_planner.md`](execution_planner.md)
+> Framework method reference. Authority: [`execution_planner.md`](../execution_planner.md)
 > defines execution and release closure; [`dos_re_2.0.md`](dos_re_2.0.md)
 > defines generated recovery techniques. Promoted from the
 > DOS_RE 1.0 starter (template_dos_port, retired) because the mechanics remain valid.
@@ -10,7 +10,7 @@
 > `ReplayArtifact` interval green under `verify_interval`. If you are here earlier, close this and
 > go back to the checklist; pitfall #24 is how projects drown. The *rules*
 > (sequencing, the read-only boundary, the parity gate) are
-> [`enhancements.md`](enhancements.md) — this is the workflow on top of them.
+> [`enhancements.md`](../enhancements.md) — this is the workflow on top of them.
 > This is an optional late-product workflow, not an architectural prerequisite
 > for non-authoritative enhancements. The override architecture permits an
 > enhancement earlier once its authoritative read-only seam is verified.
@@ -31,13 +31,13 @@ menu.** One settings dict, persisted next to the game data, edited live. The
 menu widget is a framework piece now — `dos_re.overlay_menu` (tabbed modal
 overlay, pygame-injected, items-as-data closures, structural determinism
 firewall: the tick freezes while it is open, so nothing it consumes can
-perturb the game or a demo).
+perturb the game or a replay).
 
 **3. The tab taxonomy IS the accuracy boundary.** Three classes, never mixed:
 
 | Tab class | Contents | Contract |
 |---|---|---|
-| **Presentation** (Display / Audio / …) | read-only enhancements | parity gate: enhanced-at-neutral ≡ faithful, pixel- and state-exact; the demo corpus stays green with them on |
+| **Presentation** (Display / Audio / …) | read-only enhancements | parity gate: enhanced-at-neutral ≡ faithful, pixel- and state-exact; the replay corpus stays green with them on |
 | **Experimental** | anything that can affect game accuracy (state-writing opt-ins, input-layer comforts, gameplay-adjacent toggles) | quarantined in this one tab, labeled, default OFF; each documents exactly what it writes |
 | **Debug** (cheats) | deliberate game-state writes | exists only behind a `--debug`-style flag; hidden from the product |
 
@@ -87,7 +87,7 @@ cannot be traced from the binary. The loop:
 2. **Prototype behind a toggle** (faithful default), persisted, live-switchable.
 3. **Show, don't describe** — screenshots / before-after pairs (menu toggling
    makes A/B trivial); ask concrete taste questions.
-4. **Iterate on feedback**, then the parity gate + the full demo corpus
+4. **Iterate on feedback**, then the parity gate + the full replay corpus
    before the commit. Ledgers stay current — still the loop protocol.
 
 Expect much more human interaction per slice than recovery ever needed; that
@@ -115,7 +115,7 @@ State the tier per moving element in the port's enhancement notes.
 The completed port's Stage-6 layer is the reference implementation
 (pre2_port: interpolation's two-snapshot window `frame_capture.py`, smooth
 transitions, widescreen decomposition — the widescreen and pixel-aspect
-*lessons* are in [`enhancements.md`](enhancements.md)). Read them as *ideas
+*lessons* are in [`enhancements.md`](../enhancements.md)). Read them as *ideas
 that survived*, not features to copy: each game's list will differ.
 
 Promoted so far: the overlay menu (`dos_re.overlay_menu`). Next candidate

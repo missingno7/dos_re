@@ -20,7 +20,7 @@ The effect model is deliberately asymmetric, which keeps it sound by default:
       opcodes never enable an elision around them.
 
 Analyses run on ``FunctionScan`` objects — which the recovery IR re-elaborates
-via ``dos_re.lift.ir`` — never by parsing emitted Python (docs/dos_re_2.0.md
+via ``dos_re.lift.ir`` — never by parsing emitted Python (docs/history/dos_re_2.0.md
 §1b).
 """
 from __future__ import annotations

@@ -2,7 +2,7 @@
 reach a CPU: not the interpreter, not the lifted graph, not the CPU-ABI
 adapters, not a fallback to any of them.
 
-Generic, game-agnostic (docs/dos_re_2.0.md section 6).  The runner's runtime
+Generic, game-agnostic (docs/history/dos_re_2.0.md section 6).  The runner's runtime
 import guard is the DYNAMIC backstop; this is the static one, and it is
 strictly stronger in the ways that matter:
 

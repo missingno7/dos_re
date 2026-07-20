@@ -1,4 +1,4 @@
-# Deterministic replay and continuation state (dos_re 3.0)
+# ReplayArtifact and cached continuation boundaries
 
 dos_re has one primary replay artifact: a deterministic recording that drives
 the original interpreter and a candidate implementation over the same stable
@@ -48,7 +48,7 @@ the requested point.
 The interactive players capture through `ReplayRecording`. It buffers
 normalized immutable events, then finalizes exactly one `ReplayArtifact` with
 the complete base continuation and optional cached endpoint. Real-mode
-`input_demo.py` and protected-mode `pm_input_demo.py` are adapters only:
+`replay_input.py` and protected-mode `pm_replay_input.py` are adapters only:
 keyboard/mouse normalization and application, plus the PM stable frame seam.
 They define no file names, manifests, versions, snapshots, or compatibility
 branches.
@@ -201,7 +201,8 @@ annotations stay in `dos_re.replay`.
 ## Scope boundary
 
 The replay artifact, real-mode and protected-mode continuation adapters,
-interval verification, persistent boundary cache, divergence localization, and
-function-visit index are the current shared infrastructure. Atlas storage,
-project-specific native object models, and semantic projection fields remain
-independent consumers of these interfaces.
+interval verification, persistent boundary cache, divergence localization,
+function-visit index, and optional oracle-owned observed-transfer section are
+the shared infrastructure. `ExecutionAtlas.ingest_replay` consumes those
+records by identity; Atlas storage, project-specific native object models, and
+semantic projection fields remain independent of replay persistence.

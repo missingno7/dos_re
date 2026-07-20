@@ -747,7 +747,7 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     already cross-checks every instruction length against live execution.
     """
     leaders = scan.block_leaders()
-    # BOUNDARY OBSERVERS (docs/dos_re_2.0.md §1a — the VMless wall): each
+    # BOUNDARY OBSERVERS (docs/history/dos_re_2.0.md §1a — the VMless wall): each
     # ``boundary_heads`` ip gets an emitted event call after its instruction,
     # and the instruction AFTER the head becomes a RESUME ENTRY — a block
     # leader exported in RESUME_ENTRIES so the installer can register a
@@ -808,7 +808,7 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
             # leaves IP on the successor, so that is where a resumed park comes
             # back -- but it is not the only way to be here. The machine can sit
             # ON the head: a snapshot captured while the game spun in the wait
-            # (skyroads' gameplay demos all start at 1010:22F8, mid-spin), or an
+            # (skyroads' gameplay replays all start at 1010:22F8, mid-spin), or an
             # IRET returning to it after an IRQ landed on that instruction. Both
             # are ordinary; neither could dispatch, because the head was forced
             # as a block leader but never exported, so the wall fired at the one

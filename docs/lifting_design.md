@@ -1,21 +1,10 @@
-# Automatic literal lifting: ASM function → Python hook → oracle → refactor
+# Automatic literal lifting: recovered function → generated implementation
 
-> **DOS_RE 2.0 supersession note (2026-07-17).**  This document designed the
-> lifter under the 1.x risk model: lift one function, prove it ORACLE_PASSING,
-> only then trust it.  Under DOS_RE 2.0 ([`dos_re_2.0.md`](dos_re_2.0.md), the
-> canonical architecture) that per-function gate applies ONLY to the hybrid
-> auto-install tier.  Graph assembly is different: the largest supported
-> **VMless lifted graph** is emitted (`tools/liftemit.py`), structurally linked
-> (`tools/liftlink.py`), installed whole (`lift.install.install_vmless_graph`),
-> and judged by END-TO-END oracle comparison with stable-point temporal bisection
-> (`dos_re.replay.bisect_divergence`) — per-function ORACLE_PASSING is metadata, not a
-> precondition.  Wherever this document says or implies "proven before
-> linked/installed", read it as describing the hybrid tier or as historical.
-> The M0–M4 roadmap in §10 is the 1.x lifter roadmap; the project-level
-> milestones are now M1–M6 in `dos_re_2.0.md` §6.  Terminology: what this doc
-> calls the eventual "native" artifact is, in 2.0 vocabulary, the **VMless
-> lifted runtime** — the CPU carrier and DOS memory model are removed by later
-> stages (CPUless emitter, DOS-layout dissolution), not by this lifter.
+> This is a generated-implementation mechanism reference. The lifter emits
+> candidates from retained Recovery IR; `ImplementationCatalog` describes
+> them, the planner selects them per function or region, and replay-based
+> oracle verification supplies evidence. “VMless”, “CPUless”, and related
+> terms below are per-implementation properties, never global player modes.
 
 > **Two ISA pipelines.** This document describes the design in its original
 > 16-bit terms; the 32-bit flat (DOS/4GW / CPU386) counterpart mirrors it
@@ -167,7 +156,7 @@ def lifted_1010_4537(cpu):
             s.bx = mem.rw(s.cs, 0x5B9C)
             # 1010:453C  8A04         mov al, [si]
             ...
-            cpu.instruction_count += 9          # block-exact demo-clock preservation
+            cpu.instruction_count += 9          # block-exact replay-clock preservation
             bb = 2 if (s.flags & ZF) else 1
         elif bb == 1:
             ...
@@ -183,7 +172,7 @@ Non-negotiable properties:
 - **Original disassembly as per-line comments** — this is what the refactoring
   AI reads; the artifact must be self-explanatory without re-disassembling.
 - **`instruction_count` preserved block-exactly**, so pre2-style
-  instruction-count clocks and demo determinism are unaffected by installing
+  instruction-count clocks and replay determinism are unaffected by installing
   a literal hook (a stronger transparency guarantee than hand hooks give).
   Dropped deliberately (with re-record) only at refactor time.
 - **Entry signature guard** via the existing `self_disable_if_patched` — the
@@ -220,7 +209,7 @@ runtime does — decoder/CFG/emitter unchanged.
 
 ## 7. Verification and the proof ladder
 
-Primary verification is **in-situ over the demo corpus** with the existing
+Primary verification is **in-situ over the replay corpus** with the existing
 `HookVerifier` (clone runtime → run interpreted original to the continuation
 → run the lifted hook → diff registers + flags + full memory, dead-stack
 scratch excluded). The lifted artifact additionally gets **basic-block
@@ -236,14 +225,12 @@ INSTALLED             running as the default replacement (still guarded by entry
 REFACTORED            the agent rewrote into real recovered Python; SAME tests green
 ```
 
-> **2.0 scope of this ladder:** these statuses gate the HYBRID auto-install
-> tier (`install_passing_lifts`) and serve diagnostics/regression.  They do
-> NOT gate structural linking or inclusion in the assembled VMless graph —
-> that is judged end-to-end (see the supersession note at the top and
-> `dos_re_2.0.md` §2).
+> These statuses are implementation evidence used by the catalog and for
+> diagnostics. They do not create a second selection authority: structural
+> inclusion is decided by the execution plan and judged end-to-end.
 
 - Promotion LIFTED → ORACLE_PASSING is done by a driver
-  (`tools/liftverify.py`) that replays chosen demos with the verifier
+  (`tools/liftverify.py`) that replays chosen replays with the verifier
   attached and writes results into the island manifest — the same evidence
   language the ports already speak.
 - Synthetic register/memory fuzz (the `test_expand_4plane_row_4537_fuzz`
@@ -375,7 +362,7 @@ the ability to decode non-executable bytes).
 module defining one hook, exactly as §5 specified: architectural state at
 every instruction boundary, a basic-block dispatch loop, per-line
 address/bytes/mnemonic comments, the fail-loud SMC entry guard, and
-`--count-instructions` for demo-clock transparency. `lift/runtime.py`
+`--count-instructions` for replay-clock transparency. `lift/runtime.py`
 provides the VM-delegation primitives (`emulate_call` / `emulate_far_call` /
 `emulate_int` — callees and ISRs run through the interpreter, so hooks
 compose and lifting order never matters) and `interp_one` (the exact
@@ -538,7 +525,7 @@ proven artifact."
 2. The metrics honesty rule (§7) — lifted tier never counts as recovered.
 3. M0 first (census before emitter) — or straight to M1 on one port?
 4. Whether `instruction_count` preservation should be mandatory (my
-   recommendation: yes in literal mode; it makes installs demo-transparent).
+   recommendation: yes in literal mode; it makes installs replay-transparent).
 
 
 ## Self-modifying code

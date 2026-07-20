@@ -1,7 +1,7 @@
 """Real-mode ReplayArtifact recording and input-adapter tests."""
 from types import SimpleNamespace
 
-from dos_re.input_demo import (
+from dos_re.replay_input import (
     DOS_KEY_CHANNEL,
     MOUSE_CHANNEL,
     SCAN_CHANNEL,
@@ -55,7 +55,7 @@ def test_real_mode_recording_is_one_replay_artifact_and_replays(tmp_path):
     artifact = recording.finish(3, end_state=_state(3, 7))
 
     assert (artifact.directory / "replay.json").is_file()
-    assert not (artifact.directory / "input_demo.json").exists()
+    assert not (artifact.directory / "replay_input.json").exists()
     reopened = ReplayArtifact.open(artifact.directory)
     adapter = RealModeInputAdapter(reopened.events)
     rt = DummyRuntime()

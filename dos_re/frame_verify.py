@@ -81,7 +81,7 @@ AfterBoundaryCallback = Callable[[Runtime, str, Addr], None]
 TraceSampleCallback = Callable[[Runtime], bytes]
 # Returns (kind, canonical_addr) when the CPU is parked in a boundary-less input
 # wait loop, else None.  Lets the verifier treat such a loop as a frame boundary
-# so demo/live input is pumped there instead of spinning until the frame budget.
+# so replay/live input is pumped there instead of spinning until the frame budget.
 InputWaitDetector = Callable[["CPU8086"], "tuple[str, Addr] | None"]
 
 

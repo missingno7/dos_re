@@ -855,7 +855,7 @@ class CalleeContract:
     parks: bool = False             # contains a boundary head (or composes a
                                     # callee that does): STANDALONE-ONLY --
                                     # its adapter must not enter the VMless
-                                    # demo graph (a park unwind would lose
+                                    # replay graph (a park unwind would lose
                                     # composed caller locals)
 
 
@@ -1128,7 +1128,7 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
                and far_callees[i.far_target].flags_livein
                for i in scan.insts.values())
     # a parking function (or one composing a parking callee) is
-    # STANDALONE-ONLY: the demo graph keeps its original lifted module.
+    # STANDALONE-ONLY: the replay graph keeps its original lifted module.
     parks = bool(heads) \
         or any(i.kind == CALL and i.target in callees
                and callees[i.target].parks

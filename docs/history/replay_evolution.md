@@ -2,7 +2,7 @@
 
 > Historical design record only. Nothing in this document is a supported API,
 > file format, command, or implementation recipe. For current replay behavior,
-> use [`../demos_and_snapshots.md`](../demos_and_snapshots.md).
+> use [`../demos_and_snapshots.md`](../replay_architecture.md).
 
 Before dos_re 3.0, replay and verification evolved as several independent
 experiments. Input recordings, game-tick verification, front-end flow

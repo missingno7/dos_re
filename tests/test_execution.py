@@ -21,6 +21,7 @@ from dos_re.execution import (
     RuntimeServiceCatalog,
     RuntimeServiceDescriptor,
     RuntimeCapabilityViolation,
+    execution_composition_digest,
     plan_execution,
     profile_configuration,
 )
@@ -440,6 +441,27 @@ def test_plan_digest_changes_with_implementation_evidence():
         _implementation("external", (ROOT, CALLEE), digest="two"),
     ))
     assert first.plan_digest != second.plan_digest
+
+
+def test_execution_composition_digest_ignores_coverage_evidence():
+    config = profile_configuration("detached", program_identity=PROGRAM)
+    implementation = _implementation("external", (ROOT, CALLEE), digest="one")
+    first = plan_execution(config, COVERAGE, _catalog(implementation))
+    second = plan_execution(
+        config,
+        ProgramCoverage(
+            roots=COVERAGE.roots,
+            reachable=COVERAGE.reachable,
+            evidence_identity="coverage-v2-with-replay-evidence",
+        ),
+        _catalog(implementation),
+    )
+
+    assert first.plan_digest != second.plan_digest
+    assert (
+        execution_composition_digest(first)
+        == execution_composition_digest(second)
+    )
 
 
 def test_authored_implementation_requires_explicit_selection():

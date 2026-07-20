@@ -4,12 +4,12 @@ Extracted from the Lemmings pilot's ``tick_clock`` (mechanism only; the head
 addresses and their kinds are PORT FACTS the port passes in).  One clock
 definition is shared by every driver -- viewer, headless replay, verifiers,
 the bisector, the strict-VMless runner -- so record-time and replay-time agree
-at the identical instruction (docs/demos_and_snapshots.md).
+at the identical instruction (docs/replay_architecture.md).
 
 THE CONTRACT (validated on the pilot, cross-mode): per boundary, deliver the
 frame's timer IRQs, then run to park at the ``passes_per_boundary``-th pass of
 a registered boundary head.  A park is a GAME event, so the boundary index
-counts game progress -- demos replay identically on the interpreted oracle and
+counts game progress -- replays reproduce identically on the interpreted oracle and
 on a lifted graph.
 
 EXACT PARK (why a sentinel raises rather than sets a flag): a replacement-hook

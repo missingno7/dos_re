@@ -9,7 +9,7 @@ It deliberately does NOT import ``load_mz_program`` / ``parse_mz`` / ``load_le``
 The EXE loader (:func:`dos_re.runtime.create_runtime`) lives in
 :mod:`dos_re.runtime` and imports FROM here—so an EXE-independent import graph
 reaches this core but never the loader
-that parses the binary (dos_re/docs/dos_re_2.0.md §"The EXE-independence wall").
+that parses the binary (dos_re/docs/history/dos_re_2.0.md §"The EXE-independence wall").
 """
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ def enable_sound_blaster(rt: Runtime, *, base: int = 0x220, irq: int = 7, dma: i
                          detection_only: bool = False):
     """Attach an emulated Sound Blaster + PIC so the program detects and uses it.
 
-    Opt-in (an interactive front-end calls this); the deterministic demo/test path
+    Opt-in (an interactive front-end calls this); the deterministic replay/test path
     leaves the hardware absent so its timing is unchanged.  The front-end decides
     *how* to deliver IRQs: at batch boundaries (``pic.acknowledge`` + a forced
     ``deliver_interrupt``) to avoid interrupting the game mid-render, or inline via

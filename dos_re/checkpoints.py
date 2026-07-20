@@ -6,8 +6,8 @@ runtime positioned at *any* instruction, step the VM (instruction-exact oracle)
 until it reaches the next compatible checkpoint, where game state is consistent
 and a native phase-system could take over.
 
-The checkpoint set is the game adapter's curated, evidence-based phase map —
-the ``checkpoints`` dict of its :class:`dos_re.hook_taxonomy.HookTaxonomy`
+The checkpoint set is the game adapter's curated, evidence-based phase map:
+the backend's declared ``checkpoints`` mapping
 (address -> "kind: description", e.g. ``(0x1010, 0xD007): "frame: main loop"``).
 Categorising by ``kind`` (the text before the first ``:``) lets a caller wait
 for a specific phase boundary, e.g. only the object-update checkpoint.

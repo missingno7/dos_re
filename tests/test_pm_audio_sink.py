@@ -15,7 +15,7 @@ import pytest
 np = pytest.importorskip("numpy")
 pytest.importorskip("sounddevice")
 
-from dos_re.pm_player import _SoundDeviceSink  # noqa: E402
+from dos_re.pm_backend import _SoundDeviceSink  # noqa: E402
 
 
 class _FakeSB:

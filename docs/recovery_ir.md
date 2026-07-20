@@ -1,17 +1,11 @@
 # Recovery IR v0 — the shared representation every stage consumes
 
-**Status: v0 LANDED (2026-07-17) — all §6 success criteria met on the
-Lemmings pilot: `tools/irgen.py` regenerates the document deterministically;
-`liftemit --from-ir` and `liftlink --from-ir` consume it through the shared
-`dos_re.lift.ir` re-elaborator; the IR-path corpus (unlinked AND linked) is
-byte-identical to the snapshot path, 212/212 modules; the demo corpus
-replays ORACLE-CLEAN on the resulting graph; unsupported constructs land in
-the IR's fail-loud ledger.  Originally drafted as:**  Companion to [`dos_re_2.0.md`](dos_re_2.0.md)
-§1b: the system is built around one shared recovery IR + analyses + selected
-emitters; every stage artifact is a projection of the IR.  This document
-defines v0 — the smallest IR that lets the VMless emitter consume IR instead
-of ad-hoc scan objects, and that the CPUless analyses can grow on without a
-redesign.**
+**Status: v0 implemented.** `tools/irgen.py` regenerates the document
+deterministically; generated implementation pipelines consume it through the
+shared `dos_re.lift.ir` re-elaborator; unsupported constructs remain in its
+fail-loud ledger. Recovery IR is the canonical retained static structure
+consumed by lifting and imported by the Execution Atlas. Every generated-stage
+artifact is a projection of this retained source.
 
 ## 1. Why an explicit IR (and why now)
 
@@ -110,16 +104,15 @@ change.  v0's job is to be complete and faithful, not clever.
    while the migration completes.
 3. **Equivalence gate**: regenerating the current VMless corpus THROUGH the
    IR must be byte-identical to the scan-path corpus (same emitted files),
-   and the demo corpus must replay ORACLE-CLEAN — only then does the IR
-   become
-   the canonical path (dos_re_2.0.md §6 success criteria).
+   and the replay corpus must replay oracle-clean — only then does the IR
+   become the canonical path.
 4. liftlink's edge computation moves onto the IR (`calls_near`/`calls_far` +
    exit kinds are already there), eliminating its private rescans.
 
 ## 4. Platform-effect tags (v0: recognize, don't yet bind)
 
-v0 tags instructions whose effect class is already known so the adapter
-binding stage (dos_re_2.0.md §4) has its work list in the IR:
+v0 tags instructions whose effect class is already known so backend adapters
+and generated implementations receive their work list from the IR:
 
 | tag | recognizer (v0) |
 |---|---|
@@ -150,6 +143,6 @@ recognition that dissolves the keep-interpreted queue starts from the
   canonical inputs;
 - the VMless emitter consumes the IR, and the IR-path corpus is
   byte-identical to the scan-path corpus for the Lemmings pilot;
-- the demo corpus replays ORACLE-CLEAN on the IR-generated graph;
+- the replay corpus replays ORACLE-CLEAN on the IR-generated graph;
 - unsupported constructs appear in the IR's `unsupported` ledger, loudly;
 - liftlink computes edges from the IR without rescanning.

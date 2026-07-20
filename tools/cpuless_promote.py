@@ -182,13 +182,13 @@ def _gate_dyn_evidence(scan, cs, dyn_evidence, done, dispatch_owner,
                        extra_leaders=frozenset()) -> None:
     """Evidence-gated dynamic dispatch (tier 9): a function containing
     near-indirect transfers promotes only when every OBSERVED runtime target
-    of its sites (the canonical-demo probe evidence) is dispatchable --
+    of its sites (the canonical-replay probe evidence) is dispatchable --
 
       * an intra-function block leader (jump-table landing), or
       * an already-promoted NEAR-return function, or
       * a dispatch entry owned by a promoted function (alternate entry).
 
-    A site with no observed targets promotes optimistically: the demo never
+    A site with no observed targets promotes optimistically: the replay never
     executes it, and a live selector outside the registry raises the
     UnknownDispatchTarget witness -- never a fallback.  Refusals here retry
     every fixpoint round, so promotion order follows the evidence.
@@ -302,7 +302,7 @@ def _read_virtual_time(key: str, spec: dict) -> dict:
 
     A composed callee's ``cost`` accumulates into its caller's ``_cost``, which
     anchors every downstream platform effect and, for a consumer whose gate is
-    instruction-count-keyed, WHERE demo input lands.  A GENERATED body is
+    instruction-count-keyed, WHERE replay input lands.  A GENERATED body is
     instruction-exact by construction; a hand-recovered OVERRIDE is not -- it
     does not execute the original control flow -- so it must DECLARE what its
     cost means:
@@ -400,7 +400,7 @@ def main(argv=None) -> int:
                          "a head inside a function becomes an emitted "
                          "plat.boundary observer; the function (and its "
                          "composed callers) become STANDALONE-ONLY -- the "
-                         "recovered module is written, but the VMless demo "
+                         "recovered module is written, but the VMless replay "
                          "graph keeps the original lifted module")
     ap.add_argument("--vector-evidence", default=None,
                     help="vector_sites.json (game-vectored INT probe "
@@ -836,7 +836,7 @@ def main(argv=None) -> int:
             kcs, kip = (int(x, 16) for x in key.split(":"))
             if contracts_by_cs[kcs][kip].parks:
                 # STANDALONE-ONLY: the recovered body parks in-line via
-                # plat.boundary; the demo graph keeps the original lifted
+                # plat.boundary; the replay graph keeps the original lifted
                 # module (a park unwind would lose composed caller locals).
                 standalone_only.append(key)
                 continue

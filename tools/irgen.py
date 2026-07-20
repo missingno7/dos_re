@@ -136,7 +136,9 @@ def main(argv=None) -> int:
         provenance={
             "exe": f"{Path(args.exe).name} sha1="
                    f"{hashlib.sha1(Path(args.exe).read_bytes()).hexdigest()}",
-            "snapshot": str(args.snapshot),
+            # Recovery IR is retained project evidence. Machine-specific
+            # absolute paths would make identical inputs serialize differently.
+            "snapshot": Path(args.snapshot).name,
             "toolchain": toolchain,
             "entries": len(entries),
         },

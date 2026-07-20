@@ -2,7 +2,7 @@
 
 The VM exposes both sources as callbacks (``dos.set_adlib_callback`` /
 ``dos.set_speaker_callback``); this sink renders them into one pygame mixer
-channel with a small jitter lead.  It never writes game state, so demos replay
+channel with a small jitter lead.  It never writes game state, so replays reproduce
 identically with audio on or off — it is safe to wire into any port's viewer.
 
 Part of the FRONTEND RING (see tools/lint.py): needs numpy + pygame.  The

@@ -13,7 +13,7 @@ Fresh emission (not the shipped modules) keeps both sides of the
 differential the SAME emitter generation: the shipped corpus may predate
 translator changes (e.g. the cs-constant-local), and comparing across
 generations reports emitter drift, not core bugs.  The shipped corpus'
-authority is the demo acceptance gate, not this tool.
+authority is the replay acceptance gate, not this tool.
 
 Run from the game root:
     python dos_re/tools/abi_core_verify.py \

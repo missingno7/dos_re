@@ -5,7 +5,7 @@ For every contract-promotable census entry with proven-unobserved outputs
 (the poison-proof set) -- or every promotable entry with --all -- emit the
 dual-entrypoint module (public ABI-recovered entry + contract-proof shadow)
 plus the generated shadow loader.  Substituting the shadows into the
-recovered graph and replaying the canonical demo through the acceptance
+recovered graph and replaying the canonical replay through the acceptance
 gate proves the narrowed contracts end to end against the oracle.
 
 Usage:
@@ -614,7 +614,7 @@ def main(argv=None) -> int:
     ap.add_argument("--check-parity", action="store_true", default=True,
                     help="verify each integration adapter's signature matches "
                          "the shipped mechanical module it replaces (default "
-                         "on); refuse rather than fail mid-demo")
+                         "on); refuse rather than fail mid-replay")
     ap.add_argument("--no-check-parity", dest="check_parity",
                     action="store_false")
     ap.add_argument("--apply", action="store_true",

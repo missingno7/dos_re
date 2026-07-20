@@ -154,7 +154,7 @@ def test_platform_int_forces_flags_livein():
     unchanged.  The emitter models the INT's flag output via plat.intr, which
     reads its `_flags` input back out -- so without flags_livein the body seeds
     that input from the zero default and CLOBBERS the caller's preserved flags
-    (state divergence vs the interpreted oracle over the whole demo, bisected
+    (state divergence vs the interpreted oracle over the whole replay, bisected
     to exactly this leaf).  A platform INT must trigger flags_livein just like
     a game-vectored INT does.
     """

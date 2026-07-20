@@ -5,7 +5,7 @@ input the ABI carries (it carries ds/es/ss).  A CS-relative memory read -- notab
 the dynamic-dispatch SELECTOR read `mov reg, cs:[bx+disp]`, which bypasses the
 normal ABI input pass -- must therefore resolve against a function-local `cs`
 constant, not an undefined name (which used to `NameError` at runtime and was
-caught by the demo-driven differential on OVERKILL's object-walk dispatchers).
+caught by the replay-driven differential on OVERKILL's object-walk dispatchers).
 """
 from __future__ import annotations
 

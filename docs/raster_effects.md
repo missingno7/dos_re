@@ -135,7 +135,7 @@ or dropped visibly when no fact exists.
 3. **A display-locked time model (future fidelity tier):** deriving beam
    position from virtual time requires the synthetic 3DAh status to follow a
    real display clock.  That changes observed port values -- the meaning of
-   the whole demo corpus -- so it is a deliberate future tier for oracle
+   the whole replay corpus -- so it is a deliberate future tier for oracle
    fidelity/diagnostics, NOT a prerequisite: native rendering does not need
    cycle-accurate CRT emulation when the visual meaning is recoverable and
    representable directly.

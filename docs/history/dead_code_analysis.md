@@ -11,7 +11,7 @@ live function nobody declared.
 
 Therefore: **reachability machinery must first prove the root set COMPLETE.
 Pruning is not safe merely because a function is absent from the static near-call
-closure or from demo coverage.** A function the static graph cannot reach is
+closure or from replay coverage.** A function the static graph cannot reach is
 almost always reached by a dynamic edge the static graph cannot see.
 
 ## The evidence (skyroads, 179 IR functions)
@@ -113,7 +113,7 @@ consolidation:
     {"addr": "1010:3B17", "source": "ivt",         "evidence": "observed IVT vector 08h"},
     {"addr": "1010:34A7", "source": "dynamic",     "evidence": "dispatch table ds:0E38 [0]"},
     {"addr": "1010:434A", "source": "boundary",    "evidence": "tick-wait head; scheduler resume"},
-    {"addr": "1010:22F8", "source": "snapshot",    "evidence": "demo snapshot start CS:IP"}
+    {"addr": "1010:22F8", "source": "snapshot",    "evidence": "replay snapshot start CS:IP"}
   ]
 }
 ```

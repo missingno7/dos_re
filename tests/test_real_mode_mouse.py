@@ -1,4 +1,4 @@
-"""Real-mode INT 33h Microsoft-mouse driver + the input-demo mouse channel.
+"""Real-mode INT 33h Microsoft-mouse driver + the input-replay mouse channel.
 
 Skyroads is the first 16-bit game exercised here that actually drives INT 33h
 (fn 0/1/2/3/4 -- reset, show, hide, get-position+buttons, set-position).  Until
@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from dos_re.dos import DOSMachine
-from dos_re.input_demo import MOUSE_CHANNEL, RealModeInputAdapter, mouse_payload
+from dos_re.replay_input import MOUSE_CHANNEL, RealModeInputAdapter, mouse_payload
 from dos_re.replay import ReplayEvent, ReplayPoint
 
 

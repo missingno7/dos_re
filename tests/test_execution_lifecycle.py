@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-import dos_re.pm_player as pm_player
+import dos_re.pm_backend as pm_backend
 
 from dos_re.player import build_arg_parser
 
@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_protected_mode_uses_the_canonical_parser():
-    frontend = pm_player.PMFrontend(ROOT)
+    frontend = pm_backend.PMFrontend(ROOT)
     args = build_arg_parser(frontend).parse_args(
         ["--exe", "GAME.EXE", "--png", "frame.png", "--no-sound"]
     )

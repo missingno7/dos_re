@@ -200,7 +200,7 @@ unreadable.
 **Prerequisite.**  Everything above.  Naming a field whose offset or extent is
 wrong is worse than leaving it anonymous — a plausible name makes an unproven
 structure look verified (see *Two claims, never merged* in
-`docs/dos_re_2.0.md`).
+`docs/history/dos_re_2.0.md`).
 
 **Why not now.**  It is Stage 4 / M5 by definition, and it is the one part of
 this pipeline that **no proof produces**.  Behavioural verification says

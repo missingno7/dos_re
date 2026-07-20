@@ -1,7 +1,7 @@
 """lint_independence.py -- STATIC proof that a strict-VMless runtime cannot
 reach the original executable or the loader that parses it.
 
-Generic, game-agnostic (docs/dos_re_2.0.md section 1a').  The runtime
+Generic, game-agnostic (docs/history/dos_re_2.0.md section 1a').  The runtime
 file-access guard (``dos_re.independence.exe_access_guard``) is the dynamic
 backstop; this is the static one.  It walks the IMPORT GRAPH rooted at the
 port's VMless runner + boot module (not a flat text grep) and fails if any
