@@ -508,11 +508,12 @@ Two INDEPENDENT safety mechanisms, not one conservative gate:
 
 - **Fail-loud** protects against KNOWN-unsupported constructs: the lifter
   refuses what it cannot represent, unknown call targets raise, uncovered
-  paths raise `HybridGap` with a snapshot and repro command.  Nothing is
+  paths raise `HybridGap` with a `ReplayArtifact` point and replay command.
+  Nothing is
   silently faked or silently handed back to hidden emulation.
 - **End-to-end oracle comparison** protects against UNKNOWN silent mistakes
   (translator, linker, scheduler, platform).  Full guest state is diffed
-  against the interpreted oracle at every tick boundary over demos/drives.
+  against the interpreted oracle over the relevant stable-point intervals.
   **This is the authoritative gate.**
 
 Consequences:
@@ -541,16 +542,14 @@ run recovery pipeline
 → repeat
 ```
 
-**The recorded demo is the test.**  When a recorded input demo exists for a
-path, it is the authoritative input corpus: replay exactly the same semantic
-events on the oracle and on the candidate at the same semantic boundaries
-(the framework's lockstep playback), and compare state there.  Never
-approximate a demo with synthetic frame-number drives, periodic key spam, or
-mouse-hold heuristics — a guessed test verifies a guessed path.  Gate on
-compatibility first (clock semantics, hook-topology fingerprint); a stale
-demo is migrated or re-recorded ONCE, not approximated.  Input models are
-investigated only when the same demo succeeds on the oracle and diverges on
-the candidate.
+**The recorded replay artifact is the test.** Replay exactly the same semantic
+events on the oracle and candidate between the same stable points, then compare
+complete continuation or canonical semantic state. Never approximate the
+recording with synthetic frame-number drives, periodic key spam, or mouse-hold
+heuristics—a guessed test verifies a guessed path. Artifacts or derived
+boundaries with stale identities are rejected; unsupported old recordings are
+discarded and recorded again. Input models are investigated only when the same
+artifact succeeds on the oracle and diverges on the candidate.
 
 ---
 
@@ -836,7 +835,7 @@ the next major mechanical stage after the VMless graph converges.
   parameters, pointer/view types where proven, direct recovered-to-recovered
   calls through recovered contracts, dual generated entrypoints (private
   compat for verification, public ABI-recovered), provenance naming.  The
-  historical memory image stays authoritative; the canonical demo stays
+  recovery-time memory image stays authoritative; the canonical replay stays
   oracle-clean.  Complete when no public recovered contract contains a CPU
   object, register-named parameter, or return-address mechanics — and
   unsupported ABI shapes fail loudly with evidence.  **End state + acceptance

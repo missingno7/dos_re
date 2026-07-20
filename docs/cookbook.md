@@ -3,10 +3,6 @@
 > 2.0 hard walls and automation principle, dos_re_2.0.md wins.  Promoted from the
 > DOS_RE 1.0 starter (template_dos_port, retired) because the mechanics remain valid.
 
-> **dos_re 3.0 replay supersession:** historical replay engines, suffix demos, or separate
-> repro manifests are historical. Their proof requirements are consolidated in
-> `dos_re.replay` and [`demos_and_snapshots.md`](demos_and_snapshots.md).
-
 # Cookbook — proven techniques that live in the source repos
 
 Not everything the two ports invented could be promoted into this framework:
@@ -119,7 +115,8 @@ unfocused as the pre-commit pass). KE's level-2 demo proved `rects_overlap`
 → *Deterministic timing fast-forward*: collapse provably-identical poll
 iterations in closed form, re-emitting every due IRQ at its emulated-time
 point, never skipping across a pump boundary. The emulated timeline stays
-byte-identical — demos don't re-record. Worked examples:
+byte-identical; the runtime identity changes, so derived boundary caches are
+revalidated automatically. Worked examples:
 `pre2/bridge/timing_fastforward.py` (+ `tests/test_timing_fastforward.py`,
 whose mock-CPU sweep is the template for proving skip arithmetic) and the
 simpler `overkill/timing_fastforward.py`. Read pitfalls #12–13 first.
@@ -137,10 +134,10 @@ Deliver the *real installed IRQ0 ISR* at the wait points (never poke the flag
 Worked example: `overkill/timing_fastforward.py::advance_frames_fast`.
 
 **Every probe/investigation replays minutes of VM to reach its target.**
-→ *Walk-shadow cache*: record a demo's per-frame states once (delta-encoded;
-~10–20 MB for an 8000-frame demo), replay in seconds, keyed by the demo file's
-hash so it can't go stale. Worked example: `overkill/probes/_shadow_cache.py`;
-the probe scaffolding around it is `overkill/probes/_harness.py`.
+→ Promote the target to a stable `ReplayPoint` and let `ReplayArtifact` cache
+it. Each boundary stores complete non-memory continuation state plus only pages
+changed from the artifact's base; it restores independently and is rejected
+when any relevant identity changes.
 
 ## Bootstrap and cold start
 
@@ -195,7 +192,8 @@ and the layered section of `docs/pre2/source_port_plan.md`.
 **Audio makes bring-up unbearably slow before you care about it.**
 → *Fast-AdLib service*: replace the driver's delay/write loops with an
 instant-return service during bring-up — reaches graphics fastest, mutes
-music, and is recorded in demo manifests so replays stay compatible. Worked
+music. Treat it as a distinct `ExecutionProfile` identity so replay caches
+cannot cross the implementation change. Worked
 example: `pre2/bootstrap_hooks.py` (`install_fast_adlib_service`).
 
 **You need to hear/verify FM music without the game running.**
@@ -232,52 +230,26 @@ let a wall of unread-but-verified lifted code inflate the campaign's
 
 ## Verification depth (the endgame)
 
-**Proving the native port equals the VM, tick by tick, over whole playthroughs.**
-→ Use `ReplayArtifact` stable game-tick points with `CanonicalState`. Record
-the continuation base plus per-tick
-consumed input + a gameplay-state digest (render-only ranges masked out — ONE
-digest definition shared with the forward oracle), replay through the VM-less
-core, compare per tick. Includes the non-obvious lesson, now a first-class
-*sideband* channel: state derived from instruction count (P2's idle-fidget
-timer) must be *recorded and injected*, since the native port has no
-instruction count. Worked examples of the full pipeline (pre-framework, still
-the richest reference) are intentionally not linked as current APIs.
+**Proving a native port against the machine-backed oracle.** → Record one
+`ReplayArtifact`, define stable points at the seams the game actually observes,
+and compare the exact relevant interval. Machine-backed candidates use complete
+continuation-state comparison. Detached native candidates project authoritative
+state into the oracle's `CanonicalState` schema.
 
-**Proving the native FRONT END behaves like the original — the screens with no game tick.**
-→ Express front-end transitions as stable replay points and canonical semantic
-state. A gameplay-only interval captures
-none of the intro / title / menu / attract / map / tally — they run with no tick —
-so those flows ship verified against nothing and drift (a screen shown in the wrong
-ORDER, an attract demo entered instead of the recorded selection, a wall screen
-after the level load instead of before). A per-frame pixel diff is the WRONG proof
-(the VM recording and the native scene generator share no frame clock); the proof is
-the flow's discrete structure: **[1] screen ORDER** (`capture`/`collapse`/
-`filter_runs`/`diff_sequence`), **[2] a DECISION-STATE witness byte-compared at
-every screen transition** (`pack_fields`/`diff_fields` — chosen level/mode,
-live-vs-attract input source, lives, password state), **[3] gameplay-entry state
-byte-identical outside an OWNED byte set** (`diff_offsets` — sound-driver data /
-load-layout / scene scratch a VM-less product legitimately owns differently), and
-**[4] that owned set proven INERT** (`spread_beyond` — dual-replay the recorded
-gameplay ticks from both entry states; no tick may diverge outside the owned set).
-Input honesty: capture the raw key-flag window the VM's front end sampled per frame
-(include EVERYTHING the flow reads — menu key flags can live below the scancode
-table) and feed it to native CAUSALLY per screen (`input_segments`/`SegmentedInput`),
-so presses land on the same screen at the same relative moment. Needs a
-**artifact based at cold boot**; seed the candidate from the FRONT-END entry state (boot
-constants), not a level-jump bootstrap. Worked end-to-end (all four gates green on a
-real cold-boot replay; gate 2 caught a menu-entry fresh-start block on its first run):
-Historical port-local scripts documented this proof before consolidation; they
-are intentionally not linked as current APIs.
+**Proving front-end and presentation flow.** → Put stable points at discrete
+presentation and decision transitions instead of assuming that the oracle and a
+native renderer share a frame clock. Capture consumed input as immutable replay
+events and include every semantic field needed to prove equivalent choices and
+transitions in the canonical projection.
 
 **A divergence appears 10 minutes into a replay.**
 → Use `replay.bisect_divergence`. The artifact caches and annotates the latest
 equivalent boundary, making the failing X→Y transition directly replayable.
-Suffix demos and separate repro bundles are obsolete.
 
-**Tracking what the demo corpus actually covers.**
-→ Corpus census: enumerate demos, their length, and which
-levels/scenes/behaviours each reaches; blind spots are reported risks. Worked
-examples: `pre2/probes/demo_census.py`, `pre2_port/docs/pre2/demo_manifest.md`.
+**Tracking what the replay corpus actually covers.**
+→ Use each artifact's function-visit index and the execution atlas to enumerate
+covered functions, invocation counts, and first-entry/last-exit intervals. Report
+unvisited behavior as a coverage gap.
 
 ## The play.py entry point (the human's window into the port)
 
@@ -314,7 +286,8 @@ game demands it, cheapest first:
   (`overkill_port/scripts/play.py`).
 
 Whatever you pick: every knob a replay must match goes into
-`demo_metadata`/`apply_demo_metadata`, or old demos lie.
+`demo_metadata`/`apply_demo_metadata` and the execution-profile identity, or
+artifact validation must reject the run.
 
 **How big should `--steps-per-frame` be?** Size it *above* the game's peak
 per-frame work, never toward the average. A budget below the real per-frame cost
@@ -325,8 +298,8 @@ below chunk 20000, reaching natural pacing only from ~40000). This matters
 *more* once you add a tick-wait park: the park makes the budget a **ceiling** the
 common frame never reaches, so its value is set entirely by the rare heavy
 frames — size it to peak + headroom (SkyRoads: measured peak 37.3k steps →
-budget 48k). Because `steps_per_frame` lives in `demo_metadata`, raising the
-default never disturbs existing recordings.
+budget 48k). Because `steps_per_frame` lives in artifact metadata, playback
+restores the recorded value.
 
 **A hook tier safe enough to record demos over (`--safe-hooks`).**
 → Classify hooks by WRITE-SET: render/audio-owned hooks (their writes cannot
@@ -362,10 +335,10 @@ blocks to the host mixer (worked example: P2 `--audio adlib`, and
 
 **Convenience fast-paths behind flags (never silent).**
 → Recovered accelerators the human toggles: P2's `--fast-song-load`
-(byte-exact MOD-loader fast-forward, default ON live / OFF for replays so old
-demos still verify) and `--fast-adlib` (mute the hot AdLib thunk to reach
+(byte-exact MOD-loader fast-forward) and `--fast-adlib` (mute the hot AdLib thunk to reach
 graphics fastest). The pattern: default them by MODE, record them in demo
-metadata, document the byte-exactness status in the help text. Worked
+metadata, include them in the execution-profile identity, and document the
+byte-exactness status in the help text. Worked
 example: `pre2_port/scripts/play.py`.
 
 ## Progress and process machinery

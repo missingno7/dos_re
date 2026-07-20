@@ -35,6 +35,9 @@ Reading order for the framework itself: the repo [README](../README.md) →
 | [`enhancements.md`](enhancements.md), [`post_endgame.md`](post_endgame.md) | The enhanced-layer / post-endgame playbook (parity gate, overlay menu taxonomy). |
 | [`glossary.md`](glossary.md) | Every project term (oracle, island, coastline, golden, heartbeat, …) in one table — 1.x terms kept for reading historical ledgers; dos_re_2.0.md vocabulary wins. |
 
+Historical, non-normative design records live under [`history/`](history/).
+They are not API or workflow documentation.
+
 Related, outside `docs/`:
 
 - [`../tools/README.md`](../tools/README.md) — one entry per CLI tool:

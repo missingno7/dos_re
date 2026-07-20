@@ -35,9 +35,9 @@ authority; "native" is banned as a bare term):**
 | **Parity gate** | The enhanced layer's standing proof: at its neutral settings the enhanced game must be pixel- and state-identical to the faithful game, so "enhanced" can never silently mean "diverged". ([`enhancements.md`](enhancements.md)) |
 | **Hybrid runtime** | The workbench: the VM running the original game with recovered islands hooked live over it. |
 | **Native runtime** | DEPRECATED as a bare term — it conflated stages 1–4. Use the stage vocabulary above: a runtime is *VMless lifted*, *CPUless lifted*, *DOS-layout-less native*, or a *semantic clean port*. The shipped product is stage 3+ (no interpreter, no CPU carrier, no DOS layout, no bridge). |
-| **Demo** | A deterministic **input recording** (never a video): VM-visible key events keyed to the emulated boundary clock, plus metadata. Replays identically under every driver. ([`demos_and_snapshots.md`](demos_and_snapshots.md)) |
-| **Snapshot** | A save-state-like repro artifact: full memory + CPU + DOS/hardware state. Makes bugs local ("resume here, run 4 frames, compare"). |
-| **Boundary clock** | The emulated counter demo events are keyed to. All drivers must agree on what increments it, or demo proofs are void. |
+| **Replay artifact / demo** | The single persistent oracle-verifiable recording: base continuation state, immutable normalized events, stable points, metadata, function visits, and derived base-relative boundary caches. “Demo” remains a player/CLI convenience term, not a second format. ([`demos_and_snapshots.md`](demos_and_snapshots.md)) |
+| **Snapshot** | Complete serialised memory, CPU, DOS, device, timing, interrupt, scheduler, and replay-cursor state for resuming machine-backed execution. It is not an independent replay record or a portable game save. |
+| **Replay timeline** | A canonical monotonic sequence of stable `ReplayPoint` identities. Backend adapters may observe different stop seams, but must agree on their semantic ordering and event positions. |
 | **Input-wait registry** | The one shared table of boundary-less keyboard-poll loops every driver treats as boundaries. |
 | **Hook oracle** | The differential per-hook verifier: clone, run original ASM to the continuation, run the hook, diff registers + flags + full memory. |
 | **Frame oracle** | The lockstep frame verifier: reference (pure ASM) vs candidate (hooked/native) diffed at frame boundaries. |

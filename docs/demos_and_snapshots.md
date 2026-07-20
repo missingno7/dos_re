@@ -4,9 +4,9 @@ dos_re has one primary replay artifact: a deterministic recording that drives
 the original interpreter and a candidate implementation over the same stable
 interval and compares their equivalent continuation state.
 
-There are no legacy demo formats, suffix demos, standalone bisection repros,
-tick-demo proof files, or frontend-timeline proof files in the 3.0 design.
-Downstream recordings made with earlier formats must be recorded again.
+Earlier recording formats are unsupported. Downstream projects record new
+artifacts through the current players. Design history is isolated in
+[`history/replay_evolution.md`](history/replay_evolution.md).
 
 ## The verification model
 
@@ -104,7 +104,7 @@ X is restored, replay advances to X, X is cached lazily, and only X→Y executes
 The on-disk shape is:
 
 ```text
-demo/
+artifact/
   replay.json
   profiles/<profile-id-and-hash>/
     base/state.json
@@ -154,17 +154,16 @@ On mismatch, the already-diverged candidate endpoint is not cached as valid.
 The artifact annotates X as the latest valid point before the observed
 divergence.
 
-## Bisection and repro
+## Divergence localization
 
 `bisect_divergence` receives stable candidate stop points. It verifies cached
 sub-intervals until it finds the smallest supplied transition whose endpoint
 diverges. The final valid predecessor is cached and annotated with the
 divergent successor and profile identities.
 
-That persistent point is the repro. There is no suffix demo or separate repro
-snapshot format. After a fix, tooling restores the same pre-divergence point,
-tests the small transition, then verifies the function's full first-entry to
-last-exit interval.
+That persistent point is the reproduction reference. After a fix, tooling
+restores it, tests the small transition, then verifies the function's full
+first-entry to last-exit interval.
 
 ## Function visits and atlas identity
 
@@ -194,39 +193,13 @@ class ReplayDriver:
 
 Game knowledge stays in adapters: event application, exact stop seams,
 authoritative semantic fields, and stable lifted function identities. Storage,
-validation, caching, interval selection, comparison, bisection, and repro
+validation, caching, interval selection, comparison, bisection, and divergence
 annotations stay in `dos_re.replay`.
 
-## What was removed
+## Scope boundary
 
-dos_re 3.0 deliberately removes these independent workflows:
-
-- game-tick demos and their private binary/digest format;
-- frontend timeline proof containers;
-- suffix demos that clone and rebase remaining input;
-- timestamped divergence snapshot/repro manifests;
-- repeated-prefix hook-set bisection.
-
-Any useful proof concept from those systems must enter through
-`CanonicalState` or stable replay points rather than retaining another artifact
-format.
-
-## Landing order
-
-The implementation is intentionally separable:
-
-1. Land artifact contracts, profile identities, stable points, and the
-   base-relative boundary store.
-2. Add real-mode and PM continuation codecs and prove capture/restore with
-   deterministic resume tests.
-3. Adapt hook-verification drivers to exact X→Y replay and replace repeated
-   prefix bisection with persistent stable-point bisection.
-4. Populate function visits during replay, then build the atlas inverse index
-   from function identity to covering artifacts and intervals.
-5. Add project-specific semantic projection schemas as candidates detach from
-   DOS memory. Each projection lands independently and is checked against the
-   same oracle corpus.
-
-This slice implements steps 1 and 2 plus a driver-neutral end-to-end proof of
-step 3. It does not prescribe atlas storage, native object models, or semantic
-projection fields beyond the explicit interfaces above.
+The replay artifact, real-mode and protected-mode continuation adapters,
+interval verification, persistent boundary cache, divergence localization, and
+function-visit index are the current shared infrastructure. Atlas storage,
+project-specific native object models, and semantic projection fields remain
+independent consumers of these interfaces.
