@@ -479,6 +479,21 @@ def register_effects(inst) -> Effects:  # noqa: C901  (a decode table is a table
             allr = frozenset(W16) | frozenset({"ds", "es", "ss"})
             return Effects(reads=allr, writes=allr - frozenset({"ss"}),
                            mem_read=True, mem_write=True, stack_delta=0)
+        if r == 3 and inst.kind == CALL_IND and (inst.modrm >> 6) != 3:
+            # FAR indirect CALL through a memory far pointer.  Statically the
+            # target set is unknown, so this REFUSES by default (the capability
+            # string is unchanged); it becomes composable only when per-site
+            # evidence is supplied, at which point abi_scan overrides these
+            # effects (see the ``far_dyn_effects`` argument) exactly as it does
+            # for a composed direct call.  The effects are still modelled here
+            # (like CALL/CALL_FAR, which also carry a refusal) so the dataflow
+            # is exact for the composed case: a dispatched callee may read and
+            # write the whole bundle, and the 4-byte far frame it pushes is
+            # popped by its own retf.
+            allr = frozenset(W16) | frozenset({"ds", "es", "ss"})
+            return Effects(reads=allr, writes=allr - frozenset({"ss"}),
+                           mem_read=True, mem_write=True, stack_delta=0,
+                           refusal="indirect-or-far-transfer")
         if r == 5:
             # Far indirect jmp through a memory vector: the ISR
             # CHAIN tail -- the saved vector's recovered handler runs on our
@@ -597,7 +612,7 @@ def _successors(scan) -> dict[int, list[int]]:
 
 
 def abi_scan(scan, callee_effects=None, far_callee_effects=None,
-             plat_farcalls=None) -> AbiReport:
+             plat_farcalls=None, far_dyn_effects=None) -> AbiReport:
     """Infer the CPU ABI of one scanned function from its instruction list.
 
     Register INPUTS = live-in at entry by backward may-liveness over the
@@ -622,6 +637,22 @@ def abi_scan(scan, callee_effects=None, far_callee_effects=None,
     stack traffic to locate the args and clean them (net ``+argbytes`` pop, the
     frame push and pascal cleanup combined)."""
     effs = {i.ip: register_effects(i) for i in scan.insts.values()}
+    if far_dyn_effects:
+        # A COMPOSED indirect far call (per-site evidence supplied): the same
+        # override this function already applies to a direct call whose target
+        # composes.  The dispatched arm may touch the whole bundle; ``net_pop``
+        # is the site's uniform net stack effect (0 when every observed arm is
+        # a stack-balanced recovered body, the pascal ``argbytes`` when every
+        # arm is a callee-cleanup platform boundary target).
+        for ip, net_pop in far_dyn_effects.items():
+            if ip not in effs:
+                continue
+            allr = frozenset(W16) | frozenset({"ds", "es", "ss"})
+            effs[ip] = Effects(reads=allr | frozenset({"sp"}),
+                               writes=(allr - frozenset({"ss"}))
+                               | frozenset({"sp"}),
+                               mem_read=True, mem_write=True,
+                               stack_delta=net_pop)
     if plat_farcalls:
         for i in scan.insts.values():
             if (i.kind == CALL_FAR and i.far_target is not None

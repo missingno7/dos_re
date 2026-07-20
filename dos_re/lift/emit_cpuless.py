@@ -906,7 +906,8 @@ class PromotionSpec:
 def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
                      far_callees=None, dispatch_addrs=frozenset(),
                      boundary_addrs=frozenset(), plat_far_segs=frozenset(),
-                     plat_farcalls=None, dead_exits=frozenset()):
+                     plat_farcalls=None, dead_exits=frozenset(),
+                     far_dyn_sites=None):
     """The strict promotion gate.  Returns a :class:`PromotionSpec` or
     raises :class:`Refusal` with the census reason.
 
@@ -949,6 +950,13 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
                 and i.far_target not in far_callees):
             raise Refusal("platform-farcall-contract-unknown")
     plat_argbytes = {tgt: c.argbytes for tgt, c in plat_farcalls.items()}
+    # COMPOSED INDIRECT FAR CALLS (evidence-gated): resolve each site's observed
+    # target set into dispatchable arms.  Composing here (before abi_scan) is
+    # what removes the site from the refusal set -- the same shape as a direct
+    # call whose target contract is supplied.
+    far_arms = far_dyn_arms(scan, far_dyn_sites, far_callees, plat_farcalls,
+                            plat_far_segs)
+    far_pops = {ip: pop for ip, (_a, pop) in far_arms.items()}
     callee_effects = {ip: (frozenset(c.inputs) - frozenset({"sp", "ss"}),
                            frozenset(c.outputs))
                       for ip, c in callees.items()}
@@ -957,7 +965,8 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
                    for tgt, c in far_callees.items()}
     abi = abi_scan(scan, callee_effects=callee_effects,
                    far_callee_effects=far_effects,
-                   plat_farcalls=plat_argbytes)
+                   plat_farcalls=plat_argbytes,
+                   far_dyn_effects=far_pops)
     heads = frozenset(boundary_addrs) & frozenset(scan.insts)
     for h in heads:
         hk = scan.insts[h].kind
@@ -1075,7 +1084,7 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     bp_bias = _check_frame_pointer(scan, callees, far_callees)
     sp_delta, ret_pop, sp_output, sp_deltas = _check_stack_depths(
         scan, alt_entries, callees, far_callees, plat_farcalls, dead_exits,
-        bp_bias)
+        bp_bias, far_pops)
     # NOTE: a sp_output (unbalanced/varying exit) tail dispatch used to refuse
     # here -- "an unbalanced body would hand the callee a shifted frame".  That
     # is exactly the FRAMELESS STACK-ARG idiom (push args; jmp cs:[table]; each
@@ -1117,7 +1126,7 @@ def check_promotable(scan, *, excluded_addrs=frozenset(), callees=None,
     # may return status in CF -- e.g. a KERNEL DOS gateway), so it needs
     # _flags_in for the untracked bits, exactly like an INT (i.kind == INT).
     flags_livein = fl_needed or bool(heads) \
-        or any(_is_dyn(i) or i.kind == INT or _is_isr_chain(i)
+        or any(_is_dyn(i) or _is_far_dyn(i) or i.kind == INT or _is_isr_chain(i)
                or i.op == 0x9C
                or (i.kind == CALL_FAR and i.far_target in plat_farcalls)
                for i in scan.insts.values()) \
@@ -1154,7 +1163,7 @@ def _func_needs_plat(scan, callees, far_callees=None, plat_farcalls=None) -> boo
         e = register_effects(i)
         if e.port_io or e.int_effect is not None:
             return True
-        if _is_dyn(i) or _is_game_int(i) or _is_isr_chain(i):
+        if _is_dyn(i) or _is_far_dyn(i) or _is_game_int(i) or _is_isr_chain(i):
             return True     # a dynamic/vectored callee may need the platform
         if (i.kind == CALL_FAR and i.far_target in (plat_farcalls or {})):
             return True     # a platform/API far-call (plat.farcall)
@@ -1414,6 +1423,8 @@ def _is_stack_family(i) -> bool:
             or (op == 0xFF and i.reg == 6) or (op == 0x8F and i.reg == 0)
             or i.kind in (CALL, CALL_FAR)  # composed call: ret-addr push/pop
             or _is_dyn(i)                  # recovered dispatch: balanced
+            or _is_far_dyn(i)              # composed indirect far call: the
+                                           # far frame push + its retf pop
             or _is_game_int(i)             # vector dispatch: frame symmetric
             or _is_isr_chain(i)            # chain tail: frame is the callee's
             or i.kind in (RET, RETF, IRET))
@@ -1525,6 +1536,214 @@ def _is_dyn(i) -> bool:
     dispatch. Far variants stay refusals unless they are ISR-chain tails."""
     return i.kind in (CALL_IND, JMP_IND) and i.modrm is not None \
         and ((i.modrm >> 3) & 7) in (2, 4)
+
+
+def _is_far_dyn(i) -> bool:
+    """A FAR indirect CALL through a memory far pointer (``FF /3``) -- the
+    structural shape.  Whether such a site COMPOSES is a separate question
+    answered by per-site evidence (``far_dyn_sites``), never by structure: the
+    predicate stays purely syntactic so every analysis pass (stack depth, flag
+    liveness, plat need) can recognise the site, and only the gate decides
+    whether it is composable or a refusal.
+
+    ``FF /3`` mandates a memory operand -- a 16-bit register cannot hold a
+    32-bit far pointer -- so a ``mod == 3`` encoding is excluded here rather
+    than mis-modelled as a far transfer."""
+    return i.kind == CALL_IND and i.modrm is not None \
+        and ((i.modrm >> 3) & 7) == 3 and (i.modrm >> 6) != 3
+
+
+#: how a composed indirect-far arm is dispatched.
+_ARM_PLAT = "plat"          # a platform-boundary target (plat.farcall)
+_ARM_BODY = "body"          # a recovered far-return body (the _dyn registry)
+
+
+def _parse_far_key(t):
+    """``"SEG:OFF"`` (the dyn-evidence wire format) or ``(seg, off)`` -> a
+    normalised ``(seg, off)`` pair."""
+    if isinstance(t, str):
+        seg, off = t.split(":")
+        return int(seg, 16) & 0xFFFF, int(off, 16) & 0xFFFF
+    return int(t[0]) & 0xFFFF, int(t[1]) & 0xFFFF
+
+
+def far_dyn_arms(scan, far_dyn_sites, far_callees, plat_farcalls,
+                 plat_far_segs=frozenset()):
+    """Resolve every FAR indirect call site in ``scan`` against its OBSERVED
+    target evidence, returning ``{site ip: ([(seg, off, kind)], net_pop)}``.
+
+    THE MECHANISM.  A composed indirect far call is nothing new: it is a
+    GUARDED FAN-OUT OVER STATIC FAR CALLS.  Evidence supplies the arm set; each
+    arm is then composed by exactly the rule that already governs a DIRECT
+    ``call far`` to that same target -- a platform-boundary target with a
+    contract becomes a ``plat.farcall`` effect, a recovered far-return body
+    becomes a dispatched recovered call.  Nothing here knows what a target IS
+    (an import thunk, a callback, a game routine); it only knows how a static
+    call to it would have composed.  That is why the capability generalises:
+    any future static far-call composition rule is inherited by the indirect
+    site for free.
+
+    EVIDENCE IS NOT PROOF.  A capture shows what a pointer HELD on the observed
+    path, never what it CAN hold, so composition alone is not enough -- the
+    emitted site carries a runtime guard that raises a structured witness for
+    any pointer outside this arm set (see ``UnknownFarDispatchTarget``).  The
+    set below is therefore the DISPATCHABLE set, not a proof of exhaustiveness.
+
+    Refusals (loud, never a guess):
+      * ``far-dispatch-no-evidence`` -- the site has no observed target: there
+        is nothing to dispatch to and a guard alone would be a body that can
+        only raise.
+      * ``far-dispatch-platform-contract-unknown`` -- an observed target lands
+        in a declared platform-boundary segment but has no contract, so its arg
+        cleanup is unknown.  The indirect analogue of
+        ``platform-farcall-contract-unknown``: the boundary is known, the
+        contract is not, and the argbytes are never guessed.
+      * ``far-dispatch-target-unpromoted`` -- an observed target is game code
+        with no recovered far-return body (yet).  Retried every fixpoint round,
+        exactly like the near-dyn gate's ``dyn-target-unpromoted``.
+      * ``far-dispatch-target-sp-escape`` -- an observed recovered arm does not
+        return stack-balanced, so the site's continuation depth is arm-
+        dependent (the same rule the near-dyn evidence gate applies).
+      * ``far-dispatch-nonuniform-stack`` -- the arms disagree on the net stack
+        effect, so the depth after the site is not a static number.  Depth is
+        the premise every other analysis rests on; it must not become dynamic.
+    """
+    far_dyn_sites = far_dyn_sites or {}
+    far_callees = far_callees or {}
+    plat_farcalls = plat_farcalls or {}
+    out = {}
+    for i in scan.insts.values():
+        if not _is_far_dyn(i):
+            continue
+        if i.ip not in far_dyn_sites:
+            # no evidence channel for this site at all: not composed here, so
+            # it stays an ordinary indirect-control-flow refusal.  Only a site
+            # the channel KNOWS about (and that came back empty) is the
+            # distinct "observed nothing" case below.
+            continue
+        targets = [_parse_far_key(t) for t in far_dyn_sites[i.ip]]
+        if not targets:
+            raise Refusal("far-dispatch-no-evidence")
+        arms, pops = [], set()
+        for tgt in sorted(set(targets)):
+            if tgt in plat_farcalls:
+                arms.append((tgt[0], tgt[1], _ARM_PLAT))
+                pops.add(plat_farcalls[tgt].argbytes)
+            elif tgt in far_callees:
+                c = far_callees[tgt]
+                if c.ret_kind != "far":
+                    raise Refusal("far-dispatch-target-not-far-return")
+                if c.sp_output or c.ret_pop or c.sp_delta != 0:
+                    raise Refusal("far-dispatch-target-sp-escape")
+                arms.append((tgt[0], tgt[1], _ARM_BODY))
+                pops.add(0)
+            elif tgt[0] in plat_far_segs:
+                raise Refusal("far-dispatch-platform-contract-unknown")
+            else:
+                raise Refusal("far-dispatch-target-unpromoted")
+        if len(pops) > 1:
+            raise Refusal("far-dispatch-nonuniform-stack")
+        out[i.ip] = (arms, next(iter(pops)))
+    return out
+
+
+_FLAG_FIELDS = (("cf", 0x01), ("pf", 0x04), ("af", 0x10), ("zf", 0x40),
+                ("sf", 0x80), ("of", 0x800), ("intf", 0x200), ("df", 0x400))
+
+
+def _flags_word_expr() -> str:
+    """The live FLAGS word rebuilt from the flag locals (the bits this body
+    tracks); the caller ORs in the untracked bits from ``_flags_in``."""
+    return " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
+                      for f in ("cf", "pf", "af", "zf", "sf", "of",
+                                "df", "intf"))
+
+
+def _plat_farcall_lines(cs, pseg, poff, argbytes, ret_off, cost) -> list:
+    """The literal PLATFORM far-call sequence: write the 4-byte far return
+    frame, hand the API service the register bundle + composed FLAGS word,
+    reload the bundle it left, then the pascal cleanup (4 + argbytes).
+
+    Factored out of the direct ``call far <platform target>`` path so a
+    COMPOSED INDIRECT far site can emit the identical sequence for an arm whose
+    resolved pointer is that target -- the arm IS the static call."""
+    out = [
+        "sp = (sp - 2) & 0xFFFF",
+        f"mem.ww(ss, sp, 0x{cs:04X})",              # return CS
+        "sp = (sp - 2) & 0xFFFF",
+        f"mem.ww(ss, sp, 0x{ret_off:04X})",         # return offset
+        f"_ff = (_flags_in & ~_fmask) | (({_flags_word_expr()}) & _fmask)",
+    ]
+    bundle = ", ".join(f"'{r}': {r}" for r in _INT_REGS + ("ss", "sp"))         + ", '_flags': _ff"
+    out.append(f"_fo = plat.farcall(0x{pseg:04X}, 0x{poff:04X}, "
+               f"{{{bundle}}}, {argbytes}, {cost})")
+    out += [f"{r} = _fo['{r}']" for r in _INT_REGS]
+    out.append("_pf = _fo['flags']")
+    out += [f"{f} = (_pf & 0x{b:X}) != 0" for f, b in _FLAG_FIELDS]
+    out.append("_fmask |= 0xED5")
+    out.append("_cost += _fo['cost']")
+    out.append(f"sp = (sp + {4 + argbytes}) & 0xFFFF")
+    return out
+
+
+def _far_body_call_lines(cs, tseg, toff, ret_off, cost) -> list:
+    """The far call to a RECOVERED body, dispatched through the generated
+    registry: the same 4-byte far frame written literally, the full register
+    bundle in and out, the callee's flag mask merged, then the frame popped
+    (the callee's own ``retf`` consumed it)."""
+    out = [
+        "sp = (sp - 2) & 0xFFFF",
+        f"mem.ww(ss, sp, 0x{cs:04X})",
+        "sp = (sp - 2) & 0xFFFF",
+        f"mem.ww(ss, sp, 0x{ret_off:04X})",
+    ]
+    bundle = ", ".join(f"'{r}': {r}" for r in _DYN_REGS)         + (f", 'cs': 0x{tseg:04X}, '_df': (1 if df else 0), "
+           f"'_flags_in': ((_flags_in & ~_fmask) "
+           f"| (({_flags_word_expr()}) & _fmask))")
+    out.append(f'_do, _dc = _dyn("{tseg:04X}:{toff:04X}", mem, plat, '
+               f"{cost}, {{{bundle}}})")
+    out += [f"{r} = _do['{r}']" for r in _DYN_REGS]
+    out.append("_gm = _dc['fmask']")
+    out.append("if _gm:")
+    out.append("    _gf = _dc['flags']")
+    out += [f"    if _gm & 0x{b:X}: {f} = (_gf & 0x{b:X}) != 0"
+            for f, b in _FLAG_FIELDS]
+    out.append("    _fmask |= _gm")
+    out.append("_cost += _dc['cost']")
+    out.append("sp = (sp + 4) & 0xFFFF")
+    return out
+
+
+def _far_dyn_site_lines(i, cs, arms, plat_farcalls, cost) -> list:
+    """A COMPOSED INDIRECT FAR CALL: read the far pointer out of memory, then
+    dispatch it through a GUARDED fan-out over the observed arms.
+
+    Each arm emits exactly what a DIRECT far call to that pointer emits, so the
+    site inherits every static far-call composition rule rather than
+    re-deriving one.  The guard is the soundness half: observed evidence says
+    what the pointer HELD, never what it CAN hold, so any pointer outside the
+    arm set raises :class:`UnknownFarDispatchTarget` naming the site and the
+    unresolved pointer.  There is no fallback arm, no nearest match, no
+    default -- an un-witnessed pointer is a frontier witness, not a guess."""
+    off_expr, seg_local = _ea(i)
+    out = [f"_fea = {off_expr}",
+           f"_fptr = mem.rw({seg_local}, _fea)",
+           f"_fseg = mem.rw({seg_local}, (_fea + 2) & 0xFFFF)"]
+    for n, (tseg, toff, kind) in enumerate(arms):
+        cond = f"_fseg == 0x{tseg:04X} and _fptr == 0x{toff:04X}"
+        out.append(f"{'if' if n == 0 else 'elif'} {cond}:")
+        if kind == _ARM_PLAT:
+            body = _plat_farcall_lines(
+                cs, tseg, toff, plat_farcalls[(tseg, toff)].argbytes,
+                i.next_ip, cost)
+        else:
+            body = _far_body_call_lines(cs, tseg, toff, i.next_ip, cost)
+        out += ["    " + ln for ln in body]
+    out.append("else:")
+    regs = ", ".join(f"'{r}': {r}" for r in _DYN_REGS)
+    out.append(f'    raise _far_witness("{cs:04X}:{i.ip:04X}", _fseg, _fptr, '
+               f"{{{regs}}}, {cost})")
+    return out
 
 
 def _is_game_int(i) -> bool:
@@ -1776,7 +1995,8 @@ def _is_isr_chain(i) -> bool:
 
 def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
                         far_callees=None, plat_farcalls=None,
-                        dead_exits=frozenset(), bp_bias=None) -> tuple:
+                        dead_exits=frozenset(), bp_bias=None,
+                        far_pops=None) -> tuple:
     """Static stack-discipline verification: every address has
     ONE net push depth (bytes) from entry, consistent at every join.
 
@@ -1977,6 +2197,12 @@ def _check_stack_depths(scan, alt_entries=frozenset(), callees=None,
                 # the 4-byte far frame push and the 4+argbytes pascal cleanup
                 # combined.  Depth (bytes pushed) drops by argbytes.
                 afters = [d - plat_farcalls[i.far_target].argbytes]
+            if far_pops is not None and i.ip in far_pops:
+                # a COMPOSED indirect far call: every observed arm agrees on
+                # the net stack effect (far_dyn_arms proved it), so the depth
+                # after the site is that one static number -- exactly as for a
+                # direct far call to any one of those arms.
+                afters = [d - far_pops[i.ip]]
         succs = []
         if i.kind in (SEQ, CALL, CALL_FAR, CALL_IND):
             succs = [i.next_ip]
@@ -2077,7 +2303,10 @@ def _flag_pass(scan, callees, far_callees, alt_entries, plat_farcalls=None,
                 if not need <= set(defined[ip]):
                     fl_consumed = True
             if "df" not in defined[ip]:
-                if i.op in _STRING_OPS or _is_dyn(i):
+                if i.op in _STRING_OPS or _is_dyn(i) or _is_far_dyn(i):
+                    # a composed indirect far site hands the resolved arm the
+                    # caller's FLAGS word (the plat arm) / bundle (the body
+                    # arm) exactly as a direct one does, DF included.
                     df_consumed = True
                 if (i.kind == CALL and i.target in callees
                         and callees[i.target].df_livein):
@@ -2228,7 +2457,32 @@ def _contract_inputs(scan, abi, boundary_addrs=frozenset()) -> list[str]:
     return inputs
 
 
-def _emit_boundary_observer(blk, cs, i, count):
+def _flush_flag_writes(blk, flag_written) -> None:
+    """Record the flag bits written SO FAR IN THIS BLOCK into ``_fmask``.
+
+    ``_fmask`` says which FLAGS bits this body has authoritatively computed;
+    every bit outside it rides the caller's ``_flags_in`` word.  The mask is
+    normally written once at the end of a block (one ``|=`` instead of one per
+    instruction), which is fine for a block that just runs to its terminator --
+    but NOT for a site that composes an OUTGOING flags word mid-block (a
+    platform far-call or INT, a dynamic dispatch, a flags-livein callee, a
+    boundary observer).  Such a site reads ``_fmask`` to decide which bits are
+    its own, so any flag written earlier in the same block but not yet recorded
+    was silently discarded and the CALLER's stale bit handed out instead --
+    e.g. ``or cx,cx ; push args ; call far <API>`` gave the API the entry ZF
+    rather than the ZF the ``or`` had just computed.
+
+    Flushing at the site fixes that at the source: the bits are recorded as
+    soon as the instruction that wrote them has been emitted, which is exactly
+    when they become true.  Clearing afterwards keeps the end-of-block flush
+    from repeating them."""
+    if flag_written:
+        bits = " | ".join(f"0x{_FLAG_BITS[f]:X}" for f in sorted(flag_written))
+        blk.append(f"_fmask |= {bits}")
+        flag_written.clear()
+
+
+def _emit_boundary_observer(blk, cs, i, count, flag_written=None):
     """Emit the boundary-head observer AFTER the head instruction: pass the
     full live bundle + composed flags word + the absolute virtual time to
     plat.boundary; merge back the (possibly parked-and-resumed) bundle,
@@ -2236,6 +2490,8 @@ def _emit_boundary_observer(blk, cs, i, count):
     fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
                     for f in ("cf", "pf", "af", "zf", "sf", "of",
                               "df", "intf"))
+    if flag_written is not None:
+        _flush_flag_writes(blk, flag_written)
     blk.append(f"_bw = (_flags_in & ~_fmask) | (({fw}) & _fmask)")
     bundle = ", ".join(f"'{r}': {r}" for r in _DYN_REGS) \
         + f", 'cs': 0x{cs:04X}, '_df': (1 if df else 0), '_flags_in': _bw"
@@ -2257,7 +2513,8 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                    dispatch_addrs=frozenset(), df_livein=False,
                    sp_output=False, flags_livein=False,
                    boundary_addrs=frozenset(), stub_targets=frozenset(),
-                   plat_farcalls=None, dead_exits=frozenset()) -> str:
+                   plat_farcalls=None, dead_exits=frozenset(),
+                   far_dyn_sites=None) -> str:
     """Generate the recovered module source for one promotable function.
 
     ``callees``: CalleeContract per direct near-call target -- the
@@ -2284,6 +2541,11 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
     leaders = sorted(set(scan.block_leaders()) | set(alt_entries))
     bb_of = {ip: n for n, ip in enumerate(leaders)}
     has_dyn = any(_is_dyn(i) for i in scan.insts.values())
+    # the SAME resolution the gate proved (far_dyn_arms is pure): the emitter
+    # never re-derives a target set, it re-reads the one that was checked.
+    far_arms = far_dyn_arms(scan, far_dyn_sites, far_callees, plat_farcalls)
+    has_far_body = any(k == _ARM_BODY for a, _p in far_arms.values()
+                       for _s, _o, k in a)
     inputs = _contract_inputs(scan, abi, boundary_addrs)
     outputs = _output_set(abi, sp_output)
 
@@ -2315,9 +2577,13 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
     has_ivec = any(_is_game_int(i)
                    or (_is_isr_chain(i) and not _is_desmc_far_chain(i))
                    for i in scan.insts.values())
-    if has_dyn:
+    if has_dyn or has_far_body:
         A("")
         A(f"from {recovered_import_base}._dyncall import dyn_exec as _dyn")
+    if far_arms:
+        A("")
+        A(f"from {recovered_import_base}._dyncall import "
+          f"far_dispatch_witness as _far_witness")
     if has_ivec:
         A("")
         A(f"from {recovered_import_base}._dyncall import ivec_exec as _ivec")
@@ -2482,6 +2748,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
                                 for f in ("cf", "pf", "af", "zf", "sf", "of",
                                           "df", "intf"))
+                _flush_flag_writes(blk, flag_written)
                 bundle = ", ".join(f"'{r}': {r}" for r in _DYN_REGS) \
                     + (", 'cs': _vs, '_df': (1 if df else 0), "
                        f"'_flags_in': ((_flags_in & ~_fmask) | (({fw}) & _fmask))")
@@ -2514,6 +2781,30 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 blk.append("break")
                 terminated = True
                 break
+            if i.ip in far_arms:
+                # COMPOSED INDIRECT FAR CALL: a guarded fan-out over the
+                # observed far pointers, each arm emitted exactly as the direct
+                # far call to that pointer would be; an un-witnessed pointer
+                # raises the structured witness.  Control resumes at the next
+                # instruction on every arm (the arms agree on the net stack
+                # effect, proven by far_dyn_arms), so this is an ordinary
+                # fall-through site like any other composed call.
+                _flush_flag_writes(blk, flag_written)
+                blk += _far_dyn_site_lines(i, cs, far_arms[i.ip][0],
+                                           plat_farcalls,
+                                           f"_base + _cost + {count}")
+                ip = i.next_ip
+                if ip in bb_of:
+                    blk.append(f"_cost += {count}")
+                    if flag_written:
+                        bits = " | ".join(f"0x{_FLAG_BITS[f]:X}"
+                                          for f in sorted(flag_written))
+                        blk.append(f"_fmask |= {bits}")
+                    blk.append(f"bb = {bb_of[ip]}")
+                    blk.append("continue")
+                    terminated = True
+                    break
+                continue
             if _is_dyn(i):
                 # Runtime-resolved recovered dispatch (near indirect
                 # call/jmp).  Target computed from regs/memory, resolved
@@ -2559,6 +2850,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
                                 for f in ("cf", "pf", "af", "zf", "sf", "of",
                                           "df", "intf"))
+                _flush_flag_writes(blk, flag_written)
                 bundle = ", ".join(f"'{r}': {r}" for r in _DYN_REGS) \
                     + (f", 'cs': 0x{cs:04X}, '_df': (1 if df else 0), "
                        f"'_flags_in': ((_flags_in & ~_fmask) "
@@ -2637,37 +2929,18 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 # cleanup).  The dispatch costs one VM step of virtual time.
                 pf = plat_farcalls[i.far_target]
                 pseg, poff = i.far_target
-                blk.append("sp = (sp - 2) & 0xFFFF")
-                blk.append(f"mem.ww(ss, sp, 0x{cs:04X})")     # return CS
-                blk.append("sp = (sp - 2) & 0xFFFF")
-                blk.append(f"mem.ww(ss, sp, 0x{i.next_ip:04X})")   # return off
-                fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
-                                for f in ("cf", "pf", "af", "zf", "sf", "of",
-                                          "df", "intf"))
-                blk.append(f"_ff = (_flags_in & ~_fmask) | (({fw}) & _fmask)")
-                bundle = ", ".join(f"'{r}': {r}"
-                                   for r in _INT_REGS + ("ss", "sp")) \
-                    + ", '_flags': _ff"
-                blk.append(f"_fo = plat.farcall(0x{pseg:04X}, 0x{poff:04X}, "
-                           f"{{{bundle}}}, {pf.argbytes}, "
-                           f"_base + _cost + {count})")
-                for r in _INT_REGS:
-                    blk.append(f"{r} = _fo['{r}']")
-                blk.append("_pf = _fo['flags']")
-                for fname, fbit in (("cf", 0x01), ("pf", 0x04), ("af", 0x10),
-                                    ("zf", 0x40), ("sf", 0x80), ("of", 0x800),
-                                    ("intf", 0x200), ("df", 0x400)):
-                    blk.append(f"{fname} = (_pf & 0x{fbit:X}) != 0")
-                blk.append("_fmask |= 0xED5")
-                # the platform dispatch cost is DYNAMIC (the thunk step plus any
-                # nested Win16 callback the API re-entered), so the backend
+                # the platform dispatch cost is DYNAMIC (the thunk step plus
+                # any nested callback the API re-entered), so the backend
                 # reports it -- a fixed +1 would undercount callback-bearing
                 # APIs (EnumFonts, a WndProc reached through DispatchMessage).
-                blk.append("_cost += _fo['cost']")
-                # pascal cleanup: pop the 4-byte far frame + argbytes of args
-                blk.append(f"sp = (sp + {4 + pf.argbytes}) & 0xFFFF")
+                # The sequence itself is shared with a COMPOSED INDIRECT far
+                # site whose resolved pointer is this same target.
+                _flush_flag_writes(blk, flag_written)
+                blk += _plat_farcall_lines(cs, pseg, poff, pf.argbytes,
+                                           i.next_ip,
+                                           f"_base + _cost + {count}")
                 if i.ip in heads:
-                    _emit_boundary_observer(blk, cs, i, count)
+                    _emit_boundary_observer(blk, cs, i, count, flag_written)
                 ip = i.next_ip
                 if ip in bb_of:
                     blk.append(f"_cost += {count}")
@@ -2713,6 +2986,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                     fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
                                     for f in ("cf", "pf", "af", "zf", "sf",
                                               "of", "df", "intf"))
+                    _flush_flag_writes(blk, flag_written)
                     kw = (f"_flags_in=((_flags_in & ~_fmask) | (({fw}) & _fmask))"
                           + (", " + kw if kw else ""))
                 if c.df_livein:
@@ -2759,7 +3033,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                     # already carries the callee's virtual time, so the observer
                     # fires at the post-call offset; registers/flags reflect the
                     # returned state and merge back any delivered-ISR effects.
-                    _emit_boundary_observer(blk, cs, i, count)
+                    _emit_boundary_observer(blk, cs, i, count, flag_written)
                 ip = i.next_ip
                 if ip in bb_of:
                     blk.append(f"_cost += {count}")
@@ -2784,6 +3058,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                 fw = " | ".join(f"(0x{_FLAG_BITS[f]:X} if {f} else 0)"
                                 for f in ("cf", "pf", "af", "zf", "sf", "of",
                                           "df", "intf"))
+                _flush_flag_writes(blk, flag_written)
                 blk.append(f"_fw = (_flags_in & ~_fmask) | (({fw}) & _fmask)")
                 blk.append("sp = (sp - 2) & 0xFFFF")
                 blk.append("mem.ww(ss, sp, _fw)")
@@ -2872,7 +3147,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                     val = "ax" if width == 2 else "(ax & 0xFF)"
                     blk.append(f"plat.outp({port}, {val}, {width}, {cost})")
                 if i.ip in heads:
-                    _emit_boundary_observer(blk, cs, i, count)
+                    _emit_boundary_observer(blk, cs, i, count, flag_written)
                 nxt = i.next_ip
                 if nxt in bb_of and nxt != ip:
                     blk.append(f"_cost += {count}")
@@ -2895,7 +3170,7 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
                                       for f in sorted(flag_written))
                     blk.append(f"_fmask |= {bits}")
                     flag_written.clear()
-                _emit_boundary_observer(blk, cs, i, count)
+                _emit_boundary_observer(blk, cs, i, count, flag_written)
             nxt = i.next_ip
             if nxt in bb_of and nxt != ip:     # falls into the next block
                 blk.append(f"_cost += {count}")
@@ -2964,6 +3239,37 @@ class UnknownDispatchTarget(RuntimeError):
         self.key = key
         self.regs = dict(regs)
         self.base = base
+
+
+class UnknownFarDispatchTarget(RuntimeError):
+    """An INDIRECT FAR CALL resolved to a far pointer that is not in the site's
+    observed evidence set.
+
+    Observed evidence is not proof: a capture shows what a pointer HELD on the
+    paths that ran, never what it CAN hold.  So a composed indirect far site is
+    emitted as a guarded fan-out and this is the guard -- reached exactly when
+    the running program produced a pointer no capture witnessed.  It names the
+    SITE and the unresolved POINTER, so the fix is either a wider capture or a
+    promotion of the newly-seen target.  There is deliberately no fallback arm:
+    dispatching to an unverified pointer would be a guess, and a wrong answer
+    is worse than a loud stop."""
+
+    def __init__(self, site, seg, off, regs, base):
+        super().__init__(
+            "indirect far call at %s resolved to %04X:%04X, which is not in "
+            "the site's observed target set (frontier witness; widen the "
+            "capture or promote the target)" % (site, seg, off))
+        self.site = site
+        self.target = (seg, off)
+        self.key = "%04X:%04X" % (seg, off)
+        self.regs = dict(regs)
+        self.base = base
+
+
+def far_dispatch_witness(site, seg, off, regs, base):
+    """Build the guard's witness.  The generated body ``raise``s the result, so
+    the raise is visible at the site rather than hidden in a helper frame."""
+    return UnknownFarDispatchTarget(site, seg, off, regs, base)
 
 
 _cache = {}
