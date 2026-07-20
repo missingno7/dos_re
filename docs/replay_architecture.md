@@ -105,6 +105,11 @@ open-resource positions, runtime state, and event cursor. The replay core does
 not guess whether a runtime adapter is complete; the adapter's resume tests
 must prove it.
 
+External host persistence is execution policy, not continuation state. A DOS
+replay retains open-file contents and its in-memory read-your-writes overlay,
+but capture and restore detach the interactive player's save directory. Replay
+must never observe a save file changed after the recording began.
+
 ### CanonicalState
 
 The authoritative state compared between oracle and candidate. It contains a

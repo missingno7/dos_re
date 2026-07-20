@@ -209,6 +209,12 @@ def capture_runtime_continuation(rt: Runtime, *, event_cursor: int):
             "cannot capture deterministic replay continuation with a wall-clock time source")
 
     dos_state = capture_dos_state(rt.dos, rt.program.memory)
+    # A replay continuation is a closed deterministic machine state.  The
+    # interactive player's save directory is an external host persistence
+    # policy, not guest state: restoring it would let later replayed DOS opens
+    # observe files changed after recording.  Preserve the in-memory file
+    # overlay and open-file regions, but detach the host sink.
+    dos_state["save_dir"] = None
     sb = getattr(rt.dos, "sound_blaster", None)
     if sb is not None:
         dos_state["sound_blaster"] = sb.snapshot_state()
@@ -267,6 +273,11 @@ def apply_runtime_continuation(rt: Runtime, state) -> None:
     rt.cpu.halted = bool(state.metadata["halted"])
     rt.cpu.call_depth = int(state.metadata["call_depth"])
     _restore_dos_state(rt, dos_state)
+    # Older ReplayArtifacts may have captured the viewer's save path.  Never
+    # reactivate it during deterministic continuation restore.  This is
+    # intentionally local to replay continuations; ordinary developer
+    # snapshots retain their existing persistence semantics.
+    rt.dos.save_dir = None
     for handle_text, region_name in dos_state.get("file_regions", {}).items():
         handle = int(handle_text)
         if handle not in rt.dos.files or region_name not in state.regions:

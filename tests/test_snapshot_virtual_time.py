@@ -21,6 +21,7 @@ import pytest
 
 from dos_re.runtime_core import enable_sound_blaster
 from dos_re.snapshot_runtime import load_snapshot_headless
+from dos_re.replay import ContinuationState
 from dos_re.snapshot import capture_runtime_continuation, apply_runtime_continuation
 
 
@@ -126,6 +127,37 @@ def test_real_mode_replay_continuation_restores_device_and_cursor_state(tmp_path
     assert rt.dos.file_overlay == {"SAVE.DAT": bytearray(b"saved")}
     assert rt.dos.stdout == ["before\ncheckpoint"]
     assert rt.dos.port_log == [("out", 0x388, 0x20, 8), ("in", 0x388, 0x06, 8)]
+
+
+def test_replay_continuation_detaches_host_save_directory(tmp_path):
+    _write_min_snapshot(tmp_path, steps=123)
+    rt = load_snapshot_headless(tmp_path, game_root=tmp_path)
+    rt.dos.save_dir = tmp_path / "live-saves"
+    rt.dos.file_overlay["CONFIG.DAT"] = bytearray(b"recorded")
+
+    state = capture_runtime_continuation(rt, event_cursor=4)
+    assert state.metadata["dos"]["save_dir"] is None
+
+    # Compatibility is confined to state restoration: an existing immutable
+    # artifact may already contain the old host path, but using it must still
+    # produce a closed deterministic replay runtime.
+    legacy = ContinuationState(
+        state.schema_id,
+        {
+            **state.metadata,
+            "dos": {
+                **state.metadata["dos"],
+                "save_dir": str(tmp_path / "old-captured-saves"),
+            },
+        },
+        state.regions,
+        state.event_cursor,
+    )
+    rt.dos.save_dir = tmp_path / "different-saves"
+    apply_runtime_continuation(rt, legacy)
+
+    assert rt.dos.save_dir is None
+    assert rt.dos.file_overlay == {"CONFIG.DAT": bytearray(b"recorded")}
 
 
 def test_real_mode_replay_continuation_rejects_wall_clock(tmp_path):
