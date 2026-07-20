@@ -27,9 +27,9 @@ interpreted oracle → VMless lifted runtime → CPUless lifted runtime
 
 **DOS_RE 3.0 executable model:** those stages are recovery transformations and
 per-function or per-region properties, not separate product architectures.
-One planner produces either a **hybrid** plan (the EXE is permitted) or a
-**standalone** plan (the EXE is forbidden), and may mix generated and authored
-implementations at different recovery levels. See
+One profile-driven player and planner run any valid mixture. Development may
+permit the EXE and verification tools; detached/release profiles forbid them.
+A separate closed-world exporter produces standalone artifacts. See
 [`docs/override_architecture.md`](docs/override_architecture.md) and
 [`docs/execution_planner.md`](docs/execution_planner.md).
 

@@ -58,8 +58,9 @@ This generates the minimal skeleton:
 > **Transitional scaffold:** the current generator still emits stage-named
 > diagnostic runners while the unified planner is implemented. Do not treat
 > these as separate product architectures or add new CPUless/memoryless runner
-> families. The target keeps only thin `play_hybrid` and `play_native`
-> presets over one launch API.
+> families. The target has one profile-driven `play.py`; standalone products
+> come from a separate closed-world export command. Existing runner names
+> become temporary delegating aliases and are then removed.
 
 ```
 mygame_port/

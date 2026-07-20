@@ -28,11 +28,12 @@ recovery islands, or authored variants.
 Generated output remains disposable and reproducible from the executable,
 recovery IR, recovery facts, and toolchain.
 
-There are only two top-level dependency modes: **hybrid**, where the original
-EXE may remain available, and **standalone**, where it is forbidden at
-runtime. VMless, CPUless, ABI-recovered, DOS-memory-backed, and memoryless are
-implementation or state-adapter properties. The complete planning,
-reachability, readiness-report, and entrypoint contract is defined in
+There are two dependency-policy outcomes: **hybrid**, where the original EXE
+may remain available, and **standalone**, where it is forbidden at runtime.
+They are not different players. VMless, CPUless, ABI-recovered,
+DOS-memory-backed, and memoryless are implementation or state-adapter
+properties. The complete planning, reachability, readiness-report, universal
+player, and export contract is defined in
 [`execution_planner.md`](execution_planner.md).
 
 All manually or AI-authored program code belongs to the override layer. An
@@ -381,9 +382,10 @@ Migration proceeds without changing all backends at once:
 7. Route faithful verification through the existing hook oracles plus
    `ReplayArtifact` interval verification. Add enhancement isolation and
    behavioral-declaration tests.
-8. Replace player hook modes and stage-named launch authorities with the
-   unified planner. Both real-mode and PM drivers consume the same plan model;
-   `play_hybrid` and `play_native` may remain thin presets.
+8. Replace player hook modes and stage-named launch authorities with one
+   profile-driven `play.py` and the unified planner. Real-mode, PM, and
+   detached drivers consume the same plan model. Old entrypoints may remain
+   temporary delegating aliases only.
 9. Adapt existing graph manifests and recovery facts to the program-coverage
    interface. The future execution atlas can replace this adapter without
    changing the planner.
@@ -446,7 +448,7 @@ CPUless and ABI-recovered backend adapters
         ↓
 category-specific verification policies
         ↓
-player/CLI and project migration
+universal player + closed-world exporter + project migration
         ↓
 legacy registry and terminology removal
 ```

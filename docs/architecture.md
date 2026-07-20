@@ -120,16 +120,24 @@ tools/        lint, test runner, cleaner, linear disassembler, hotspot profiler,
               a back-compat shim — both now live in the package)
 ```
 
-## Execution configuration (no silent fallbacks)
+## One player and one execution configuration
+
+Projects converge on one `play.py` capable of running any valid plan.
+Development, verification, detached, and release are configuration profiles,
+not player implementations. A separate closed-world exporter produces the
+standalone artifact and audits its finished dependency closure. See
+[`execution_planner.md`](execution_planner.md).
 
 One execution configuration describes these independent axes:
 
 | Dimension | Choices |
 |---|---|
-| **dependency mode** | hybrid (original EXE permitted); standalone (original EXE forbidden) |
-| **provider policy** | ordered interpreted/generated/region implementation preferences |
+| **composition** | roots, ordered interpreted/generated/region provider preferences, selected overrides |
+| **execution policy** | EXE/interpreter/development capabilities required, allowed, or forbidden |
+| **verification policy** | oracle/candidate profiles, replay corpus, comparison projection and exclusions |
+| **build target** | none, Windows, mobile, or another platform/package policy |
 | **override profile** | none; selected faithful replacements; optional non-authoritative enhancements; optional behavioral modifications |
-| **product/service profile** | roots, features, platform services, assets, and package policy |
+| **product/service profile** | features, platform services, assets, and product roots |
 
 Oracle and candidate are verification roles, not additional implementation
 layers. The oracle uses the untouched interpreted implementation. A candidate

@@ -386,10 +386,10 @@ audit where static checking cannot see it).
 
 These walls classify generated or authored implementations and state adapters.
 They feed the unified planner's detachment report. They do not require a
-uniform recovery level across a game and do not fix runner names. Product
-launch selects only `hybrid` (original EXE permitted) or `standalone`
-(original EXE forbidden); `play_hybrid` and `play_native` may be thin presets
-over that shared API.
+uniform recovery level across a game and do not fix runner names. One
+profile-driven `play.py` runs development, verification, detached, or release
+plans. A separate closed-world exporter produces standalone artifacts;
+stage-named players are temporary aliases only.
 
 There are **two independent walls at the VMless stage**, and both must hold
 before M2 is accepted:
