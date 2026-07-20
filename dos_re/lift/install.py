@@ -9,12 +9,12 @@ routines pass, more of the game moves out of interpretation automatically.
 
 THE DETERMINISM CONTRACT (why this module also fingerprints):
 Installing a hook changes work-per-``step()`` — a hook that replaces a 200-
-instruction routine costs ONE ``step()``.  A demo whose clock is the frame
+instruction routine costs ONE ``step()``.  A replay whose clock is the frame
 index (N steps/frame) therefore desyncs if replayed under a *different* hook
 set than it was recorded under.  So an installed set carries a **fingerprint**
-(``lift_fingerprint``); the play runner records it in the demo and refuses to
-replay a demo under a mismatched set (fail loud, never silent desync — the
-charter's one-boundary-definition rule).  A demo recorded hook-free has an
+(``lift_fingerprint``); the play runner records it in the replay and refuses to
+replay a replay under a mismatched set (fail loud, never silent desync — the
+charter's one-boundary-definition rule).  A replay recorded hook-free has an
 empty fingerprint and replays hook-free.
 
 This module is game-agnostic: it is handed a manifest + the directory the
@@ -44,7 +44,7 @@ def _load_module(path: Path):
 def passing_entries(manifest_paths, *, statuses=INSTALLABLE_STATUSES) -> dict[str, str]:
     """Best proven module per entry across manifests → {"CS:IP": module_name}.
 
-    Merges several proof passes (menu/gameplay/demo drives): an entry counts as
+    Merges several proof passes (menu/gameplay/replay drives): an entry counts as
     installable if ANY pass proved it, and the last-seen module name wins (all
     passes emit the same deterministic module for an entry)."""
     keep: dict[str, str] = {}
@@ -148,7 +148,7 @@ def install_passing_lifts(cpu, cs: int, emit_dir, manifest_paths, *,
 def install_vmless_graph(cpu, emit_dir, *, skip=()) -> dict[tuple[int, int], str]:
     """Install EVERY emitted module in ``emit_dir`` as a replacement hook — the
     full-VMless-lifted-graph installer for oracle-guided convergence
-    (docs/dos_re_2.0.md; this is the stage-1 "VMless" assembly step, NOT yet
+    (docs/history/dos_re_2.0.md; this is the stage-1 "VMless" assembly step, NOT yet
     CPUless or DOS-layout-less).
 
     Unlike ``install_passing_lifts`` (the hybrid tier, which gates on
@@ -225,8 +225,8 @@ def lift_fingerprint(installed: dict[tuple[int, int], str]) -> str:
 
     Covers BOTH which addresses are hooked and which module answers each — so
     a re-lift that changes a routine's body (new sha) also changes the
-    fingerprint and forces demos to be re-validated.  Empty set → "" (a
-    hook-free demo)."""
+    fingerprint and forces replays to be re-validated.  Empty set → "" (a
+    hook-free replay)."""
     if not installed:
         return ""
     payload = ";".join(f"{cs:04X}:{ip:04X}={mod}"

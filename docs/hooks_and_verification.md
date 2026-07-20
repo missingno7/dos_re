@@ -81,7 +81,7 @@ The canonical project command is:
 
 ```text
 python scripts/play.py --profile verification \
-  --play-demo artifacts/demos/example \
+  --play-replay artifacts/replays/example \
   --verify-start X --verify-end Y
 ```
 

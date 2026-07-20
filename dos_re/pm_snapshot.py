@@ -43,7 +43,7 @@ def capture_pm_state(rt) -> dict:
             # The every-16-instructions IRQ-poll phase: a resumed run must keep
             # the same phase, or a hardware IRQ (SB block, timer) lands at a
             # different instruction than in the run that saved — enough to make
-            # a demo replay diverge one frame in.
+            # a replay playback diverge one frame in.
             "irq_decim": cpu._irq_decim,
         },
         "dos": {

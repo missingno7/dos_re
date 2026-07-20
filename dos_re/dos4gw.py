@@ -41,7 +41,7 @@ class DosError(Exception):
 class DosInputExhausted(Exception):
     """A blocking console read found the key queue empty.
 
-    The front-end catches this to pump real input (or a demo script) and
+    The front-end catches this to pump real input (or a replay script) and
     resume; headless runs treat it as the fail-loud boundary."""
 
 
@@ -298,7 +298,7 @@ class DOS4GWHost:
         """Attach the emulated Sound Blaster (dos_re.sblaster) to this host.
 
         Opt-in, like the 16-bit ``enable_sound_blaster``: the deterministic
-        demo/test path leaves the hardware absent.  ``base`` is whatever the
+        replay/test path leaves the hardware absent.  ``base`` is whatever the
         program's config probes (KE probes $210).  Block IRQs pace against
         ``clock`` — wall time in a viewer; the default (None) is a
         DETERMINISTIC emulated clock derived from the instruction count.
@@ -331,7 +331,7 @@ class DOS4GWHost:
         pending block onto the new origin.
 
         ``deterministic=True`` uses the instruction-count clock (reproducible —
-        the ONLY clock under which a demo records and replays identically);
+        the ONLY clock under which a replay records and replays identically);
         ``False`` uses wall time (smoother live audio, not reproducible).  A
         viewer that starts recording must flip to the deterministic clock, or
         the recorded block-IRQ timeline can't be replayed (it diverges at the

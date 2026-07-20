@@ -67,7 +67,7 @@ def test_int21_43_set_attributes_succeeds(tmp_path: Path) -> None:
 
 
 def test_snapshot_persists_console_input_state(tmp_path):
-    """key_queue / fallback are machine state: a cold-start demo's snapshot
+    """key_queue / fallback are machine state: a cold-start replay's snapshot
     must restore them or the boot menu blocks forever on replay."""
     from dos_re.runtime import create_runtime
     from dos_re.snapshot import write_snapshot, load_snapshot

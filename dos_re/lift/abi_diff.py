@@ -1,6 +1,6 @@
 """Seeded differential: mechanical CPUless core vs DE-STACKED ABI core.
 
-The M3b slice-2 verifier (docs/dos_re_2.0.md Stage 2b): for one function,
+The M3b slice-2 verifier (docs/history/dos_re_2.0.md Stage 2b): for one function,
 drive the mechanical recovered implementation and the ABI-recovered core
 over the SAME deterministic pseudo-random machine states and require:
 
@@ -17,7 +17,7 @@ over the SAME deterministic pseudo-random machine states and require:
 The states are seeded, not recorded: a destackable LEAF function's behavior
 is a pure function of (memory contents, register inputs), so a
 deterministic synthetic state exercises it exactly; determinism keeps every
-run reproducible (the automation principle).  The end-to-end demo remains
+run reproducible (the automation principle).  The end-to-end replay remains
 the acceptance authority for the composed graph.
 """
 from __future__ import annotations

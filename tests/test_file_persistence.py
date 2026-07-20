@@ -5,7 +5,7 @@ close -- deterministic, but a game that saves progress (Skyroads rewrites
 SKYROADS.CFG after each finished level) never remembered anything.  The overlay
 now lets a run read back what it just wrote (still zero disk I/O by default), and
 an opt-in ``save_dir`` flushes on close so the interactive product persists
-progress.  With ``save_dir`` unset (demos/tests/headless) nothing touches disk
+progress.  With ``save_dir`` unset (replays/tests/headless) nothing touches disk
 and the shipped assets stay pristine.
 """
 from __future__ import annotations
@@ -97,7 +97,7 @@ def game_dir(tmp_path: Path) -> Path:
 def test_default_drops_writes_on_close_so_a_reopen_reads_the_pristine_file(game_dir: Path) -> None:
     """With persistence OFF (the deterministic default) a write does NOT survive
     close: a re-open reads the original file, byte-for-byte the legacy behaviour.
-    This MUST hold or a demo where the game rewrites then re-reads a file (e.g.
+    This MUST hold or a replay where the game rewrites then re-reads a file (e.g.
     Skyroads reloading SKYROADS.CFG after a level break) would replay differently
     from how it was recorded."""
     dos, cpu = DOSMachine(root=game_dir), _Cpu()      # save_dir unset

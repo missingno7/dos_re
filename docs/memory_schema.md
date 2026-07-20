@@ -39,7 +39,7 @@ almost exact:
 | Recovery IR = single code-identity truth    | Memory Schema IR = single layout truth  |
 | ONE core, two entrypoints (compat + public) | ONE native object, import/export bridge |
 | contract-proof shadow (poisoned outputs)    | region poison + field-level diff         |
-| CPUless wall (no CPU/interpreter route)     | Memoryless wall (no FlatMemory route)    |
+| CPU-model detached (no CPU/interpreter route) | DOS-memory detached (no FlatMemory route) |
 | `abi_promote --cores` bottom-up fixpoint    | region-by-region promotion              |
 | refusal census = the work list              | `MemorylessPromotionBlocked` = work list |
 
@@ -98,7 +98,7 @@ M4 obligation:
 * the gate (`check_composable`) REFUSES any function that reads its stack as
   memory (`stack-addressed-memory`, 59 functions) rather than guessing.
 
-That is the M4 loop in miniature, already green on the canonical demo.  The
+That is the M4 loop in miniature, already green on the canonical replay.  The
 no-alias proof obligation should therefore be a **first-class schema
 analysis**, not an afterthought — we have already needed it once.
 
@@ -357,7 +357,7 @@ M4 acceptance should require all of these:
    >
    > So the load-bearing evidence for slice 1 was the **poison run** — the
    > byte was poisoned for 964 boundaries and nothing diverged, which a hidden
-   > reader would have broken.  That is real evidence and it is demo-scoped
+   > reader would have broken.  That is real evidence and it is replay-scoped
    > evidence.  Static sole-ownership was NOT proven, and the gate should not
    > be described as though it were.
    >
@@ -456,5 +456,5 @@ it:
    owner `1010:1F19` is currently refused (`computed-ss-address`), so a
    verified owner is a prerequisite and is NOT yet available.
 
-Field names stay ANONYMOUS throughout (`field_06`, not `x`) — see
-*Two claims, never merged* in `docs/dos_re_2.0.md`.
+Field names stay anonymous throughout (`field_06`, not `x`): structural
+recovery evidence and semantic naming are separate claims.

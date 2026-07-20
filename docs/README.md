@@ -1,60 +1,37 @@
-# dos_re documentation
+# dos_re 3.0 documentation
 
-**Audience: AI agents.** This is the framework's operating manual and
-reference — the mechanisms `dos_re/` ships (the VM, the proof engines, the
-lifter, the state-view seam) and their honest status. The only human-facing
-document in this repo is the top-level [README](../README.md).
+The [repository README](../README.md) is the human introduction. The active
+reading path is:
 
-If you are the agent about to port a game, start at
-[`getting_started.md`](getting_started.md); come back here for
-the machinery. The fastest route into this repo is
-[`agent_toolbox.md`](agent_toolbox.md) — task → tool → command for every
-recurring recovery job.
+1. [Getting started](getting_started.md) — the end-to-end port workflow.
+2. [Execution planning](execution_planner.md) — configuration, dependency
+   closure, bootstrap, detachment, and release.
+3. [Override architecture](override_architecture.md) — generated and authored
+   implementations and their verification policies.
+4. [Execution Atlas](execution_atlas.md) — retained evidence, navigation, and
+   conservative coverage.
+5. [Replay architecture](replay_architecture.md) — deterministic replay,
+   continuation state, cached boundaries, and verification intervals.
+6. [Architecture](architecture.md) — module ownership and dependency rules.
+7. [Glossary](glossary.md) and [agent toolbox](agent_toolbox.md).
 
-Reading order for the framework itself: the repo [README](../README.md) →
-`execution_planner.md` → `override_architecture.md` → `agent_toolbox.md` →
-`execution_atlas.md` → `architecture.md` →
-`hooks_and_verification.md` →
-`demos_and_snapshots.md` → `state_mirrors.md` →
-`hardware_support.md`.
+## Specialized mechanism references
 
-| Doc | What it covers |
+| Document | Scope |
 |---|---|
-| [`dos_re_2.0.md`](dos_re_2.0.md) | Recovery-transformation reference: generated lifting stages, hard dependency walls, recovery facts, and oracle-guided convergence. Execution and override authority belongs to the 3.0 documents below. |
-| [`recovery_ir.md`](recovery_ir.md) | **Recovery IR v0 spec**: the shared representation every stage consumes (CFG + machine ops + calls + effects + provenance + facts + fail-loud unsupported ledger); `irgen` → IR → analyses → selected emitter; the IR-path equivalence gate. |
-| [`agent_toolbox.md`](agent_toolbox.md) | **The task index**: boot an EXE, diagnose fail-louds, snapshots, traces, frame boundaries, wait loops, demos, profiling, hooks, oracle verification, the lifter, LIFTED-vs-RECOVERED, progress metrics, guardrails — each with the command and when to use it. |
-| [`architecture.md`](architecture.md) | The package boundary, the framework module map, execution modes, adapter layering, dependencies. |
-| [`override_architecture.md`](override_architecture.md) | **dos_re 3.0 override model:** one implementation catalog, explicit authored selection, stable targets, faithful/enhancement/behavioral categories, backend activators, and verification contracts. |
-| [`execution_planner.md`](execution_planner.md) | **dos_re 3.0 lifecycle:** one universal `play.py`, orthogonal policies, mixed per-region bindings, detachment reports, real/PM drivers, closed-world export, and atlas-independent interfaces. |
-| [`execution_atlas.md`](execution_atlas.md) | **dos_re 3.0 navigation and coverage:** stable multi-image identities, normalized static and replay evidence, unresolved transfers, inverse replay queries, catalog joins, and `CoverageSource` integration. |
-| [`hooks_and_verification.md`](hooks_and_verification.md) | Hook registration and return mechanics, the differential hook oracle (metadata + strict modes), the frame oracle, hook taxonomy. |
-| [`demos_and_snapshots.md`](demos_and_snapshots.md) | **dos_re 3.0 replay architecture:** one oracle/candidate replay artifact, stable points, profile-local continuation caches, machine or semantic canonical projections, persistent bisection boundaries, and function visits. No legacy formats or migration paths. |
-| [`state_mirrors.md`](state_mirrors.md) | The state-view seam: human-named views over the DOS memory image with swappable backends, without weakening byte-exact verification. |
-| [`hardware_support.md`](hardware_support.md) | Honest, status-legend-based matrix of the video/audio/timing/DOS models, the unmodeled-I/O policy, and the rule for extending them. |
-| [`performance.md`](performance.md) | How to run dos_re fast: PyPy for headless workloads (~13-17x interpretation), pytest-xdist for suites, and the byte-exact equivalence-gate method required for any interpreter optimization. |
-| [`lifting_design.md`](lifting_design.md) | The automatic lifter (LANDED): ASM function → generated literal Python hook → in-situ oracle verification. Design, failure policy, the proof ledger. Read its 2.0 supersession note first: per-function proof gates only the hybrid tier, never VMless graph assembly. |
-| [`getting_started.md`](getting_started.md) | **Start a new game here**: scaffold one player, establish the oracle replay corpus, add catalog implementations, verify detachment, and export. |
-| [`history/`](history/) | Clearly separated design and migration history; not current executable guidance. |
-| [`pitfalls.md`](pitfalls.md), [`cookbook.md`](cookbook.md) | Hard-won mechanics references (determinism traps and worked techniques); the 3.0 execution and override documents win where framing conflicts. |
-| [`enhancements.md`](enhancements.md), [`post_endgame.md`](post_endgame.md) | The enhanced-layer / post-endgame playbook (parity gate, overlay menu taxonomy). |
-| [`glossary.md`](glossary.md) | Current 3.0 execution terms plus recovery vocabulary needed to read older evidence ledgers. |
+| [Recovery IR](recovery_ir.md) | Canonical retained static recovery structure |
+| [Lifting design](lifting_design.md) | Generated implementation pipeline |
+| [Hooks and verification](hooks_and_verification.md) | Low-level interception and comparison mechanisms |
+| [Memory schema](memory_schema.md) | Typed views over original memory layouts |
+| [Performance](performance.md) | Measurement and optimization |
+| [Hardware status](hardware_support.md) | Device-model coverage and known limits |
+| [Enhancements](enhancements.md) | Read-only presentation and host integrations |
+| [Future work](future_work.md) | Explicitly unimplemented proposals |
 
-Historical, non-normative design records live under [`history/`](history/).
-They are not API or workflow documentation.
+Other files in this directory are focused mechanism notes and must be read in
+the context of the authorities above. Documents under [`history/`](history/)
+are non-normative design records. They may contain retired names and commands;
+they are not onboarding material.
 
-Related, outside `docs/`:
-
-- [`../tools/README.md`](../tools/README.md) — one entry per CLI tool:
-  command + when to reach for it.
-- [`../examples/minimal_adapter/example.py`](../examples/minimal_adapter/example.py)
-  — runnable 5-minute demo of the hook/verify/snapshot loop on a synthetic EXE.
-- [`../examples/tiny_frame_game/`](../examples/tiny_frame_game/README.md) —
-  the whole lifecycle in ten minutes: a synthetic frame-loop game through
-  oracle boot, embedded-base replay artifacts, snapshots, both verification oracles, and a
-  state mirror.
-- [`../AGENTS.md`](../AGENTS.md) — the rules for extending this framework
-  (including the missing-behaviour → extension recipes).
-
-The retired DOS_RE 1.0 starter (`template_dos_port`) is archived; its
-file-provenance ledger (`MIGRATION.md`) stays there as history.  New ports:
-[`getting_started.md`](getting_started.md).
+Runnable examples live under [`examples/`](../examples/). Current command-line
+tools are indexed in [`tools/README.md`](../tools/README.md).

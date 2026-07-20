@@ -154,7 +154,7 @@ class VMlessPlatformAdapter:
         """Boundary-head observer (verification binding).  Writes the live
         bundle back to the VM so a park resumes from CURRENT state, then
         fires the VM's boundary hook (which may raise BoundaryReached).
-        NOTE: parking functions are STANDALONE-ONLY in the demo graph (their
+        NOTE: parking functions are STANDALONE-ONLY in the replay graph (their
         adapters are not installed -- an unwound park would lose composed
         caller locals), so this path serves the differential harness, where
         no hook is armed and the observer is inert."""
@@ -303,7 +303,7 @@ class CPUlessPlatformRuntime:
         #: the standalone SCHEDULER seam: the selected composition installs a callback
         #: (head_cs, head_ip, resume_ip, regs, abs_cost) -> (regs, flags,
         #: extra_cost) that counts boundary-head passes and, on quota, PARKS
-        #: in-line: applies demo inputs, delivers timer IRQs through the
+        #: in-line: applies replay inputs, delivers timer IRQs through the
         #: recovered HANDLERS, and returns the post-IRQ state.  Without a
         #: callback the observer is inert (free-running).
         self.boundary_cb = None
@@ -311,7 +311,7 @@ class CPUlessPlatformRuntime:
         #: with an empty type-ahead buffer must WAIT for input.  A flat CPU
         #: rewinds its IP and re-runs the instruction next frame; the CPUless
         #: backend cannot rewind a Python call stack, so a driver installs a
-        #: callback that advances ONE frame in place (capture + demo input +
+        #: callback that advances ONE frame in place (capture + replay input +
         #: timer IRQs) so awaited input can arrive, after which ``intr`` retries
         #: the read.  Without a callback a blocking read fails loud (the runner
         #: has no input source), never synthesising a phantom key.
@@ -360,7 +360,7 @@ class CPUlessPlatformRuntime:
             except ConsoleInputWouldBlock:
                 # A console read found the type-ahead buffer empty.  On a flat
                 # CPU the DOS handler rewinds IP and the read re-runs next frame;
-                # here the driver advances one frame in place (delivering demo
+                # here the driver advances one frame in place (delivering replay
                 # input + timer IRQs) so the awaited key can arrive, then we
                 # retry the SAME read.  No driver -> fail loud (never a phantom).
                 if self.blocking_read_cb is None:

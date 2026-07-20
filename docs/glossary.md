@@ -1,61 +1,31 @@
-# Glossary
+# dos_re 3.0 glossary
 
-The project's vocabulary in one place. Terms link to the doc that owns them.
-
-**Recovery properties and transformations ([`dos_re_2.0.md`](dos_re_2.0.md)
-§1):** these classify implementations; they are not top-level launch modes.
-
-| Stage term | Meaning |
+| Term | Definition |
 |---|---|
-| **Interpreted oracle** | Stage 0: the original program running in the instruction-level interpreter — full emulated CPU state + historical DOS memory are authoritative. The source of truth for all differential verification. |
-| **VMless lifted runtime** | Stage 1: lifted Python functions execute directly (no fetch/decode/execute loop for lifted code) but still on the CPU-shaped carrier (`cpu.s`, flags, emulated stack, seg:off, DOS memory). NOT "native". |
-| **CPUless lifted runtime** | Stage 2: the CPU carrier is removed — args/returns/locals/explicit state instead of registers/flags/push-pop. May still address the historical DOS memory image by raw offset. The first stage that may be called native code execution, always qualified CPUless. |
-| **DOS-layout-less native** | Stage 3: the historical DOS memory *layout* is dissolved into native structures (objects, typed arrays, named fields). Memory doesn't disappear; the dependency on the original layout does. |
-| **Semantic clean port** | Stage 4: named concepts, domain models, structured flow, clean platform APIs — the human-readable source port. |
-| **The three detachments** | VM detachment (remove interpretation) → CPU detachment (remove the CPU-shaped model) → memory-model detachment (remove the DOS layout). "What remains is the game itself." |
-| **Oracle-guided convergence** | The 2.0 risk model: assemble the largest supported graph mechanically and early; fail loud on known-unsupported; the end-to-end oracle finds silent mistakes; auto-bisect localizes; AI repairs only the concrete gap. Per-function proofs are metadata, never an assembly gate. |
-| **Platform adapter** | A reusable generic dos_re capability binding a recognized machine effect (file access, input, page flip, OPL write, timer wait) to a native interface (`platform.video.present(...)`). Oracle-compatible / faithful / enhanced / per-OS implementations behind one interface. |
-| **Recovery fact** | The smallest explicit, evidence-backed, versioned declaration of game-specific knowledge (jump table here, input-wait boundary there) fed into the generic pipeline — the alternative to hand-patching generated output. |
-| **Verification bridge** | Generated serializer reconstructing historical DOS machine state from the native object model so the oracle stays reachable after the CPU and memory model are gone. Depends on the native implementation, never vice versa; not shipped. |
-| **Hard execution wall** | An enforced, mechanically checkable implementation property: VM-detached output cannot interpret instructions, CPU-detached output cannot access the CPU carrier, and memory-model-detached output cannot access the DOS layout. Walls feed the detachment report; they do not define product types or runner names. |
-| **Recovery IR** | The shared intermediate representation all analyses/transformations operate on; every stage artifact (VMless, CPUless, native, bridge, diagnostics) is an EMITTER PROJECTION of it. The system is never built around parsing generated Python from one stage into the next. |
-| **True native** | The ultimate target: no interpreter, no CPU carrier, no DOS-layout dependency, host-language control flow + data structures + platform adapters, oracle-verifiable via the optional bridge. The staged path (VMless → CPUless → DOS-layout-less) is the engineering strategy; direct binary→true-native emission is the goal. |
-
-| Term | Meaning |
-|---|---|
-| **Oracle** | The original DOS executable running interpreted in the VM — the single source of truth for all behaviour. Never guessed around, never retired until a piece is CANONICAL. (the retired 1.0 starter's lifecycle docs (historical)) |
-| **VM / the microscope** | The `dos_re` 8086 + DOS + hardware interpreter. A controlled execution environment for observing and proving — not necessarily the final runtime. |
-| **Hook** | A native handler installed at an original CS:IP. Scaffolding, never architecture; classified by role (checkpoint / env_wait / debug_probe / glue). ([`hooks_and_verification.md`](hooks_and_verification.md)) |
-| **Island** | One coherent recovered unit with its own verification contract: pure logic + thin adapter + verifier. Tagged with `@oracle_link`. (the retired 1.0 starter's lifecycle docs (historical)) |
-| **Golden** | A recorded oracle fixture turned into a test: captured inputs/outputs/memory effects the recovered island must reproduce forever. |
-| **Coastline** | The total surface where recovered code borders interpreted ASM. Progress = the coastline moving upward (fewer, larger contact points). |
-| **Coastline shortening** | Calling a verified recovered callee directly instead of returning to ASM between two recovered islands. |
-| **Archipelago / Continent** | The geography metaphor's middle and end states: islands → archipelagos (islands connected into a *subsystem*) → continents (complete native systems) → the recovered mainland (VM-less port). "Subsystem" and "archipelago" name the same thing at different altitudes. |
-| **Glue** | A hook-taxonomy role: accidental ASM-boundary plumbing (tails, helpers, per-row scan steps) that exists only because a hook landed there — the collapse target when islands merge. Not an architectural layer. |
-| **Parity gate** | The enhanced layer's standing proof: at its neutral settings the enhanced game must be pixel- and state-identical to the faithful game, so "enhanced" can never silently mean "diverged". ([`enhancements.md`](enhancements.md)) |
-| **Hybrid runtime** | The workbench: the VM running the original game with recovered islands hooked live over it. |
-| **Standalone execution** | A plan whose selected product profile has complete reachable implementation and service coverage without loading the original EXE or interpreter. Its regions may have different VM/CPU/memory detachment properties. |
-| **Detachment report** | The planner's evidence-backed account of reachable coverage, selected bindings, unresolved edges, EXE/interpreter dependencies, required services, and standalone/package readiness. A runner name or successful playthrough is not a report. |
-| **Execution profile** | A versioned preset over composition, execution, verification, product, and build policies. Development, verification, detached, and release profiles select capabilities; they are not separate players. |
-| **Native runtime** | Avoid as an unqualified implementation claim. The universal player and export report state the actual per-region VM, CPU, ABI, DOS-memory, and memoryless properties. |
-| **Replay artifact / demo** | The single persistent oracle-verifiable recording: base continuation state, immutable normalized events, stable points, metadata, function visits, and derived base-relative boundary caches. “Demo” remains a player/CLI convenience term, not a second format. ([`demos_and_snapshots.md`](demos_and_snapshots.md)) |
-| **Snapshot** | Complete serialised memory, CPU, DOS, device, timing, interrupt, scheduler, and replay-cursor state for resuming machine-backed execution. It is not an independent replay record or a portable game save. |
-| **Replay timeline** | A canonical monotonic sequence of stable `ReplayPoint` identities. Backend adapters may observe different stop seams, but must agree on their semantic ordering and event positions. |
-| **Input-wait registry** | The one shared table of boundary-less keyboard-poll loops every driver treats as boundaries. |
-| **Hook oracle** | The differential per-hook verifier: clone, run original ASM to the continuation, run the hook, diff registers + flags + full memory. |
-| **Frame oracle** | The lockstep frame verifier: reference (pure ASM) vs candidate (hooked/native) diffed at frame boundaries. |
-| **Continuation / HookStop** | A hook's declared legitimate end (near RET, far RET, IRET, fixed IP, computed dispatch). |
-| **Strict mode** | Auto-continuation verification: no metadata; the hook's final address becomes the only accepted target. |
-| **State mirror / bridge** | Human-named typed views over the byte-exact original memory layout; offsets quarantined in one module, `memcmp` verification preserved. ([`state_mirrors.md`](state_mirrors.md)) |
-| **Boot constants** | The post-bootstrap initialized state extracted into generated product data, so an EXE-independent backend cold-boots with no EXE and no snapshot. |
-| **Heartbeat** | The game's fixed tick cadence, preserved explicitly in a detached product — as opposed to the DOS waiting machinery (busy-waits, retrace polls), which is never ported. |
-| **Env wait** | A hardware wait (PIT tick, CRT retrace) the interpreter must keep hooked so the oracle doesn't spin on a flag a real IRQ would clear. |
-| **Frontier** | The residue of never-hooked addresses late in a port, each explicitly triaged (`dos_re/frontier.py`). |
-| **Fail loud / HybridGap** | The no-silent-fallback rule made executable: unrecovered behaviour raises with precise context; it is never faked and never silently handed back to ASM. |
-| **Transition signal** | A `HybridGap` subclass that is a control-flow signal, not an error: the per-frame step reached a multi-frame sequence (respawn, level end) the flow driver must drive. |
-| **Status ladder** | GUESS → OBSERVED → RECOVERED → ASM_MATCHED → VERIFIED → CANONICAL — the only way names earn confidence (`dos_re/islands.py`, the retired 1.0 starter's methodology docs (historical)). |
-| **Faithful baseline / non-authoritative enhancement** | The unchanged program under a selected baseline backend vs an optional presentation or host-integration override that reads authoritative state and writes none. It may attach once that state seam is verified; the whole game need not be memoryless. ([`override_architecture.md`](override_architecture.md)) |
-| **Cyborgization** | The deprecated experiment of growing presentation alongside recovery without one enforced, verified read-only state seam. The problem was parallel authority, not simply when presentation work began (pitfall #24). |
-| **Crystallization** | Letting higher-level meaning *emerge* from verified lower-level facts instead of naming by guess. (the retired 1.0 starter's methodology docs (historical)) |
-| **Staticization** | The discipline for runtime-patched code: observed live bytes → named variant → signature guard → explicit static Python. |
-| **Adapter** | Backend- or project-specific marshalling for addresses, formats, invocation contracts, views, and platform capabilities. Semantic override bodies remain CPUless and backend-neutral; the framework core never learns a game. |
+| **Recovered program** | One original program identity plus all known implementations of its functions and regions. |
+| **Recovery IR** | Canonical retained static program structure and machine-level recovery facts. |
+| **Stable identity** | Backend-independent serialized identity for a program, image, function, region, execution point, boundary, or runtime-code variant. |
+| **ReplayArtifact** | The sole persistent deterministic replay format: base continuation state, immutable events, points, metadata, visits, transfers, and derived boundaries. |
+| **ReplayPoint** | Stable position on a replay timeline, independent of whether a snapshot is cached there. |
+| **CachedBoundary** | Independently restorable continuation state at a ReplayPoint, stored as metadata plus pages changed from the replay base. |
+| **ContinuationState** | Backend-specific complete state required for deterministic continuation, including machine, devices, scheduling, timing, and event cursor. |
+| **CanonicalState** | Backend-neutral authoritative semantic projection used when raw representations differ. |
+| **Execution Atlas** | Persistent evidence and navigation index joining Recovery IR and replay observations. It does not execute or select code. |
+| **ProgramCoverage** | Conservative reachable identities, roots, unresolved edges, and evidence identity supplied to planning. |
+| **ImplementationCatalog** | The available interpreted, generated, authored, faithful, enhancement, behavioral, and region implementations. |
+| **ExecutionConfiguration** | Explicit composition, execution policy, verification policy, bootstrap, services, and build target. |
+| **ExecutionPlan** | Immutable selected implementation and dependency closure for one configuration and coverage identity. |
+| **DetachmentReport** | Explanation of selected coverage, unresolved frontiers, retained dependencies, bootstrap status, and package readiness. |
+| **BootstrapProvider** | Declared producer of initial runtime state and its build/runtime artifacts and capabilities. |
+| **RuntimeService** | Host or framework facility selected through the service catalog, not an owner of recovered code. |
+| **Backend adapter** | Machine-specific construction and translation beneath the unified player. |
+| **Faithful replacement** | Authored implementation intended to preserve original authoritative behavior. |
+| **Non-authoritative enhancement** | Optional read-only presentation or host integration with declared output differences. |
+| **Behavioral modification** | Explicit intentional authoritative divergence with its own tests and scope. |
+| **Region replacement** | One implementation covering a declared set of original identities. |
+| **Recovery property** | Per-implementation property such as interpreted, VMless, CPUless, ABI-recovered, DOS-memory-backed, memoryless, or native. |
+| **EXE-detached** | Runtime dependency closure excludes the original executable and original code. |
+| **Standalone** | Complete closed-world exported product with no unresolved frontier or undeclared development dependency. |
+| **Closed-world export** | Physical package of exactly the files and capabilities declared by a package-ready release plan. |
+| **Oracle** | Untouched original execution used as the behavioral reference during development and verification. |
+| **Hook** | A low-level CPU/runtime interception mechanism. It is not the general name for implementations or overrides. |

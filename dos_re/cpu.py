@@ -129,7 +129,7 @@ class CPU8086:
     trace: list[str] = field(default_factory=list)
     # Tracing defaults OFF: the per-instruction trace list is appended once per
     # executed instruction and is only drained by snapshot.run_until.  Any other
-    # run loop (the interactive viewer, headless demo replay, liftverify drives)
+    # run loop (the interactive viewer, headless replay playback, liftverify drives)
     # that left it ON would grow `self.trace` without bound — ~1 formatted string
     # per instruction, i.e. gigabytes within seconds of gameplay (found 2026-07-15,
     # the Lemmings pilot's runaway-RAM investigation).  The paths that WANT a trace
@@ -150,7 +150,7 @@ class CPU8086:
     #: (re-pointing CS:IP at the RESUME entry before raising).  None = no
     #: observation cost.
     boundary_hook: Callable[["CPU8086", int, int, int], None] | None = None
-    #: THE VMLESS WALL POISON (docs/dos_re_2.0.md §1a): when True, any step
+    #: THE VMLESS WALL POISON (docs/history/dos_re_2.0.md §1a): when True, any step
     #: that would fetch/decode/execute an original instruction (i.e. no
     #: replacement hook at CS:IP) raises immediately — interpretation is
     #: IMPOSSIBLE, not merely unused.  Armed by wall-gated runners on the
@@ -160,7 +160,7 @@ class CPU8086:
     #: (cs,ip) here and interprets instead of raising — one run enumerates
     #: the whole interpreted frontier (the census-closure work list).
     interp_frontier: set | None = None
-    #: EXE-INDEPENDENCE (docs/dos_re_2.0.md §"The EXE-independence wall"): when
+    #: EXE-INDEPENDENCE (docs/history/dos_re_2.0.md §"The EXE-independence wall"): when
     #: True, the lifted entry guard ``self_disable_if_patched`` is a no-op.  A
     #: data-only boot image has the recovered code ZEROED (poisoned), so an
     #: entry-signature comparison against the live bytes is meaningless — the
@@ -198,7 +198,7 @@ class CPU8086:
     # Optional hardware-interrupt source (a PIC).  When set, it is polled at each
     # instruction boundary with IF set; returning an IRQ number delivers it inline
     # (real hardware-interrupt entry into the IVT handler).  Left None on the
-    # deterministic demo/test path so that timing there is unchanged.
+    # deterministic replay/test path so that timing there is unchanged.
     pending_irq: "Callable[[], int | None] | None" = None
     max_rep_count: int = 1_000_000
     # Optional generic execution telemetry sink. The CPU emits only raw events;
@@ -591,7 +591,7 @@ class CPU8086:
                     f"hook covers this address.  The candidate must never "
                     f"fetch/decode/execute x86; register a resume entry, lift "
                     f"the code, or record the recovery fact that explains this "
-                    f"address (docs/dos_re_2.0.md section 1a).")
+                    f"address (docs/history/dos_re_2.0.md section 1a).")
 
         seg_override: str | None = None
         rep: int | None = None

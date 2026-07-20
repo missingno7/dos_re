@@ -1,24 +1,22 @@
-# DOS_RE 2.0 — the automatic staged recovery pipeline
+# DOS_RE 2.0 — the automatic staged recovery pipeline (historical)
 
-**Status: generated-recovery pipeline reference (owner-ratified, 2026-07-17).**
-The lifting transformations and pilot evidence remain current. The dos_re 3.0
-execution, dependency-detachment, and release authority is
-[`execution_planner.md`](execution_planner.md).
+> Non-normative design record. Current architecture and commands begin at the
+> repository README and `docs/README.md`.
 
 > **DOS_RE 3.0 executable-model supersession.** The recovery transformations
 > and hard walls in this document remain optional implementation evidence.
 > They no longer define release readiness, product types, or mandatory runner
 > names. One plan may mix implementations at different recovery levels; its
 > declared dependency closure and release policy are authoritative. See
-> [`execution_planner.md`](execution_planner.md) and
-> [`override_architecture.md`](override_architecture.md).
+> [`execution_planner.md`](../execution_planner.md) and
+> [`override_architecture.md`](../override_architecture.md).
 
 > **M3 CPUless — ACCEPTED (2026-07-16).**  The whole reachable graph from the
 > game root is CPUless: recovered functions compute over `(mem, plat, *regs)`
 > with no CPU carrier, no interpreter, no lifted graph.  `detached profile` runs
 > the game standalone from the data-only boot image, and
 > the project's ReplayArtifact verification gate proves it byte-exact against the interpreted
-> oracle over the whole demo (regs + flags + poison-masked memory at every
+> oracle over the whole replay (regs + flags + poison-masked memory at every
 > boundary).  The generic machinery that made this automatic is catalogued in
 > §CPUless machinery below; everything game-specific stayed in `lemmings_port`
 > as recovery facts (entries, dispatch/boundary/vector facts, the recovered
@@ -125,7 +123,7 @@ now says so.)
    native cannot access the historical DOS memory layout.
 5. **Unsupported behavior must fail loudly.**  No silent emulation, hidden
    interpreter fallback, guessed semantics, or patches that merely make one
-   demo pass.
+   replay pass.
 6. **Generated code is disposable.**  Delete every generated artifact and
    reproduce it from the original binary, configuration, recovery facts, and
    the DOS_RE toolchain.
@@ -269,7 +267,7 @@ contracts **fail loudly** (no silent fallback to a register-shaped
 signature).  The mechanical CPUless graph remains the generated reference:
 every promoted contract is differentially verified (returned values,
 observable memory effects, caller-live conditions, platform effects, virtual
-timing where still required, complete deterministic demo behavior), with the
+timing where still required, complete deterministic replay behavior), with the
 oracle bridge as final acceptance.
 
 The stage-2b hard wall: **the recovered program no longer exposes or depends
@@ -624,7 +622,7 @@ this structure; this routine is the scheduler seam).  Response: record the
 smallest evidence-backed fact → feed it into the generic pipeline →
 regenerate → re-verify.
 
-The response is **never** to hand-patch generated output until a demo happens
+The response is **never** to hand-patch generated output until a replay happens
 to pass.
 
 ### Recovery facts are explicit
@@ -993,8 +991,8 @@ Lemmings-specific.
 
 - **Two-level acceptance.**  The function differential (`verify_cpuless.py`
   pattern) checks recovered-vs-oracle over randomized register/flag/memory
-  trials; the demo differential is the authoritative gate — the port's recorded
-  demo replayed on the oracle and on the recovered program in lockstep, masked
+  trials; the replay differential is the authoritative gate — the port's recorded
+  replay replayed on the oracle and on the recovered program in lockstep, masked
   byte-exact at every boundary.  The clean-room form runs the STANDALONE program
   (no VM at all) against the oracle.
 

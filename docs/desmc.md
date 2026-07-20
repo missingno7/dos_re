@@ -64,7 +64,7 @@ A single unsupported write keeps the whole function refused
 
 A candidate is a CANDIDATE, not a proof.  The emitted module is promoted by
 the ordinary differential machinery — `liftverify` in situ, then the
-end-to-end demo differential — run over inputs that exercise MULTIPLE patch
+end-to-end replay differential — run over inputs that exercise MULTIPLE patch
 configurations.  The SkyRoads validation: the transformed `66E6`, executed
 from the identical pre-state as the interpreted oracle over a full TREKDAT
 chunk (2,148 bit-reader calls through runtime-patched widths that the

@@ -26,7 +26,7 @@ IMPORT_CAPABILITIES = {
     "dos_re.execution": DependencyCapability.DEVELOPMENT_TOOLING.value,
     "dos_re.hooks": DependencyCapability.DEVELOPMENT_TOOLING.value,
     "dos_re.player": DependencyCapability.DEVELOPMENT_TOOLING.value,
-    "dos_re.pm_player": DependencyCapability.DEVELOPMENT_TOOLING.value,
+    "dos_re.pm_backend": DependencyCapability.DEVELOPMENT_TOOLING.value,
     "dos_re.replay": DependencyCapability.REPLAY.value,
     "dos_re.runtime": DependencyCapability.DOS_RE_RUNTIME.value,
     "dos_re.snapshot": DependencyCapability.SNAPSHOTS.value,

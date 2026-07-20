@@ -120,7 +120,7 @@ def save_crash(rt, out_dir: str | Path, *, exc: BaseException | None = None,
     """Snapshot ``rt`` where it stands and record why. Returns the directory.
 
     ``context`` is whatever the caller knows that the machine does not -- the
-    frame number, the park counts, which demo was replaying. Put it in: the
+    frame number, the park counts, which replay was replaying. Put it in: the
     machine state says WHERE it broke and the context says WHEN, and the second
     question is usually the harder one to answer afterwards.
 

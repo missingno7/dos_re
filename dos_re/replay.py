@@ -16,7 +16,7 @@ Continuation state is deliberately distinct from comparison state:
   state; detached native profiles project the same semantic schema from their
   own representation.
 
-No legacy demo, suffix, snapshot, or repro format is read here.  Version 1 is
+No legacy replay, suffix, snapshot, or repro format is read here.  Version 1 is
 the first dos_re 3.0 format and intentionally has no migration path.
 """
 from __future__ import annotations

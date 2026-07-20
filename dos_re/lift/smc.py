@@ -44,7 +44,7 @@ Verification contract
 ---------------------
 A candidate is CANDIDATE, not proven.  ``liftemit --desmc`` emits the
 transformed module (banner-marked), and the ordinary differential machinery
-(``liftverify`` in situ, then the end-to-end demo differential) is the
+(``liftverify`` in situ, then the end-to-end replay differential) is the
 promotion gate -- run it over inputs that exercise MULTIPLE patch
 configurations (e.g. every LZS file the boot decodes re-patches the widths).
 """

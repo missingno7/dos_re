@@ -137,7 +137,7 @@ class SoundBlaster:
     # if None, the IRQ fires immediately (detection-only / headless use).
     clock: Callable[[], float] | None = None
     # Anchor the block cadence to a fixed grid (live play, for drift-free audio).
-    # Left False for the deterministic demo clock so recordings stay byte-reproducible.
+    # Left False for the deterministic replay clock so recordings stay byte-reproducible.
     anchor_cadence: bool = False
     _block_due: float = 0.0
     _block_pending: bool = False
@@ -355,7 +355,7 @@ class SoundBlaster:
         """Re-base a pending block-complete IRQ onto a new clock origin.
 
         The front-end may switch the time source (e.g. wall clock <-> the
-        deterministic demo clock); ``_block_due`` was computed against the old
+        deterministic replay clock); ``_block_due`` was computed against the old
         origin, so without this the next block would either stall forever or fire
         a catch-up burst.  Re-arm it one block-period from ``now`` on the new clock.
         """
@@ -388,7 +388,7 @@ class SoundBlaster:
             # Store the pending block as a REMAINING duration on the current
             # clock, not the absolute _block_due: the resumed run re-arms it the
             # same distance ahead on whatever clock it uses, so the block-IRQ
-            # fires at the identical emulated instant (a demo replays exactly).
+            # fires at the identical emulated instant (a replay playbacks exactly).
             "block_remaining": (max(0.0, self._block_due - self.clock())
                                 if self._block_pending and self.clock else 0.0),
             "channels": {str(c): ch.snapshot_state() for c, ch in self.channels.items()},
@@ -426,7 +426,7 @@ class SoundBlaster:
         FAITHFUL (reproducible) path: if a block was pending at save, re-arm it
         the SAME remaining distance ahead on the current clock — it then fires
         at the identical emulated instant it would have in the run that saved,
-        so a demo recorded live replays byte-for-byte.  Only when nothing is
+        so a replay recorded live replays byte-for-byte.  Only when nothing is
         pending AND the stream is genuinely stalled (DMA active, no queued IRQ)
         do we kick-start it by raising the IRQ directly — the old unconditional
         fire broke replay determinism (the block fired at load, not at due).

@@ -1,7 +1,7 @@
 """Execution composition and dependency-policy planning for dos_re 3.0.
 
-This module is deliberately backend-neutral.  It does not import a CPU,
-interpreter, player, replay implementation, or the future Execution Atlas.
+This module is deliberately backend-neutral. It does not import a CPU,
+interpreter, player, replay implementation, or Execution Atlas storage.
 Ports describe coverage, implementations, and services as immutable records;
 the planner selects one implementation per reachable identity and fails before
 runtime construction when a strict profile cannot be satisfied.
@@ -268,7 +268,7 @@ class ProgramCoverage:
 
 
 class CoverageSource(Protocol):
-    """Interface current IR adapters and the future Execution Atlas implement."""
+    """Backend-neutral coverage interface implemented by IR and Atlas adapters."""
 
     def coverage_for(self, product_profile: str) -> ProgramCoverage: ...
 

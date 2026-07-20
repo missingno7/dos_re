@@ -4,7 +4,7 @@ Runs the ABI-contract inference (dos_re.lift.contracts) over every censused
 function: proposed real parameters (from register/stack live-ins),
 caller-observed return values (interprocedural exit-liveness narrowing),
 stack-argument evidence, pointer-pair evidence, and structured refusals --
-the ABI-recovered CPUless work list (docs/dos_re_2.0.md, Stage 2b / M3b).
+the ABI-recovered CPUless work list (docs/history/dos_re_2.0.md, Stage 2b / M3b).
 
 Externally-reachable functions (roots, dynamic-dispatch targets, vectored
 handlers) keep conservative return sets; supply them so the narrowing never

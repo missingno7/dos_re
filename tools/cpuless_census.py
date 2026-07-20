@@ -3,7 +3,7 @@
 Runs the CPU-ABI inference (dos_re.lift.cpuless) over every censused function
 and reports which functions the CPUless emitter can take today and which
 capabilities are missing, ranked by how much corpus they unblock -- the M3
-work list (docs/dos_re_2.0.md section 1, stage 2).
+work list (docs/history/dos_re_2.0.md section 1, stage 2).
 
 Tiers:
     leaf        no refusals at all: fully analyzed straight-line/branchy code

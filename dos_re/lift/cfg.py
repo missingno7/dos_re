@@ -260,7 +260,7 @@ def scan_function(fetch: Callable[[int], int], entry: int, *,
     the ``no-exit`` refusal is suppressed and the function stays liftable, its
     boundary head(s) recorded for the emitter's resume machinery.  Without this a
     game's own main loop is unliftable, capping the VMless graph short of the
-    root (docs/dos_re_2.0.md §6a).
+    root (docs/history/dos_re_2.0.md §6a).
     """
     heads = boundary_heads or frozenset()
     scan = FunctionScan(entry=entry)

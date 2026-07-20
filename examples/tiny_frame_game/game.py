@@ -40,7 +40,7 @@ The program (one code/data segment, entry at offset 0):
 
 Per frame it paints framebuffer row 0 with colour ``(counter + keystate) & 0xFF``
 — so the visible output depends on both time and input, which is exactly what
-demos, snapshots, hooks, and the frame verifier need to prove things about.
+replays, snapshots, hooks, and the frame verifier need to prove things about.
 """
 from __future__ import annotations
 

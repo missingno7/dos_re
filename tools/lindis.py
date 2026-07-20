@@ -16,7 +16,7 @@ to be executable.
 
 Usage:
     python tools/lindis.py <exe_path> <snapshot_dir> <CS> <START> <END>
-e.g python tools/lindis.py assets/GAME.EXE artifacts/demos/.../snapshot 1010 9AFF 9C6B
+e.g python tools/lindis.py assets/GAME.EXE artifacts/replays/.../snapshot 1010 9AFF 9C6B
 
 Origin: adapted from the Overkill port's scripts/lindis.py (its game-specific
 snapshot loader replaced by the generic dos_re.snapshot.load_snapshot).

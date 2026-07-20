@@ -39,7 +39,7 @@ KNOWN_OPTIONAL = ("numpy", "pygame", "pytest", "cffi", "sounddevice", "pynuked_o
 # in — player.py keeps its imports lazy; display.py and audio_sink.py are only
 # imported by player.py when a window actually opens.
 FRONTEND_RING = {"player.py", "display.py", "audio_sink.py", "overlay_menu.py",
-                 "pm_player.py"}
+                 "pm_backend.py"}
 FRONTEND_ALLOWED = ("pygame", "sounddevice", "pynuked_opl3")
 
 

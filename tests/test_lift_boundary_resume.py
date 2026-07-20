@@ -7,7 +7,7 @@ head itself:
 
   * a snapshot captured while the game was spinning there -- and a game spends
     most of its wall clock in exactly this loop, so this is the LIKELIEST place
-    to catch it. Every one of skyroads' gameplay demos starts at 1010:22F8,
+    to catch it. Every one of skyroads' gameplay replays starts at 1010:22F8,
     mid-spin.
   * an IRET returning to the head, when an IRQ landed on that instruction.
 

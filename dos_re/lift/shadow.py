@@ -156,7 +156,7 @@ class ShadowRecord:
         if self.errors:
             return f"{self.key}: {v} -- {self.errors[0]}"
         if not self.calls:
-            return f"{self.key}: {v} -- NEVER CALLED (wrong demo for this address?)"
+            return f"{self.key}: {v} -- NEVER CALLED (wrong replay for this address?)"
         cost = ""
         if self.costs:
             top = sorted(self.costs.items(), key=lambda kv: -kv[1])[:4]

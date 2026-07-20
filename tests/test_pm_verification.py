@@ -63,7 +63,7 @@ def test_configure_sound_preserves_restored_sb():
     re-armed block IRQ).  The viewer only needs to retarget its clock at wall
     time — rebuilding the device would blank the DMA programming and cut the
     audio off on resume."""
-    from dos_re.pm_player import _configure_sound
+    from dos_re.pm_backend import _configure_sound
     rt = make_rt()
     # Stand in for a snapshot-restored, actively-streaming device.
     sb = rt.dos.attach_sound_blaster(base=0x210, irq=7, dma=1)
@@ -83,12 +83,12 @@ def test_configure_sound_preserves_restored_sb():
 
 
 def test_configure_sound_deterministic_keeps_instruction_clock():
-    """Demo-replay fidelity contract: the reproducible paths (record, replay,
+    """Replay-replay fidelity contract: the reproducible paths (record, replay,
     headless) must keep the SB on the deterministic instruction-count clock,
     NOT wall time — the SB IRQ's firing point steers the whole execution, so a
-    demo only replays faithfully if record and replay share that clock."""
+    replay only replays faithfully if record and replay share that clock."""
     import time
-    from dos_re.pm_player import _configure_sound
+    from dos_re.pm_backend import _configure_sound
     rt = make_rt()
     sb = rt.dos.attach_sound_blaster(base=0x210, irq=7, dma=1)   # instruction-count clock
     clk0 = sb.clock

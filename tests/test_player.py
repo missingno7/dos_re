@@ -50,8 +50,8 @@ def test_standard_cli_defaults():
     assert args.headless is False           # viewer is the default state
     assert args.profile == "development"
     assert args.plan_only is False
-    assert args.play_demo is None
-    assert args.demo_continue is False
+    assert args.play_replay is None
+    assert args.replay_continue is False
     assert args.steps_per_frame == GameFrontend.default_steps_per_frame
     assert args.timer_irqs_per_frame == GameFrontend.default_timer_irqs_per_frame
     assert args.present_hz == GameFrontend.default_present_hz
@@ -78,15 +78,15 @@ def test_frontend_defaults_flow_into_parser():
     assert args.tiny_extra is True
 
 
-def test_demo_metadata_roundtrip():
+def test_replay_metadata_roundtrip():
     fe = GameFrontend(ROOT)
     args = _parse(fe, ["--exe", "GAME.EXE", "--steps-per-frame", "555",
                        "--timer-irqs-per-frame", "3"])
-    meta = fe.demo_metadata(args)
+    meta = fe.replay_metadata(args)
     assert meta["steps_per_frame"] == 555 and meta["timer_irqs_per_frame"] == 3
 
     fresh = _parse(fe, ["--exe", "GAME.EXE"])   # defaults, as a replay would start
-    fe.apply_demo_metadata(fresh, meta)
+    fe.apply_replay_metadata(fresh, meta)
     assert fresh.steps_per_frame == 555 and fresh.timer_irqs_per_frame == 3
 
 
@@ -191,7 +191,7 @@ def test_run_headless_respects_frame_budget(capsys):
 
 
 def test_verification_profile_requires_an_explicit_interval():
-    with pytest.raises(SystemExit, match="requires --play-demo"):
+    with pytest.raises(SystemExit, match="requires --play-replay"):
         player.main(GameFrontend(ROOT), [
             "--exe", str(Path(__file__)), "--profile", "verification",
         ])

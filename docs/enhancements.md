@@ -1,14 +1,10 @@
-> Framework method reference. Authority: [`execution_planner.md`](execution_planner.md)
-> defines execution and release closure; [`dos_re_2.0.md`](dos_re_2.0.md)
-> defines generated recovery techniques. Promoted from the
-> DOS_RE 1.0 starter (template_dos_port, retired) because the mechanics remain valid.
+> Current policy reference for `OverrideCategory.ENHANCEMENT`. Execution and
+> release closure remain owned by [`execution_planner.md`](execution_planner.md).
 
 # Non-authoritative enhancements over verified game state
 
-> This file is the **rules** (sequencing, the read-only boundary, the parity
-> gate). The post-endgame **workflow** — the human taste loop, the
-> fps-vs-interpolation ladder, the technique catalog (F10 menu, transitions,
-> hosts) — is [`post_endgame.md`](post_endgame.md), gated until the flip.
+> This file defines the read-only authoritative-state boundary and verification
+> policy for presentation and host integrations.
 > Enhancement registration and verification policy are defined by
 > [`override_architecture.md`](override_architecture.md).
 

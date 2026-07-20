@@ -18,7 +18,7 @@ What's here:
 
 | Directory | Role |
 |---|---|
-| [`minimal_adapter/`](minimal_adapter/example.py) | 5-minute demo of the hook → verify → snapshot loop on a straight-line program. |
+| [`minimal_adapter/`](minimal_adapter/example.py) | 5-minute replay of the hook → verify → snapshot loop on a straight-line program. |
 | [`tiny_frame_game/`](tiny_frame_game/README.md) | The whole lifecycle on a synthetic frame-loop game (oracle boot, cold-start `ReplayArtifact`, both verification oracles, state mirror). Doubles as the repo's full-stack integration test. |
 
 To start a real game port, do NOT copy files from here: scaffold a port repo

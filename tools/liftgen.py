@@ -70,7 +70,7 @@ def main(argv=None) -> int:
                         "into DIR (one module each, named lifted_<cs>_<ip>.py)")
     p.add_argument("--count-instructions", action="store_true",
                    help="(with --emit) make the lifted hook reproduce the ASM's "
-                        "instruction_count, so installing it is demo-clock transparent")
+                        "instruction_count, so installing it is replay-clock transparent")
     p.add_argument("--max-iterations", type=int, default=None, metavar="N",
                    help="(with --emit) raise the emitted hook's runaway guard above "
                         "the default -- for large data-driven loops, not decode bugs")

@@ -1,4 +1,4 @@
-> Framework method reference. Authority: [`execution_planner.md`](execution_planner.md)
+> Framework method reference. Authority: [`execution_planner.md`](../execution_planner.md)
 > defines execution and release closure; [`dos_re_2.0.md`](dos_re_2.0.md)
 > defines generated recovery techniques. Promoted from the
 > DOS_RE 1.0 starter (template_dos_port, retired) because the mechanics remain valid.
@@ -72,7 +72,7 @@ ORACLE_PASSING with zero divergences. `kegg_port/docs/kegg/
 lifter_gap_analysis.md` is the porting story if dos_re ever needs another
 ISA variant.
 
-**A recorded demo replays differently from the recording (even crashes),
+**A recorded replay replays differently from the recording (even crashes),
 though input is re-injected at the exact frame boundaries.** → Some IRQ
 source ticks on *wall clock* while recording but on the instruction count
 (or fire-at-once) while replaying — KE's Sound Blaster block-complete IRQ.
@@ -81,7 +81,7 @@ timelines. The 16-bit rule ("instructions ARE time",
 `pre2/docs/live_view_timing_design.md`) applies to PM unchanged: every
 reproducible path (record / replay / headless) must clock every IRQ from
 `instruction_count`; only a casual live view may pace by wall clock
-(`pm_player._configure_sound(deterministic=...)`). PM demos also record a
+(`pm_backend._configure_sound(deterministic=...)`). PM replays also record a
 complete continuation state through `ReplayArtifact`; oracle/candidate
 verification uses canonical endpoint comparison. Any change to
 an emulated clock invalidates old recordings — re-record, don't debug them.
@@ -253,9 +253,9 @@ unvisited behavior as a coverage gap.
 
 `dos_re/dos_re/player.py` owns the standard
 CLI (viewer by default / `--headless`; `--snapshot`/`--save-snapshot`;
-`--record-demo`/`--play-demo`/`--demo-continue`; execution profiles;
+`--record-replay`/`--play-replay`/`--replay-continue`; execution profiles;
 pacing knobs), the viewer loop with the standard hotkeys (F10 screenshot,
-F11 demo-record toggle, F12 snapshot), headless replay and crash snapshots.
+F11 replay-record toggle, F12 snapshot), headless replay and crash snapshots.
 Your project's only player subclasses `GameFrontend`; the worked
 examples below are the GAME-SPECIFIC ideas you graduate into as the port
 matures.
@@ -263,7 +263,7 @@ matures.
 **Which pacing model? (the main thing ports actually differ in).**
 → Start with the library default: a fixed `--steps-per-frame` budget +
 `--timer-irqs-per-frame` INT 08h ticks — no wall clock, the frame index IS
-the demo clock, record/replay trivially deterministic. Graduate only when the
+the replay clock, record/replay trivially deterministic. Graduate only when the
 game demands it, cheapest first:
 - **Deterministic tick-wait park** (simplest, no wall clock): the game paces
   off a timer-tick counter its INT 08h ISR bumps, but the driver delivers all
@@ -275,7 +275,7 @@ game demands it, cheapest first:
   fewer interpreted steps on gameplay-heavy frames, keeping the deterministic
   fixed-budget clock.
 - **Wall-clock model** (P2): PIT ch0 + the 70 Hz retrace on the WALL clock for
-  live play, while demos keep a deterministic instruction-count clock
+  live play, while replays keep a deterministic instruction-count clock
   (`pre2_port/scripts/play.py`, `docs/pre2/timing_hook_design.md` — read its §7
   before touching live pacing).
 - **Modelled wait boundaries** (Overkill): present at the game's timer/retrace
@@ -298,11 +298,11 @@ frames — size it to peak + headroom (SkyRoads: measured peak 37.3k steps →
 budget 48k). Because `steps_per_frame` lives in artifact metadata, playback
 restores the recorded value.
 
-**A hook tier safe enough to record demos over (`recording-safe override profile`).**
+**A hook tier safe enough to record replays over (`recording-safe override profile`).**
 → Classify hooks by WRITE-SET: render/audio-owned hooks (their writes cannot
 touch the gameplay state a recording certifies) plus input-closed asset
 decoders proven byte-identical over the whole asset set. Running only that
-tier keeps the wall-clock playable for fluent human demo recording while
+tier keeps the wall-clock playable for fluent human replay recording while
 every gameplay byte still comes from original ASM. Worked example:
 `pre2.checkpoints.SAFE_ORACLE_HOOKS` + the `recording-safe override profile` help text in
 `pre2_port/scripts/play.py`.
@@ -333,7 +333,7 @@ blocks to the host mixer (worked example: P2 `--audio adlib`, and
 **Convenience fast-paths behind flags (never silent).**
 → Recovered accelerators the human toggles: P2's `--fast-song-load`
 (byte-exact MOD-loader fast-forward) and `--fast-adlib` (mute the hot AdLib thunk to reach
-graphics fastest). The pattern: default them by MODE, record them in demo
+graphics fastest). The pattern: default them by MODE, record them in replay
 metadata, include them in the execution-profile identity, and document the
 byte-exactness status in the help text. Worked
 example: `pre2_port/scripts/play.py`.
@@ -363,7 +363,7 @@ template `examples/ledgers/overnight_goal.md` (preconditions checklist,
 done-condition, gates, work-queue buckets; run_status's frontier statement
 overrides the queue). Deploy it in the MIDDLE of the port — the hook/lift
 grind after the game is fully runnable and the corpus spans gameplay
-(ideally e2e cold-start demos); the corpus is what makes unattended commits
+(ideally e2e cold-start replays); the corpus is what makes unattended commits
 safe. Bring-up and the flip's design decisions stay attended.
 Worked examples of a long campaign's brief evolving:
 `overkill_port/scripts/overnight_loop.sh`,
@@ -380,7 +380,7 @@ it, optionally wrap with PyInstaller. Worked example:
 ## Presentation over a verified authoritative seam
 
 **Making it look/feel modern without touching gameplay.**
-→ [`enhancements.md`](enhancements.md) has the rules. The enhancement may
+→ [`enhancements.md`](../enhancements.md) has the rules. The enhancement may
 attach before the whole game is memoryless, but its authoritative input must
 already be verified and read-only. Worked examples are
 P2's enhanced layer: render-intent model (`pre2_port/docs/pre2/render_model.md`,

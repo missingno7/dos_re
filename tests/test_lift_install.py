@@ -1,7 +1,7 @@
 """Focused tests for dos_re.lift.install — the hybrid auto-install rung.
 
 Only proven routines install; the fingerprint is deterministic and covers
-both which addresses are hooked and which module answers each (so a demo can
+both which addresses are hooked and which module answers each (so a replay can
 detect a changed lift set and refuse to desync).  Game-free (synthetic)."""
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def test_fingerprint_is_deterministic_and_module_sensitive(tmp_path):
     a = {(0x1010, 0x0100): "lifted_1010_0100.py", (0x1010, 0x0200): "lifted_1010_0200.py"}
     b = {(0x1010, 0x0200): "lifted_1010_0200.py", (0x1010, 0x0100): "lifted_1010_0100.py"}
     assert lift_fingerprint(a) == lift_fingerprint(b)         # order-independent
-    assert lift_fingerprint({}) == ""                        # hook-free demo
+    assert lift_fingerprint({}) == ""                        # hook-free replay
     c = dict(a); c[(0x1010, 0x0100)] = "lifted_1010_0100_v2.py"
     assert lift_fingerprint(c) != lift_fingerprint(a)        # module change → new fp
 

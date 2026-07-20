@@ -8,7 +8,7 @@ CS:IP, byte-exact verifiable). That means the two biggest speedups are *free*
 
 The interpreter's per-instruction path is scalar stdlib code (numpy — a core
 dependency for bulk pixel/array work — installs fine under PyPy and stays OFF
-that hot path), so every path — oracle runs, hook verification, demo replay,
+that hot path), so every path — oracle runs, hook verification, replay playback,
 the test suites, **and the live viewer** — runs unchanged under
 [PyPy](https://pypy.org). Measured (PyPy 3.11
 v7.3.20 vs CPython 3.11, Windows, 20M-instruction steady state):
@@ -106,7 +106,7 @@ test dominates the critical path. Measured locally (CPython, 24 threads):
 | overkill_port | 4m17s | **56s (4.6x)** | the main beneficiary |
 | pre2_port | 24s | 18s | mild |
 | dos_re | 11s | 8s | mild |
-| ancient_port / skyroads_port | 47s / 20s | ~same | critical-path-bound (one long demo-roundtrip test each) |
+| ancient_port / skyroads_port | 47s / 20s | ~same | critical-path-bound (one long replay-roundtrip test each) |
 
 **xdist and PyPy do NOT compose well for suites**: every PyPy worker re-pays
 JIT warmup, so overkill under `pypy -n auto` is 1m27s — slower than

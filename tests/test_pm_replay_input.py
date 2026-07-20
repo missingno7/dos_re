@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 from dos_re.cpu import HaltExecution
 from dos_re.cpu386 import CPU386, FlatMemory
-from dos_re.input_demo import MOUSE_CHANNEL, mouse_payload
-from dos_re.pm_input_demo import (
+from dos_re.replay_input import MOUSE_CHANNEL, mouse_payload
+from dos_re.pm_replay_input import (
     FrameClock,
     KEY_CHANNEL,
     ProtectedModeInputAdapter,
@@ -41,7 +41,7 @@ def test_protected_mode_recording_uses_replay_artifact(tmp_path):
     artifact = recording.finish(8, end_state=_state(3, 9))
 
     reopened = ReplayArtifact.open(artifact.directory)
-    assert not (artifact.directory / "input_demo.json").exists()
+    assert not (artifact.directory / "replay_input.json").exists()
     adapter = ProtectedModeInputAdapter(reopened.events)
     keys, mouse = [], []
     dos = SimpleNamespace(set_mouse_norm=lambda *sample: mouse.append(sample))

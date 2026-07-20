@@ -6,7 +6,7 @@ a screenshot key). See docs/post_endgame.md for when and how to use it.
 
 Host-presentation layer ONLY — the determinism firewall is structural:
   * the menu is MODAL: while open the caller freezes the game tick (like a pause) and routes every key
-    event here, so nothing it consumes can ever reach the game's input cells or perturb a demo;
+    event here, so nothing it consumes can ever reach the game's input cells or perturb a replay;
   * items act through caller-supplied closures on HOST/presentation settings — this module imports
     nothing from any game and never touches game state;
   * pygame is INJECTED (the ``pygame_mod`` constructor arg): importing this module needs nothing.

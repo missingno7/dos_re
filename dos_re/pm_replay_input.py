@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
-from .input_demo import MOUSE_CHANNEL, mouse_sample
+from .replay_input import MOUSE_CHANNEL, mouse_sample
 from .lift.runtime32 import interp_one32
 from .replay import ReplayEvent
 

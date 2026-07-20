@@ -1,6 +1,6 @@
 """CPU-ABI inference -- the first CPUless de-carrier analysis (M3, stage 2).
 
-The CPUless wall (docs/dos_re_2.0.md section 1a) removes the CPU-shaped
+The CPUless wall (docs/history/dos_re_2.0.md section 1a) removes the CPU-shaped
 carrier: generated functions stop communicating through emulated registers,
 flags, and the machine stack, and use arguments/returns/locals instead.  The
 transformation is driven by ANALYSES OVER THE SHARED RECOVERY IR -- never by

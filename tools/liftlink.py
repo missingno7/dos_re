@@ -2,7 +2,7 @@
 """liftlink — batch linker: ``emulate_call`` edges become direct lifted-to-lifted calls.
 
 The VM-detachment linking pass of the DOS_RE 2.0 pipeline
-(docs/dos_re_2.0.md): after ``liftemit`` produces the VMless lifted corpus,
+(docs/history/dos_re_2.0.md): after ``liftemit`` produces the VMless lifted corpus,
 this tool turns interpreter-mediated near CALLs between lifted functions into
 direct Python calls, producing the structurally linked VMless graph.
 ``emit_function`` already knows how to emit a linked direct call (``link_map``
@@ -25,7 +25,7 @@ comparison at tick boundaries over the assembled graph, with
 timeline transition. Per-function ORACLE_PASSING is NOT a link precondition —
 ``--proven-edges`` restores that 1.x conservative gate for the hybrid tier or
 for debugging, but it must not be the default posture (oracle-guided
-convergence, docs/dos_re_2.0.md §2).
+convergence, docs/history/dos_re_2.0.md §2).
 
 Everything is rescanned from the snapshot (``scan_function`` with the
 interpreter probe, exactly as liftverify does) — stale census artifacts are
@@ -389,7 +389,7 @@ def main(argv=None) -> int:
                     help="1.x conservative gate: additionally require the "
                          "callee to be ORACLE_PASSING on some --board. For "
                          "the hybrid tier / debugging only -- graph assembly "
-                         "is judged end-to-end (docs/dos_re_2.0.md section 2).")
+                         "is judged end-to-end (docs/history/dos_re_2.0.md section 2).")
     ap.add_argument("--boundary-heads", default=None, metavar="@FILE",
                     help="boundary-head addresses (one CS:IP per line); must "
                          "match the liftemit setting for a consistent corpus")

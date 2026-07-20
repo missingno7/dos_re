@@ -405,7 +405,7 @@ slice 9  game-vectored INT + iret handlers (5 + 3) via the _ivec dispatch
 slice 10 alt-entry 11 + observer 9 — likely permanent classes with an
          explicit generated frame contract
 slice 11 flags-word-stack (pushf/popf) 7
-slice 12 acceptance gate + full-corpus poison proof on the canonical demo
+slice 12 acceptance gate + full-corpus poison proof on the canonical replay
 ```
 
 Then, and only then, M4 ([`../memory_schema.md`](../memory_schema.md)).

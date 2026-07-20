@@ -8,7 +8,7 @@ not merely a name, so an exception is a finding rather than a silent gap.
 
 This is a STATIC gate over generated text and the census: it complements,
 never replaces, the seeded differential (tools/abi_core_verify.py) and the
-end-to-end oracle demo.  It exists because several real defects in this
+end-to-end oracle replay.  It exists because several real defects in this
 milestone were statically visible before they were dynamically visible --
 an unbound composed-call argument, a stale core module left on disk after
 its function was refused.
@@ -195,7 +195,7 @@ def gate(abi_dir: Path, census: dict) -> dict:
         # signature that never declared `_flags_in`.  That is a NameError on
         # every call, and because the runtime catches BaseException around the
         # program thread it surfaced only as a missing park -- eight cores, a
-        # bisection, and several demo runs to find something a compiler-grade
+        # bisection, and several replay runs to find something a compiler-grade
         # check names instantly.  Generated code must be checked AS CODE.
         for fname, bad in _unbound_names(s).items():
             for nm in sorted(bad):
@@ -249,7 +249,7 @@ def main(argv=None) -> int:
     print("\nWALL COUNTERS ALL ZERO for the emitted core corpus. "
           "(M3b completion additionally requires the exception list above "
           "to be empty or fully represented, plus a green differential and "
-          "a green oracle demo.)")
+          "a green oracle replay.)")
     return 0
 
 

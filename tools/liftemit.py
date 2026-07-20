@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """liftemit — batch-emit every census entry to lifted Python, in one pass.
 
-The bulk-emission step of the DOS_RE 2.0 pipeline (docs/dos_re_2.0.md): given
+The bulk-emission step of the DOS_RE 2.0 pipeline (docs/history/dos_re_2.0.md): given
 the census entry list and a snapshot whose memory is the code-bytes authority,
 emit a VMless lifted module per entry into ``--emit-dir``.  No verification
 and no driving — that is ``liftverify``'s job (per-slice diagnostics / hybrid
@@ -17,7 +17,7 @@ and per-call/per-block instrumentation is verification-tier overhead (it made
 the Lemmings fade paths measurably slower).  Pass ``--coverage`` to emit
 byte-identically to liftverify's modules when a proof pass will reuse them.
 
-The VMLESS WALL (docs/dos_re_2.0.md §1a) is checked here mechanically: after
+The VMLESS WALL (docs/history/dos_re_2.0.md §1a) is checked here mechanically: after
 emission every module is scanned for ``interp_one`` call sites (instruction-
 interpretation fallback inside the declared corpus).  The count is always
 reported; ``--require-vmless-wall`` makes any nonzero count a hard failure —
@@ -125,7 +125,7 @@ def emit_entry_from_ir(fn_rec: dict, emit_dir: Path, max_iterations,
     # ir.desmc_operand_slots): a function refused ONLY for runtime code patching,
     # whose every incoming write is a supported operand slot, may be emitted with
     # those operands read from live code memory. The module is banner-marked
-    # DESMC; the ordinary differential machinery (liftverify + the end-to-end demo
+    # DESMC; the ordinary differential machinery (liftverify + the end-to-end replay
     # gate) is the promotion decision.  Unlike cpuless_promote, the lifted emitter
     # supports far-target patches too (the JMP_FAR/CALL_FAR path in emit.py).
     slots = desmc_operand_slots(fn_rec)
@@ -227,7 +227,7 @@ def main(argv=None) -> int:
     ap.add_argument("--require-vmless-wall", action="store_true",
                     help="fail (exit 2) if any emitted module contains an "
                          "interp_one fallback call site -- the enforced VMless "
-                         "execution wall (docs/dos_re_2.0.md section 1a)")
+                         "execution wall (docs/history/dos_re_2.0.md section 1a)")
     args = ap.parse_args(argv)
     if not args.from_ir and not (args.exe and args.snapshot and args.entries_file):
         ap.error("either --from-ir IR.json or --exe + --snapshot + --entries-file")
