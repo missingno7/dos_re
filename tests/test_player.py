@@ -14,6 +14,13 @@ from pathlib import Path
 import pytest
 
 from dos_re import player
+from dos_re.execution import (
+    CoverageResult,
+    ExecutionPlanError,
+    ImplementationDescriptor,
+    ImplementationOrigin,
+    StaticCoverageSource,
+)
 from dos_re.hooks import registry as hook_registry
 from dos_re.player import GameFrontend, HookModeUnsupported, build_arg_parser
 
@@ -39,6 +46,8 @@ def test_standard_cli_defaults():
     fe = GameFrontend(ROOT)
     args = _parse(fe, [])
     assert args.headless is False           # viewer is the default state
+    assert args.profile == "development"
+    assert args.plan_only is False
     assert args.play_demo is None
     assert args.demo_continue is False
     assert args.no_replacements is False
@@ -116,6 +125,61 @@ def test_unimplemented_hook_tiers_fail_loud(flag):
     args = _parse(fe, [flag])
     with pytest.raises(HookModeUnsupported):
         fe.apply_hook_mode(_StubRuntime(), args)
+
+
+def test_detached_profile_fails_before_runtime_construction():
+    class Fe(GameFrontend):
+        created = False
+
+        def create_runtime(self, args):
+            self.created = True
+            raise AssertionError("strict planning must happen before boot")
+
+    fe = Fe(ROOT)
+    with pytest.raises(ExecutionPlanError) as caught:
+        player.main(fe, ["--profile", "detached", "--headless"])
+    assert not fe.created
+    assert caught.value.report.exe_dependent
+
+
+def test_frontend_can_declare_exe_free_implementation_for_same_player():
+    class Fe(GameFrontend):
+        def execution_coverage(self, args):
+            return StaticCoverageSource(CoverageResult(
+                roots=("root",),
+                reachable=frozenset({"root", "frame"}),
+                evidence_identity="tiny-coverage",
+            ))
+
+        def execution_implementations(self, args):
+            return (ImplementationDescriptor(
+                implementation_id="mixed-external",
+                targets=frozenset({"root", "frame"}),
+                origin=ImplementationOrigin.GENERATED,
+                properties=frozenset({"vmless", "dos-memory-backed"}),
+                implementation_digest="tiny-v1",
+            ),)
+
+        default_provider_preference = ("mixed-external",)
+
+    args = _parse(Fe(ROOT), ["--profile", "detached"])
+    plan = Fe(ROOT).resolve_execution_plan(args)
+    assert plan.report.standalone_executable_ready
+    assert {binding.implementation_id for binding in plan.bindings} == {
+        "mixed-external"
+    }
+
+
+def test_plan_only_reports_without_runtime_construction(capsys):
+    class Fe(GameFrontend):
+        def create_runtime(self, args):
+            raise AssertionError("--plan-only must not construct a runtime")
+
+    assert player.main(Fe(ROOT), ["--plan-only"]) == 0
+    output = capsys.readouterr().out
+    assert "execution profile: development" in output
+    assert "standalone executable ready: false" in output
+    assert "plan digest:" in output
 
 
 def test_run_headless_respects_frame_budget(capsys):

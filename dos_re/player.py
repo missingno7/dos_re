@@ -58,6 +58,18 @@ from pathlib import Path
 
 from dos_re.cpu import HaltExecution, UnsupportedInstruction
 from dos_re.dos import ConsoleInputWouldBlock
+from dos_re.execution import (
+    CoverageResult,
+    ExecutionConfiguration,
+    ExecutionPlan,
+    ImplementationDescriptor,
+    ImplementationOrigin,
+    RuntimeServiceDescriptor,
+    StaticCoverageSource,
+    format_execution_plan,
+    plan_execution,
+    profile_configuration,
+)
 from dos_re.hooks import registry as hook_registry
 from dos_re.input_demo import (
     MOUSE_CHANNEL,
@@ -264,6 +276,8 @@ class GameFrontend:
     default_scale = 3
     #: "adlib" turns on the observer-only OPL3 + PC-speaker sink in the viewer
     default_audio = "off"
+    #: Ordered implementation providers. Import order never selects execution.
+    default_provider_preference: tuple[str, ...] = ("interpreted-original",)
 
     def __init__(self, root: Path | str) -> None:
         #: the PORT repo root; artifacts (snapshots/demos/screenshots) live under it
@@ -274,6 +288,58 @@ class GameFrontend:
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Add game-specific flags.  Never rename or repurpose the standard set."""
+
+    # --- execution planning ------------------------------------------------------
+
+    def program_identity(self, args: argparse.Namespace) -> str:
+        """Stable plan identity; ports override with their recovery-IR identity."""
+        return f"frontend:{self.name}"
+
+    def execution_configuration(self, args: argparse.Namespace) -> ExecutionConfiguration:
+        return profile_configuration(
+            args.profile,
+            program_identity=self.program_identity(args),
+            product_profile="default",
+            provider_preference=self.default_provider_preference,
+        )
+
+    def execution_coverage(self, args: argparse.Namespace) -> StaticCoverageSource:
+        """Coverage adapter for the current monolithic interpreted runtime."""
+        program = self.program_identity(args)
+        root = f"{program}:program"
+        return StaticCoverageSource(CoverageResult(
+            roots=(root,),
+            reachable=frozenset({root}),
+            evidence_identity=f"legacy-monolith:{program}",
+        ))
+
+    def execution_implementations(
+        self, args: argparse.Namespace,
+    ) -> tuple[ImplementationDescriptor, ...]:
+        root = f"{self.program_identity(args)}:program"
+        return (ImplementationDescriptor(
+            implementation_id="interpreted-original",
+            targets=frozenset({root}),
+            origin=ImplementationOrigin.INTERPRETED,
+            properties=frozenset({"cpu-backed", "dos-memory-backed"}),
+            requires_original_exe=True,
+            requires_interpreter=True,
+            implementation_digest=_runtime_identity(),
+        ),)
+
+    def execution_services(
+        self, args: argparse.Namespace,
+    ) -> tuple[RuntimeServiceDescriptor, ...]:
+        return ()
+
+    def resolve_execution_plan(self, args: argparse.Namespace) -> ExecutionPlan:
+        """Resolve before boot so strict profiles cannot touch forbidden runtime."""
+        return plan_execution(
+            self.execution_configuration(args),
+            self.execution_coverage(args),
+            self.execution_implementations(args),
+            self.execution_services(args),
+        )
 
     def default_save_dir(self, args: argparse.Namespace) -> Path:
         """Where the live product persists the game's own saved files (progress,
@@ -342,7 +408,10 @@ class GameFrontend:
         )
         overrides = tuple(sorted(
             f"{key!r}:{value}" for key, value in rt.cpu.hook_names.items()))
-        implementation = _implementation_identity(self)
+        plan_digest = getattr(getattr(args, "execution_plan", None), "plan_digest", "")
+        implementation = hashlib.sha256(
+            f"{_implementation_identity(self)}:{plan_digest}".encode("utf-8")
+        ).hexdigest()
         key = hashlib.sha256(
             ("\n".join((mode, implementation, *overrides))).encode("utf-8")
         ).hexdigest()[:12]
@@ -418,6 +487,17 @@ def build_arg_parser(frontend: GameFrontend,
                       help="raw DOS command tail to pass to the executable")
 
     mode = p.add_argument_group("run mode")
+    mode.add_argument(
+        "--profile",
+        default="development",
+        choices=("development", "verification", "detached", "release"),
+        help="execution policy preset; recovery level is selected per implementation",
+    )
+    mode.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="resolve and print the execution/detachment plan without booting",
+    )
     mode.add_argument("--headless", action="store_true",
                       help="skip the live pygame viewer (default: viewer on)")
     mode.add_argument("--frames", type=int, default=0,
@@ -902,6 +982,17 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
                                   hands over to the player when the demo ends).
     """
     args = build_arg_parser(frontend, description).parse_args(argv)
+    hook_modes = (
+        args.no_replacements, args.safe_hooks, args.verify_hooks, args.trace_hooks
+    )
+    if args.profile == "verification" and not any(hook_modes):
+        # Compatibility adapter for the current hook verifier. Ports eventually
+        # express this through VerificationPolicy and a verification driver.
+        args.verify_hooks = True
+    args.execution_plan = frontend.resolve_execution_plan(args)
+    if args.plan_only:
+        print(format_execution_plan(args.execution_plan))
+        return 0
 
     if args.play_demo:
         playback = _RealReplayPlayback.open(args.play_demo)

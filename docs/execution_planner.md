@@ -1,9 +1,14 @@
 # One player, one execution planner, one export boundary (dos_re 3.0)
 
-Status: architecture and migration contract. This document defines one
-universal player, orthogonal policy axes, the closed-world export boundary,
-and interfaces a future Execution Atlas can implement or consume. It does not
-depend on the atlas being implemented.
+Status: architecture and migration contract, with the first executable slice
+landed. `dos_re.execution` now provides immutable configuration, coverage,
+implementation/service catalog, plan, and detachment-report contracts plus
+the standard profiles and fail-loud planner. The real-mode `GameFrontend`
+declares those inputs, resolves a plan before runtime construction, exposes
+`play.py --profile ... --plan-only`, and includes the plan digest in replay
+profile identity. PM/detached execution-driver migration, project alias
+removal, and closed-world export remain later slices. This design does not
+depend on the Execution Atlas being implemented.
 
 ## Decision
 
@@ -405,6 +410,7 @@ python scripts/play.py --profile development
 python scripts/play.py --profile verification --replay artifacts/replays/...
 python scripts/play.py --profile detached
 python scripts/play.py --profile release
+python scripts/play.py --profile detached --plan-only
 ```
 
 `--profile release` is useful as a source-tree smoke run, but it does not
