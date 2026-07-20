@@ -48,8 +48,8 @@ def write_ir(path):
             "toolchain": "fixture",
         },
         "facts_applied": [],
-        "functions": [
-            {
+        "functions": {
+            "1010:0100": {
                 "entry": "1010:0100", "liftable": True, "refusals": [],
                 "exits": ["ret"], "signature": "90c3",
                 "calls_near": ["0200"], "calls_far": [], "ints": ["21"],
@@ -63,7 +63,7 @@ def write_ir(path):
                     ],
                 }],
             },
-            {
+            "1010:0200": {
                 "entry": "1010:0200", "liftable": True, "refusals": [],
                 "exits": ["ret"], "signature": "c3",
                 "calls_near": ["0300"], "calls_far": [], "ints": [],
@@ -75,7 +75,7 @@ def write_ir(path):
                     ],
                 }],
             },
-            {
+            "1010:0400": {
                 "entry": "1010:0400", "liftable": False,
                 "refusals": [{
                     "ip": "0400", "reason": "unsupported-opcode",
@@ -84,7 +84,7 @@ def write_ir(path):
                 "exits": [], "calls_near": [], "calls_far": [], "ints": [],
                 "blocks": [],
             },
-        ],
+        },
         "unsupported": [],
     }
     path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")

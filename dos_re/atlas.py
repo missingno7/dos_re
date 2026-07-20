@@ -214,9 +214,14 @@ class ExecutionAtlas:
         ir_path = Path(ir_path)
         document = load_recovery_ir(ir_path)
         ir_digest = _sha256(ir_path.read_bytes())
+        function_records = document.get("functions", {})
+        records = (
+            function_records.values()
+            if isinstance(function_records, Mapping) else function_records
+        )
         entries = {
             str(record["entry"]).upper(): record
-            for record in document.get("functions", ())
+            for record in records
         }
         nodes: dict[str, dict[str, Any]] = {}
         edges: list[dict[str, Any]] = []
