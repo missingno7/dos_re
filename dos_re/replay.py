@@ -875,7 +875,12 @@ class ReplayArtifact:
 
     @property
     def trusted(self) -> bool:
-        """Whether the complete captured timeline is oracle-backed evidence."""
+        """Whether this finite captured timeline is oracle-backed evidence.
+
+        This says nothing about unobserved inputs to functions visited by the
+        replay. Function correctness remains a set of scoped verification
+        claims, never a consequence of artifact trust.
+        """
         capture = self.capture_profile()
         if capture.role == "oracle":
             return True

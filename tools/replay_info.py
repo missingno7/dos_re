@@ -22,7 +22,10 @@ def main(argv=None) -> int:
         f"capture: {capture.profile_id} ({capture.role}) / "
         f"{capture.identity_digest}"
     )
-    print(f"trusted: {'yes' if artifact.trusted else 'no'}")
+    print(
+        "oracle-backed timeline: "
+        f"{'yes' if artifact.trusted else 'no'}"
+    )
     print("profiles:")
     for profile, boundary_count in artifact.profiles():
         print(f"  {profile.profile_id}: {profile.role} / {profile.implementation} "

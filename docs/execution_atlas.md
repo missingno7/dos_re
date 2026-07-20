@@ -133,6 +133,13 @@ entry cache, interval size, invocation coverage, and replay identity. The
 boundary remains part of the original ReplayArtifact; the Atlas creates no
 suffix replay or reproduction artifact.
 
+Visits, invocation counts, paths, and observed edges describe evidence
+coverage; they do not certify universal function correctness. The Atlas may
+index scoped passing verification claims and counterexamples, but it must not
+collapse them into an unqualified `verified` boolean. Coverage counts help
+choose the next replay or test. They are not a framework-wide threshold that
+blocks use of an implementation indefinitely.
+
 ## Conservative coverage
 
 `coverage_for(product_profile)` walks known resolved and observed function

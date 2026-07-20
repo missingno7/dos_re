@@ -10,7 +10,9 @@
 | **Execution Atlas** | Deterministic materialized projection and query index over cited evidence sources. It does not execute, decode, or select code. |
 | **ReplayArtifact** | Sole persistent deterministic replay format: base continuation state, immutable events, points, metadata, visits, transfers, annotations, and derived boundaries. |
 | **Capture profile** | Exact execution composition used to record a ReplayArtifact's immutable input stream. It may be an oracle or candidate and is provenance, not a correctness claim. |
-| **Trusted replay** | An oracle-captured artifact, or a candidate-captured artifact whose complete timeline has passed equivalent oracle/candidate validation for the same capture execution. |
+| **Trusted replay** | An oracle-captured artifact, or a candidate-captured artifact whose complete finite timeline has passed equivalent oracle/candidate validation for the same capture execution. Trust is scoped to that event stream, not every possible function input. |
+| **Verification claim** | Reproducible finite result binding an implementation digest, oracle and candidate execution identities, ReplayArtifact, exact interval, and comparison schema. A passing claim is not universal correctness. |
+| **Counterexample** | Persisted replay boundary and mismatch showing one verification claim fails; it becomes a focused regression for the next implementation digest. |
 | **ReplayExecutionIdentity** | Immutable identity of one oracle or candidate execution composition used to validate replay continuation caches. It is distinct from execution-policy profiles. |
 | **ReplayPoint** | Stable position on a replay timeline whether or not a snapshot is cached there. |
 | **CachedBoundary** | Independently restorable continuation at a ReplayPoint, stored as metadata plus pages changed from the replay base. |

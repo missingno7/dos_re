@@ -80,10 +80,12 @@ sources. It does not decode code, execute replays, select implementations, or
 turn absence of observation into proof. Conflicting and unresolved evidence
 stays visible.
 
-Replay capture may use a responsive generated or verified-override
-composition. The artifact records that exact capture identity; full
+Replay capture may use a responsive generated or previously replay-backed
+override composition. The artifact records that exact capture identity; full
 oracle/candidate validation establishes trust, and post-hoc oracle replay can
 attach function and transfer evidence independently for Atlas ingestion.
+That trust is scoped to the recorded timeline. It does not claim that every
+function the replay visits is correct for inputs the corpus has never exercised.
 
 ## Execution and release
 

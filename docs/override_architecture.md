@@ -88,6 +88,10 @@ It must declare its contract, effects, continuation, services, and digest.
 Replay verification covers the complete first-entry through final completed
 last-exit interval and compares complete continuation or canonical semantic
 state. A mismatch is a defect, not an automatic reclassification.
+Each pass is evidence only for its exact replay and interval. One relevant pass
+plus focused contract tests is enough to use the replacement during
+development; additional corpus coverage raises confidence without pretending
+to establish universal correctness.
 
 ### Non-authoritative enhancement
 

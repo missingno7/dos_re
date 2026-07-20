@@ -41,12 +41,14 @@ capabilities; a `ReplayExecutionIdentity` keys the exact continuation semantics
 of one selected mixed plan.
 
 The capture profile is provenance, not an assertion of correctness. Interactive
-capture may select already-verified performance overrides or a provisional
+capture may select previously replay-backed performance overrides or a provisional
 candidate plan. An oracle capture is trusted immediately. A candidate capture
 becomes trusted only after an equivalent `0 -> end_point` validation whose
 candidate execution identity selects the same implementation, image, runtime,
 devices, and schemas as the capture profile. Partial green intervals remain
 useful verification records but do not promote the whole replay to evidence.
+Replay trust means only that this finite event stream is oracle-backed. It
+never certifies every function visited by the replay for unobserved inputs.
 
 ## Stable points and events
 
@@ -176,6 +178,13 @@ that namespace. There is no partial cache migration.
 On mismatch, the already-diverged candidate endpoint is not cached as valid.
 The artifact annotates X as the latest valid point before the observed
 divergence.
+
+Each equivalent result is retained as a scoped claim over the exact
+implementation, oracle, replay, interval, and projection identities. No number
+of such claims becomes an exhaustive proof. Projects normally use the first
+relevant passing interval to keep development moving, accumulate further
+claims as the corpus grows, and turn every later divergence into a permanent
+focused regression.
 
 ## Divergence localization
 

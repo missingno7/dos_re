@@ -56,7 +56,10 @@ Generation is not proof. A generated implementation descriptor should cite its
 source identity, implementation digest, refusal or completeness information,
 and verification evidence. Focused call verification can diagnose a candidate;
 ReplayArtifact intervals provide reusable oracle-versus-candidate evidence for
-the paths a replay covers.
+the paths a replay covers. They create scoped verification claims, not a
+timeless `verified` property. There is no global sample-count or coverage
+threshold: development can proceed after a relevant passing interval, while
+new corpus evidence and counterexamples continuously refine confidence.
 
 Unknown transfers, runtime-code variants, unsupported effects, and unverified
 paths remain explicit. They feed the same identity/evidence model used by the
