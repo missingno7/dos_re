@@ -1902,6 +1902,7 @@ def verify_checkpointed(
             "checkpoint_span": checkpoint_span,
             "points_observed": points_observed,
             "observable_effects": observable_effects,
+            "observable_event_count": observable_event_count,
             "digest": comparison.oracle_digest,
         })
         if cache_verified_end:

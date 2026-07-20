@@ -244,16 +244,18 @@ native code may legitimately use a different write order.
 
 The player exposes three modes:
 
-- `checkpointed` (default): rolling semantic states plus observable effects,
-  with detailed comparison every `--verify-checkpoint-span` points;
+- `checkpointed` (default): rolling complete semantic-point state digests, with
+  detailed comparison every `--verify-checkpoint-span` points;
 - `semantic-points`: the span-1 reference with the same semantic/observable
   contract;
 - `endpoint`: the former cheapest endpoint-only continuation check.
 
-`--no-verify-observables` deliberately reduces the claim to semantic-boundary
-plus continuation equivalence. It is useful only for an adapter that has not yet
-implemented its external-effect stream; output must not be described as full
-observable-interval equivalence.
+`--verify-observables` adds the adapter's ordered external-effect stream. It is
+not enabled merely because an adapter exists: a port first measures its real
+replay overhead. Without it, output deliberately claims semantic-boundary plus
+continuation equivalence, not full observable-interval equivalence. The strict
+reference command enables it explicitly; ports whose measured cost is
+negligible may make that choice in their own verification wrapper.
 
 On mismatch, the already-diverged candidate endpoint is not cached as valid.
 The artifact annotates X as the latest valid point before the observed

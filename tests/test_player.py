@@ -86,6 +86,9 @@ def test_standard_cli_defaults():
     assert args.present_hz == GameFrontend.default_present_hz
     assert args.snapshot is None and args.save_snapshot is None
     assert args.dos_args == ""
+    assert args.verify_mode == "checkpointed"
+    assert args.verify_checkpoint_span == 64
+    assert args.verify_observables is False
 
 
 def test_replay_frame_stops_on_guest_coordinate_not_dispatch_count():

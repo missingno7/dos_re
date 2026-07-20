@@ -732,8 +732,9 @@ def build_arg_parser(frontend: GameFrontend,
     )
     verify.add_argument(
         "--verify-observables", action=argparse.BooleanOptionalAction,
-        default=True,
-        help="include adapter-declared I/O/device/interrupt/input effects",
+        default=False,
+        help="include adapter-declared I/O/device/interrupt/input effects "
+             "(stronger but backend-dependent overhead; measured before enabling)",
     )
 
     pace = p.add_argument_group("pacing")
