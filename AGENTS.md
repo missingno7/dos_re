@@ -109,7 +109,7 @@ dos_re/         the framework package — docs/architecture.md is the module map
   le.py cpu386.py dos4gw.py                        ← the machine (DOS/4GW protected mode)
   hooks.py gaps.py verification.py frame_verify.py snapshot.py input_demo.py
   pm_snapshot.py pm_verification.py                ← the PM proof engines
-  replay.py hook_taxonomy.py runtime_code.py islands.py state_view.py
+  replay.py atlas.py identity.py hook_taxonomy.py runtime_code.py islands.py state_view.py
   checkpoints.py frontier.py dosbox_savestate.py   ← the proof engines
   lift/                                            ← the automatic lifter
   player.py display.py audio_sink.py pm_player.py  ← the frontend ring (numpy/pygame allowed)

@@ -201,7 +201,8 @@ annotations stay in `dos_re.replay`.
 ## Scope boundary
 
 The replay artifact, real-mode and protected-mode continuation adapters,
-interval verification, persistent boundary cache, divergence localization, and
-function-visit index are the current shared infrastructure. Atlas storage,
-project-specific native object models, and semantic projection fields remain
-independent consumers of these interfaces.
+interval verification, persistent boundary cache, divergence localization,
+function-visit index, and optional oracle-owned observed-transfer section are
+the shared infrastructure. `ExecutionAtlas.ingest_replay` consumes those
+records by identity; Atlas storage, project-specific native object models, and
+semantic projection fields remain independent of replay persistence.

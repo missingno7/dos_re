@@ -354,6 +354,138 @@ class FunctionVisitIndex:
         return [record.to_json() for record in self.records()]
 
 
+@dataclass(frozen=True)
+class ObservedTransfer:
+    """Aggregated, directly observed control transfer on one replay timeline."""
+
+    source_id: str
+    target_id: str
+    kind: str
+    count: int
+    first_observed: ReplayPoint
+    last_observed: ReplayPoint
+
+    def __post_init__(self) -> None:
+        if not self.source_id or not self.target_id or not self.kind:
+            raise ValueError("observed transfer identities and kind must not be empty")
+        if int(self.count) <= 0:
+            raise ValueError("observed transfer count must be positive")
+        _same_timeline(self.first_observed, self.last_observed)
+        if self.last_observed.ordinal < self.first_observed.ordinal:
+            raise ValueError("observed transfer range is reversed")
+        object.__setattr__(self, "count", int(self.count))
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "source_id": self.source_id,
+            "target_id": self.target_id,
+            "kind": self.kind,
+            "count": self.count,
+            "first_observed": self.first_observed.to_json(),
+            "last_observed": self.last_observed.to_json(),
+        }
+
+    @classmethod
+    def from_json(cls, raw: Mapping[str, Any]) -> "ObservedTransfer":
+        return cls(
+            str(raw["source_id"]), str(raw["target_id"]), str(raw["kind"]),
+            int(raw["count"]), ReplayPoint.from_json(raw["first_observed"]),
+            ReplayPoint.from_json(raw["last_observed"]),
+        )
+
+
+@dataclass(frozen=True)
+class ReplayExecutionEvidence:
+    """Versioned oracle evidence produced from actual runtime observations.
+
+    This section remains compact and immutable with respect to the input
+    stream.  The Atlas imports it; it does not infer transfers from adjacent
+    function visits.
+    """
+
+    profile_identity_digest: str
+    transfers: tuple[ObservedTransfer, ...] = ()
+    runtime_variants: tuple[str, ...] = ()
+    incomplete_functions: tuple[str, ...] = ()
+    version: int = 1
+
+    def __post_init__(self) -> None:
+        if self.version != 1:
+            raise ValueError("unsupported replay execution-evidence version")
+        if not self.profile_identity_digest:
+            raise ValueError("execution evidence requires a profile identity")
+        object.__setattr__(
+            self, "transfers",
+            tuple(sorted(self.transfers, key=lambda item: (
+                item.source_id, item.target_id, item.kind,
+                item.first_observed.ordinal, item.last_observed.ordinal,
+            ))),
+        )
+        object.__setattr__(self, "runtime_variants", tuple(sorted(set(self.runtime_variants))))
+        object.__setattr__(
+            self, "incomplete_functions", tuple(sorted(set(self.incomplete_functions))))
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "profile_identity_digest": self.profile_identity_digest,
+            "transfers": [item.to_json() for item in self.transfers],
+            "runtime_variants": list(self.runtime_variants),
+            "incomplete_functions": list(self.incomplete_functions),
+        }
+
+    @classmethod
+    def from_json(cls, raw: Mapping[str, Any]) -> "ReplayExecutionEvidence":
+        return cls(
+            str(raw["profile_identity_digest"]),
+            tuple(ObservedTransfer.from_json(item) for item in raw.get("transfers", ())),
+            tuple(map(str, raw.get("runtime_variants", ()))),
+            tuple(map(str, raw.get("incomplete_functions", ()))),
+            int(raw.get("version", 0)),
+        )
+
+
+class ReplayEvidenceRecorder:
+    """Streaming collector fed by a backend's real control-transfer observer."""
+
+    def __init__(self) -> None:
+        self.visits = FunctionVisitIndex()
+        self._transfers: dict[tuple[str, str, str], ObservedTransfer] = {}
+        self._runtime_variants: set[str] = set()
+
+    def enter(self, function_id: str, point_before: ReplayPoint) -> None:
+        self.visits.enter(function_id, point_before)
+
+    def exit(self, function_id: str, point_after: ReplayPoint) -> None:
+        self.visits.exit(function_id, point_after)
+
+    def observe_transfer(
+        self, source_id: str, target_id: str, kind: str, point: ReplayPoint,
+    ) -> None:
+        key = (str(source_id), str(target_id), str(kind))
+        current = self._transfers.get(key)
+        if current is None:
+            self._transfers[key] = ObservedTransfer(*key, 1, point, point)
+            return
+        _same_timeline(current.first_observed, point)
+        self._transfers[key] = ObservedTransfer(
+            *key, current.count + 1, current.first_observed, point)
+
+    def observe_runtime_variant(self, variant_id: str) -> None:
+        if not variant_id:
+            raise ValueError("runtime variant identity must not be empty")
+        self._runtime_variants.add(str(variant_id))
+
+    def evidence(self, profile: ExecutionProfile) -> ReplayExecutionEvidence:
+        incomplete = tuple(
+            record.function_id for record in self.visits.records()
+            if record.invocation_count and record.last_exit is None
+        )
+        return ReplayExecutionEvidence(
+            profile.identity_digest, tuple(self._transfers.values()),
+            tuple(self._runtime_variants), incomplete)
+
+
 class ReplayDriver(Protocol):
     """Adapter implemented by each interpreter, override, or native profile."""
 
@@ -503,6 +635,7 @@ class ReplayArtifact:
             "metadata": _json_value(metadata or {}, "artifact metadata"),
             "profiles": {},
             "function_visits": [],
+            "execution_evidence": None,
             "points": {},
         }
         artifact = cls(directory, manifest)
@@ -546,6 +679,25 @@ class ReplayArtifact:
     def metadata(self) -> dict[str, Any]:
         """Return a detached copy of artifact-level canonical JSON metadata."""
         return _json_value(self._manifest["metadata"], "artifact metadata")
+
+    @property
+    def identity_digest(self) -> str:
+        """Stable identity of the immutable timeline and its oracle base."""
+        recording_profile_id = str(self._manifest.get("metadata", {}).get(
+            "recording_profile_id", ""))
+        profile = self._manifest.get("profiles", {}).get(recording_profile_id)
+        record = None if profile is None else {
+            "identity_digest": profile.get("identity_digest"),
+            "base_state_sha256": profile.get("base_state_sha256"),
+            "base_point": profile.get("base_point"),
+        }
+        return _sha256(_canonical_json({
+            "format_version": int(self._manifest["format_version"]),
+            "timeline_id": self.timeline_id,
+            "event_stream_sha256": self.event_stream_sha256,
+            "recording_profile_id": recording_profile_id,
+            "recording_profile": record,
+        }))
 
     def register_profile(
         self, profile: ExecutionProfile, *, base_point: ReplayPoint,
@@ -741,6 +893,23 @@ class ReplayArtifact:
             })
             self._write()
 
+    def point_annotations(self) -> tuple[dict[str, Any], ...]:
+        """Return detached annotations ordered by point and insertion order."""
+        result: list[dict[str, Any]] = []
+        for record in sorted(
+            self._manifest.get("points", {}).values(),
+            key=lambda item: ReplayPoint.from_json(item["point"]).ordinal,
+        ):
+            point = ReplayPoint.from_json(record["point"])
+            for annotation in record.get("annotations", ()):
+                result.append({
+                    "point": point.to_json(),
+                    "kind": str(annotation["kind"]),
+                    "metadata": _json_value(
+                        annotation.get("metadata", {}), "point annotation"),
+                })
+        return tuple(result)
+
     def set_function_visits(self, index: FunctionVisitIndex) -> None:
         with self._locked_mutation():
             for visit in index.records():
@@ -750,6 +919,30 @@ class ReplayArtifact:
                     self._point(visit.last_exit)
             self._manifest["function_visits"] = index.to_json()
             self._write()
+
+    def set_execution_evidence(
+        self, profile: ExecutionProfile, evidence: ReplayExecutionEvidence,
+    ) -> None:
+        """Persist authoritative observations from this artifact's oracle run."""
+        with self._locked_mutation():
+            record = self.require_profile(profile)
+            if profile.role != "oracle":
+                raise ValueError("execution evidence must be recorded by an oracle profile")
+            if self.metadata.get("recording_profile_id") != profile.profile_id:
+                raise ValueError("execution evidence profile is not the recording oracle")
+            if evidence.profile_identity_digest != profile.identity_digest:
+                raise StaleReplayError("execution evidence profile identity changed")
+            for transfer in evidence.transfers:
+                self._point(transfer.first_observed)
+                self._point(transfer.last_observed)
+            if record.get("identity_digest") != evidence.profile_identity_digest:
+                raise StaleReplayError("registered oracle identity changed")
+            self._manifest["execution_evidence"] = evidence.to_json()
+            self._write()
+
+    def execution_evidence(self) -> ReplayExecutionEvidence | None:
+        raw = self._manifest.get("execution_evidence")
+        return None if raw is None else ReplayExecutionEvidence.from_json(raw)
 
     def function_visits(self) -> tuple[FunctionVisit, ...]:
         return tuple(FunctionVisit.from_json(raw)

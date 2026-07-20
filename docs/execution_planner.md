@@ -105,12 +105,13 @@ the product-safe dos_re runtime when selected implementations still need them.
 
 `ProgramCoverage` contains stable roots, conservative reachable identities,
 unresolved edges, and an evidence identity. It implements the `CoverageSource`
-protocol directly. Recovery-IR adapters can construct it now; the future
-Execution Atlas can implement the same protocol without changing the planner.
+protocol directly. `ExecutionAtlas.coverage_for(product_profile)` implements
+the same protocol from normalized static and observed evidence without making
+the planner depend on Atlas storage.
 
 Unknown reachability is not absence. Detached and release planning reject
-unresolved edges. The Atlas may later visualize plan bindings, capability
-consumers, blockers, and alternatives, but is not a planner dependency.
+unresolved edges. Atlas queries may join supplied plans and catalogs for
+navigation, but the Atlas is not a planner dependency or selection authority.
 
 ## Implementations and services
 

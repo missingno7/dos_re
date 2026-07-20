@@ -175,6 +175,26 @@ On divergence use `bisect_divergence`. It persists the latest valid point and
 the failing successor inside the artifact; no second replay record is created.
 Inspect the corpus item with `python tools/replay_info.py <artifact-dir>`.
 
+## 7a. Build and query the Execution Atlas
+
+```bash
+python tools/atlas.py build artifacts/atlas \
+  --ir recovery/recovery_ir.json --program GAME:VERSION \
+  --image-label main-exe --image-sha256 SHA256 \
+  --root 1010:0000 --product-profile development
+python tools/atlas.py ingest-replay artifacts/atlas artifacts/demos/oracle-run
+python tools/atlas.py coverage artifacts/atlas development --json
+python tools/atlas.py best-replay artifacts/atlas FUNCTION_ID --json
+python tools/atlas.py unresolved artifacts/atlas --json
+```
+
+The build step imports the exact retained Recovery IR and never invokes a
+decoder. Replay ingestion accepts only the recording oracle as structural
+evidence. Use `show`, `callers`, `callees`, and `path` to navigate; use
+`best-replay` to select a reusable X→Y interval; use the replay verifier—not
+the Atlas—to execute it. The Atlas implements `CoverageSource`, so the same
+reachable set and unresolved frontiers feed execution planning.
+
 ## 8. Add a faithful implementation
 
 ```python

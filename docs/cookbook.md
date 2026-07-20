@@ -100,14 +100,12 @@ strict verifier never sees them. Worked example: `kegg/composition_hooks.py`
 (0x114085, the ball-vs-brick loop) + `kegg_port/docs/kegg/control_flow.md`.
 
 **"What do I recover next, and how do I prove it?" needs a repeatable
-corpus.** → A recorded gameplay demo *is* the corpus. Two tools close the
-loop from the port root: the execution atlas replays N frames and
-ranks hot call targets (static profile: ins/calls/INT/port-I/O; HOOKED
-tagged) — the top un-hooked pure LEAF in the game's code region is usually
-the next slice; `replay.verify_interval` replays the exact covered interval under the
-differential verifier (`--focus 0xADDR` while iterating on one routine,
-unfocused as the pre-commit pass). KE's level-2 demo proved `rects_overlap`
-2364/2364 calls in one unfocused pass.
+corpus.** → A recorded gameplay replay *is* the dynamic corpus. The Execution
+Atlas combines its oracle-owned visits and transfers with retained Recovery IR,
+then answers which functions are covered and which replay has the best cached
+verification interval. `replay.verify_interval` executes that exact interval
+against oracle and candidate. Atlas navigation selects evidence; it never
+executes or verifies the replay itself.
 
 ## Timing and speed
 

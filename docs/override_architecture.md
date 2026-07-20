@@ -11,7 +11,7 @@ explicitly by configuration.
 
 Catalog targets are stable `ProgramIdentity`, `FunctionIdentity`,
 `RegionIdentity`, or `ExecutionPointIdentity` values shared by recovery IR,
-replay function visits, plans, and the future Execution Atlas. Symbol names
+replay function visits, plans, and the Execution Atlas. Symbol names
 are display metadata.
 
 Addresses can seed identities, but identities remain opaque so the
@@ -149,5 +149,5 @@ stable identities and recovered contracts
 ```
 
 The catalog and planner import no CPU backend. Verification consumes plans;
-it does not own implementation selection. The future atlas implements and
+it does not own implementation selection. The Execution Atlas implements and
 consumes stable protocols without owning dispatch.

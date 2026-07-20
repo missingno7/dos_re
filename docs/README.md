@@ -13,7 +13,7 @@ recurring recovery job.
 
 Reading order for the framework itself: the repo [README](../README.md) →
 `execution_planner.md` → `override_architecture.md` → `agent_toolbox.md` →
-`architecture.md` →
+`execution_atlas.md` → `architecture.md` →
 `hooks_and_verification.md` →
 `demos_and_snapshots.md` → `state_mirrors.md` →
 `hardware_support.md`.
@@ -26,6 +26,7 @@ Reading order for the framework itself: the repo [README](../README.md) →
 | [`architecture.md`](architecture.md) | The package boundary, the framework module map, execution modes, adapter layering, dependencies. |
 | [`override_architecture.md`](override_architecture.md) | **dos_re 3.0 override model:** one implementation catalog, explicit authored selection, stable targets, faithful/enhancement/behavioral categories, backend activators, and verification contracts. |
 | [`execution_planner.md`](execution_planner.md) | **dos_re 3.0 lifecycle:** one universal `play.py`, orthogonal policies, mixed per-region bindings, detachment reports, real/PM drivers, closed-world export, and atlas-independent interfaces. |
+| [`execution_atlas.md`](execution_atlas.md) | **dos_re 3.0 navigation and coverage:** stable multi-image identities, normalized static and replay evidence, unresolved transfers, inverse replay queries, catalog joins, and `CoverageSource` integration. |
 | [`hooks_and_verification.md`](hooks_and_verification.md) | Hook registration and return mechanics, the differential hook oracle (metadata + strict modes), the frame oracle, hook taxonomy. |
 | [`demos_and_snapshots.md`](demos_and_snapshots.md) | **dos_re 3.0 replay architecture:** one oracle/candidate replay artifact, stable points, profile-local continuation caches, machine or semantic canonical projections, persistent bisection boundaries, and function visits. No legacy formats or migration paths. |
 | [`state_mirrors.md`](state_mirrors.md) | The state-view seam: human-named views over the DOS memory image with swappable backends, without weakening byte-exact verification. |
