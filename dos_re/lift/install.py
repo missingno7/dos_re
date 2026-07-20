@@ -3,7 +3,7 @@
 The hybrid-acceleration rung of the recovery ladder (docs/lifting_design.md
 §7: LIFTED → ORACLE_PASSING → INSTALLED → REFACTORED).  Once a lifted routine
 is proven byte-exact against the oracle, running it as the replacement is a
-free speed-up long before ``play_native.py`` exists: interpreted code reaches
+free speed-up long before the program is release-ready: interpreted code reaches
 the proven routine, runs the Python replacement, returns to the VM.  As more
 routines pass, more of the game moves out of interpretation automatically.
 

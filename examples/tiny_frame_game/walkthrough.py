@@ -45,10 +45,15 @@ from game import (  # noqa: E402
 
 from dos_re.checkpoints import run_to_next_checkpoint  # noqa: E402
 from dos_re.cpu import CPU8086  # noqa: E402
+from dos_re.execution import (ImplementationCatalog, ImplementationDescriptor,
+                              ImplementationEntry, ImplementationOrigin,
+                              OverrideCategory, ProgramCoverage, plan_execution,
+                              profile_configuration)  # noqa: E402
 from dos_re.frame_verify import FrameVerifyConfig, make_frame_sample, run_frame_verifier  # noqa: E402
 from dos_re.input_demo import RealModeInputAdapter, SCAN_CHANNEL, scan_payload  # noqa: E402
 from dos_re.interrupts import deliver_scancode  # noqa: E402
 from dos_re.memory import linear  # noqa: E402
+from dos_re.player import GameFrontend  # noqa: E402
 from dos_re.runtime import Runtime, create_runtime  # noqa: E402
 from dos_re.replay import ExecutionProfile, ReplayPoint, ReplayRecording  # noqa: E402
 from dos_re.snapshot import (apply_runtime_continuation, capture_runtime_continuation,
@@ -165,28 +170,68 @@ def stage_snapshot(exe: Path, tmp: Path) -> None:
 
 # ---- stages 4+5: wrong hook caught, correct hook verified ---------------------------------------
 
-def _draw_frame_hook(fill_width: int):
-    """The 'recovered' DRAW_FRAME routine as a thin hook (near-RET boundary)."""
-    def hook(cpu: CPU8086) -> None:
-        colour = (cpu.mem.rb(cpu.s.ds, COUNTER) + cpu.mem.rb(cpu.s.ds, KEYSTATE)) & 0xFF
-        base = linear(0xA000, 0)
-        for i in range(fill_width):
-            cpu.mem.data[base + i] = colour
-        cpu.set_reg8(0, colour)                 # AL holds the colour after the adds
-        cpu.s.cx = 0                            # REP STOSB leaves CX=0 ...
-        cpu.s.di = WIDTH                        # ... and DI past the row
-        cpu.set_logic_flags(0, 16)              # final flags come from XOR DI,DI
-        cpu.s.ip = cpu.mem.rw(cpu.s.ss, cpu.s.sp)   # RET
-        cpu.s.sp = (cpu.s.sp + 2) & 0xFFFF
-    return hook
+def _draw_frame_body(fill_width: int):
+    """Natural authored behavior, independent of CPU control flow."""
+    def draw(counter: int, keystate: int) -> tuple[int, bytes]:
+        colour = (counter + keystate) & 0xFF
+        return colour, bytes([colour]) * fill_width
+    return draw
+
+
+def _bind_draw_implementation(
+    rt: Runtime, implementation_id: str, fill_width: int,
+) -> None:
+    address = (rt.program.entry_cs, DRAW_FRAME)
+    target = f"function:{address[0]:04x}:{address[1]:04x}:v1"
+    body = _draw_frame_body(fill_width)
+
+    def activate(runtime, targets):
+        assert targets == (target,)
+
+        def cpu_adapter(cpu: CPU8086) -> None:
+            colour, row = body(
+                cpu.mem.rb(cpu.s.ds, COUNTER),
+                cpu.mem.rb(cpu.s.ds, KEYSTATE),
+            )
+            base = linear(0xA000, 0)
+            cpu.mem.data[base:base + len(row)] = row
+            cpu.set_reg8(0, colour)
+            cpu.s.cx = 0
+            cpu.s.di = WIDTH
+            cpu.set_logic_flags(0, 16)
+            cpu.s.ip = cpu.mem.rw(cpu.s.ss, cpu.s.sp)
+            cpu.s.sp = (cpu.s.sp + 2) & 0xFFFF
+
+        runtime.cpu.replacement_hooks[address] = cpu_adapter
+        runtime.cpu.hook_names[address] = implementation_id
+
+    catalog = ImplementationCatalog((ImplementationEntry(
+        ImplementationDescriptor(
+            implementation_id=implementation_id,
+            targets=frozenset({target}),
+            origin=ImplementationOrigin.AUTHORED,
+            category=OverrideCategory.FAITHFUL,
+            implementation_digest=f"{implementation_id}:{fill_width}",
+        ),
+        implementation=body,
+        activate=activate,
+    ),))
+    plan = plan_execution(
+        profile_configuration(
+            "development",
+            program_identity="tiny-frame-game",
+            selected_overrides=(implementation_id,),
+        ),
+        ProgramCoverage((target,), frozenset({target}), evidence_identity="v1"),
+        catalog,
+    )
+    GameFrontend(ROOT).bind_execution_plan(rt, plan)
 
 
 def stage_hooks(exe: Path) -> None:
     # Wrong: fills one byte short. Registers match; only full-memory diff sees it.
     rt = boot(exe)
-    key = (rt.program.entry_cs, DRAW_FRAME)
-    rt.cpu.replacement_hooks[key] = _draw_frame_hook(WIDTH - 1)
-    rt.cpu.hook_names[key] = "wrong_draw_row"
+    _bind_draw_implementation(rt, "wrong_draw_row", WIDTH - 1)
     install_hook_verifier(rt, HookVerifierConfig.strict(verify_all=True), stops={})
     try:
         for _ in range(3):
@@ -200,9 +245,7 @@ def stage_hooks(exe: Path) -> None:
 
     # Correct: verified against the interpreted original on every single call.
     rt = boot(exe)
-    key = (rt.program.entry_cs, DRAW_FRAME)
-    rt.cpu.replacement_hooks[key] = _draw_frame_hook(WIDTH)
-    rt.cpu.hook_names[key] = "recovered_draw_row"
+    _bind_draw_implementation(rt, "recovered_draw_row", WIDTH)
     install_hook_verifier(rt, HookVerifierConfig.strict(verify_all=True), stops={})
     for _ in range(5):
         advance_frame(rt)
@@ -241,9 +284,9 @@ def stage_frame_verifier(exe: Path, tmp: Path) -> None:
         candidate = create_runtime(exe)
         boundary = _install_boundary(reference)
         _install_boundary(candidate)
-        draw = (candidate.program.entry_cs, DRAW_FRAME)
-        candidate.cpu.replacement_hooks[draw] = _draw_frame_hook(candidate_fill)
-        candidate.cpu.hook_names[draw] = "candidate_draw_row"
+        _bind_draw_implementation(
+            candidate, "candidate_draw_row", candidate_fill
+        )
         config = FrameVerifyConfig(max_frames=6, frame_budget=100_000, source="vram",
                                    dump_dir=tmp / "frame_verify", preview_on_diff=False,
                                    log_every=0)

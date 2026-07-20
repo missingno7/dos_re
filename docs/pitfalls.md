@@ -1,6 +1,6 @@
-> Framework method reference (DOS_RE 2.0).  Authority: [`dos_re_2.0.md`](dos_re_2.0.md)
-> is canonical; where older per-routine/hook-first phrasing below conflicts with the
-> 2.0 hard walls and automation principle, dos_re_2.0.md wins.  Promoted from the
+> Framework method reference. Authority: [`execution_planner.md`](execution_planner.md)
+> defines execution and release closure; [`dos_re_2.0.md`](dos_re_2.0.md)
+> defines generated recovery techniques. Promoted from the
 > DOS_RE 1.0 starter (template_dos_port, retired) because the mechanics remain valid.
 
 # Pitfalls — the mistakes the source ports actually made
@@ -50,10 +50,10 @@ deleted in the same commit that grounds the leaf.*
 
 **5. Parent hooks hiding children.** [both] A lifted parent called a child
 hook's Python function directly, making the child a shared black box inside
-the parent's verify transaction. → `--verify-hooks` passed while the child was
+the parent's verify transaction. → `verification profile` passed while the child was
 wrong. → *Route child boundaries through
 `call_installed_hook_like_near_call` / `jump_installed_hook_boundary`;
-`dos_re/tools/audit_hook_oracle.py` enforces it statically.*
+the execution plan keeps the boundary explicit.*
 
 ## Verification
 
@@ -202,15 +202,12 @@ read state and write none, enforced by a parity gate (enhanced-at-neutral ≡
 faithful, pixel- and state-exact). Anything that needs to write is not an
 enhancement. See [`enhancements.md`](enhancements.md).*
 
-**24. Building presentation backends during recovery ("cyborgization").** [P2]
-Early in the project, faithful/enhanced *viewer* backends were grown alongside
-hook-based recovery, before the native game was complete. → It required a
-whole policing apparatus: transitional "faithful-only, not yet grounded"
-states to track, one-implementation audits to stop parallel truths, and
-presentation effort spent while gameplay was still unrecovered. It worked, but
-the project's own retrospective verdict is: not recommended. → *The enhanced
-layer is the ENDGAME — lifecycle Stage 6, after the faithful VM-less game is
-complete and stable. The only sanctioned exception class is audio-style
-disruptions: small, separable fixes for something that actively impedes the
-recovery workflow itself (P2's noisy, crackling emulated playback). See
-[`enhancements.md`](enhancements.md).*
+**24. Building presentation over an unverified state seam.** [P2]
+Early faithful/enhanced viewer backends grew alongside hook-based recovery
+without a single enforced authoritative boundary. → They required transitional
+state ledgers and one-implementation audits to stop parallel truths. → *A
+non-authoritative enhancement may land incrementally, but only after the state
+it consumes has a verified read-only seam. It never invents missing gameplay
+state and never writes the authoritative model. See
+[`enhancements.md`](enhancements.md) and
+[`override_architecture.md`](override_architecture.md).*

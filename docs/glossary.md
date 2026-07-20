@@ -2,8 +2,8 @@
 
 The project's vocabulary in one place. Terms link to the doc that owns them.
 
-**The five execution stages ([`dos_re_2.0.md`](dos_re_2.0.md) §1 is the
-authority; "native" is banned as a bare term):**
+**Recovery properties and transformations ([`dos_re_2.0.md`](dos_re_2.0.md)
+§1):** these classify implementations; they are not top-level launch modes.
 
 | Stage term | Meaning |
 |---|---|
@@ -17,7 +17,7 @@ authority; "native" is banned as a bare term):**
 | **Platform adapter** | A reusable generic dos_re capability binding a recognized machine effect (file access, input, page flip, OPL write, timer wait) to a native interface (`platform.video.present(...)`). Oracle-compatible / faithful / enhanced / per-OS implementations behind one interface. |
 | **Recovery fact** | The smallest explicit, evidence-backed, versioned declaration of game-specific knowledge (jump table here, input-wait boundary there) fed into the generic pipeline — the alternative to hand-patching generated output. |
 | **Verification bridge** | Generated serializer reconstructing historical DOS machine state from the native object model so the oracle stays reachable after the CPU and memory model are gone. Depends on the native implementation, never vice versa; not shipped. |
-| **Hard execution wall** | The enforced, mechanically checkable property that defines a completed stage: VMless output cannot interpret instructions (zero `interp_one` sites on the declared corpus), CPUless output cannot access the CPU carrier, native output cannot access the DOS memory model. Fixes runner names: `play_vmless.py` / `play_cpuless.py` / `play_native.py` — a runner may not carry a name whose wall its artifacts do not satisfy. |
+| **Hard execution wall** | An enforced, mechanically checkable implementation property: VM-detached output cannot interpret instructions, CPU-detached output cannot access the CPU carrier, and memory-model-detached output cannot access the DOS layout. Walls feed the detachment report; they do not define product types or runner names. |
 | **Recovery IR** | The shared intermediate representation all analyses/transformations operate on; every stage artifact (VMless, CPUless, native, bridge, diagnostics) is an EMITTER PROJECTION of it. The system is never built around parsing generated Python from one stage into the next. |
 | **True native** | The ultimate target: no interpreter, no CPU carrier, no DOS-layout dependency, host-language control flow + data structures + platform adapters, oracle-verifiable via the optional bridge. The staged path (VMless → CPUless → DOS-layout-less) is the engineering strategy; direct binary→true-native emission is the goal. |
 
@@ -34,7 +34,10 @@ authority; "native" is banned as a bare term):**
 | **Glue** | A hook-taxonomy role: accidental ASM-boundary plumbing (tails, helpers, per-row scan steps) that exists only because a hook landed there — the collapse target when islands merge. Not an architectural layer. |
 | **Parity gate** | The enhanced layer's standing proof: at its neutral settings the enhanced game must be pixel- and state-identical to the faithful game, so "enhanced" can never silently mean "diverged". ([`enhancements.md`](enhancements.md)) |
 | **Hybrid runtime** | The workbench: the VM running the original game with recovered islands hooked live over it. |
-| **Native runtime** | DEPRECATED as a bare term — it conflated stages 1–4. Use the stage vocabulary above: a runtime is *VMless lifted*, *CPUless lifted*, *DOS-layout-less native*, or a *semantic clean port*. The shipped product is stage 3+ (no interpreter, no CPU carrier, no DOS layout, no bridge). |
+| **Standalone execution** | A plan whose selected product profile has complete reachable implementation and service coverage without loading the original EXE or interpreter. Its regions may have different VM/CPU/memory detachment properties. |
+| **Detachment report** | The planner's evidence-backed account of reachable coverage, selected bindings, unresolved edges, EXE/interpreter dependencies, required services, and standalone/package readiness. A runner name or successful playthrough is not a report. |
+| **Execution profile** | A versioned preset over composition, execution, verification, product, and build policies. Development, verification, detached, and release profiles select capabilities; they are not separate players. |
+| **Native runtime** | Avoid as an unqualified implementation claim. The universal player and export report state the actual per-region VM, CPU, ABI, DOS-memory, and memoryless properties. |
 | **Replay artifact / demo** | The single persistent oracle-verifiable recording: base continuation state, immutable normalized events, stable points, metadata, function visits, and derived base-relative boundary caches. “Demo” remains a player/CLI convenience term, not a second format. ([`demos_and_snapshots.md`](demos_and_snapshots.md)) |
 | **Snapshot** | Complete serialised memory, CPU, DOS, device, timing, interrupt, scheduler, and replay-cursor state for resuming machine-backed execution. It is not an independent replay record or a portable game save. |
 | **Replay timeline** | A canonical monotonic sequence of stable `ReplayPoint` identities. Backend adapters may observe different stop seams, but must agree on their semantic ordering and event positions. |
@@ -44,15 +47,15 @@ authority; "native" is banned as a bare term):**
 | **Continuation / HookStop** | A hook's declared legitimate end (near RET, far RET, IRET, fixed IP, computed dispatch). |
 | **Strict mode** | Auto-continuation verification: no metadata; the hook's final address becomes the only accepted target. |
 | **State mirror / bridge** | Human-named typed views over the byte-exact original memory layout; offsets quarantined in one module, `memcmp` verification preserved. ([`state_mirrors.md`](state_mirrors.md)) |
-| **Boot constants** | The post-bootstrap initialized state extracted into native data, so the native game cold-boots with no EXE and no snapshot. |
-| **Heartbeat** | The game's fixed tick cadence, preserved explicitly in the native port — as opposed to the DOS waiting machinery (busy-waits, retrace polls), which is never ported. |
+| **Boot constants** | The post-bootstrap initialized state extracted into generated product data, so an EXE-independent backend cold-boots with no EXE and no snapshot. |
+| **Heartbeat** | The game's fixed tick cadence, preserved explicitly in a detached product — as opposed to the DOS waiting machinery (busy-waits, retrace polls), which is never ported. |
 | **Env wait** | A hardware wait (PIT tick, CRT retrace) the interpreter must keep hooked so the oracle doesn't spin on a flag a real IRQ would clear. |
 | **Frontier** | The residue of never-hooked addresses late in a port, each explicitly triaged (`dos_re/frontier.py`). |
 | **Fail loud / HybridGap** | The no-silent-fallback rule made executable: unrecovered behaviour raises with precise context; it is never faked and never silently handed back to ASM. |
 | **Transition signal** | A `HybridGap` subclass that is a control-flow signal, not an error: the per-frame step reached a multi-frame sequence (respawn, level end) the flow driver must drive. |
 | **Status ladder** | GUESS → OBSERVED → RECOVERED → ASM_MATCHED → VERIFIED → CANONICAL — the only way names earn confidence (`dos_re/islands.py`, the retired 1.0 starter's methodology docs (historical)). |
-| **Faithful core / enhanced layer** | The verified game vs the presentation-only comfort layer that reads state and writes none. The enhanced layer is built LAST — lifecycle Stage 6, after the faithful game is complete. ([`enhancements.md`](enhancements.md)) |
-| **Cyborgization** | The deprecated early-P2 experiment of growing faithful/enhanced viewer backends alongside recovery, before the native game was complete. Retrospective verdict: not recommended (pitfall #24). |
+| **Faithful baseline / non-authoritative enhancement** | The unchanged program under a selected baseline backend vs an optional presentation or host-integration override that reads authoritative state and writes none. It may attach once that state seam is verified; the whole game need not be memoryless. ([`override_architecture.md`](override_architecture.md)) |
+| **Cyborgization** | The deprecated experiment of growing presentation alongside recovery without one enforced, verified read-only state seam. The problem was parallel authority, not simply when presentation work began (pitfall #24). |
 | **Crystallization** | Letting higher-level meaning *emerge* from verified lower-level facts instead of naming by guess. (the retired 1.0 starter's methodology docs (historical)) |
 | **Staticization** | The discipline for runtime-patched code: observed live bytes → named variant → signature guard → explicit static Python. |
-| **Adapter** | The per-game package holding everything that knows the game: addresses, formats, hooks, views, recovered logic. The framework core never learns a game. |
+| **Adapter** | Backend- or project-specific marshalling for addresses, formats, invocation contracts, views, and platform capabilities. Semantic override bodies remain CPUless and backend-neutral; the framework core never learns a game. |

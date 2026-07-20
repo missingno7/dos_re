@@ -1,148 +1,116 @@
-# Hooks and verification
+# Backend adapters and verification
 
-The heart of the method: replace one original routine at a time with native
-code, and let the framework prove — not assume — that the replacement is exact.
+The architecture is defined by
+[`override_architecture.md`](override_architecture.md). This document explains
+the CPU-backed adapter and proof machinery which implements that architecture
+while interpreted code remains in a plan.
 
-## What a hook is (and is not)
+## Selection comes first
 
-A hook is a **minimal boundary adapter, not a place where logic accumulates**.
-A good hook only:
-
-1. reads the relevant state from original memory/registers,
-2. calls a clean native recovered function (which knows nothing about the CPU,
-   segment:offset, or the VM),
-3. writes the result back to original memory/registers,
-4. returns to the original control flow with **exact** return mechanics:
-
-```text
-near routine:    cpu.s.ip = cpu.pop()
-far routine:     cpu.s.ip = cpu.pop(); cpu.s.cs = cpu.pop()
-internal block:  cpu.s.ip = <exact continuation IP>
-```
-
-Do not assume a routine returns; some are loop bodies, jump targets, or dispatch
-stubs. Never add a hook because it looks right — every hook needs oracle
-evidence (a VM trace of what the original actually did).
-
-## Registering hooks
+Every executable implementation is an `ImplementationEntry` in the project's
+single `ImplementationCatalog`:
 
 ```python
-from dos_re.hooks import registry
-
-@registry.replace(0x1010, 0x1234, "sqz_decode_1234")
-def sqz_decode_1234(cpu):
-    ...
+ImplementationEntry(
+    descriptor=ImplementationDescriptor(
+        implementation_id="sqz_decode",
+        targets=frozenset({"function:main-image:1010:1234:v1"}),
+        origin=ImplementationOrigin.AUTHORED,
+        category=OverrideCategory.FAITHFUL,
+        implementation_digest="...",
+    ),
+    implementation=sqz_decode,
+    activate=real_mode_sqz_adapter,
+)
 ```
 
-`dos_re.runtime.create_runtime()` installs everything registered.  Duplicate
-registrations at one address fail fast.  `DOS_RE_DISABLE_HOOKS=CS:IP,CS:IP`
-disables individual hooks for A/B checks without code changes.
+Authored entries are inactive unless selected by
+`ExecutionConfiguration.selected_overrides`. The planner chooses one owner for
+each reachable target. `GameFrontend.bind_execution_plan` invokes only the
+activators in that resolved plan.
 
-When a lifted parent composes a child routine that is itself hooked, never call
-the child's Python function directly — route through
-`call_installed_hook_like_near_call` / `jump_installed_hook_boundary` so the
-child stays a verifier-visible boundary instead of a shared black box.
-`tools/audit_hook_oracle.py` statically enforces this.
+There is no global hook registry, import-time selection, environment selection,
+or player flag which installs program behavior.
 
-## The hook oracle (`dos_re/verification.py`)
+## The CPU-backed adapter
 
-The differential verifier wraps every hooked address. On each call it clones
-the runtime, executes the **original ASM** on the clone up to the hook's
-continuation, executes **your hook** on the live runtime, and diffs registers +
-flags + (by default) full memory. Two modes:
+The semantic implementation is ordinary CPUless Python. A real-mode activator
+may bind a thin callable into the CPU backend's private dispatch table. That
+callable only:
 
-- **metadata mode** — the adapter declares each hook's valid continuation
-  (`GenericHookStop("near_ret")`, far-ret, iret, fixed-ip, computed dispatch, …).
-  Fast; the standing verification for a maturing adapter.
-- **strict / auto-continuation mode** (`HookVerifierConfig.strict()`) — runs the
-  hook first, takes its final address as the only acceptable target, then runs
-  the original ASM to that address and diffs. No metadata to maintain; slower;
-  ideal for focused investigation.
+1. marshals the recovered contract from registers, stack, and memory;
+2. calls the catalog entry's semantic implementation;
+3. applies declared results and effects;
+4. reproduces the exact continuation.
 
-On a divergence, set `OK_TRACE_HOOK="CS:IP"` and reproduce: the verifier prints
-the exact ASM-oracle instruction trace — what the original did that your hook
-did not. Fix the hook to match what the original *did*, not what you think it
-should do. The classic bug classes (you will hit all of them): freed-stack
-scratch words, flag shape (INC preserves CF — use `dos_re.asm` helpers),
-early-out branch selection.
+The body must not receive a decoder or an implicit operation that falls back
+to interpreted instructions. CPUless does not imply memoryless: DOS memory may
+remain a declared authoritative capability.
 
-**Full-memory + full-state diffs by default.** Narrowing the diff hides bugs.
-Narrow only as a deliberate, temporary performance lever.
+Near return, far return, interrupt return, internal continuation, and
+non-returning transfer are distinct contracts. The adapter must reproduce the
+one evidenced for its stable target.
 
-## The frame oracle (`dos_re/frame_verify.py`)
+Generated parents use `call_installed_hook_like_near_call`,
+`call_installed_hook_like_far_call`, or `jump_installed_hook_boundary` when
+crossing another selected CPU-backed boundary. These helpers preserve original
+control-flow mechanics and keep nested verification visible. They do not
+select implementations.
 
-Per-hook equivalence gets weaker as hooks collapse into larger native chains,
-so the second engine diffs **whole frames**: it steps a reference runtime (pure
-ASM) and a candidate runtime (hooked/native) to adapter-defined frame
-boundaries, samples framebuffer + visible VRAM (+ whatever state the adapter
-adds), and dumps PNG/report artifacts on divergence.
+Runtime-patched code uses `runtime_code.py` identities and signatures. Unknown
+variants fail loudly; they do not silently interpret or choose a different
+implementation.
 
-The adapter supplies: boundary addresses (present/timer/retrace), a
-`sample_builder`, `reference_env_hooks` (the hardware waits the *oracle* side
-must keep so the original ASM doesn't spin forever), optional `pump_inputs`,
-and the shared input-wait detector (see
-[`demos_and_snapshots.md`](demos_and_snapshots.md) — mandatory reading before
-trusting any demo).
+## Focused hook oracle
 
-Widen the frame sample until it covers **all observable state** — every object
-field, RNG state, score/lives, timers, and the framebuffer. *If it is not in
-the snapshot, divergence can hide there.*
+`dos_re.verification` can prove a selected faithful CPU-backed implementation
+at one call boundary. It clones the pre-call runtime, executes original
+instructions on the oracle clone, executes the selected adapter on the
+candidate, and compares continuation state.
 
-## Hook roles and lifetimes (`dos_re/hook_taxonomy.py`)
+`HookVerifierConfig.strict()` derives the oracle stop from the candidate's
+actual continuation and compares full memory by default. Explicit
+`GenericHookStop` metadata can make repeated local verification faster.
 
-Classify each hook by **role**, not address:
+This verifier is a focused development tool. It does not own selection and it
+does not replace ReplayArtifact interval verification.
 
-| Role | Meaning | Direction |
-|------|---------|-----------|
-| **checkpoint** | a real logical resume boundary (frame/object-update/render/input) | keep, make explicit |
-| **env_wait** | hardware/environment wait (PIT/IRQ0, CRTC retrace, INT 09h) the interpreter can't satisfy natively | keep hooked, even on the oracle reference |
-| **debug_probe** | exists only to observe/verify | keep out of the hot path |
-| **glue** | accidental ASM-boundary plumbing (tails, helpers, per-row scan steps) | collapse into native chains between checkpoints |
+## Replay interval verification
 
-A registered hook address is scaffolding, not architecture. Collapsing glue
-chains into one native flow is desirable — but only with evidence from the real
-original call graph, and with correctness protected by the frame/state verifier
-rather than by preserving historical hook boundaries.
-
-## One recovered leaf, many adapters
-
-The recovered function is the **single implementation**; everything else is a
-thin adapter over it — never a second copy:
-
-1. the **live replacement** (the hybrid runtime skips the ASM body),
-2. the **verify checkpoint** (diff vs the oracle at the boundary),
-3. the **native runtime consumer** (the VM-less game composes the same leaf),
-4. the enhanced backend — but only in lifecycle Stage 6, after the faithful
-   game is complete (never during recovery; pitfall #24).
-
-Ground the live hook + verifier *first*; the native side absorbs the grounded
-leaf *last*. Duplicating logic between a hook and the native backend is how a
-port silently forks from its own proof.
-
-Beyond the confidence ladder on each function
-(the retired 1.0 starter's methodology docs (historical)), track which **adapter state** each piece
-is in — every rendering/audio piece is exactly one of:
-
-1. **recovered + live-grounded** — leaf + live replacement hook + verifier;
-2. **recovered, verify-only** — leaf + checkpoint diff, but the ASM still runs it;
-3. **native-consumer-only** — composed by the native side but *not* grounded by
-   a live hook (a transitional state to fix — not an endpoint, not "done");
-4. **known gap** — not recovered; fails loud everywhere (never a VM fallback);
-5. **blocked — history-dependent buffer state** — the original keeps stateful
-   buffers (scroll-page rings, self-copies); needs the real stateful model, not
-   a from-scratch rebuild;
-6. **not worth hooking** — a pure controller/setup wrapper with no hot or
-   reusable behaviour.
-
-Record the recovered set itself with `@oracle_link` metadata and a generated
-manifest (`dos_re.islands` + `tools/gen_island_manifest.py`) so "what is
-recovered" is answered by the code, not by a hand-edited list.
-
-## The hook lifecycle
+The canonical project command is:
 
 ```text
-observe -> classify -> choose boundary -> build ASM oracle -> implement hook -> verify -> document
+python scripts/play.py --profile verification \
+  --play-demo artifacts/demos/example \
+  --verify-start X --verify-end Y
 ```
 
-See the retired 1.0 starter's methodology docs (historical) for each step in detail and its
-`docs/ai_porting_charter.md` §4 for the per-slice lifting loop this fits into.
+Add `--bisect` to persist the first divergent transition. The frontend supplies
+the oracle and candidate `ReplayDriver` pair; `player.main` owns the command,
+stable points, comparison, and exit status.
+
+Verification compares complete continuation state when both sides share the
+machine representation, or the same `CanonicalState` schema when the candidate
+is detached or memoryless. A reproduction is always a boundary reference
+inside the original replay artifact; verification creates no secondary replay
+artifact.
+
+## Framework interceptors
+
+Replay clocks, wait parking, profilers, diagnostic probes, device entrypoints,
+and verifier wrappers are runtime services. They may use a backend's private
+dispatch mechanism, but they are not program implementations and cannot claim
+coverage. Their availability is constrained by the execution policy and they
+must not enter a release closure unless declared product-safe.
+
+## Verification policy by category
+
+| Category | Contract |
+|---|---|
+| faithful replacement | Equivalent complete or canonical state at the interval endpoint; mismatch is failure |
+| non-authoritative enhancement | Authoritative state remains equivalent; only declared presentation output is excluded |
+| behavioral modification | Expected divergence is declared and covered by modification-specific tests |
+
+One authored body can have real-mode, protected-mode, generated, ABI-recovered,
+or detached activators. Semantic duplication between those adapters creates a
+second authority and is forbidden.

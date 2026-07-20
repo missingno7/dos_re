@@ -30,15 +30,12 @@ DEFAULT_DIR_GLOBS = (
     "*.egg-info",
 )
 
-# Regenerable artifact families (snapshots, demos, frame-verify dumps).  Game
-# adapters typically extend these with their own capture folders.
+# Regenerable diagnostic artifact families. ReplayArtifact recordings and their
+# persistent boundaries are project assets and are intentionally never cleaned.
 ARTIFACT_DIR_GLOBS = (
-    "artifacts/snapshot_*",
-    "artifacts/demo_*",
     "artifacts/tmp_*",
     "artifacts/frame_verify",
     "artifacts/verify_*",
-    "artifacts/repros",
 )
 
 ARTIFACT_FILE_GLOBS = ()

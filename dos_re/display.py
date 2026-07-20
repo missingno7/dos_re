@@ -12,7 +12,7 @@ This module is part of the FRONTEND RING (see tools/lint.py): it may import nump
 core never imports it — only ``dos_re.player`` (and game viewers) load it, lazily, when a window opens.
 
 Origin: copied from pre2_port's scripts/display.py (zero game knowledge; only the window title changed);
-lived at tools/display.py until the play-runner unification promoted it into the package.
+is owned directly by the package frontend ring.
 """
 from __future__ import annotations
 

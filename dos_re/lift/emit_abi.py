@@ -780,7 +780,7 @@ def emit_abi_core(scan, proposal: dict, key: str, *,
     # parameters in contract order -- no caller needs to know a register
     # identity.  The compat/platform channel stays keyword-only and private.
     # Register-named locals survive INSIDE the body (a pure alpha-rename with
-    # no structural content; see docs/abi_end_state.md).
+    # no structural content; see docs/history/abi_end_state.md).
     pos = [f"arg_{k}" for k in range(len(params))]
     compat_argl = (["_base=0"] if needs_plat else []) \
         + (["_df=0"] if df_livein else []) \

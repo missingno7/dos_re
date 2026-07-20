@@ -1,6 +1,6 @@
-> Framework method reference (DOS_RE 2.0).  Authority: [`dos_re_2.0.md`](dos_re_2.0.md)
-> is canonical; where older per-routine/hook-first phrasing below conflicts with the
-> 2.0 hard walls and automation principle, dos_re_2.0.md wins.  Promoted from the
+> Framework method reference. Authority: [`execution_planner.md`](execution_planner.md)
+> defines execution and release closure; [`dos_re_2.0.md`](dos_re_2.0.md)
+> defines generated recovery techniques. Promoted from the
 > DOS_RE 1.0 starter (template_dos_port, retired) because the mechanics remain valid.
 
 # Cookbook — proven techniques that live in the source repos
@@ -29,7 +29,7 @@ gameplay*: don't emulate DOS/4GW, replace it. `dos_re.le.load_le` maps the
 image, `dos_re.runtime.create_pm_runtime` boots it on the flat 386 core
 (`cpu386.py`) with the DOS/4GW host (`dos4gw.py`). Day-0 tools:
 `tools/le_info.py` (what am I looking at), `tools/pm_boot.py` (run to the
-fail-loud frontier), `tools/pm_view.py` (zero-setup live window). The whole
+fail-loud frontier), `tools/view.py --protected-mode` (zero-setup live window). The whole
 bring-up loop is: run pm_boot, read the named unimplemented opcode/service,
 implement the observed behaviour, re-run. KE went from LE parsing to
 rendered gameplay in one such session; its `docs/kegg/run_status.md` is the
@@ -253,13 +253,12 @@ unvisited behavior as a coverage gap.
 
 ## The play.py entry point (the human's window into the port)
 
-The runner itself is UNIFIED now: `dos_re/dos_re/player.py` owns the standard
+`dos_re/dos_re/player.py` owns the standard
 CLI (viewer by default / `--headless`; `--snapshot`/`--save-snapshot`;
-`--record-demo`/`--play-demo`/`--demo-continue`; the four hook-mode flags;
+`--record-demo`/`--play-demo`/`--demo-continue`; execution profiles;
 pacing knobs), the viewer loop with the standard hotkeys (F10 screenshot,
 F11 demo-record toggle, F12 snapshot), headless replay and crash snapshots.
-Your port subclasses `GameFrontend` — start from this repo's
-your port's play runner (built on `dos_re.player`) and keep the flag names; the worked
+Your project's only player subclasses `GameFrontend`; the worked
 examples below are the GAME-SPECIFIC ideas you graduate into as the port
 matures.
 
@@ -301,16 +300,16 @@ frames — size it to peak + headroom (SkyRoads: measured peak 37.3k steps →
 budget 48k). Because `steps_per_frame` lives in artifact metadata, playback
 restores the recorded value.
 
-**A hook tier safe enough to record demos over (`--safe-hooks`).**
+**A hook tier safe enough to record demos over (`recording-safe override profile`).**
 → Classify hooks by WRITE-SET: render/audio-owned hooks (their writes cannot
 touch the gameplay state a recording certifies) plus input-closed asset
 decoders proven byte-identical over the whole asset set. Running only that
 tier keeps the wall-clock playable for fluent human demo recording while
 every gameplay byte still comes from original ASM. Worked example:
-`pre2.checkpoints.SAFE_ORACLE_HOOKS` + the `--safe-hooks` help text in
+`pre2.checkpoints.SAFE_ORACLE_HOOKS` + the `recording-safe override profile` help text in
 `pre2_port/scripts/play.py`.
 
-**In-viewer verify/trace modes (`--verify-hooks`, `--trace-hooks`).**
+**In-viewer verify/trace modes (`verification profile`, `instrumented development profile`).**
 → P2 runs the ASM as oracle and diffs each recovered replacement at its
 contract boundary live, with a periodic per-hook summary (`--verify-verbose`,
 `--full-verify` = whole-machine diff); Overkill adds a strict headless hook
@@ -374,16 +373,18 @@ Worked examples of a long campaign's brief evolving:
 invariants are already in `START_HERE.md`; this is the harness that
 enforced them for months.
 
-**Shipping the finished native port.**
-→ Deployment pattern: copy the import-closure of the native entry point into a
+**Shipping the finished detached product.**
+→ Deployment pattern: copy the import-closure of the product entry point into a
 standalone folder, prove every import resolves *inside* that tree, smoke-run
 it, optionally wrap with PyInstaller. Worked example:
 `pre2_port/scripts/deploy_native.py`.
 
-## Presentation (Stage 6 — only after the faithful game is complete)
+## Presentation over a verified authoritative seam
 
 **Making it look/feel modern without touching gameplay.**
-→ [`enhancements.md`](enhancements.md) has the rules; the worked examples are
+→ [`enhancements.md`](enhancements.md) has the rules. The enhancement may
+attach before the whole game is memoryless, but its authoritative input must
+already be verified and read-only. Worked examples are
 P2's enhanced layer: render-intent model (`pre2_port/docs/pre2/render_model.md`,
 `enhanced_renderer_design.md`), frame interpolation over a two-snapshot rolling
 window (`pre2/bridge/frame_capture.py`), smooth transitions

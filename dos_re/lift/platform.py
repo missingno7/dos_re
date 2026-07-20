@@ -39,8 +39,8 @@ TWO BACKENDS implement the same contract:
     to the live VM's ``port_reader``/``port_writer`` and sets the VM's
     ``instruction_count``.  It is NOT the runtime owner of platform behaviour.
 
-  * :class:`CPUlessPlatformRuntime` -- the STANDALONE backend used by
-    ``play_cpuless.py``.  It owns a device model (a :class:`DOSMachine`, which
+  * :class:`CPUlessPlatformRuntime` -- an EXE-detached backend. It owns a
+    device model (a :class:`DOSMachine`, which
     is pure hardware -- no instruction execution) and its OWN virtual clock.
     It imports no CPU8086, no interpreter, no lifted function.
 
@@ -286,7 +286,7 @@ def _run_int(dos, carrier, num, regs, cost, flags_in):
 
 
 class CPUlessPlatformRuntime:
-    """Standalone platform backend for ``play_cpuless.py``.
+    """Standalone platform backend for an EXE-detached execution plan.
 
     Owns the historical memory image + a device model (:class:`DOSMachine`,
     pure hardware) + its own virtual clock.  Implements the ``plat`` contract
@@ -300,7 +300,7 @@ class CPUlessPlatformRuntime:
         self.clock = 0
         self._entry = 0
         self._carrier = _ClockCarrier(mem)
-        #: the standalone SCHEDULER seam: play_cpuless installs a callback
+        #: the standalone SCHEDULER seam: the selected composition installs a callback
         #: (head_cs, head_ip, resume_ip, regs, abs_cost) -> (regs, flags,
         #: extra_cost) that counts boundary-head passes and, on quota, PARKS
         #: in-line: applies demo inputs, delivers timer IRQs through the
@@ -392,7 +392,7 @@ class CPUlessPlatformRuntime:
     def farcall(self, seg: int, off: int, regs: dict, argbytes: int,
                 cost: int) -> dict:
         # The standalone backend does not yet own a platform-API device model
-        # for import-thunk far-calls (the play_cpuless analogue of the DOS INT
+        # for import-thunk far-calls (the detached analogue of the DOS INT
         # services): fail loud with a witness until a real platform adapter is
         # bound, exactly as an unmodelled INT does above.  The VMless
         # verification binding routes these through the live API registry, so

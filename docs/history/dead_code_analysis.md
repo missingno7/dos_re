@@ -1,6 +1,7 @@
 # Dead code in dos_re: reachability is under-approximated, not over-emitted
 
-**Conclusion.** In `dos_re`, reachability is UNDER-approximated far more often than
+**Historical conclusion.** In the evaluated SkyRoads recovery corpus,
+reachability was UNDER-approximated far more often than
 code is over-emitted. The lifter does not decode a whole binary and prune it; it
 emits an *evidence-gated entry set*, and within each function decodes only the
 CFG-reachable instructions. So the emitted program is already close to minimal by

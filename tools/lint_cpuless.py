@@ -37,7 +37,7 @@ form the module-name check in lint_independence.py misses.
 Usage (from a port):
     python dos_re/tools/lint_cpuless.py \
         --repo-root . \
-        --root scripts/play_cpuless.py \
+        --root product/launcher.py \
         --recovered-root mygame/recovered \
         --recovered-prefix mygame.recovered \
         --forbidden-module dos_re.cpu --forbidden-module mygame.lifted \

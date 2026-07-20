@@ -1,14 +1,16 @@
-> Framework method reference (DOS_RE 2.0).  Authority: [`dos_re_2.0.md`](dos_re_2.0.md)
-> is canonical; where older per-routine/hook-first phrasing below conflicts with the
-> 2.0 hard walls and automation principle, dos_re_2.0.md wins.  Promoted from the
+> Framework method reference. Authority: [`execution_planner.md`](execution_planner.md)
+> defines execution and release closure; [`dos_re_2.0.md`](dos_re_2.0.md)
+> defines generated recovery techniques. Promoted from the
 > DOS_RE 1.0 starter (template_dos_port, retired) because the mechanics remain valid.
 
-# The enhanced layer — faithful core first, presentation last
+# Non-authoritative enhancements over verified game state
 
 > This file is the **rules** (sequencing, the read-only boundary, the parity
 > gate). The post-endgame **workflow** — the human taste loop, the
 > fps-vs-interpolation ladder, the technique catalog (F10 menu, transitions,
 > hosts) — is [`post_endgame.md`](post_endgame.md), gated until the flip.
+> Enhancement registration and verification policy are defined by
+> [`override_architecture.md`](override_architecture.md).
 
 The Prehistorik 2 port shipped modern comforts (widescreen, frame
 interpolation, smooth transitions, stereo SFX, scaling) *without ever
@@ -16,35 +18,23 @@ diverging from the verified game*. That worked because of two rules — one
 about the boundary, one about the **order** — and every port built on this
 framework should adopt both.
 
-## The sequencing rule: the enhanced layer is the endgame
+## The sequencing rule: verify the authoritative seam first
 
-**Recover a complete, working, faithful native game first. Build enhanced
-rendering/presentation on top of it, last.** The lifecycle is:
+**An enhancement may attach only after the authoritative state it consumes has
+a verified read-only seam.** It does not require the entire game to be
+memoryless. The unchanged surrounding program may still run through the
+interpreter, generated VMless code, or generated CPUless code:
 
 ```text
-ASM game running in VM → deterministic replay / snapshots → hooks and routine
-replacement → verified recovered islands → faithful native subsystems →
-COMPLETE faithful VM-less game → enhanced presentation layer
+baseline backend → verified authoritative state seam → read-only enhancement
+                 \____________________________________/ replay state comparison
 ```
 
-Do not start widescreen, interpolation, smooth transitions, or an "enhanced
-renderer" while the faithful core still has unrecovered subsystems. Early in
-its history, the Prehistorik 2 project experimented with growing a
-faithful/enhanced visual backend *alongside* recovery (the "cyborgization"
-phase — see `pre2_port/docs/pre2/faithful_visual_layer.md` for the machinery
-it required). It ultimately worked, but the project's own verdict is **not
-recommended**: it created transitional not-yet-grounded states to police,
-parallel-truth risks to audit, and presentation effort spent while gameplay
-was still unrecovered. The enhanced engine is the *reward* for a finished
-faithful game, not a recovery shortcut.
-
-**The one sanctioned exception class: audio-style disruptions.** P2 improved
-audio playback earlier than the rule allows because it was (a) relatively
-simple and separable, and (b) the original emulated playback was noisy and
-crackling enough to disrupt all other work. That is the bar for an exception:
-small, cleanly separable, and fixing something that actively impedes the
-recovery workflow itself — and it still obeys the boundary rule below. "It
-would look nicer" never qualifies.
+Do not use an enhancement to invent missing gameplay state or hide an
+unverified subsystem. If presentation needs information the baseline does not
+expose, recover and verify that state seam first. This permits useful
+renderers, audio outputs, host UI, and debug visualization to land
+incrementally without turning presentation into a second authority.
 
 ## The boundary rule
 
@@ -63,9 +53,8 @@ equal to the faithful game at its neutral setting (the "alpha=1 parity gate"),
 so *enhanced never means diverged* — it is the same game, shown better. An
 enhancement that needs data the faithful core doesn't expose gets that data
 **recovered at the source layer first** — never faked in the renderer
-(pitfall #18). Note that with the sequencing rule above this situation should
-be rare: by the time the enhanced layer is being built, the faithful core is
-complete.
+(pitfall #18). The same boundary applies whether authoritative state is still
+DOS-memory-backed or has moved into detached objects.
 
 The seam enhancements attach to is a **semantic render-intent model** emitted
 by the faithful renderer (sprites, camera, palette, transition state) —
@@ -96,7 +85,7 @@ it never simulates more of the world.
 ## The pixel-aspect lesson
 
 320×200 DOS games were displayed on 4:3 CRTs — pixels 1.2× tall (`par=1.2` in
-`dos_re/tools/display.py`). But internal effects were often authored in raw square-
+`dos_re.display`). But internal effects were often authored in raw square-
 pixel coordinates. Both presentations are legitimate:
 
 - **4:3 (par=1.2)** — historically authentic display shape.
@@ -108,7 +97,7 @@ presentation scaling.
 
 ## Status labeling
 
-Mark enhanced-layer code `PRESENTATION_ONLY` in its module docstring, and keep
-it out of the recovered/ layers entirely. Anything that would write game state
-is not an enhancement — it is either a recovered feature (goes through the
-oracle) or it doesn't ship.
+Declare enhanced code as a non-authoritative enhancement in the unified
+override registry and keep it out of generated baseline directories. Anything
+that writes authoritative game state is not an enhancement: it is either a
+faithful replacement or an explicitly declared behavioral modification.

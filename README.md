@@ -9,27 +9,24 @@ original execution.  The key idea is not "AI writes code" — it is
 *deterministic tooling does the labor, AI unblocks it where it is stuck, and
 the original game remains executable truth.*
 
-**DOS_RE 2.0** ([`docs/dos_re_2.0.md`](docs/dos_re_2.0.md) — the canonical
-architecture) is a staged pipeline of three mechanical detachments, each
-oracle-verified:
+**dos_re 3.0** treats recovery as one evidence-backed program with a mixed
+implementation graph:
 
 ```text
-binary → automatic CPU-less lifting → structurally linked VM-less graph
-→ automatically generated native shell → oracle-guided convergence → play_native
-→ automatic memory-structure recovery → generated verification bridge
-→ clean source port
+original oracle + generated implementations + selected authored overrides
+                               |
+                    one execution plan and player
+                               |
+          replay verification → detachment proof → release export
 ```
 
-```text
-interpreted oracle → VMless lifted runtime → CPUless lifted runtime
-→ DOS-layout-less native runtime → semantic clean source port
-```
-
-**Proven through M2 on the Lemmings pilot** (`lemmings_port`): strict VMless
-(zero interpreted instructions, interpreter poisoned) AND EXE-independent (a
-generated data-only boot image; the original binary is build-time input only),
-demo-verified byte-exact against the interpreted oracle.  Current milestone:
-M3 -- CPUless via the automated de-carrier process over the recovery IR.
+VMless, CPUless, ABI-recovered, DOS-memory-backed, memoryless, and native are
+per-function or per-region properties, not separate product architectures.
+One profile-driven player and planner run any valid mixture. Development may
+permit the EXE and verification tools; detached/release profiles forbid them.
+A separate closed-world exporter produces standalone artifacts. See
+[`docs/override_architecture.md`](docs/override_architecture.md) and
+[`docs/execution_planner.md`](docs/execution_planner.md).
 
 The largest supported graph is assembled mechanically and early; known-
 unsupported constructs fail loudly; the end-to-end oracle finds silent
@@ -39,7 +36,7 @@ regression), never a gate on graph assembly.
 
 > **Do not port the game.  Build the machine that ports the game.**
 > Every blocker must improve the toolchain, not create another manual patch.
-> (The Ten Principles: `docs/dos_re_2.0.md` §0.)  The staged pipeline is the
+> (The Ten Principles: `docs/dos_re_2.0.md` §0.) The staged recovery method is the
 > engineering strategy; the ultimate goal is direct — *original binary +
 > recovery facts → automated recovery tool → true native implementation* —
 > with intermediate stages as verification projections of one shared
@@ -119,8 +116,8 @@ original EXE ──▶ dos_re VM (the oracle) ──▶ traces / snapshots / rep
 
 1. The original EXE runs in a controlled VM; `ReplayArtifact` events drive
    deterministic oracle and candidate execution.
-2. Routines are hooked at their original addresses — mechanically lifted or
-   hand-recovered as source (a pure rule behind a thin VM adapter).
+2. The planner selects generated or authored implementations at stable
+   identities; CPU-backed plans bind them through thin backend adapters.
 3. The framework diffs memory, registers, flags, ports, state, and frames
    against the interpreted original, on every call.
 4. Verified islands merge into subsystems; higher-level meaning is earned from
@@ -135,9 +132,10 @@ person driving these APIs by hand. It happens in a **port repo** — scaffolded
 by `python tools/new_project.py` and walked through in
 [`docs/getting_started.md`](docs/getting_started.md); the Lemmings pilot
 (`lemmings_port`) is the canonical reference implementation — with this
-framework wired in as the `dos_re/` submodule. (The old DOS_RE 1.0 starter,
+framework wired in as the `dos_re/` submodule. (The old dos_re 1.0 starter,
 `template_dos_port`, is retired; see
-[`docs/migration_1.0_to_2.0.md`](docs/migration_1.0_to_2.0.md).) The hard boundary, enforced by
+[`docs/history/migration_1.0_to_2.0.md`](docs/history/migration_1.0_to_2.0.md).)
+The hard boundary, enforced by
 lint: `dos_re/` never learns any game's addresses, filenames, or formats;
 everything game-specific lives in the port's adapter package.
 
@@ -156,8 +154,8 @@ python -m pytest tests -q                        # framework suite (no game asse
 | Audience | Read |
 |---|---|
 | A human wondering what this is | this README — you're done |
-| Anyone touching architecture, terminology, or the roadmap | [`docs/dos_re_2.0.md`](docs/dos_re_2.0.md) — the canonical staged-recovery pipeline, vocabulary, risk model, milestones |
-| The agent porting a game | [`docs/getting_started.md`](docs/getting_started.md) (the workflow), then [`docs/agent_toolbox.md`](docs/agent_toolbox.md) (task → tool → command here); `lemmings_port` is the worked reference |
+| Anyone touching execution or override architecture | [`docs/execution_planner.md`](docs/execution_planner.md), then [`docs/override_architecture.md`](docs/override_architecture.md) |
+| The agent porting a game | [`docs/getting_started.md`](docs/getting_started.md) (the workflow), then [`docs/agent_toolbox.md`](docs/agent_toolbox.md) (task → tool → command here) |
 | The agent extending this framework | [`AGENTS.md`](AGENTS.md) (the rules), [`docs/architecture.md`](docs/architecture.md) (the module map) |
 | Mechanism reference | [`docs/README.md`](docs/README.md) (hooks/verification, demos/snapshots, state mirrors, hardware status, lifting, performance, glossary) |
 

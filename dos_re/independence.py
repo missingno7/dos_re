@@ -1,9 +1,10 @@
-"""EXE-independence runtime enforcement (docs/dos_re_2.0.md section 1a').
+"""Optional destructive EXE/interpreter-detachment proof tools.
 
-Game-agnostic half of the EXE-independence wall: the strict-VMless runtime of
-ANY port boots from a generated, data-only boot image and must be *physically*
-unable to reach the original executable.  This module provides the enforcement
-pieces; the port supplies only paths and its recovery-facts skip set.
+The canonical source of truth is the dependency closure in
+``dos_re.execution`` and its closed-world export. This older data-only boot
+path remains useful during development because it deliberately destroys
+recovered instruction bytes, blocks EXE access, and poisons interpreter
+fallback. Passing it is focused supporting evidence, not release readiness.
 
     The EXE goes into the recovery pipeline.  Generated host code and data
     come out.  The VMless runtime never sees the EXE again.
@@ -18,8 +19,7 @@ Pieces:
 * :func:`boot_vmless_image` -- the one EXE-free boot path: headless image load,
   lifted-graph install, signature-guard bypass for poisoned code, and the
   interpreter poison armed from instruction zero.
-* :func:`independence_report` -- the DERIVED hard-gate banner (each line a
-  computed fact, not a config string).
+* :func:`independence_report` -- a derived report for this optional proof run.
 
 The build-time counterpart (producing the image) is :mod:`dos_re.bootimage`.
 """
@@ -130,7 +130,7 @@ def boot_vmless_image(
     already at the canonical post-decompression entry -- there is no loader
     phase to interpret.
     """
-    from .snapshot_headless import load_snapshot_headless
+    from .snapshot_runtime import load_snapshot_headless
     from .lift.install import install_vmless_graph
 
     boot_dir = Path(boot_dir)

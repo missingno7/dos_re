@@ -1,17 +1,23 @@
 # DOS_RE 2.0 — the automatic staged recovery pipeline
 
-**Status: the canonical architecture (owner-ratified, 2026-07-17).  This
-document supersedes any older doc language that gates native-graph assembly on
-per-function proof.  The Lemmings pilot (`lemmings_port`) is the reference
-implementation: M2 (strict VMless + EXE-independent) and M3 (CPUless via the
-automated de-carrier process) are both ACCEPTED and merged.  The next
-milestone is M4 (DOS-layout dissolution).**
+**Status: generated-recovery pipeline reference (owner-ratified, 2026-07-17).**
+The lifting transformations and pilot evidence remain current. The dos_re 3.0
+execution, dependency-detachment, and release authority is
+[`execution_planner.md`](execution_planner.md).
+
+> **DOS_RE 3.0 executable-model supersession.** The recovery transformations
+> and hard walls in this document remain optional implementation evidence.
+> They no longer define release readiness, product types, or mandatory runner
+> names. One plan may mix implementations at different recovery levels; its
+> declared dependency closure and release policy are authoritative. See
+> [`execution_planner.md`](execution_planner.md) and
+> [`override_architecture.md`](override_architecture.md).
 
 > **M3 CPUless — ACCEPTED (2026-07-16).**  The whole reachable graph from the
 > game root is CPUless: recovered functions compute over `(mem, plat, *regs)`
-> with no CPU carrier, no interpreter, no lifted graph.  `play_cpuless` runs
+> with no CPU carrier, no interpreter, no lifted graph.  `detached profile` runs
 > the game standalone from the data-only boot image, and
-> `scripts/acceptance_cpuless.py` proves it BYTE-EXACT against the interpreted
+> the project's ReplayArtifact verification gate proves it byte-exact against the interpreted
 > oracle over the whole demo (regs + flags + poison-masked memory at every
 > boundary).  The generic machinery that made this automatic is catalogued in
 > §CPUless machinery below; everything game-specific stayed in `lemmings_port`
@@ -31,7 +37,7 @@ binary
 → structurally linked VM-less graph
 → automatically generated native shell
 → oracle-guided convergence
-→ play_native
+→ release profile
 → automatic memory-structure recovery
 → generated native↔historical-state verification bridge
 → clean source port
@@ -95,7 +101,7 @@ final representation:
 
 A stage may legitimately POSTPONE any of these — but the postponement must
 be recorded as debt against this goal, never re-labelled as "fine because
-the next stage does not need it".  (See `docs/abi_end_state.md` §6, which
+the next stage does not need it".  (See `docs/history/abi_end_state.md` §6, which
 was revised after this goal was stated: the M4-need test and the
 final-representation test are different tests, and the disposition table
 now says so.)
@@ -357,7 +363,7 @@ Message wording: prefer *full VMless lifted graph*, *VMless lifted candidate*,
 implementation* — never *full native runtime* / *native assembly* / *native
 hooks* for a merely-VMless artifact.
 
-### 1a. Hard execution walls, and the runner naming contract
+### 1a. Hard execution walls as implementation properties
 
 The stage names are not labels on effort — each completed stage is defined by
 an **enforced, mechanically checkable execution wall**:
@@ -376,18 +382,13 @@ when the stage regenerates automatically AND its wall is enforced by tooling
 (a grep-class static check on the emitted artifacts at minimum, a runtime
 audit where static checking cannot see it).
 
-The walls fix the runner names in every port:
-
-```
-play_vmless.py    output of the automated VMless pipeline
-                  (lift → link → install the graph; NOT a hand-assembled hook set)
-play_cpuless.py   output of the automated CPUless transformation
-                  (NOT a manually refactored copy of play_vmless.py)
-play_native.py    output of the automated DOS-layout dissolution pipeline,
-                  plus only optional oracle-verifiable semantic cleanup
-```
-
-A runner may not carry a name whose wall its artifacts do not satisfy.
+These walls classify generated or authored implementations and state adapters.
+They feed the unified planner's detachment report. They do not require a
+uniform recovery level across a game and do not fix runner names. One
+profile-driven `play.py` runs development, verification, detached, or release
+plans. A separate closed-world exporter produces standalone artifacts;
+Recovery stages are implementation properties, not player identities. There is
+only one profile-driven player.
 
 There are **two independent walls at the VMless stage**, and both must hold
 before M2 is accepted:
@@ -405,7 +406,7 @@ EXE-independence wall says the runtime does not depend on the original
 executable *at all* — not for code, not for data, not as a hidden byte source.
 It is enforced **physically**, not by convention:
 
-- **Data-only boot image.**  `scripts/build_vmless_boot_image.py` runs the
+- **Data-only boot image.**  The project's declared build-image bootstrap runs the
   loader (the PKLITE self-extractor + the machine-type menu — interpreted, at
   BUILD time) from the EXE to the canonical post-decompression entry, captures
   the memory + machine state, and **poisons the recovered code**: every byte the
@@ -418,7 +419,7 @@ It is enforced **physically**, not by convention:
   `code_as_data` in the recovery facts and preserved.  Output:
   `generated/vmless_boot/{memory_1mb.bin, state.json, manifest.json}`.
 - **EXE-free load path.**  `dos_re.runtime_core.create_runtime_from_image` +
-  `dos_re.snapshot_headless.load_snapshot_headless` build the runtime from the
+  `dos_re.snapshot_runtime.load_snapshot_headless` builds the runtime from the
   image alone (`program.exe is None`).  The EXE loader (`create_runtime` →
   `load_mz_program`) lives in a *different* module that the VMless graph never
   imports.
@@ -428,8 +429,8 @@ It is enforced **physically**, not by convention:
   the binary by name OR by content hash (a rename does not launder it), while
   leaving game data readable.
 
-Enforced by tooling: `scripts/lint_vmless_independence.py` (static import-graph
-proof the runtime reaches no loader edge), `scripts/audit_vmless_boot_image.py`
+Enforced by tooling: the dependency-closure audit (static import-graph proof
+that the runtime reaches no loader edge) and the boot-image audit
 (no bundled executable; every recovered code byte poisoned or declared
 `code_as_data`), and `tests/test_vmless_cleanroom.py` (boot + run to gameplay in
 a temp dir with the EXE physically absent).  The runner prints a DERIVED banner
@@ -521,7 +522,7 @@ Consequences:
 - **Assemble the largest supported graph as early as possible.**  Mechanical
   integration is optimistic within the declared supported subset.
 - **Per-function ORACLE_PASSING does not gate linking or inclusion in
-  `play_native`.**  Per-function proofs remain useful metadata — hybrid
+  `release profile`.**  Per-function proofs remain useful metadata — hybrid
   auto-install, diagnostics, regression tests, later refactoring — but they
   are not a precondition for graph assembly.
 - **Divergences are localized automatically** (`dos_re.replay.bisect_divergence`
@@ -775,7 +776,7 @@ Rules:
   inherit it.
 - **Unknown effects fail loudly** — never a silent fallback to hidden
   emulation.
-- Existing reusable material: the `play_native` shells of **pre2_port,
+- Existing reusable material: the `release profile` shells of **pre2_port,
   skyroads_port, overkill_port** already contain adapter-shaped video/input/
   timing code to mine; **`opl3_fast.py` is usable as-is as the audio-adapter
   synth in a native game**.
@@ -784,7 +785,7 @@ The progression:
 
 ```
 binary → automatic lifting → effect recognition → native adapter binding
-→ linked CPU-less game graph → generated play_native
+→ linked CPU-less game graph → generated release profile
 ```
 
 Long-term: dos_re accumulates a growing adapter library, so each later game
@@ -839,7 +840,8 @@ the next major mechanical stage after the VMless graph converges.
   oracle-clean.  Complete when no public recovered contract contains a CPU
   object, register-named parameter, or return-address mechanics — and
   unsupported ABI shapes fail loudly with evidence.  **End state + acceptance
-  gate: `docs/abi_end_state.md`** — which machine concepts must be eliminated
+  historical gate: `docs/history/abi_end_state.md`** — which machine concepts
+  must be eliminated
   before M4 (generic virtual stack, register-named public parameters,
   dict-keyed results, dead flag computation), which may remain as
   deterministic emission detail (CFG-shaped `bb` bodies, register-named

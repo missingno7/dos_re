@@ -1,4 +1,4 @@
-"""cpuless_closure.py -- runtime-closure measurement for play_cpuless.
+"""cpuless_closure.py -- runtime-closure measurement for CPU-independent regions.
 
 Completion of the CPUless runtime is measured by the REQUIRED RUNTIME CLOSURE
 from declared startup/gameplay roots, NOT by "all named functions promoted"

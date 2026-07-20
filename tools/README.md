@@ -8,11 +8,10 @@ view (which tool for which recovery step, with context) is
 
 | Tool | Command | When |
 |---|---|---|
-| `view.py` | `python tools/view.py --exe assets/GAME.EXE` | Watch any EXE run, zero setup — the standard player CLI (`--headless`, `--snapshot`, `--record-demo`, `--play-demo`; F10/F11/F12). Your port's `scripts/play.py` supersedes it once an adapter exists. |
-| `pm_view.py` | `python tools/pm_view.py --exe assets/GAME.EXE` | Watch any DOS/4GW (MZ+LE) EXE run, zero setup — live viewer over the flat 386 runtime (KBC keys, INT 33h mouse, wall-clock vsync, F10/F12, `--snapshot` resume, `--headless`). A port's `scripts/play.py` (thin wrapper over `dos_re.pm_player.main`) supersedes it. |
+| `view.py` | `python tools/view.py --exe assets/GAME.EXE` or add `--protected-mode` for DOS/4GW | Run the canonical profile-driven player with the generic real-mode or protected-mode frontend (`--headless`, `--snapshot`, `--record-demo`, `--play-demo`; F10/F11/F12). A port exposes the same lifecycle through its sole `scripts/play.py`. |
 | `render_frame.py` | `python tools/render_frame.py <snapshot_dir>` | Day-0 "see output": snapshot (or `--exe` + `--steps`) → PNG. VGA 13h + EGA/VGA planar. |
 | `replay_info.py` | `python tools/replay_info.py <artifact-dir>` | Inspect a 3.0 replay's event identity, profiles, cached boundaries, function visits, and annotations. |
-| `replay_verify.py` | `python tools/replay_verify.py <artifact-dir> --driver game.replay:build --start X --end Y [--bisect]` | Verify exactly X→Y or persistently bisect a divergent transition. |
+| project `scripts/play.py` | `python scripts/play.py --profile verification --play-demo <artifact-dir> --verify-start X --verify-end Y [--bisect]` | Verify exactly X→Y or persistently bisect a divergent transition through the canonical player. |
 | `lindis.py` | `python tools/lindis.py <exe> <snapshot_dir> <CS> <START> <END>` | Read code: linear disassembly at a snapshot (static lengths, interpreter-rendered text). |
 | `profile_hotspots.py` | `python tools/profile_hotspots.py <exe> <steps> --snapshot <snap> --top 40` | FIRST, before manual tracing: hot routines, tight backward edges (= wait loops / frame boundaries), boundary crossings. |
 | `le_info.py` | `python tools/le_info.py assets/GAME.EXE` | Day-0 for a DOS/4GW (MZ+LE) title: object table, entry/stack, fixup census, entry disassembly. `--rebase 0x100000` prints addresses where the runtime loads them. |
@@ -44,12 +43,11 @@ view (which tool for which recovery step, with context) is
 |---|---|---|
 | `lint.py` | `python tools/lint.py` | Game knowledge or third-party imports leaking into the `dos_re/` core; syntax errors. |
 | `audit_layers.py` | `python tools/audit_layers.py <game>/recovered` | VM imports creeping into the pure recovered layer (the mistake that makes logic unmigratable). |
-| `audit_hook_oracle.py` | `python tools/audit_hook_oracle.py <game>` | Parent hooks calling child hooks' Python directly — hiding the child from verification. |
+| `export.py` | `python tools/export.py --factory MODULE:CALLABLE --output dist` | Export and audit the exact file closure of a package-ready release plan. |
+| `verify_export.py` | `python tools/verify_export.py --artifact dist -- TARGET_RUNNER LAUNCHER` | Recheck hashes/file closure and cold-start the packaged product with development Python paths removed. |
 | `check_undefined_names.py` | `python tools/check_undefined_names.py [pkg]` | Latent NameErrors (F821) on paths tests didn't reach. |
 | `check_doc_links.py` | `python tools/check_doc_links.py [root …] [--exclude NAME]` | Broken relative markdown links — run after any doc edit; porting repos run it as `python dos_re/tools/check_doc_links.py . --exclude dos_re`. |
 | `run_tests.py` | `python tools/run_tests.py` | Pytest-free fallback test runner for constrained sandboxes. |
 | `clean.py` | `python tools/clean.py [--artifacts]` | Generated junk; `--artifacts` also drops regenerable artifact families (promoted evidence stays). |
 
-`display.py` is a back-compat shim over `dos_re.display` (kept so old
-`from display import Display` imports keep working); use the package module
-in new code.
+Interactive presentation uses `dos_re.display` directly.

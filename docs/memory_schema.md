@@ -53,7 +53,7 @@ between this framework and the Lemmings reference port.  Do not mistake a
 port-side acceptance script for an in-tree framework facility:
 
 * **Masked differential.** The Lemmings port's
-  `scripts/acceptance_cpuless.py` already digests
+  ReplayArtifact interval verification already digests
   `registers + POISON-MASKED memory` per boundary: `_poison_mask(manifest)`
   builds a byte mask from declared ranges, `_masked()` applies it before
   hashing.  Per-region STRICT/OPAQUE/ELIMINATED policies are a

@@ -167,7 +167,9 @@ first-entry to last-exit interval.
 
 ## Function visits and atlas identity
 
-`FunctionVisitIndex` records, per stable lifted/override function identity:
+`FunctionVisitIndex` records per stable `FunctionIdentity`, independent of
+whether the body came from a generated baseline backend or an authored
+override:
 
 - total invocation count, including recursive calls;
 - point immediately before the first entry;

@@ -1,10 +1,13 @@
 # dos_re architecture
 
-`dos_re` is a reusable, oracle-driven DOS game recovery framework. The framework
-runs an original DOS binary inside a deterministic real-mode VM, lets you replace
-one original routine at a time with native code, and proves every replacement
-byte-exact against the original — until the recovered code can stand alone as a
-native source port and the VM is demoted to an offline proof harness.
+`dos_re` is a reusable, oracle-driven DOS game recovery framework. The
+unchanged original program can run through interpreted, generated VMless, or
+generated CPUless/ABI-recovered implementation providers. One execution plan
+may mix those providers by function or region. Optional authored code is
+selected through the separate override model defined in
+[`override_architecture.md`](override_architecture.md); the two dependency
+modes and unified planner are defined in
+[`execution_planner.md`](execution_planner.md).
 
 ## The package boundary (the one hard rule)
 
@@ -56,7 +59,7 @@ from the source projects). Grouped by concern:
 
 | Module | What it is |
 |---|---|
-| `hooks.py` | `HookRegistry` (`@registry.replace(cs, ip, name)`), duplicate-registration fail-fast, env-var hook disabling, the verifier-visible composition helpers `call_installed_hook_like_near_call` / `jump_installed_hook_boundary`, and the live-code signature guards (`self_disable_if_patched`, `code_matches`) for runtime-patched routines. |
+| `hooks.py` | Backend-private CPU call/return composition helpers and live-code signature guards. It contains no global implementation registry or selection policy. |
 | `gaps.py` | `HybridGap` — the fail-loud "not yet recovered" exception, plus the transition-signal subclass pattern for multi-frame sequences, and the `HookVerifyStats`/`HookTraceStats` bookkeeping. |
 | `state_view.py` | The state-mirror machinery: typed views (`StructView`, `StructArray`, `U8/U16/S8/S16`) over swappable backends (byte image / segment / overlay contract / width contract) — the generic half of `docs/state_mirrors.md`. |
 | `checkpoints.py` | VM-until-checkpoint stepping: run the oracle to the next adapter-declared phase boundary (frame/render/object-update/input), filterable by kind. |
@@ -71,6 +74,8 @@ from the source projects). Grouped by concern:
 | `pm_verification.py` | The PM differential hook oracle: strict auto-continuation over `clone_pm_runtime` — the handler's final EIP is the only acceptable continuation, the hook-stripped clone interprets the original there, then a full-machine diff (regs/flags/segments/x87/whole flat memory/VGA planes). Samples cap retires proven hooks to the passthrough fast path. |
 | `hook_taxonomy.py` | Role-based hook classification (checkpoint / env_wait / debug_probe / glue) with adapter-supplied address sets. |
 | `runtime_code.py` | Polyvariant runtime-patched-code support: `RuntimeCodeSlot`/`RuntimeCodeVariant`/`RuntimeCodeStaticization` for addresses where the executable's live bytes aren't a single static routine — variant identification against a caller-supplied slot table (distinguishes "the hook's own body", "a known-but-wrong body", and "unknown bytes"), a staticization-readiness gate, and an opt-in `RuntimeCodeWriteTracer` for discovering installers. The richer, multi-variant sibling of `hooks.py`'s single-variant `self_disable_if_patched`/`code_matches` guards. |
+| `execution.py` | **dos_re 3.0 execution planner:** immutable profiles/policies, conservative coverage protocol, implementation and runtime-service descriptors, per-identity binding, deterministic plan digest, detachment report, and fail-before-boot strict-profile validation. It imports no CPU, player, replay system, or future Execution Atlas. |
+| `bootstrap_runtime.py` | CPU-free packaged-bootstrap resolver: validates the release manifest's selected provider and stable artifact-ID paths before product startup. |
 | `islands.py` | `@oracle_link` recovered-island metadata (boundary, contract, confidence status, merge target) + auto-discovery and manifest generation — the generated progress ledger both source ports were steered by. |
 | `coverage.py` | The measured **native-%** collector for `cpu.coverage_telemetry`: adapter-supplied address→island classifier, hooked work measured in verifier-reported ASM-equivalent instructions (estimated from a JSON cache on unverified runs, loudly *unmeasured* otherwise — never guessed into the %), `bounded_original` spans for oracle-side reference runs, per-island report. Promoted generic core of overkill's `coverage.py`. |
 | `dosbox_savestate.py` | Import a DOSBox-X save state (memory + registers) as an alternative evidence source. |
@@ -85,7 +90,7 @@ from the source projects). Grouped by concern:
 | `lift/effects.py` | **The one semantic description of an instruction**, keyed off `decode`'s syntax: memory accesses (read/write/rmw, override-aware segment, EA components, width, implicit-vs-explicit), flags defined, DF-stepped pointer updates, and the implicit register participants no operand decoding reveals. `effects_of(inst) -> Effects`, refusing what it cannot describe faithfully. Consumed by censuses, contract inference, flag analysis and memory classification so they stop maintaining private opcode tables that drift (the census could not see string instructions at all — 814 of them). ANALYSIS AND GENERATION ONLY: it never ships in a recovered runtime, and it is not an interpreter — `decode.py` stays syntax, the interpreter stays the executable authority, and this is the third thing, the *description*. |
 | `lift/cfg.py` | Function-region discovery from an entry offset: reachable instructions, basic-block leaders, exits (ret/retf/iret/far-jmp), call/INT dependencies, and the structured refusal taxonomy (indirect-jump, unsupported-opcode, no-exit, region-budget, decoder-mismatch). `tools/liftgen.py` is the census + `--emit` CLI. See docs/lifting_design.md. |
 | `lift/emit.py` | The emitter (M1): a `FunctionScan` → a self-contained Python module defining one literal hook — architectural state at every instruction boundary, a basic-block dispatch loop, per-line disassembly comments, the fail-loud SMC entry guard. Faithful by reuse: ALU/flags/shifts/string-ops call the interpreter's own helpers; unknown opcodes emit an exact single-instruction fallback. 95.4% native over 269 real overkill functions; the lifted `4537` passes its hand-hook's 300-case fuzz byte-exact. |
-| `lift/runtime.py` | Support imported by generated hooks: `emulate_call`/`emulate_far_call`/`emulate_int` run callees and ISRs through the VM (hooks compose; lifting order is irrelevant), and `interp_one` executes one instruction through the interpreter for the emitter's fallback tier. 2.0 WALL NOTE: on a strict-VMless corpus the emitter emits ZERO `interp_one` sites (`liftemit --require-vmless-wall`) and the runner poisons interpretation outright (`cpu.interp_forbidden`) -- the fail-loud frontier lives OUTSIDE the corpus, never inside it (docs/dos_re_2.0.md section 1a). |
+| `lift/runtime.py` | Support imported by generated implementations: `emulate_call`/`emulate_far_call`/`emulate_int` run callees and ISRs through the VM, and `interp_one` executes one instruction through the interpreter for the emitter's fallback tier. A VM-independent catalog entry emits zero `interp_one` sites (`liftemit --require-vmless-wall`); its backend poisons interpretation with `cpu.interp_forbidden`, so an uncovered frontier fails loudly. |
 | `lift/decode32.py` + `lift/cfg32.py` | The 32-bit (flat CPU386) decoder + function scan: default-32 sizes, 0x66/0x67, ModRM+SIB, the 0F map; x87 classifies SEQ (the emitter falls back per line instead of refusing the function). Lengths cross-check against `CPU386`'s fetch stream. |
 | `lift/emit32.py` + `lift/runtime32.py` | The 32-bit emitter (same faithful/total/refactorable contract over the CPU386 model: `_flags_*`/`_shift`/`_string` reuse, segment-base-aware flat addressing) and its delegation primitives (`emulate_call32`/`emulate_int32`/`interp_one32`, `check_signature`). `tools/pmlift.py` is census+emit+in-situ-verify in one CLI. |
 | `lift/manifest.py` | The lifter's own proof ledger (`LiftManifest`/`LiftRecord`, JSON-backed): per-function status on the `LIFTED → ORACLE_PASSING → INSTALLED → REFACTORED` ladder, with call/verify/coverage counts. Deliberately disjoint from `islands.STATUSES` — lifted ≠ recovered (the metrics-honesty rule). `tools/liftverify.py` is the in-situ verify driver that installs lifted hooks with the strict auto-continuation verifier, runs the VM, diffs each call against the ASM oracle, and writes this ledger. |
@@ -94,10 +99,10 @@ from the source projects). Grouped by concern:
 
 | Module | What it is |
 |---|---|
-| `player.py` | The game-agnostic core of every port's `scripts/play.py`: the STANDARD unified CLI (viewer by default, `--headless` to disable; `--snapshot`/`--save-snapshot`; `--record-demo`/`--play-demo`/`--demo-continue`; the four hook-mode flags `--no-replacements`/`--safe-hooks`/`--verify-hooks`/`--trace-hooks`, failing loud where a port has no such tier; pacing + presentation knobs), the live pygame viewer loop with the standard hotkeys (F10 screenshot, F11 demo-record toggle, F12 snapshot), headless demo replay, gap-snapshot-on-crash, and the `GameFrontend` adapter class a port subclasses. numpy/pygame imports stay lazy — importing the module and headless replay need neither. Worked example: the Lemmings pilot's runners (`lemmings_port/scripts/`). |
+| `player.py` | The universal project `play.py` frontend: resolves `development`/`verification`/`detached`/`release` plans before boot (`--plan-only` prints the report), binds only selected catalog entries, then drives viewer, headless, replay, snapshot, input, and pacing. `GameFrontend` supplies coverage/catalog/service declarations and backend behavior. numpy/pygame imports stay lazy. |
 | `display.py` | GPU-accelerated (SDL2 streaming texture) window/present backend with a software fallback, aspect-correct letterboxing (DOS 4:3 `par`), overlays and fullscreen. Imported only when a window opens; together with `player.py` and `audio_sink.py` it forms the lint's declared FRONTEND_RING (the only package files allowed to use pygame). |
 | `overlay_menu.py` | The NATIVE product's in-game settings menu (POST-ENDGAME widget — see [`post_endgame.md`](post_endgame.md)): tabbed modal overlay, pygame-INJECTED (importing needs nothing), items-as-data closures over host settings, structural determinism firewall (the caller freezes the tick while open; nothing reaches game input). Callers follow the accuracy taxonomy: presentation tabs (read-only, parity-gated) / an **Experimental** tab quarantining anything accuracy-affecting / debug-gated cheats. |
-| `pm_player.py` | The PM (DOS/4GW) play runner: live viewer over `render_pm_frame`, set-1 KBC scancodes (E0 extended pairs), INT 33h mouse, wall-clock vsync pacing via `dos.time_source`, blocking console reads pump real keys, F10/F12, `--snapshot` resume, headless runs. `main()` is the CLI a port's `scripts/play.py` wraps; `tools/pm_view.py` is the zero-setup form. pygame stays lazy. |
+| `pm_player.py` | Protected-mode `PMFrontend` execution driver behind the canonical `player.main` pipeline: PM rendering, KBC/mouse input, deterministic replay, snapshots, pacing, and audio. It owns no parser, profile selection, hook installer, or second `main()`. |
 | `audio_sink.py` | `AdlibSpeakerSink`: observer-only viewer audio — the VM's AdLib register stream through Nuked-OPL3 plus the PC-speaker square wave, mixed into one pygame channel with a jitter lead. Never writes game state, so demos replay identically with audio on or off. Wired by `player.py`'s `--audio adlib`; promoted from ancient_port's viewer. |
 | `opl3_fast.py` | The CPython playback backend: a fast APPROXIMATE OPL3 (numpy block renderer, ~50x real-time on real game music, ~290x busy synthetic). Perceptually matched against the exact core — exact pitch math, calibrated ADSR, real stepped LFO patterns, the chip's actual rhythm phase-bit recipe, serial high-feedback recurrence — verified by `tests/test_opl3_fast.py` tolerance checks and an 80s real-music A/B. `dos_re.audio_sink.load_opl3()` defaults to `opl3_fast`; the EXTERNAL `pynuked_opl3` package (not a dos_re submodule) is an opt-in bit-exact upgrade via `DOSRE_OPL3_BACKEND=nuked`. The bit-exact pure-Python core was retired from the runtime (too slow at ~1x real-time) and now lives, dormant, in `graveyard/opl3_exact.py` — the calibration/golden reference for `opl3_fast`, never imported by the package or selected at runtime. |
 
@@ -113,49 +118,61 @@ tests/        framework test suite (no game assets needed)
 tools/        lint, test runner, cleaner, linear disassembler, hotspot profiler,
               hook-composition audit, pure-layer VM-leak audit, undefined-name
               guard, island-manifest generator, snapshot→PNG frame renderer,
-              view.py (generic any-EXE runner over dos_re.player; display.py is
-              a back-compat shim — both now live in the package)
+              view.py (generic any-EXE command over dos_re.player)
 ```
 
-## Execution modes (no silent fallbacks)
+## One player and one execution configuration
 
-Every game port built on this framework runs in one of four explicit modes:
+Projects converge on one `play.py` capable of running any valid plan.
+Development, verification, detached, and release are configuration profiles,
+not player implementations. A separate closed-world exporter produces the
+standalone artifact and audits its finished dependency closure. See
+[`execution_planner.md`](execution_planner.md).
 
-| Mode | What runs | Use |
-|------|-----------|-----|
-| **oracle / original** | pure original ASM in the VM | reference, observation, capturing oracles |
-| **hybrid (workbench)** | recovered native replacements over the VM | preparing/recording new islands against the live ASM |
-| **verify** | ASM oracle + recovered logic, diffed at contract boundaries | offline proof against recorded demos/snapshots |
-| **native (product)** | recovered source only, NO VM | the standalone source port; shipping |
+One execution configuration describes these independent axes:
 
-**No silent fallbacks.** If the hybrid runtime reaches unrecovered behaviour it
-must fail loud with a precise gap report, turning the gap into the next task
-instead of hiding it. An unrecovered path is never silently faked and never
-silently falls back to ASM.
+| Dimension | Choices |
+|---|---|
+| **composition** | roots, ordered interpreted/generated/region provider preferences, selected overrides |
+| **execution policy** | EXE/interpreter/development capabilities required, allowed, or forbidden |
+| **verification policy** | oracle/candidate profiles, replay corpus, comparison projection and exclusions |
+| **build target** | none, Windows, mobile, or another platform/package policy |
+| **override profile** | none; selected faithful replacements; optional non-authoritative enhancements; optional behavioral modifications |
+| **product/service profile** | features, platform services, assets, and product roots |
 
-**2.0 stage runners are stricter still** (docs/dos_re_2.0.md section 1a): a
-strict-VMless runner does not merely avoid interpretation -- it makes it
-IMPOSSIBLE (`cpu.interp_forbidden` raises on any uncovered address), and the
-EXE-independent runner boots from a generated data-only image with the
-original binary physically absent (section 1a').
+Oracle and candidate are verification roles, not additional implementation
+layers. The oracle uses the untouched interpreted implementation. A candidate
+uses an immutable plan with explicit bindings. VMless, CPUless, ABI-recovered,
+DOS-memory-backed, and memoryless describe those bindings or their state
+adapters; they are not launch modes.
+
+**No silent fallbacks.** A strict generated baseline that reaches uncovered
+behavior fails loud with a precise gap report. A stale or unsupported override
+target fails during plan construction. Neither case silently switches backend.
+
+Dependency declarations and release policy are authoritative. Closed-world
+export physically omits detached components, runtime capability guards reject
+undeclared acquisition, and hermetic launch tests exercise the packaged
+closure. Existing wall audits such as `cpu.interp_forbidden` and boot-image
+poisoning remain optional focused evidence; a poison flag or runner name is
+never readiness evidence.
 
 ## Layering inside a game adapter
 
-High = closest to ASM, low = closest to pure source. Dependencies point down
-only; the pure layer never imports the VM.
+Dependencies point downward; authored semantic code never imports a CPU or
+interpreter:
 
 | Layer | Role | May depend on |
 |-------|------|---------------|
-| **vm / orchestration** | `dos_re`: interpreter, verifiers, snapshots, demos | anything |
-| **hook_boundary** | thin `@registry.replace` wrappers — no game logic | lifted, bridge, pure, vm |
-| **lifted** | VM-aware Python reproducing an original routine byte/flag-exact | bridge, pure, vm |
-| **backend** | rendering / sound / file I/O implementations | pure, bridge, vm |
-| **bridge** | typed views projecting VM/DOS memory ⇄ named fields | pure, vm |
-| **pure** | portable, VM-free game logic and data records | pure only |
+| **orchestration / proof** | players, replay drivers, verifiers, snapshots, execution-plan selection | backend adapters, generated baselines, override registry |
+| **backend adapter** | marshal registers, stack, memory, arguments, returns, time, and control flow | selected override contracts, backend runtime |
+| **authored overrides** | CPUless faithful, enhancement, or behavioral implementations | recovered contracts, state views, declared platform capabilities |
+| **generated baseline** | reproducible interpreted/VMless/CPUless/ABI implementation of unchanged code | generated runtime support only |
+| **state / capability seam** | DOS-memory views, detached state, read-only presentation projections, platform services | lower-level data representations |
 
 See [`state_mirrors.md`](state_mirrors.md) for the bridge/view seam and
-the retired 1.0 starter's methodology docs (historical) for the naming/altitude discipline that
-keeps each layer honest.
+[`override_architecture.md`](override_architecture.md) for category-specific
+capabilities and verification.
 
 ## Third-party code and dependencies
 
