@@ -142,8 +142,8 @@ def test_static_and_replay_sources_build_queries_and_planner_coverage(tmp_path):
     assert any(edge.kind == "call_ind" for edge in atlas.unresolved())
 
     coverage = atlas.coverage_for("development")
-    assert coverage.reachable == frozenset({
-        function(0x100), function(0x200)})
+    assert {function(0x100), function(0x200)} < coverage.reachable
+    assert any(":point:" in identity for identity in coverage.reachable)
     assert coverage.unresolved_edges
     assert coverage.evidence_identity == atlas.identity_digest
 

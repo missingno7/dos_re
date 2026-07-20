@@ -359,6 +359,12 @@ class ExecutionAtlas:
                             "dispatch_entry": bool(instruction.get("dispatch_entry")),
                             "boundary_effect": bool(instruction.get("boundary_effect")),
                         })
+                        edges.append({
+                            "source": source, "target": site,
+                            "kind": "contains", "status": "containment",
+                            "observation_count": 0, "metadata": {},
+                            "evidence": [source_id],
+                        })
                     if kind in {"call_ind", "jmp_ind"}:
                         site = point_id(
                             int(target_source.split(":")[0], 16),
@@ -378,6 +384,12 @@ class ExecutionAtlas:
                             "source": source, "target": site, "kind": kind,
                             "status": "unresolved", "observation_count": 0,
                             "metadata": {"instruction": instruction["ip"]},
+                            "evidence": [source_id],
+                        })
+                        edges.append({
+                            "source": source, "target": site,
+                            "kind": "contains", "status": "containment",
+                            "observation_count": 0, "metadata": {},
                             "evidence": [source_id],
                         })
                     target = instruction.get("target")
@@ -819,6 +831,12 @@ class ExecutionAtlas:
                 continue
             reachable.add(current)
             queue.extend(sorted(outgoing.get(current, ())))
+        contained_points = {
+            edge.target for edge in self.edges()
+            if edge.status == "containment" and edge.source in reachable
+            and node_kinds.get(edge.target) == "execution-point"
+        }
+        reachable.update(contained_points)
         unresolved = tuple(sorted(
             f"{edge.source} --{edge.kind}--> {edge.target}"
             for edge in self.unresolved() if edge.source in reachable
