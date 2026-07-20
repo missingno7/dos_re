@@ -654,8 +654,8 @@ class VerificationResult:
 class CheckpointVerificationResult:
     """Single-pass semantic-point verification with localized failure data.
 
-    ``checkpoint_span`` controls expensive detailed comparisons and reporting,
-    not observation coverage.  Every semantic point contributes its complete
+    ``checkpoint_span`` controls rolling-digest comparison and refinement
+    batches, not observation coverage. Every semantic point contributes its complete
     canonical-state fingerprint to an order-sensitive rolling digest.  In
     observable mode, backend adapters additionally digest effects that escape
     between those points.
@@ -1782,7 +1782,7 @@ def verify_checkpointed(
     observable_effects: bool = True,
     cache_verified_end: bool = True,
 ) -> CheckpointVerificationResult:
-    """Verify every semantic point in one pass, comparing detail coarsely.
+    """Verify every semantic point in one pass, comparing rolling checkpoints.
 
     The verifier hashes each complete canonical point state, so a divergence at
     a point cannot disappear merely because both sides reconverge before the
@@ -1791,9 +1791,11 @@ def verify_checkpointed(
     ``end_observable_interval``; this catches ordered I/O/device/interrupt/input
     effects that can occur and disappear between semantic points.
 
-    On a failed coarse interval only that interval is restored and replayed one
-    point at a time.  The returned ``failed_interval`` is therefore the first
-    divergent semantic transition, ready for a backend-specific detailed trace.
+    Rich projections are materialized at the requested endpoint or after a
+    digest mismatch, not at every green checkpoint. On a failed coarse interval
+    only that interval is restored and replayed one point at a time. The returned
+    ``failed_interval`` is therefore the first divergent semantic transition,
+    ready for a backend-specific detailed trace.
     This is not instruction-trace equivalence: internal instruction order and
     guest coordinates remain irrelevant unless an adapter emits a timing/yield
     effect at the semantic boundary.

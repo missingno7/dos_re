@@ -223,10 +223,11 @@ claim interval equivalence: a wrong intermediate state can reconverge before Y.
 
 `verify_checkpointed` is the long-replay verifier. It advances both sides once,
 adds every complete canonical point-state digest to a compact rolling digest,
-and asks adapters for an ordered `ObservableIntervalDigest`. It performs the
-rich state comparison only every configurable checkpoint span. A failed digest
-causes only the most recent interval to be restored and replayed point by point,
-yielding the first divergent semantic transition for detailed tracing.
+and asks adapters for an ordered `ObservableIntervalDigest`. It compares rolling
+digests at a configurable checkpoint span and materializes rich state only at
+the requested endpoint or after a mismatch. A failed digest causes only the
+most recent interval to be restored and replayed point by point, yielding the
+first divergent semantic transition for detailed tracing.
 
 The rolling accumulator packs primitive integer records into one reusable
 64 KiB buffer; it does not allocate event objects in hot I/O paths. Machine
