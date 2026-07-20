@@ -199,6 +199,11 @@ def _restore_dos_state(rt, dos_meta: dict):
     if "unmodeled_port_reads" in dos_meta:
         rt.dos.unmodeled_port_reads = [tuple(map(int, item))
                                        for item in dos_meta["unmodeled_port_reads"]]
+    if "stdout_tail" in dos_meta:
+        stdout_tail = str(dos_meta["stdout_tail"])
+        rt.dos.stdout = [stdout_tail] if stdout_tail else []
+    if "port_log_tail" in dos_meta:
+        rt.dos.port_log = [tuple(item) for item in dos_meta["port_log_tail"]]
     rt.dos.next_alloc_segment = dos_meta.get("next_alloc_segment", rt.dos.next_alloc_segment)
     rt.dos.allocation_limit_segment = dos_meta.get("allocation_limit_segment", rt.dos.allocation_limit_segment)
     rt.dos.allocations = {int(seg, 16): int(size) for seg, size in dos_meta.get("allocations", {}).items()}

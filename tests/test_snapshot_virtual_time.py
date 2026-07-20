@@ -99,6 +99,8 @@ def test_real_mode_replay_continuation_restores_device_and_cursor_state(tmp_path
     rt.dos.next_handle = 12
     rt.dos._pit_channel0_read_latch = [0x34, 0x12]
     rt.dos.file_overlay["SAVE.DAT"] = bytearray(b"saved")
+    rt.dos.stdout = ["before\n", "checkpoint"]
+    rt.dos.port_log = [("out", 0x388, 0x20, 8), ("in", 0x388, 0x06, 8)]
     state = capture_runtime_continuation(rt, event_cursor=17)
 
     rt.cpu.s.ax = 0
@@ -109,6 +111,8 @@ def test_real_mode_replay_continuation_restores_device_and_cursor_state(tmp_path
     rt.dos.next_handle = 5
     rt.dos._pit_channel0_read_latch = []
     rt.dos.file_overlay.clear()
+    rt.dos.stdout = ["after"]
+    rt.dos.port_log = [("out", 0x61, 0x03, 8)]
     apply_runtime_continuation(rt, state)
 
     assert state.event_cursor == 17
@@ -120,6 +124,8 @@ def test_real_mode_replay_continuation_restores_device_and_cursor_state(tmp_path
     assert rt.dos.next_handle == 12
     assert rt.dos._pit_channel0_read_latch == [0x34, 0x12]
     assert rt.dos.file_overlay == {"SAVE.DAT": bytearray(b"saved")}
+    assert rt.dos.stdout == ["before\ncheckpoint"]
+    assert rt.dos.port_log == [("out", 0x388, 0x20, 8), ("in", 0x388, 0x06, 8)]
 
 
 def test_real_mode_replay_continuation_rejects_wall_clock(tmp_path):
