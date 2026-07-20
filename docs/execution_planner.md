@@ -1,58 +1,58 @@
-# Unified execution lifecycle (dos_re 3.0)
+# Unified execution and dependency detachment (dos_re 3.0)
 
 Status: implemented architecture.
 
 dos_re has one recovered-program identity, one coverage model, one
 implementation catalog, one execution configuration, one planner, one player
-pipeline, and one closed-world exporter. Recovery levels describe individual
-implementations; they never select a different player.
+pipeline, and one closed-world exporter. Recovery levels and dependency
+requirements describe individual implementations; they never select another
+player or release architecture.
 
-## Lifecycle
+## The model
 
 ```text
-ProgramCoverage + ImplementationCatalog + RuntimeServiceCatalog
-                              |
-                    ExecutionConfiguration
-                              |
-                         plan_execution
-                              |
-                 ExecutionPlan + DetachmentReport
-                    /                       \
-       player.main(frontend)          tools/export.py
-       development tree               closed-world artifact
+selected reachable implementations
++ transitive runtime-service requirements
++ selected product services
++ capabilities required by policy
+                    |
+                    v
+         required dependency closure
+                    |
+          ExecutionPlan + DetachmentReport
+             /                    \
+    development player       closed-world export
+      (open world)          (only the closure)
 ```
 
-The player resolves the plan before constructing a runtime. A strict policy
-therefore fails before an EXE loader, interpreter fallback, unavailable
-service, or unresolved implementation can be used.
+`ImplementationCatalog -> ExecutionPlan -> DetachmentReport -> export` is the
+single authority. Poison flags, runner names, filenames, and successful
+playthroughs are not dependency declarations.
 
-Real-mode and protected-mode behavior are frontend drivers behind
-`player.main`. `PMFrontend` owns PM devices and presentation but has no parser
-or second entrypoint.
-
-## Configuration axes
+## Four independent configuration axes
 
 `ExecutionConfiguration` separates:
 
-- composition: product roots, provider preference, and selected authored
-  implementations;
-- execution policy: whether the original EXE, interpreter, development
-  capabilities, and dynamic loading are allowed;
+- execution composition: product roots, provider preference, selected authored
+  implementations, and product services;
+- execution policy: capability requirements, dynamic-loading policy, and
+  coverage strictness;
 - verification policy: oracle requirement and comparison mode;
-- product profile: reachable roots, features, services, and assets;
 - build target: platform and package format.
 
 The standard profiles are:
 
-| Profile | EXE/interpreter | Development services | Purpose |
-|---|---|---|---|
-| `development` | allowed | replay, snapshots, diagnostics, profiling, instrumentation | recovery work with an explicit interpreted frontier |
-| `verification` | allowed for the oracle | replay, snapshots, diagnostics, instrumentation | compare a candidate plan against the untouched oracle |
-| `detached` | forbidden | only explicitly allowed diagnostic services | prove complete non-EXE execution closure |
-| `release` | forbidden | forbidden | prove package closure and export the product |
+| Profile | Capability policy | Purpose |
+|---|---|---|
+| `development` | lower-level and development capabilities allowed | recovery work with an explicit interpreted frontier |
+| `verification` | oracle required; replay and diagnostics allowed | compare a candidate with the untouched oracle |
+| `detached` | EXE and interpreter forbidden; limited diagnostics allowed | prove non-EXE execution without claiming full release closure |
+| `release` | EXE, interpreter, oracle, replay, snapshots, diagnostics, instrumentation, profiling, experimental overrides, and development tooling forbidden | build a closed-world product |
 
-Profiles only populate policies. VMless, CPUless, ABI-recovered,
-DOS-memory-backed, and memoryless remain descriptor properties.
+Profiles do not make VMless, CPUless, ABI-recovered, DOS-memory-backed,
+memoryless, or native global modes. Those are implementation properties.
+A custom release policy may retain the CPU model, DOS memory, DOS services, or
+the product-safe dos_re runtime when selected implementations still need them.
 
 ## Coverage and identities
 
@@ -62,31 +62,49 @@ protocol directly. Recovery-IR adapters can construct it now; the future
 Execution Atlas can implement the same protocol without changing the planner.
 
 Unknown reachability is not absence. Detached and release planning reject
-unresolved edges.
+unresolved edges. The Atlas may later visualize plan bindings, capability
+consumers, blockers, and alternatives, but is not a planner dependency.
 
-The planner emits backend-neutral plan bindings, frontier information,
-detachment evidence, and verification references which the future atlas may
-consume. Atlas persistence is not a planner dependency.
-
-## Implementation catalog
+## Implementations and services
 
 `ImplementationCatalog` is the only authority for executable program
-implementations. Every `ImplementationEntry` contains:
+implementations. Every descriptor declares:
 
-- an immutable `ImplementationDescriptor`;
-- the semantic callable, when authored code exists;
-- a backend activator which binds the selected stable targets to a runtime.
+- stable implementation ID and covered function/region identities;
+- origin and override category;
+- recovery properties;
+- required dependency capabilities;
+- required runtime services;
+- required asset identities and supported build platforms;
+- verification-evidence identities;
+- implementation digest and optional region identity.
 
-Descriptors declare origin, override category, covered targets or region,
-recovery properties, EXE/interpreter requirements, required runtime services,
-region identity, and implementation digest.
+`RuntimeServiceCatalog` is the only service authority. Services declare their
+transitive service dependencies, dependency capabilities, assets, supported
+platforms, product safety, and digest.
+`ExecutionConfiguration.product_services` adds product features such as
+display or host input to the same service closure. Direct framework feature
+requests (for example replay or snapshot CLI operations) enter through
+`requested_capabilities` and cannot override a forbidden profile policy.
 
-Authored entries are inactive unless named by `selected_overrides`. Duplicate
-implementation identities or multiple selected authored owners fail during
-planning. Runtime construction performs no global registration and import
-order cannot select behavior.
+Capabilities are stable strings. `DependencyCapability` defines the shared
+core vocabulary:
 
-Binding precedence is deterministic:
+- `original-exe` and `original-code`;
+- `interpreter`;
+- `cpu-model`;
+- `dos-memory`;
+- `dos-services`;
+- `dos-re-runtime`;
+- `oracle`, `replay`, and `snapshots`;
+- diagnostics, instrumentation, profiling, experimental overrides, and
+  development tooling.
+
+Projects may add explicit host or product capabilities. A capability is not a
+recovery level: it is a dependency that a selected implementation or service
+will request at runtime and that packaging must retain.
+
+Binding precedence remains deterministic:
 
 ```text
 explicitly selected authored implementation
@@ -95,97 +113,137 @@ explicitly selected authored implementation
 -> unresolved frontier
 ```
 
-Enhancements remain non-authoritative attachments and cannot silently claim
-authoritative coverage. Faithful and behavioral implementations carry their
-category into verification policy.
-
-## Runtime services
-
-`RuntimeServiceCatalog` is the sole service authority. The planner computes
-the transitive service closure, rejects missing services, checks development
-capabilities against execution policy, and distinguishes product-safe from
-development-only services.
-
-Real-mode, protected-mode, detached scheduling, display, input, audio,
-storage, state adapters, and host integration are services or frontend
-drivers—not player architectures.
+An implementation whose direct capabilities violate policy is not compatible.
+After selection, the complete service and capability closure is validated.
+There is no dynamic fallback outside the immutable plan.
 
 ## Detachment report
 
-Every plan contains one `DetachmentReport` listing:
+Every plan reports:
 
 - reachable identities and selected bindings;
 - generated, faithful, and region-replacement coverage;
-- original-EXE and interpreter dependencies;
 - unresolved identities and control-flow edges;
 - required, missing, development-only, and policy-forbidden services;
-- standalone-executable readiness;
+- every required capability and its implementation/service/policy consumers;
+- each selected function/region blocking further detachment and catalog
+  alternatives that do not require that capability;
+- independent detachment milestones;
 - package readiness.
 
-`play.py --profile detached --plan-only` prints the report without booting.
-A successful playthrough or a filename is never readiness evidence.
+The milestones are absence proofs over the selected closure:
 
-Standalone-executable readiness requires complete conservative coverage,
-no EXE/interpreter binding, no missing service, and no unresolved frontier.
-Package readiness additionally requires a build target and a product-safe
-service closure.
+- EXE-detached;
+- interpreter-detached;
+- CPU-model-detached;
+- DOS-memory-detached;
+- DOS-services-detached;
+- dos_re-runtime-detached.
 
-## Replay and verification
+They do not have to become true together. Package readiness means complete
+coverage, a satisfiable policy, a product-safe service closure, and a build
+target. The selected policy decides which milestones the product must meet.
 
-The immutable plan digest covers policy, coverage, bindings, descriptor
-metadata and digests, selected services, and build target. It participates in
-`ReplayArtifact` execution-profile identity, so stale boundaries cannot cross
-execution plans.
+`ExecutionPlan.require_capability(name, consumer=...)` is the runtime guard.
+It rejects a request outside the planned closure and names the caller,
+capability, and plan digest. Backend adapters, loaders, service factories, and
+fallback sites should call it at dependency acquisition boundaries.
 
-Verification is independent from packaging:
+## Verification is not production connectivity
 
-- the verification environment may retain the EXE, interpreter, replay
-  corpus, cached boundaries, snapshot machinery, and canonical-state bridges;
-- the release artifact contains none of those development authorities;
-- both sides refer to the same stable program identities and candidate plan;
-- faithful implementations compare complete machine state or canonical
-  semantic state;
-- enhancements exclude only their declared presentation outputs;
-- behavioral modifications use declared tests and divergence scopes.
+Development and verification may retain the EXE, interpreter, replay corpus,
+cached snapshots, canonical-state bridges, instrumentation, and several
+implementation candidates. Their descriptors make those dependencies visible.
 
-## Closed-world export
+A release plan forbids those capabilities. Faithful implementations can still
+be verified against the oracle before export; the resulting evidence digest is
+an input to selection, not a production import or callback. Enhancements and
+behavioral modifications retain their existing category-specific verification
+contracts.
+
+## Closed-world export and proof
 
 `tools/export.py --factory MODULE:CALLABLE --output DIST` consumes the exact
-package-ready release plan. The factory returns the plan, explicit `ExportFile`
-closure, and launcher path.
+package-ready release plan. The factory returns the plan, explicit
+`ExportFile` closure, and launcher.
 
 The exporter:
 
-1. accepts only a `release` plan whose report is package-ready;
+1. accepts only a package-ready `release` plan;
 2. requires an explicit file list and refuses directory discovery;
 3. rejects duplicate or escaping destinations;
-4. statically rejects imports of the EXE/interpreter, planner, players,
-   replay, snapshots, and verification machinery;
-5. copies into a private staging directory;
-6. hashes every finished file;
-7. writes `dos_re_release.json` with the plan digest, target, launcher, and
-   file hashes;
-8. atomically publishes the finished directory and never overwrites one.
+4. requires an exact set of asset-tagged files for the plan's declared assets;
+5. rejects files tagged for capabilities outside the selected closure;
+6. maps known dos_re imports to capabilities and rejects imports of detached
+   components;
+7. rejects runtime dynamic import/evaluation;
+8. stages, hashes, manifests, and atomically publishes exactly those files.
 
-Product-safe runtime components may retain a `dos_re` namespace. Readiness is
-about dependency closure, not cosmetic naming or a uniform memory model.
+The manifest records the plan digest and required capability closure. Thus an
+EXE-detached artifact cannot receive the original EXE merely because a launch
+script usually ignores it: an EXE file or loader is outside its enumerated
+closure.
+
+Packaging is followed by a target-specific hermetic proof:
+
+```text
+python tools/verify_export.py --artifact DIST -- TARGET_RUNNER LAUNCHER
+```
+
+This rechecks the exact file set and hashes, scrubs development Python paths
+and environment variables, cold-starts inside the artifact directory, and
+fails on a nonzero exit. Ports should run their normal startup path and
+relevant replay corpus through the same boundary. Cross-built targets supply
+their emulator, device runner, or platform test harness as `TARGET_RUNNER`.
+
+## Layered evidence
+
+The release claim deliberately uses several independent layers:
+
+1. planner validation proves complete coverage and a policy-satisfying
+   dependency closure;
+2. import/file auditing rejects known loaders, fallbacks, and detached
+   component groups;
+3. explicit packaging physically omits everything outside the closure;
+4. the runtime capability guard catches undeclared acquisition attempts;
+5. hermetic cold starts and replay tests exercise the packaged result.
+
+Code-byte poisoning, interpreter poison, EXE access interception, frontier
+probing, and destructive boot images remain useful optional development proof.
+They may make a forbidden path fail earlier, but they do not define
+detachment, readiness, or packaging.
+
+## Migration from hard walls
+
+Existing mechanisms map into the unified lifecycle as follows:
+
+| Existing mechanism | Role in dos_re 3.0 |
+|---|---|
+| `interp_forbidden`, fail-loud generated frontiers | runtime assertions and focused diagnostic proof |
+| VMless/CPUless closure linters | static evidence used to populate or validate implementation requirements |
+| boot-image code poisoning | optional destructive proof |
+| EXE access guard | optional hermetic-test assertion |
+| hook/region replacement metadata | implementation catalog coverage and requirements |
+| runtime service dependencies | canonical transitive closure |
+| player profiles | policy presets only |
+| release exporter | physical exclusion and artifact proof |
+
+The old `requires_original_exe`, `requires_interpreter`, and
+`development_capabilities` descriptor/policy fields are removed. In-repository
+catalogs declare `required_capabilities` instead. Poison state is not copied
+into the execution plan or release manifest.
 
 ## Invariants
 
 1. Every reachable authoritative identity has exactly one selected owner.
-2. Import order, environment variables, and runtime hook flags cannot select
-   behavior.
-3. Forbidden dependencies cannot return through an adapter, service, dynamic
-   import, or fallback.
-4. Every non-interpreted selected provider requires an explicit backend
-   activator.
-5. Real-mode and PM execution share one parser, configuration, planner, and
-   dispatch lifecycle.
-6. Detached and release policies forbid the EXE and interpreter; omission by
-   convention is insufficient.
-7. Export binds and audits the exact plan rather than re-planning.
-8. Verification success and package closure are separate claims over the same
-   composition.
-9. Recovery properties are reported per implementation or region.
-10. The Execution Atlas can implement or consume the stable protocols but is
-    not required by this lifecycle.
+2. Every selected implementation and service declares its dependencies.
+3. The plan digest binds coverage, composition, service closure, capability
+   policy, evidence digests, and build target.
+4. A forbidden capability cannot return through a service, import, loader,
+   runtime fallback, or unmanifested file.
+5. Detached components are physically absent from the release artifact.
+6. Development oracle connectivity is optional and never implicit production
+   connectivity.
+7. Detachment milestones are independent facts over one mixed-recovery
+   program.
+8. Poisoning is optional evidence, never the source of truth.

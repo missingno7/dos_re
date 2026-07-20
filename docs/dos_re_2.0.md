@@ -1,18 +1,16 @@
 # DOS_RE 2.0 — the automatic staged recovery pipeline
 
-**Status: the canonical architecture (owner-ratified, 2026-07-17).  This
-document supersedes any older doc language that gates native-graph assembly on
-per-function proof.  The Lemmings pilot (`lemmings_port`) is the reference
-implementation: M2 (strict VMless + EXE-independent) and M3 (CPUless via the
-automated de-carrier process) are both ACCEPTED and merged.  The next
-milestone is M4 (DOS-layout dissolution).**
+**Status: generated-recovery pipeline reference (owner-ratified, 2026-07-17).**
+The lifting transformations and pilot evidence remain current. The dos_re 3.0
+execution, dependency-detachment, and release authority is
+[`execution_planner.md`](execution_planner.md).
 
 > **DOS_RE 3.0 executable-model supersession.** The recovery transformations
-> and hard walls in this document remain valid implementation properties and
-> proof gates. They no longer define separate product types or mandatory
-> runner names. Top-level launch has only hybrid and standalone dependency
-> modes, and one standalone plan may mix implementations at different recovery
-> levels. See [`execution_planner.md`](execution_planner.md) and
+> and hard walls in this document remain optional implementation evidence.
+> They no longer define release readiness, product types, or mandatory runner
+> names. One plan may mix implementations at different recovery levels; its
+> declared dependency closure and release policy are authoritative. See
+> [`execution_planner.md`](execution_planner.md) and
 > [`override_architecture.md`](override_architecture.md).
 
 > **M3 CPUless — ACCEPTED (2026-07-16).**  The whole reachable graph from the

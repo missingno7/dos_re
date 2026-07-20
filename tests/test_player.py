@@ -113,7 +113,7 @@ def test_detached_profile_fails_before_runtime_construction():
     with pytest.raises(ExecutionPlanError) as caught:
         player.main(fe, ["--profile", "detached", "--headless"])
     assert not fe.created
-    assert caught.value.report.exe_dependent
+    assert caught.value.report.policy_forbidden_capabilities
 
 
 def test_frontend_can_declare_exe_free_implementation_for_same_player():
@@ -138,7 +138,7 @@ def test_frontend_can_declare_exe_free_implementation_for_same_player():
 
     args = _parse(Fe(ROOT), ["--profile", "detached"])
     plan = Fe(ROOT).resolve_execution_plan(args)
-    assert plan.report.standalone_executable_ready
+    assert plan.report.is_detached_from("original-exe")
     assert {binding.implementation_id for binding in plan.bindings} == {
         "mixed-external"
     }
@@ -152,7 +152,7 @@ def test_plan_only_reports_without_runtime_construction(capsys):
     assert player.main(Fe(ROOT), ["--plan-only"]) == 0
     output = capsys.readouterr().out
     assert "execution profile: development" in output
-    assert "standalone executable ready: false" in output
+    assert "original-exe detached: false" in output
     assert "plan digest:" in output
 
 

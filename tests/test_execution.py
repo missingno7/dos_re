@@ -5,6 +5,7 @@ import pytest
 
 from dos_re.execution import (
     BuildTarget,
+    DependencyCapability,
     ExecutionPlanError,
     ImplementationCatalog,
     ImplementationDescriptor,
@@ -14,6 +15,7 @@ from dos_re.execution import (
     ProgramCoverage,
     RuntimeServiceCatalog,
     RuntimeServiceDescriptor,
+    RuntimeCapabilityViolation,
     plan_execution,
     profile_configuration,
 )
@@ -45,6 +47,7 @@ def _implementation(
     category=OverrideCategory.BASELINE,
     exe=False,
     interpreter=False,
+    capabilities=(),
     services=(),
     digest="v1",
 ):
@@ -53,8 +56,11 @@ def _implementation(
         targets=frozenset(targets),
         origin=origin,
         category=category,
-        requires_original_exe=exe,
-        requires_interpreter=interpreter,
+        required_capabilities=frozenset(capabilities) | (
+            {DependencyCapability.ORIGINAL_EXE.value} if exe else set()
+        ) | (
+            {DependencyCapability.INTERPRETER.value} if interpreter else set()
+        ),
         required_services=frozenset(services),
         implementation_digest=digest,
     )
@@ -74,8 +80,8 @@ def test_development_plan_may_mix_interpreted_and_generated():
         ROOT: "generated-root",
         CALLEE: "interpreted",
     }
-    assert plan.report.exe_dependent == (CALLEE,)
-    assert not plan.report.standalone_executable_ready
+    assert plan.report.requires(DependencyCapability.ORIGINAL_EXE)
+    assert not plan.report.is_detached_from(DependencyCapability.ORIGINAL_EXE)
 
 
 def test_detached_rejects_exe_only_frontier_with_actionable_report():
@@ -88,9 +94,11 @@ def test_detached_rejects_exe_only_frontier_with_actionable_report():
         ))
     report = caught.value.report
     assert report.unresolved == (CALLEE, ROOT)
-    assert report.exe_dependent == (CALLEE, ROOT)
-    assert report.interpreter_dependent == (CALLEE, ROOT)
-    assert "original-EXE-dependent" in str(caught.value)
+    assert report.policy_forbidden_capabilities == (
+        DependencyCapability.INTERPRETER.value,
+        DependencyCapability.ORIGINAL_EXE.value,
+    )
+    assert "required capabilities forbidden" in str(caught.value)
 
 
 def test_detached_accepts_mixed_non_exe_recovery_properties():
@@ -103,7 +111,8 @@ def test_detached_accepts_mixed_non_exe_recovery_properties():
         _implementation("vm-root", (ROOT,)),
         _implementation("cpu-free-callee", (CALLEE,)),
     ))
-    assert plan.report.standalone_executable_ready
+    assert plan.report.is_detached_from(DependencyCapability.ORIGINAL_EXE)
+    assert plan.report.is_detached_from(DependencyCapability.INTERPRETER)
     assert not plan.report.package_ready  # detachment is not packaging
 
 
@@ -130,12 +139,12 @@ def test_detached_allows_diagnostics_but_rejects_profiler_capability():
         RuntimeServiceDescriptor(
             "diagnostic",
             product_safe=False,
-            development_capabilities=frozenset({"diagnostics"}),
+            required_capabilities=frozenset({"diagnostics"}),
         ),
         RuntimeServiceDescriptor(
             "profiler",
             product_safe=False,
-            development_capabilities=frozenset({"profiling"}),
+            required_capabilities=frozenset({"profiling"}),
         ),
     )
     with pytest.raises(ExecutionPlanError) as caught:
@@ -155,9 +164,132 @@ def test_release_plan_is_package_ready_with_product_safe_closure():
             "display", product_safe=True, implementation_digest="display-v1"
         ),
     ))
-    assert plan.report.standalone_executable_ready
+    assert plan.report.is_detached_from(DependencyCapability.ORIGINAL_EXE)
     assert plan.report.package_ready
     assert len(plan.plan_digest) == 64
+
+
+def test_dependency_closure_combines_implementation_product_and_service_requirements():
+    config = profile_configuration(
+        "release",
+        program_identity=PROGRAM,
+        product_services=("display",),
+        build_target=BuildTarget("windows", "zip"),
+    )
+    implementation = _implementation(
+        "external",
+        (ROOT, CALLEE),
+        capabilities=(DependencyCapability.DOS_MEMORY.value,),
+        services=("storage",),
+    )
+    plan = plan_execution(config, COVERAGE, _catalog(implementation), _services(
+        RuntimeServiceDescriptor(
+            "display",
+            product_safe=True,
+            required_capabilities=frozenset({"host-display"}),
+            dependencies=frozenset({"storage"}),
+        ),
+        RuntimeServiceDescriptor(
+            "storage",
+            product_safe=True,
+            required_capabilities=frozenset({"host-filesystem"}),
+        ),
+    ))
+    assert plan.report.required_services == ("display", "storage")
+    assert plan.report.required_capabilities == (
+        DependencyCapability.DOS_MEMORY.value,
+        "host-display",
+        "host-filesystem",
+    )
+    uses = {item.capability: item.consumers for item in plan.report.capability_uses}
+    assert uses[DependencyCapability.DOS_MEMORY.value] == (
+        "implementation:external",
+    )
+    assert uses["host-display"] == ("service:display",)
+    assert plan.report.is_detached_from(DependencyCapability.CPU_MODEL)
+    assert not plan.report.is_detached_from(DependencyCapability.DOS_MEMORY)
+
+
+def test_release_rejects_oracle_capability_even_when_service_is_product_safe():
+    config = profile_configuration(
+        "release",
+        program_identity=PROGRAM,
+        build_target=BuildTarget("windows", "zip"),
+    )
+    implementation = _implementation("external", (ROOT, CALLEE), services=("oracle",))
+    with pytest.raises(ExecutionPlanError) as caught:
+        plan_execution(config, COVERAGE, _catalog(implementation), _services(
+            RuntimeServiceDescriptor(
+                "oracle",
+                product_safe=True,
+                required_capabilities=frozenset({
+                    DependencyCapability.ORACLE.value,
+                }),
+            ),
+        ))
+    assert caught.value.report.policy_forbidden_capabilities == (
+        DependencyCapability.ORACLE.value,
+    )
+    assert caught.value.report.policy_forbidden_services == ("oracle",)
+
+
+def test_runtime_capability_guard_rejects_undeclared_fallback():
+    plan = plan_execution(
+        profile_configuration("detached", program_identity=PROGRAM),
+        COVERAGE,
+        _catalog(_implementation("external", (ROOT, CALLEE))),
+    )
+    with pytest.raises(RuntimeCapabilityViolation, match="fallback:function:callee"):
+        plan.require_capability(
+            DependencyCapability.INTERPRETER,
+            consumer="fallback:function:callee",
+        )
+
+
+def test_release_rejects_implementation_incompatible_with_build_target():
+    config = profile_configuration(
+        "release",
+        program_identity=PROGRAM,
+        build_target=BuildTarget("mobile", "bundle"),
+    )
+    implementation = ImplementationDescriptor(
+        implementation_id="windows-only",
+        targets=frozenset({ROOT, CALLEE}),
+        origin=ImplementationOrigin.GENERATED,
+        supported_platforms=frozenset({"windows"}),
+    )
+    with pytest.raises(ExecutionPlanError) as caught:
+        plan_execution(config, COVERAGE, _catalog(implementation))
+    assert caught.value.report.packaging_incompatible == (
+        f"{CALLEE}:windows-only",
+        f"{ROOT}:windows-only",
+    )
+
+
+def test_report_names_alternative_that_removes_dependency():
+    plan = plan_execution(
+        profile_configuration(
+            "development",
+            program_identity=PROGRAM,
+            provider_preference=("interpreted",),
+        ),
+        COVERAGE,
+        _catalog(
+            _implementation(
+                "interpreted",
+                (ROOT, CALLEE),
+                capabilities=(DependencyCapability.CPU_MODEL.value,),
+            ),
+            _implementation("cpu-free", (CALLEE,)),
+        ),
+    )
+    blocker = next(
+        item for item in plan.report.capability_blockers
+        if item.target == CALLEE
+        and item.capability == DependencyCapability.CPU_MODEL.value
+    )
+    assert blocker.implementation_id == "interpreted"
+    assert blocker.alternatives_without_capability == ("cpu-free",)
 
 
 def test_plan_digest_changes_with_implementation_evidence():

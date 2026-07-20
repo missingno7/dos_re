@@ -1,8 +1,8 @@
-"""audit_boot_image.py -- verify a GENERATED boot image is a legitimate
-data-only artifact, not the executable in disguise.
+"""Audit an optional destructive data-only boot-image proof.
 
-Generic, game-agnostic (docs/dos_re_2.0.md section 1a').  Checks (all must
-pass):
+Release closure is owned by ``ExecutionPlan`` and ``dos_re.export``. This
+development tool provides extra evidence by checking that a generated proof
+image is not the executable in disguise. Checks (all must pass):
 
   1. no bundled executable -- no file under the image dir is an MZ/PE/COM
      image, and no file's contents hash to the recorded source EXE (rename

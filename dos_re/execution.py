@@ -8,7 +8,7 @@ runtime construction when a strict profile cannot be satisfied.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import json
@@ -21,6 +21,41 @@ class Requirement(str, Enum):
     REQUIRED = "required"
     ALLOWED = "allowed"
     FORBIDDEN = "forbidden"
+
+
+class DependencyCapability(str, Enum):
+    """Stable names for independently detachable runtime dependencies.
+
+    Descriptors may also use project-defined string capabilities.  These core
+    names are shared by the planner, exporter, documentation, and future
+    Execution Atlas.
+    """
+
+    ORIGINAL_EXE = "original-exe"
+    ORIGINAL_CODE = "original-code"
+    INTERPRETER = "interpreter"
+    CPU_MODEL = "cpu-model"
+    DOS_MEMORY = "dos-memory"
+    DOS_SERVICES = "dos-services"
+    DOS_RE_RUNTIME = "dos-re-runtime"
+    ORACLE = "oracle"
+    REPLAY = "replay"
+    SNAPSHOTS = "snapshots"
+    DIAGNOSTICS = "diagnostics"
+    INSTRUMENTATION = "instrumentation"
+    PROFILING = "profiling"
+    EXPERIMENTAL_OVERRIDES = "experimental-overrides"
+    DEVELOPMENT_TOOLING = "development-tooling"
+
+
+def capability_name(capability: str | DependencyCapability) -> str:
+    return capability.value if isinstance(capability, DependencyCapability) else capability
+
+
+@dataclass(frozen=True)
+class CapabilityPolicy:
+    capability: str
+    requirement: Requirement
 
 
 class DynamicLoading(str, Enum):
@@ -44,11 +79,35 @@ class OverrideCategory(str, Enum):
 
 @dataclass(frozen=True)
 class ExecutionPolicy:
-    original_exe: Requirement
-    interpreter: Requirement
-    development_capabilities: frozenset[str] = frozenset()
+    capabilities: tuple[CapabilityPolicy, ...] = ()
     dynamic_loading: DynamicLoading = DynamicLoading.ALLOWED
     strict_coverage: bool = False
+
+    def __post_init__(self) -> None:
+        names = [item.capability for item in self.capabilities]
+        if len(set(names)) != len(names):
+            raise ValueError("execution capability policies must be unique")
+
+    def requirement_for(self, capability: str | DependencyCapability) -> Requirement:
+        name = capability_name(capability)
+        for item in self.capabilities:
+            if item.capability == name:
+                return item.requirement
+        return Requirement.ALLOWED
+
+    @property
+    def required_capabilities(self) -> frozenset[str]:
+        return frozenset(
+            item.capability for item in self.capabilities
+            if item.requirement is Requirement.REQUIRED
+        )
+
+    @property
+    def forbidden_capabilities(self) -> frozenset[str]:
+        return frozenset(
+            item.capability for item in self.capabilities
+            if item.requirement is Requirement.FORBIDDEN
+        )
 
 
 @dataclass(frozen=True)
@@ -72,6 +131,8 @@ class ExecutionConfiguration:
     verification_policy: VerificationPolicy = VerificationPolicy()
     provider_preference: tuple[str, ...] = ()
     selected_overrides: tuple[str, ...] = ()
+    product_services: frozenset[str] = frozenset()
+    requested_capabilities: frozenset[str] = frozenset()
     build_target: BuildTarget | None = None
 
 
@@ -101,9 +162,11 @@ class ImplementationDescriptor:
     origin: ImplementationOrigin
     category: OverrideCategory = OverrideCategory.BASELINE
     properties: frozenset[str] = frozenset()
-    requires_original_exe: bool = False
-    requires_interpreter: bool = False
+    required_capabilities: frozenset[str] = frozenset()
     required_services: frozenset[str] = frozenset()
+    required_assets: frozenset[str] = frozenset()
+    supported_platforms: frozenset[str] = frozenset()
+    verification_evidence: frozenset[str] = frozenset()
     implementation_digest: str = ""
     region_id: str | None = None
 
@@ -112,8 +175,10 @@ class ImplementationDescriptor:
 class RuntimeServiceDescriptor:
     service_id: str
     product_safe: bool
-    development_capabilities: frozenset[str] = frozenset()
+    required_capabilities: frozenset[str] = frozenset()
     dependencies: frozenset[str] = frozenset()
+    required_assets: frozenset[str] = frozenset()
+    supported_platforms: frozenset[str] = frozenset()
     implementation_digest: str = ""
 
 
@@ -161,22 +226,57 @@ class PlanBinding:
 
 
 @dataclass(frozen=True)
+class CapabilityUse:
+    capability: str
+    consumers: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CapabilityBlocker:
+    capability: str
+    target: str
+    implementation_id: str
+    alternatives_without_capability: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DetachmentMilestone:
+    capability: str
+    detached: bool
+    dependency_group: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class DetachmentReport:
     reachable: tuple[str, ...]
     bindings: tuple[PlanBinding, ...]
     generated_coverage: tuple[str, ...]
     faithful_override_coverage: tuple[str, ...]
     region_replacement_coverage: tuple[str, ...]
-    exe_dependent: tuple[str, ...]
-    interpreter_dependent: tuple[str, ...]
     unresolved: tuple[str, ...]
     unresolved_edges: tuple[str, ...]
     required_services: tuple[str, ...]
     missing_services: tuple[str, ...]
+    required_assets: tuple[str, ...]
+    packaging_incompatible: tuple[str, ...]
     development_only_services: tuple[str, ...]
     policy_forbidden_services: tuple[str, ...]
-    standalone_executable_ready: bool
+    required_capabilities: tuple[str, ...]
+    capability_uses: tuple[CapabilityUse, ...]
+    capability_blockers: tuple[CapabilityBlocker, ...]
+    policy_forbidden_capabilities: tuple[str, ...]
+    detachment_milestones: tuple[DetachmentMilestone, ...]
     package_ready: bool
+
+    def requires(self, capability: str | DependencyCapability) -> bool:
+        return capability_name(capability) in self.required_capabilities
+
+    def is_detached_from(self, capability: str | DependencyCapability) -> bool:
+        name = capability_name(capability)
+        for item in self.detachment_milestones:
+            if item.capability == name:
+                return item.detached
+        return name not in self.required_capabilities
 
     def failure_lines(self) -> tuple[str, ...]:
         lines: list[str] = []
@@ -186,10 +286,16 @@ class DetachmentReport:
             lines.append("unresolved control-flow edges: " + ", ".join(self.unresolved_edges))
         if self.missing_services:
             lines.append("missing runtime services: " + ", ".join(self.missing_services))
-        if self.exe_dependent:
-            lines.append("original-EXE-dependent: " + ", ".join(self.exe_dependent))
-        if self.interpreter_dependent:
-            lines.append("interpreter-dependent: " + ", ".join(self.interpreter_dependent))
+        if self.packaging_incompatible:
+            lines.append(
+                "not compatible with build target: "
+                + ", ".join(self.packaging_incompatible)
+            )
+        if self.policy_forbidden_capabilities:
+            lines.append(
+                "required capabilities forbidden by execution policy: "
+                + ", ".join(self.policy_forbidden_capabilities)
+            )
         if self.development_only_services:
             lines.append(
                 "development-only services: " + ", ".join(self.development_only_services)
@@ -213,6 +319,17 @@ class ExecutionPlan:
     report: DetachmentReport
     plan_digest: str
 
+    def require_capability(
+        self,
+        capability: str | DependencyCapability,
+        *,
+        consumer: str,
+    ) -> None:
+        """Fail loudly when runtime code requests an undeclared dependency."""
+        name = capability_name(capability)
+        if name not in self.report.required_capabilities:
+            raise RuntimeCapabilityViolation(name, consumer, self.plan_digest)
+
 
 class ExecutionPlanError(RuntimeError):
     """A strict execution profile cannot be resolved without forbidden gaps."""
@@ -227,6 +344,19 @@ class ExecutionPlanError(RuntimeError):
         )
 
 
+class RuntimeCapabilityViolation(RuntimeError):
+    """Runtime code requested a dependency outside the immutable plan closure."""
+
+    def __init__(self, capability: str, consumer: str, plan_digest: str):
+        self.capability = capability
+        self.consumer = consumer
+        self.plan_digest = plan_digest
+        super().__init__(
+            f"{consumer} requested capability {capability!r}, which is outside "
+            f"execution plan {plan_digest[:12]} dependency closure"
+        )
+
+
 def format_execution_plan(plan: ExecutionPlan) -> str:
     """Stable, concise human report for ``play.py --plan-only`` and CI logs."""
     report = plan.report
@@ -236,9 +366,14 @@ def format_execution_plan(plan: ExecutionPlan) -> str:
         f"plan digest: {plan.plan_digest}",
         f"reachable identities: {len(report.reachable)}",
         f"bound identities: {len(report.bindings)}",
-        f"standalone executable ready: {str(report.standalone_executable_ready).lower()}",
+        "required capabilities: "
+        + (", ".join(report.required_capabilities) or "none"),
         f"package ready: {str(report.package_ready).lower()}",
     ]
+    lines.extend(
+        f"{item.capability} detached: {str(item.detached).lower()}"
+        for item in report.detachment_milestones
+    )
     lines.extend(f"- {failure}" for failure in report.failure_lines())
     return "\n".join(lines)
 
@@ -250,6 +385,8 @@ def profile_configuration(
     product_profile: str = "default",
     provider_preference: Iterable[str] = (),
     selected_overrides: Iterable[str] = (),
+    product_services: Iterable[str] = (),
+    requested_capabilities: Iterable[str] = (),
     build_target: BuildTarget | None = None,
 ) -> ExecutionConfiguration:
     """Construct one of the standard policy presets.
@@ -263,27 +400,75 @@ def profile_configuration(
         product_profile=product_profile,
         provider_preference=tuple(provider_preference),
         selected_overrides=tuple(selected_overrides),
+        product_services=frozenset(product_services),
+        requested_capabilities=frozenset(requested_capabilities),
         build_target=build_target,
+    )
+    development = (
+        CapabilityPolicy(DependencyCapability.ORIGINAL_EXE.value, Requirement.ALLOWED),
+        CapabilityPolicy(DependencyCapability.ORIGINAL_CODE.value, Requirement.ALLOWED),
+        CapabilityPolicy(DependencyCapability.INTERPRETER.value, Requirement.ALLOWED),
+        CapabilityPolicy(DependencyCapability.ORACLE.value, Requirement.ALLOWED),
+        CapabilityPolicy(DependencyCapability.REPLAY.value, Requirement.ALLOWED),
+        CapabilityPolicy(DependencyCapability.SNAPSHOTS.value, Requirement.ALLOWED),
+        CapabilityPolicy(DependencyCapability.DIAGNOSTICS.value, Requirement.ALLOWED),
+        CapabilityPolicy(DependencyCapability.INSTRUMENTATION.value, Requirement.ALLOWED),
+        CapabilityPolicy(DependencyCapability.PROFILING.value, Requirement.ALLOWED),
+        CapabilityPolicy(
+            DependencyCapability.EXPERIMENTAL_OVERRIDES.value, Requirement.ALLOWED
+        ),
+        CapabilityPolicy(DependencyCapability.DEVELOPMENT_TOOLING.value, Requirement.ALLOWED),
+    )
+    detached = (
+        CapabilityPolicy(DependencyCapability.ORIGINAL_EXE.value, Requirement.FORBIDDEN),
+        CapabilityPolicy(DependencyCapability.ORIGINAL_CODE.value, Requirement.FORBIDDEN),
+        CapabilityPolicy(DependencyCapability.INTERPRETER.value, Requirement.FORBIDDEN),
+        CapabilityPolicy(DependencyCapability.ORACLE.value, Requirement.FORBIDDEN),
+        CapabilityPolicy(DependencyCapability.PROFILING.value, Requirement.FORBIDDEN),
+        CapabilityPolicy(
+            DependencyCapability.EXPERIMENTAL_OVERRIDES.value, Requirement.FORBIDDEN
+        ),
+        CapabilityPolicy(
+            DependencyCapability.DEVELOPMENT_TOOLING.value, Requirement.FORBIDDEN
+        ),
+    )
+    release = tuple(
+        CapabilityPolicy(item.value, Requirement.FORBIDDEN)
+        for item in (
+            DependencyCapability.ORIGINAL_EXE,
+            DependencyCapability.ORIGINAL_CODE,
+            DependencyCapability.INTERPRETER,
+            DependencyCapability.ORACLE,
+            DependencyCapability.REPLAY,
+            DependencyCapability.SNAPSHOTS,
+            DependencyCapability.DIAGNOSTICS,
+            DependencyCapability.INSTRUMENTATION,
+            DependencyCapability.PROFILING,
+            DependencyCapability.EXPERIMENTAL_OVERRIDES,
+            DependencyCapability.DEVELOPMENT_TOOLING,
+        )
     )
     if profile == "development":
         return ExecutionConfiguration(
             **common,
             execution_policy=ExecutionPolicy(
-                Requirement.ALLOWED,
-                Requirement.ALLOWED,
-                frozenset({
-                    "diagnostics", "instrumentation", "profiling", "replay",
-                    "snapshots", "experimental-overrides",
-                }),
+                capabilities=development,
             ),
         )
     if profile == "verification":
+        verification_capabilities = tuple(
+            CapabilityPolicy(
+                item.capability,
+                Requirement.REQUIRED
+                if item.capability == DependencyCapability.ORACLE.value
+                else item.requirement,
+            )
+            for item in development
+        )
         return ExecutionConfiguration(
             **common,
             execution_policy=ExecutionPolicy(
-                Requirement.ALLOWED,
-                Requirement.ALLOWED,
-                frozenset({"diagnostics", "instrumentation", "replay", "snapshots"}),
+                capabilities=verification_capabilities,
             ),
             verification_policy=VerificationPolicy("differential", oracle_required=True),
         )
@@ -291,10 +476,8 @@ def profile_configuration(
         return ExecutionConfiguration(
             **common,
             execution_policy=ExecutionPolicy(
-                Requirement.FORBIDDEN,
-                Requirement.FORBIDDEN,
-                frozenset({"diagnostics", "instrumentation", "replay"}),
-                DynamicLoading.DECLARED_ONLY,
+                capabilities=detached,
+                dynamic_loading=DynamicLoading.DECLARED_ONLY,
                 strict_coverage=True,
             ),
         )
@@ -302,10 +485,8 @@ def profile_configuration(
         return ExecutionConfiguration(
             **common,
             execution_policy=ExecutionPolicy(
-                Requirement.FORBIDDEN,
-                Requirement.FORBIDDEN,
-                frozenset(),
-                DynamicLoading.FORBIDDEN,
+                capabilities=release,
+                dynamic_loading=DynamicLoading.FORBIDDEN,
                 strict_coverage=True,
             ),
         )
@@ -315,13 +496,20 @@ def profile_configuration(
     )
 
 
-def _compatible(implementation: ImplementationDescriptor,
-                policy: ExecutionPolicy) -> bool:
-    if policy.original_exe is Requirement.FORBIDDEN and implementation.requires_original_exe:
-        return False
-    if policy.interpreter is Requirement.FORBIDDEN and implementation.requires_interpreter:
-        return False
-    return True
+def _compatible(
+    implementation: ImplementationDescriptor,
+    policy: ExecutionPolicy,
+    build_target: BuildTarget | None,
+) -> bool:
+    capability_compatible = not (
+        implementation.required_capabilities & policy.forbidden_capabilities
+    )
+    target_compatible = (
+        build_target is None
+        or not implementation.supported_platforms
+        or build_target.platform in implementation.supported_platforms
+    )
+    return capability_compatible and target_compatible
 
 
 def _ordered_candidates(
@@ -349,11 +537,14 @@ def _plan_digest(
         "profile": configuration.profile,
         "product": configuration.product_profile,
         "policy": {
-            "exe": configuration.execution_policy.original_exe.value,
-            "interpreter": configuration.execution_policy.interpreter.value,
-            "capabilities": sorted(configuration.execution_policy.development_capabilities),
+            "capabilities": sorted(
+                (item.capability, item.requirement.value)
+                for item in configuration.execution_policy.capabilities
+            ),
             "dynamic_loading": configuration.execution_policy.dynamic_loading.value,
         },
+        "product_services": sorted(configuration.product_services),
+        "requested_capabilities": sorted(configuration.requested_capabilities),
         "verification": configuration.verification_policy.mode,
         "build": (
             None if configuration.build_target is None else
@@ -373,9 +564,11 @@ def _plan_digest(
                 "origin": item.origin.value,
                 "category": item.category.value,
                 "properties": sorted(item.properties),
-                "exe": item.requires_original_exe,
-                "interpreter": item.requires_interpreter,
+                "capabilities": sorted(item.required_capabilities),
                 "services": sorted(item.required_services),
+                "assets": sorted(item.required_assets),
+                "platforms": sorted(item.supported_platforms),
+                "verification_evidence": sorted(item.verification_evidence),
                 "region": item.region_id,
             }
             for item in selected
@@ -385,8 +578,10 @@ def _plan_digest(
                 "id": item.service_id,
                 "digest": item.implementation_digest,
                 "product_safe": item.product_safe,
-                "development_capabilities": sorted(item.development_capabilities),
+                "capabilities": sorted(item.required_capabilities),
                 "dependencies": sorted(item.dependencies),
+                "assets": sorted(item.required_assets),
+                "platforms": sorted(item.supported_platforms),
             }
             for item in services
         ],
@@ -430,8 +625,8 @@ def plan_execution(
     bindings: list[PlanBinding] = []
     selected_by_id: dict[str, ImplementationDescriptor] = {}
     unresolved: list[str] = []
-    blocked_exe: list[str] = []
-    blocked_interpreter: list[str] = []
+    blocked_capabilities: dict[str, set[str]] = {}
+    packaging_incompatible: list[str] = []
     for target in sorted(coverage.reachable):
         selected_first = tuple(configuration.selected_overrides) + tuple(
             item for item in configuration.provider_preference
@@ -442,21 +637,38 @@ def plan_execution(
         )
         selected = next(
             (candidate for candidate in candidates
-             if _compatible(candidate, configuration.execution_policy)),
+             if _compatible(
+                 candidate,
+                 configuration.execution_policy,
+                 configuration.build_target,
+             )),
             None,
         )
         if selected is None:
             unresolved.append(target)
-            if any(candidate.requires_original_exe for candidate in candidates):
-                blocked_exe.append(target)
-            if any(candidate.requires_interpreter for candidate in candidates):
-                blocked_interpreter.append(target)
+            for candidate in candidates:
+                for capability in (
+                    candidate.required_capabilities
+                    & configuration.execution_policy.forbidden_capabilities
+                ):
+                    blocked_capabilities.setdefault(capability, set()).add(
+                        f"target:{target}"
+                    )
+                if (
+                    configuration.build_target is not None
+                    and candidate.supported_platforms
+                    and configuration.build_target.platform
+                    not in candidate.supported_platforms
+                ):
+                    packaging_incompatible.append(
+                        f"{target}:{candidate.implementation_id}"
+                    )
             continue
         bindings.append(PlanBinding(target, selected.implementation_id))
         selected_by_id[selected.implementation_id] = selected
 
     selected = tuple(sorted(selected_by_id.values(), key=lambda item: item.implementation_id))
-    required_service_set = {
+    required_service_set = set(configuration.product_services) | {
         service_id for item in selected for service_id in item.required_services
     }
     pending_services = list(required_service_set)
@@ -478,26 +690,133 @@ def plan_execution(
         for service_id in required_service_ids
         if service_id in service_by_id
     )
+    required_assets = tuple(sorted(
+        {
+            asset
+            for item in selected
+            for asset in item.required_assets
+        }
+        | {
+            asset
+            for service in selected_services
+            for asset in service.required_assets
+        }
+    ))
+    incompatible_services = tuple(sorted(
+        f"service:{service.service_id}"
+        for service in selected_services
+        if configuration.build_target is not None
+        and service.supported_platforms
+        and configuration.build_target.platform not in service.supported_platforms
+    ))
+    packaging_incompatible_items = tuple(sorted(
+        set(packaging_incompatible) | set(incompatible_services)
+    ))
     development_only_services = tuple(sorted(
         service.service_id for service in selected_services if not service.product_safe
     ))
+    capability_consumers: dict[str, set[str]] = {}
+    for item in selected:
+        for capability in item.required_capabilities:
+            capability_consumers.setdefault(capability, set()).add(
+                f"implementation:{item.implementation_id}"
+            )
+    for service in selected_services:
+        for capability in service.required_capabilities:
+            capability_consumers.setdefault(capability, set()).add(
+                f"service:{service.service_id}"
+            )
+    for capability in configuration.execution_policy.required_capabilities:
+        capability_consumers.setdefault(capability, set()).add(
+            f"policy:{configuration.profile}"
+        )
+    for capability in configuration.requested_capabilities:
+        capability_consumers.setdefault(capability, set()).add("configuration")
+    for capability, consumers in blocked_capabilities.items():
+        capability_consumers.setdefault(capability, set()).update(consumers)
+    required_capability_set = (
+        set(configuration.execution_policy.required_capabilities)
+        | set(configuration.requested_capabilities)
+        | set(blocked_capabilities)
+        | {
+            capability
+            for item in selected
+            for capability in item.required_capabilities
+        }
+        | {
+            capability
+            for service in selected_services
+            for capability in service.required_capabilities
+        }
+    )
+    forbidden_capability_set = (
+        required_capability_set
+        & configuration.execution_policy.forbidden_capabilities
+    ) | set(blocked_capabilities)
+    policy_forbidden_capabilities = tuple(sorted(forbidden_capability_set))
     policy_forbidden_services = tuple(sorted(
         service.service_id for service in selected_services
-        if not service.development_capabilities.issubset(
-            configuration.execution_policy.development_capabilities
-        )
+        if service.required_capabilities
+        & configuration.execution_policy.forbidden_capabilities
     ))
-
-    exe_dependent = tuple(sorted(set(blocked_exe) | {
-        target
-        for target, implementation_id in ((b.target, b.implementation_id) for b in bindings)
-        if selected_by_id[implementation_id].requires_original_exe
-    }))
-    interpreter_dependent = tuple(sorted(set(blocked_interpreter) | {
-        target
-        for target, implementation_id in ((b.target, b.implementation_id) for b in bindings)
-        if selected_by_id[implementation_id].requires_interpreter
-    }))
+    capability_uses = tuple(
+        CapabilityUse(capability, tuple(sorted(consumers)))
+        for capability, consumers in sorted(capability_consumers.items())
+    )
+    capability_blockers = tuple(
+        CapabilityBlocker(
+            capability=capability,
+            target=binding.target,
+            implementation_id=binding.implementation_id,
+            alternatives_without_capability=tuple(sorted(
+                candidate.implementation_id
+                for candidate in all_implementation_items
+                if binding.target in candidate.targets
+                and capability not in candidate.required_capabilities
+            )),
+        )
+        for binding in bindings
+        for capability in sorted(
+            selected_by_id[binding.implementation_id].required_capabilities
+        )
+    )
+    milestone_groups = (
+        (
+            DependencyCapability.ORIGINAL_EXE.value,
+            (
+                DependencyCapability.ORIGINAL_EXE.value,
+                DependencyCapability.ORIGINAL_CODE.value,
+            ),
+        ),
+        (
+            DependencyCapability.INTERPRETER.value,
+            (DependencyCapability.INTERPRETER.value,),
+        ),
+        (
+            DependencyCapability.CPU_MODEL.value,
+            (DependencyCapability.CPU_MODEL.value,),
+        ),
+        (
+            DependencyCapability.DOS_MEMORY.value,
+            (DependencyCapability.DOS_MEMORY.value,),
+        ),
+        (
+            DependencyCapability.DOS_SERVICES.value,
+            (DependencyCapability.DOS_SERVICES.value,),
+        ),
+        (
+            DependencyCapability.DOS_RE_RUNTIME.value,
+            (DependencyCapability.DOS_RE_RUNTIME.value,),
+        ),
+    )
+    milestones = tuple(
+        DetachmentMilestone(
+            name,
+            not bool(required_capability_set & set(group)),
+            group,
+        )
+        for name, group in milestone_groups
+    )
     generated = tuple(sorted(
         binding.target for binding in bindings
         if selected_by_id[binding.implementation_id].origin is ImplementationOrigin.GENERATED
@@ -509,12 +828,12 @@ def plan_execution(
     regions = tuple(sorted({
         item.region_id for item in selected if item.region_id is not None
     }))
-    standalone_ready = not (
-        unresolved or coverage.unresolved_edges or missing_services
-        or exe_dependent or interpreter_dependent
-    )
     package_ready = (
-        standalone_ready
+        not unresolved
+        and not coverage.unresolved_edges
+        and not missing_services
+        and not packaging_incompatible_items
+        and not policy_forbidden_capabilities
         and not development_only_services
         and not policy_forbidden_services
         and configuration.build_target is not None
@@ -526,24 +845,28 @@ def plan_execution(
         generated_coverage=generated,
         faithful_override_coverage=faithful,
         region_replacement_coverage=regions,
-        exe_dependent=exe_dependent,
-        interpreter_dependent=interpreter_dependent,
         unresolved=tuple(unresolved),
         unresolved_edges=tuple(sorted(coverage.unresolved_edges)),
         required_services=tuple(required_service_ids),
         missing_services=missing_services,
+        required_assets=required_assets,
+        packaging_incompatible=packaging_incompatible_items,
         development_only_services=development_only_services,
         policy_forbidden_services=policy_forbidden_services,
-        standalone_executable_ready=standalone_ready,
+        required_capabilities=tuple(sorted(required_capability_set)),
+        capability_uses=capability_uses,
+        capability_blockers=capability_blockers,
+        policy_forbidden_capabilities=policy_forbidden_capabilities,
+        detachment_milestones=milestones,
         package_ready=package_ready,
     )
 
     policy = configuration.execution_policy
     policy_failure = (
-        (policy.original_exe is Requirement.FORBIDDEN and bool(exe_dependent))
-        or (policy.interpreter is Requirement.FORBIDDEN and bool(interpreter_dependent))
+        bool(policy_forbidden_capabilities)
         or bool(unresolved)
         or bool(missing_services)
+        or bool(packaging_incompatible_items)
         or bool(policy_forbidden_services)
         or (policy.strict_coverage and bool(coverage.unresolved_edges))
         or (

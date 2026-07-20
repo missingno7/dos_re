@@ -5,36 +5,39 @@ import ast
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 
-from .execution import ExecutionPlan
+from .execution import DependencyCapability, ExecutionPlan
 
 
-FORBIDDEN_RELEASE_IMPORTS = (
-    "ctypes",
-    "importlib",
-    "pkgutil",
-    "runpy",
-    "dos_re.cpu",
-    "dos_re.cpu386",
-    "dos_re.execution",
-    "dos_re.hooks",
-    "dos_re.player",
-    "dos_re.pm_player",
-    "dos_re.replay",
-    "dos_re.runtime",
-    "dos_re.snapshot",
-    "dos_re.verification",
-    "dos_re.pm_verification",
-)
+IMPORT_CAPABILITIES = {
+    "dos_re.cpu": DependencyCapability.CPU_MODEL.value,
+    "dos_re.cpu386": DependencyCapability.CPU_MODEL.value,
+    "dos_re.execution": DependencyCapability.DEVELOPMENT_TOOLING.value,
+    "dos_re.hooks": DependencyCapability.DEVELOPMENT_TOOLING.value,
+    "dos_re.player": DependencyCapability.DEVELOPMENT_TOOLING.value,
+    "dos_re.pm_player": DependencyCapability.DEVELOPMENT_TOOLING.value,
+    "dos_re.replay": DependencyCapability.REPLAY.value,
+    "dos_re.runtime": DependencyCapability.DOS_RE_RUNTIME.value,
+    "dos_re.snapshot": DependencyCapability.SNAPSHOTS.value,
+    "dos_re.snapshot_headless": DependencyCapability.SNAPSHOTS.value,
+    "dos_re.snapshot_runtime": DependencyCapability.DOS_RE_RUNTIME.value,
+    "dos_re.verification": DependencyCapability.ORACLE.value,
+    "dos_re.pm_verification": DependencyCapability.ORACLE.value,
+}
+DYNAMIC_RUNTIME_MODULES = ("ctypes", "importlib", "pkgutil", "runpy")
 
 
 @dataclass(frozen=True)
 class ExportFile:
     source: Path
     destination: str
+    required_capabilities: frozenset[str] = frozenset()
+    asset_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -42,11 +45,15 @@ class ExportManifest:
     plan_digest: str
     target: str
     launcher: str
+    required_capabilities: tuple[str, ...]
     files: tuple[tuple[str, str], ...]
 
 
 class ExportError(RuntimeError):
     pass
+
+
+RELEASE_MANIFEST_SCHEMA = "dos_re_release/v2"
 
 
 def _runtime_nodes(tree: ast.AST):
@@ -120,15 +127,21 @@ def _dynamic_loading_calls(path: Path) -> tuple[str, ...]:
     return tuple(sorted(found))
 
 
-def _forbidden_import(name: str) -> str | None:
-    for forbidden in FORBIDDEN_RELEASE_IMPORTS:
-        if name == forbidden or name.startswith(forbidden + "."):
-            return forbidden
+def _import_capability(name: str) -> tuple[str, str] | None:
+    for module, capability in IMPORT_CAPABILITIES.items():
+        if name == module or name.startswith(module + "."):
+            return module, capability
     return None
 
 
-def _validate_files(files: tuple[ExportFile, ...], launcher: str) -> None:
+def _validate_files(
+    plan: ExecutionPlan,
+    files: tuple[ExportFile, ...],
+    launcher: str,
+) -> None:
     destinations: set[str] = set()
+    packaged_assets: set[str] = set()
+    required = set(plan.report.required_capabilities)
     for item in files:
         source = Path(item.source)
         destination = Path(item.destination)
@@ -140,12 +153,32 @@ def _validate_files(files: tuple[ExportFile, ...], launcher: str) -> None:
         if normalized in destinations:
             raise ExportError(f"duplicate export destination: {normalized}")
         destinations.add(normalized)
+        if item.asset_id is not None:
+            if item.asset_id in packaged_assets:
+                raise ExportError(f"duplicate packaged asset: {item.asset_id}")
+            packaged_assets.add(item.asset_id)
+        detached_requirements = item.required_capabilities - required
+        if detached_requirements:
+            raise ExportError(
+                f"{source} is tagged with capabilities outside the selected "
+                "release closure: " + ", ".join(sorted(detached_requirements))
+            )
         for imported in sorted(_import_names(source, destination)):
-            forbidden = _forbidden_import(imported)
-            if forbidden:
+            if any(
+                imported == module or imported.startswith(module + ".")
+                for module in DYNAMIC_RUNTIME_MODULES
+            ):
                 raise ExportError(
-                    f"{source} imports development-only {forbidden!r} "
-                    f"through {imported!r}"
+                    f"{source} imports release-forbidden dynamic runtime "
+                    f"module {imported!r}"
+                )
+            dependency = _import_capability(imported)
+            if dependency is not None and dependency[1] not in required:
+                module, capability = dependency
+                raise ExportError(
+                    f"{source} imports {module!r} through {imported!r}, but "
+                    f"capability {capability!r} is outside the selected "
+                    "release closure"
                 )
         dynamic_calls = _dynamic_loading_calls(source)
         if dynamic_calls:
@@ -155,6 +188,15 @@ def _validate_files(files: tuple[ExportFile, ...], launcher: str) -> None:
             )
     if Path(launcher).as_posix() not in destinations:
         raise ExportError(f"launcher {launcher!r} is not in the export closure")
+    missing_assets = set(plan.report.required_assets) - packaged_assets
+    undeclared_assets = packaged_assets - set(plan.report.required_assets)
+    if missing_assets or undeclared_assets:
+        raise ExportError(
+            "packaged asset closure differs from execution plan; missing="
+            + repr(sorted(missing_assets))
+            + ", undeclared="
+            + repr(sorted(undeclared_assets))
+        )
 
 
 def export_release(
@@ -174,7 +216,7 @@ def export_release(
         raise ExportError("only a release-profile plan may be exported")
     if not plan.report.package_ready:
         raise ExportError("release plan is not package-ready")
-    _validate_files(files, launcher)
+    _validate_files(plan, files, launcher)
 
     destination = Path(destination)
     if destination.exists():
@@ -199,13 +241,16 @@ def export_release(
                 f"{target_name.platform}:{target_name.package_format}"
             ),
             launcher=Path(launcher).as_posix(),
+            required_capabilities=plan.report.required_capabilities,
             files=tuple(hashes),
         )
         (staging / "dos_re_release.json").write_text(
             json.dumps({
+                "schema": RELEASE_MANIFEST_SCHEMA,
                 "plan_digest": manifest.plan_digest,
                 "target": manifest.target,
                 "launcher": manifest.launcher,
+                "required_capabilities": list(manifest.required_capabilities),
                 "files": dict(manifest.files),
             }, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -215,3 +260,71 @@ def export_release(
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+
+
+def verify_release_artifact(
+    artifact: str | Path,
+    command: tuple[str, ...],
+    *,
+    timeout: float = 60.0,
+) -> subprocess.CompletedProcess[str]:
+    """Hash-audit and cold-start a packaged artifact with a scrubbed environment.
+
+    ``command`` is target-specific (for example a Python interpreter plus the
+    packaged launcher, or a native executable).  The build system chooses the
+    runner; this function supplies the common closed-world proof boundary.
+    """
+    artifact = Path(artifact).resolve()
+    manifest_path = artifact / "dos_re_release.json"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ExportError(f"cannot read release manifest: {manifest_path}") from exc
+    if payload.get("schema") != RELEASE_MANIFEST_SCHEMA:
+        raise ExportError(
+            f"unsupported release manifest schema: {payload.get('schema')!r}"
+        )
+    expected = set(payload.get("files", {})) | {"dos_re_release.json"}
+    actual = {
+        path.relative_to(artifact).as_posix()
+        for path in artifact.rglob("*")
+        if path.is_file()
+    }
+    if actual != expected:
+        raise ExportError(
+            "artifact file closure differs from manifest; missing="
+            + repr(sorted(expected - actual))
+            + ", unexpected="
+            + repr(sorted(actual - expected))
+        )
+    for relative, expected_digest in payload["files"].items():
+        digest = hashlib.sha256((artifact / relative).read_bytes()).hexdigest()
+        if digest != expected_digest:
+            raise ExportError(f"release file hash mismatch: {relative}")
+    if not command:
+        raise ExportError("hermetic execution command must not be empty")
+    environment = {
+        name: value for name, value in os.environ.items()
+        if name.upper() in {
+            "SYSTEMROOT", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP",
+        }
+    }
+    environment["PYTHONNOUSERSITE"] = "1"
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=artifact,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ExportError(f"hermetic release execution failed to start: {exc}") from exc
+    if completed.returncode:
+        raise ExportError(
+            f"hermetic release execution exited {completed.returncode}:\n"
+            f"{completed.stdout}{completed.stderr}"
+        )
+    return completed

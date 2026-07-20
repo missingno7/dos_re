@@ -21,9 +21,9 @@ Historical 1.0 migration notes live under
 | Concept | Where |
 |---|---|
 | The five recovery stages (interpreted oracle → hybrid → VMless → CPUless → DOS-layout-less → semantic port) | [`dos_re_2.0.md`](dos_re_2.0.md) section 1 |
-| The hard walls (VMless: interpretation impossible; CPUless: CPU-carrier access impossible; DOS-layout-less: historical memory-layout access impossible) as implementation properties | section 1a |
+| Recovery properties and optional destructive proof techniques | [`dos_re_2.0.md`](dos_re_2.0.md) section 1a |
 | Mixed implementation plans, policies, one player, readiness reports, and export | [`execution_planner.md`](execution_planner.md) |
-| The EXE-independence wall (data-only boot image; the runtime never sees the EXE) | section 1a' |
+| Dependency closure, detachment milestones, and closed-world release proof | [`execution_planner.md`](execution_planner.md) |
 | Oracle-guided convergence (fail-loud + end-to-end differential + auto-bisection) | section 2 |
 | The automation principle (automate the 99%, isolate the 1%; recovery facts) | section 3 |
 | Platform adapters (no monolithic DOS machine in the native output) | section 4 |
@@ -81,10 +81,11 @@ Then follow the milestones (`dos_re_2.0.md` section 6):
 2. **M2 — strict VMless.**  Run the pipeline: `tools/irgen.py` (census + IR) →
    `tools/liftemit.py --from-ir` → `tools/liftlink.py --from-ir`; install the
    graph; converge against the oracle (`replay.bisect_divergence` localizes
-   divergences to stable timeline transitions). Close the walls: interpreter poison, boundary heads as
-   recovery facts, data-only boot image (`dos_re.bootimage` +
-   `dos_re.independence`, linted by `tools/lint_independence.py` and audited
-   by `tools/audit_boot_image.py`).
+   divergences to stable timeline transitions). Declare the implementation's
+   required capabilities and prove the EXE/interpreter-detached plan through
+   closed-world export and hermetic replay. Interpreter poison, a data-only
+   boot image (`dos_re.bootimage` + `dos_re.independence`), and
+   `tools/audit_boot_image.py` remain optional destructive evidence.
 3. **M3+ — CPUless and beyond.**  De-carrier passes on the shared IR
    (in progress on the pilot; watch `lemmings_port`).
 

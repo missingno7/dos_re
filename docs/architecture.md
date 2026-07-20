@@ -149,11 +149,12 @@ adapters; they are not launch modes.
 behavior fails loud with a precise gap report. A stale or unsupported override
 target fails during plan construction. Neither case silently switches backend.
 
-The existing wall audits remain strict evidence: VM-detached bindings make
-interpretation impossible (`cpu.interp_forbidden`), and standalone launch
-requires the original binary to be physically unavailable. The planner
-combines those per-binding facts with conservative reachability and service
-closure in a `DetachmentReport`; a runner name is never readiness evidence.
+Dependency declarations and release policy are authoritative. Closed-world
+export physically omits detached components, runtime capability guards reject
+undeclared acquisition, and hermetic launch tests exercise the packaged
+closure. Existing wall audits such as `cpu.interp_forbidden` and boot-image
+poisoning remain optional focused evidence; a poison flag or runner name is
+never readiness evidence.
 
 ## Layering inside a game adapter
 

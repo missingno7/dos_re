@@ -1,6 +1,6 @@
-> Framework method reference (DOS_RE 2.0).  Authority: [`dos_re_2.0.md`](dos_re_2.0.md)
-> is canonical; where older per-routine/hook-first phrasing below conflicts with the
-> 2.0 hard walls and automation principle, dos_re_2.0.md wins.  Promoted from the
+> Framework method reference. Authority: [`execution_planner.md`](execution_planner.md)
+> defines execution and release closure; [`dos_re_2.0.md`](dos_re_2.0.md)
+> defines generated recovery techniques. Promoted from the
 > DOS_RE 1.0 starter (template_dos_port, retired) because the mechanics remain valid.
 
 # Non-authoritative enhancements over verified game state

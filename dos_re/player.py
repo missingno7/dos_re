@@ -26,6 +26,7 @@ from pathlib import Path
 
 from dos_re.dos import ConsoleInputWouldBlock
 from dos_re.execution import (
+    DependencyCapability,
     ExecutionConfiguration,
     ExecutionPlan,
     ImplementationCatalog,
@@ -239,11 +240,20 @@ class GameFrontend:
         return f"frontend:{self.name}"
 
     def execution_configuration(self, args: argparse.Namespace) -> ExecutionConfiguration:
+        requested_capabilities: set[str] = set()
+        if args.record_demo or args.play_demo:
+            requested_capabilities.update({
+                DependencyCapability.REPLAY.value,
+                DependencyCapability.SNAPSHOTS.value,
+            })
+        if args.snapshot or args.save_snapshot:
+            requested_capabilities.add(DependencyCapability.SNAPSHOTS.value)
         return profile_configuration(
             args.profile,
             program_identity=self.program_identity(args),
             product_profile="default",
             provider_preference=self.default_provider_preference,
+            requested_capabilities=requested_capabilities,
         )
 
     def execution_coverage(self, args: argparse.Namespace) -> ProgramCoverage:
@@ -265,8 +275,15 @@ class GameFrontend:
             targets=frozenset({root}),
             origin=ImplementationOrigin.INTERPRETED,
             properties=frozenset({"cpu-backed", "dos-memory-backed"}),
-            requires_original_exe=True,
-            requires_interpreter=True,
+            required_capabilities=frozenset({
+                DependencyCapability.ORIGINAL_EXE.value,
+                DependencyCapability.ORIGINAL_CODE.value,
+                DependencyCapability.INTERPRETER.value,
+                DependencyCapability.CPU_MODEL.value,
+                DependencyCapability.DOS_MEMORY.value,
+                DependencyCapability.DOS_SERVICES.value,
+                DependencyCapability.DOS_RE_RUNTIME.value,
+            }),
             implementation_digest=_runtime_identity(),
         )),))
 
@@ -340,12 +357,24 @@ class GameFrontend:
         ``create_<game>_runtime`` (which installs their hooks)."""
         if not args.exe:
             raise SystemExit("--exe is required (this frontend has no default_exe)")
+        args.execution_plan.require_capability(
+            DependencyCapability.ORIGINAL_EXE,
+            consumer=f"{type(self).__name__}.create_runtime",
+        )
+        args.execution_plan.require_capability(
+            DependencyCapability.INTERPRETER,
+            consumer=f"{type(self).__name__}.create_runtime",
+        )
         from dos_re.runtime import create_runtime  # lazy: keeps the loader off
         return create_runtime(args.exe, game_root=args.game_root,  # an override's graph
                               command_tail=args.dos_args)
 
     def load_snapshot_runtime(self, args: argparse.Namespace, snapshot_dir: str | Path):
         """Resume from a snapshot directory."""
+        args.execution_plan.require_capability(
+            DependencyCapability.SNAPSHOTS,
+            consumer=f"{type(self).__name__}.load_snapshot_runtime",
+        )
         from dos_re.snapshot import load_snapshot  # lazy (see create_runtime)
         return load_snapshot(args.exe, snapshot_dir, game_root=args.game_root)
 

@@ -31,8 +31,10 @@ ImplementationEntry
     interpreted | generated | authored
     baseline | faithful | enhancement | behavioral
     implementation properties
-    EXE/interpreter requirements
+    dependency-capability requirements
     runtime-service requirements
+    required assets / supported build platforms
+    verification evidence
     implementation digest
   implementation       semantic callable when applicable
   activate             backend binding adapter
