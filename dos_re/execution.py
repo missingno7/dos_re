@@ -987,25 +987,28 @@ def plan_execution(
         or item.implementation_id in configuration.selected_overrides
     )
     selected_override_set = set(configuration.selected_overrides)
-    selected_enhancements = tuple(
+    selected_authored = tuple(
         item for item in implementation_items
         if item.implementation_id in selected_override_set
-        and item.category is OverrideCategory.ENHANCEMENT
+        and item.origin is ImplementationOrigin.AUTHORED
     )
-    for enhancement in selected_enhancements:
-        if enhancement.origin is not ImplementationOrigin.AUTHORED:
+    for override in selected_authored:
+        if not override.targets:
             raise ValueError(
-                f"enhancement {enhancement.implementation_id!r} must be authored")
-        if not enhancement.targets:
-            raise ValueError(
-                f"enhancement {enhancement.implementation_id!r} requires an "
-                "attachment target")
-        missing_targets = enhancement.targets - coverage.reachable
+                f"selected override {override.implementation_id!r} requires "
+                "an attachment target"
+            )
+        missing_targets = override.targets - coverage.reachable
         if missing_targets:
             raise ValueError(
-                f"enhancement {enhancement.implementation_id!r} attaches outside "
-                "conservative coverage: " + ", ".join(sorted(missing_targets))
+                f"selected override {override.implementation_id!r} targets "
+                "outside conservative coverage: "
+                + ", ".join(sorted(missing_targets))
             )
+    selected_enhancements = tuple(
+        item for item in selected_authored
+        if item.category is OverrideCategory.ENHANCEMENT
+    )
     authoritative_items = tuple(
         item for item in implementation_items
         if item.category is not OverrideCategory.ENHANCEMENT
