@@ -232,10 +232,14 @@ The rolling accumulator packs primitive integer records into one reusable
 64 KiB buffer; it does not allocate event objects in hot I/O paths. Machine
 adapters emit canonical interrupts and port reads/writes directly. Input and
 presentation adapters emit their own stable identities. Complete canonical
-state at every point covers memory changes that survive to a semantic boundary.
-If intermediate memory is externally observable (for example an interrupt may
-read it), that interrupt/yield must be represented in the effect stream. A raw
-write-by-write memory trace is a stricter optional diagnostic because equivalent
+state at every point covers memory and stateful device changes that survive to
+a semantic boundary. Machine adapters canonicalize externally consumed output
+(for example OPL register writes) instead of hashing every raw setup/polling I/O
+instruction; final video-controller state is covered by the presentation-point
+projection. If intermediate memory or device state is externally observable
+(for example an interrupt or scanline presenter may read it), that
+interrupt/yield/effect must be represented in the stream. Raw write-by-write
+memory or port traces are stricter optional diagnostics because equivalent
 native code may legitimately use a different write order.
 
 The player exposes three modes:
