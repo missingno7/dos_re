@@ -1071,9 +1071,15 @@ class ReplayArtifact:
                 and validation.start == start
                 and validation.end == end
             ):
+                oracle = self.profile_by_digest(
+                    validation.oracle_profile_identity_digest)
                 candidate = self.profile_by_digest(
                     validation.candidate_profile_identity_digest)
-                if capture.same_execution_as(candidate):
+                # Capture may use a provisional or subsequently corrected
+                # implementation. Trust is an oracle-backed claim about the
+                # finite immutable event timeline, not a certification of the
+                # runtime that happened to collect those inputs.
+                if oracle.role == "oracle" and candidate.role == "candidate":
                     return True
         return False
 

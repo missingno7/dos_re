@@ -251,6 +251,31 @@ def test_candidate_capture_becomes_trusted_only_after_full_validation(tmp_path):
     assert json.loads(artifact.path.read_text())["revision"] == revision
 
 
+def test_corrected_candidate_can_validate_a_provisional_capture(tmp_path):
+    artifact = make_artifact(tmp_path)
+    corrected = profile(
+        "native-corrected", "candidate", "detached-native-v2", "native-v1",
+        runtime="runtime-b",
+    )
+    artifact.register_profile(
+        corrected,
+        base_point=point(0),
+        base_state=CounterDriver(corrected).capture(),
+    )
+
+    result = verify_interval(
+        artifact,
+        CounterDriver(ORACLE),
+        CounterDriver(corrected),
+        point(0),
+        point(len(VALUES)),
+    )
+
+    assert result.equivalent
+    assert not artifact.capture_profile().same_execution_as(corrected)
+    assert artifact.trusted
+
+
 def test_execution_enrichment_is_idempotent_and_detects_nondeterminism(tmp_path):
     artifact = make_artifact(tmp_path)
     recorder = ReplayEvidenceRecorder()

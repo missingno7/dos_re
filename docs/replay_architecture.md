@@ -44,9 +44,11 @@ The capture profile is provenance, not an assertion of correctness. Interactive
 capture may select previously replay-backed performance overrides or a provisional
 candidate plan. An oracle capture is trusted immediately. A candidate capture
 becomes trusted only after an equivalent `0 -> end_point` validation whose
-candidate execution identity selects the same implementation, image, runtime,
-devices, and schemas as the capture profile. Partial green intervals remain
-useful verification records but do not promote the whole replay to evidence.
+registered oracle and current candidate reproduce the complete finite timeline.
+The candidate may be a corrected successor to the provisional capture runtime;
+the validation certifies the immutable replay, not the code that recorded it.
+Partial green intervals remain useful verification records but do not promote
+the whole replay to evidence.
 Replay trust means only that this finite event stream is oracle-backed. It
 never certifies every function visited by the replay for unobserved inputs.
 
