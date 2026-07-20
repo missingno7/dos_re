@@ -57,16 +57,20 @@ never certifies every function visited by the replay for unobserved inputs.
 A replay chooses one canonical monotonic timeline. `ReplayPoint` is
 `(timeline_id, ordinal)`; the pair is its stable identity and ordering key.
 Every executable ordinal also has a `ReplayPointCoordinate`: a schema-tagged,
-backend-neutral declaration of where execution must stop. Guest instruction
-count, simulation tick, presentation fence, or a native transaction identity
-may supply that coordinate. Function entry, function exit, frame, crash,
+backend-neutral declaration of where execution must stop. The primary
+coordinate should be an event the recovered program itself exposes: a completed
+simulation tick, main-loop park, page flip/presentation fence, input-consumption
+boundary, or native transaction. Function entry, function exit, crash,
 divergence, and manual names remain annotations, not competing clocks.
 
-Host dispatch count is never a stable coordinate. `CPU.run(N)` performs `N`
-calls to `step()`, but one generated-function dispatch may account many guest
-instructions. A machine-backed driver therefore consumes the persisted guest
-instruction coordinate and must reach it exactly; overshooting fails loudly
-and means that implementation needs a resumable boundary. The coordinate hash
+Guest instruction count is a diagnostic/fallback coordinate for bootstrap or a
+region that has not exposed a semantic yield yet. It is not the architectural
+clock. A semantic implementation does not imitate instruction counts merely to
+replay. Host dispatch count is never a coordinate: `CPU.run(N)` performs `N`
+calls to `step()`, while one generated-function dispatch may account many guest
+instructions. A low-level fallback must still be reached exactly; overshooting
+fails loudly and identifies a long atomic implementation that needs an explicit
+yield if an interrupt or device effect can occur inside it. The coordinate hash
 is part of the artifact identity.
 
 `ReplayEvent` stores a point, stable sequence number, channel, and canonical
@@ -188,7 +192,24 @@ recording a new artifact. Changing a replay execution identity creates a new
 cache namespace. Changing its base state invalidates every boundary in
 that namespace. There is no partial cache migration.
 
-## Differential verification
+## Differential verification and guarantees
+
+The verification terms are deliberately separate:
+
+- **semantic-boundary equivalence**: canonical state agrees at each declared
+  program boundary;
+- **observable-interval equivalence**: the ordered canonical stream of input,
+  interrupts, I/O/device output, presentation/audio/filesystem effects, and
+  boundary state fingerprints also agrees between boundaries;
+- **full continuation-state equivalence**: both implementations can continue
+  deterministically from the compared endpoint and project to equal
+  authoritative state;
+- **strict instruction-trace equivalence**: guest instructions and intermediate
+  machine effects agree. This is a low-level diagnostic, not a requirement for
+  a faithful semantic/native implementation.
+
+`verify_interval` is the inexpensive endpoint continuation check. It does not
+claim interval equivalence: a wrong intermediate state can reconverge before Y.
 
 `verify_interval(artifact, oracle, candidate, X, Y)`:
 
@@ -199,6 +220,36 @@ that namespace. There is no partial cache migration.
 5. replays each side only from X to Y;
 6. projects and compares both endpoints in their shared canonical schema;
 7. caches Y for both identities only when the endpoint is equivalent.
+
+`verify_checkpointed` is the long-replay verifier. It advances both sides once,
+adds every complete canonical point-state digest to a compact rolling digest,
+and asks adapters for an ordered `ObservableIntervalDigest`. It performs the
+rich state comparison only every configurable checkpoint span. A failed digest
+causes only the most recent interval to be restored and replayed point by point,
+yielding the first divergent semantic transition for detailed tracing.
+
+The rolling accumulator accepts primitive integer records through one reusable
+40-byte buffer; it does not allocate event objects in hot I/O paths. Machine
+adapters emit canonical interrupts and port reads/writes directly. Input and
+presentation adapters emit their own stable identities. Complete canonical
+state at every point covers memory changes that survive to a semantic boundary.
+If intermediate memory is externally observable (for example an interrupt may
+read it), that interrupt/yield must be represented in the effect stream. A raw
+write-by-write memory trace is a stricter optional diagnostic because equivalent
+native code may legitimately use a different write order.
+
+The player exposes three modes:
+
+- `checkpointed` (default): rolling semantic states plus observable effects,
+  with detailed comparison every `--verify-checkpoint-span` points;
+- `semantic-points`: the span-1 reference with the same semantic/observable
+  contract;
+- `endpoint`: the former cheapest endpoint-only continuation check.
+
+`--no-verify-observables` deliberately reduces the claim to semantic-boundary
+plus continuation equivalence. It is useful only for an adapter that has not yet
+implemented its external-effect stream; output must not be described as full
+observable-interval equivalence.
 
 On mismatch, the already-diverged candidate endpoint is not cached as valid.
 The artifact annotates X as the latest valid point before the observed

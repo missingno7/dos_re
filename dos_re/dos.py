@@ -11,6 +11,7 @@ from .x86 import HaltExecution, UnsupportedInstruction, CF, ZF, IF, TF
 if TYPE_CHECKING:                       # type hints only -- not a runtime import
     from .cpu import CPU8086
 from .memory import EGA_APERTURE, EGA_PLANE_STRIDE, EGA_PLANE_WINDOW
+from .observable import SOFTWARE_INTERRUPT
 
 # Which device tracker owns which OUT port (see DOSMachine.port_write, which
 # routes a write to exactly one of them instead of offering it to all four).
@@ -191,6 +192,11 @@ class DOSMachine:
     opl_status: int = 0
     opl_registers: dict[int, int] = field(default_factory=dict)
     port_log: list[tuple[str, int, int, int]] = field(default_factory=list)
+    # Transient verification observer.  It is intentionally absent from
+    # snapshots/continuations: a verifier attaches a fresh interval-local sink
+    # after restore and removes it before caching state.
+    observable_effect_sink: object | None = field(
+        default=None, repr=False, compare=False)
     # Optional emulated sound hardware (a Sound Blaster + its DMA channel) and the
     # master PIC.  Left None on the deterministic/headless path; an interactive
     # front-end enables them (see runtime.enable_sound_blaster) so the program's
@@ -1079,6 +1085,18 @@ class DOSMachine:
             mem.ega_h_display_end = value
 
     def interrupt(self, cpu: CPU8086, num: int) -> None:
+        sink = self.observable_effect_sink
+        if sink is not None:
+            # Four input words are enough to distinguish DOS/BIOS service
+            # selection and its ordinary arguments without coupling the
+            # semantic stream to CS:IP or guest instruction timing.
+            sink.record(
+                SOFTWARE_INTERRUPT,
+                num & 0xFF,
+                cpu.s.ax & 0xFFFF,
+                ((cpu.s.bx & 0xFFFF) << 16) | (cpu.s.cx & 0xFFFF),
+                ((cpu.s.dx & 0xFFFF) << 16) | (cpu.s.si & 0xFFFF),
+            )
         if num == 0x20:
             cpu.halted = True
             raise HaltExecution()

@@ -34,6 +34,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
+from .observable import (
+    ObservableIntervalDigest,
+    RollingEffectDigest,
+    SEMANTIC_BOUNDARY,
+)
+
 FORMAT_VERSION = 1
 DEFAULT_PAGE_SIZE = 4096
 MANIFEST = "replay.json"
@@ -616,6 +622,33 @@ class VerificationResult:
     @property
     def equivalent(self) -> bool:
         return self.comparison.equivalent
+
+
+@dataclass(frozen=True)
+class CheckpointVerificationResult:
+    """Single-pass semantic-point verification with localized failure data.
+
+    ``checkpoint_span`` controls expensive detailed comparisons and reporting,
+    not observation coverage.  Every semantic point contributes its complete
+    canonical-state fingerprint to an order-sensitive rolling digest.  In
+    observable mode, backend adapters additionally digest effects that escape
+    between those points.
+    """
+
+    result: VerificationResult
+    checkpoint_span: int
+    points_observed: int
+    checkpoints_compared: int
+    observable_effects: bool
+    failed_interval: tuple[ReplayPoint, ReplayPoint] | None = None
+
+    @property
+    def equivalent(self) -> bool:
+        return self.result.equivalent
+
+    @property
+    def comparison(self) -> StateComparison:
+        return self.result.comparison
 
 
 @dataclass(frozen=True)
@@ -1686,6 +1719,296 @@ def verify_interval(
             "differences": list(comparison.differences[:16]),
         })
     return result
+
+
+@dataclass(frozen=True)
+class _ObservedSegment:
+    start: ReplayPoint
+    end: ReplayPoint
+    oracle_projection: CanonicalState
+    candidate_projection: CanonicalState
+    comparison: StateComparison
+    boundary_equivalent: bool
+    effects_equivalent: bool
+    oracle_boundary_digest: ObservableIntervalDigest
+    candidate_boundary_digest: ObservableIntervalDigest
+    oracle_effect_digest: ObservableIntervalDigest | None
+    candidate_effect_digest: ObservableIntervalDigest | None
+
+    @property
+    def equivalent(self) -> bool:
+        return (
+            self.comparison.equivalent
+            and self.boundary_equivalent
+            and self.effects_equivalent
+        )
+
+
+def verify_checkpointed(
+    artifact: ReplayArtifact,
+    oracle: ReplayDriver,
+    candidate: ReplayDriver,
+    start: ReplayPoint,
+    end: ReplayPoint,
+    *,
+    checkpoint_span: int = 64,
+    observable_effects: bool = True,
+    cache_verified_end: bool = True,
+) -> CheckpointVerificationResult:
+    """Verify every semantic point in one pass, comparing detail coarsely.
+
+    The verifier hashes each complete canonical point state, so a divergence at
+    a point cannot disappear merely because both sides reconverge before the
+    next coarse checkpoint.  With ``observable_effects=True`` each driver must
+    also implement ``begin_observable_interval`` and
+    ``end_observable_interval``; this catches ordered I/O/device/interrupt/input
+    effects that can occur and disappear between semantic points.
+
+    On a failed coarse interval only that interval is restored and replayed one
+    point at a time.  The returned ``failed_interval`` is therefore the first
+    divergent semantic transition, ready for a backend-specific detailed trace.
+    This is not instruction-trace equivalence: internal instruction order and
+    guest coordinates remain irrelevant unless an adapter emits a timing/yield
+    effect at the semantic boundary.
+    """
+    if checkpoint_span <= 0:
+        raise ValueError("checkpoint_span must be positive")
+    if oracle.profile.role != "oracle" or candidate.profile.role != "candidate":
+        raise ValueError("verify_checkpointed requires oracle and candidate profiles")
+    if oracle.profile.projection_schema != candidate.profile.projection_schema:
+        raise ValueError("oracle and candidate must declare the same projection schema")
+    _ordered_interval(start, end)
+    if observable_effects:
+        _require_observable_driver(oracle)
+        _require_observable_driver(candidate)
+
+    oracle_restored, oracle_start = _position_and_project(artifact, oracle, start)
+    candidate_restored, candidate_start = _position_and_project(
+        artifact, candidate, start)
+    start_comparison = oracle_start.compare(candidate_start)
+    if not start_comparison.equivalent:
+        raise ReplayError(
+            "verification interval starts from non-equivalent oracle/candidate state: "
+            + "; ".join(start_comparison.differences[:3]))
+    if not artifact.has_cached(oracle.profile, start):
+        artifact.cache(
+            oracle.profile, start, oracle.capture(),
+            metadata={"kind": "verified-start"})
+    if not artifact.has_cached(candidate.profile, start):
+        artifact.cache(
+            candidate.profile, start, candidate.capture(),
+            metadata={"kind": "verified-start"})
+
+    cursor = start
+    points_observed = 0
+    checkpoints = 0
+    final_segment: _ObservedSegment | None = None
+    failed_interval: tuple[ReplayPoint, ReplayPoint] | None = None
+    while cursor.ordinal < end.ordinal:
+        checkpoint = ReplayPoint(
+            min(end.ordinal, cursor.ordinal + checkpoint_span),
+            artifact.timeline_id,
+        )
+        segment = _observe_segment(
+            artifact, oracle, candidate, cursor, checkpoint,
+            observable_effects=observable_effects,
+        )
+        points_observed += checkpoint.ordinal - cursor.ordinal
+        checkpoints += 1
+        final_segment = segment
+        if not segment.equivalent:
+            failed_interval, segment, refined_points = _refine_failed_segment(
+                artifact, oracle, candidate, cursor, checkpoint,
+                observable_effects=observable_effects,
+            )
+            points_observed += refined_points
+            final_segment = segment
+            break
+        cursor = checkpoint
+
+    if final_segment is None:
+        # Empty interval: the already-compared start is also the endpoint.
+        digest = _empty_interval_digest("dos-re:semantic-point-states:v1")
+        final_segment = _ObservedSegment(
+            start, end, oracle_start, candidate_start, start_comparison,
+            True, True, digest, digest, None, None)
+
+    if failed_interval is None:
+        oracle_projection = final_segment.oracle_projection
+        candidate_projection = final_segment.candidate_projection
+        comparison = oracle_projection.compare(candidate_projection)
+    else:
+        oracle_projection = final_segment.oracle_projection
+        candidate_projection = final_segment.candidate_projection
+        differences = list(final_segment.comparison.differences)
+        if not final_segment.boundary_equivalent:
+            differences.insert(0, "semantic-point state digest differs")
+        if not final_segment.effects_equivalent:
+            differences.insert(0, "observable interval effect digest differs")
+        comparison = StateComparison(
+            False,
+            tuple(differences or ("observed interval differs",)),
+            oracle_projection.digest,
+            candidate_projection.digest,
+        )
+
+    oracle_run = IntervalRun(
+        oracle.profile, oracle_restored, start, end, oracle_projection)
+    candidate_run = IntervalRun(
+        candidate.profile, candidate_restored, start, end,
+        candidate_projection)
+    result = VerificationResult(
+        start, end, oracle_run, candidate_run, comparison)
+    artifact.record_validation(result)
+    if result.equivalent:
+        artifact.annotate(end, kind="verified-semantic-interval", metadata={
+            "oracle_profile": oracle.profile.profile_id,
+            "candidate_profile": candidate.profile.profile_id,
+            "checkpoint_span": checkpoint_span,
+            "points_observed": points_observed,
+            "observable_effects": observable_effects,
+            "digest": comparison.oracle_digest,
+        })
+        if cache_verified_end:
+            if not artifact.has_cached(oracle.profile, end):
+                artifact.cache(
+                    oracle.profile, end, oracle.capture(),
+                    metadata={"kind": "verified-end"})
+            if not artifact.has_cached(candidate.profile, end):
+                artifact.cache(
+                    candidate.profile, end, candidate.capture(),
+                    metadata={"kind": "verified-end"})
+    else:
+        assert failed_interval is not None
+        before, after = failed_interval
+        artifact.annotate(before, kind="latest-valid-before-divergence", metadata={
+            "oracle_profile": oracle.profile.profile_id,
+            "candidate_profile": candidate.profile.profile_id,
+            "first_observed_mismatch_at": after.to_json(),
+            "verification_mode": (
+                "semantic+observable" if observable_effects else "semantic"),
+            "differences": list(comparison.differences[:16]),
+        })
+    return CheckpointVerificationResult(
+        result, checkpoint_span, points_observed, checkpoints,
+        observable_effects, failed_interval)
+
+
+def _observe_segment(
+    artifact: ReplayArtifact,
+    oracle: ReplayDriver,
+    candidate: ReplayDriver,
+    start: ReplayPoint,
+    end: ReplayPoint,
+    *,
+    observable_effects: bool,
+) -> _ObservedSegment:
+    _driver_at(oracle, start, "observed segment start")
+    _driver_at(candidate, start, "observed segment start")
+    oracle_effects = _begin_observable(oracle) if observable_effects else None
+    candidate_effects = _begin_observable(candidate) if observable_effects else None
+    oracle_boundaries = RollingEffectDigest(
+        "dos-re:semantic-point-states:v1")
+    candidate_boundaries = RollingEffectDigest(
+        "dos-re:semantic-point-states:v1")
+    oracle_projection = _project(oracle)
+    candidate_projection = _project(candidate)
+    try:
+        for ordinal in range(start.ordinal + 1, end.ordinal + 1):
+            point = ReplayPoint(ordinal, artifact.timeline_id)
+            oracle.replay_to(artifact, point)
+            candidate.replay_to(artifact, point)
+            _driver_at(oracle, point, "semantic observation")
+            _driver_at(candidate, point, "semantic observation")
+            oracle_projection = _project(oracle)
+            candidate_projection = _project(candidate)
+            oracle_boundaries.record_bytes(
+                SEMANTIC_BOUNDARY,
+                bytes.fromhex(oracle_projection.digest),
+                identity=ordinal,
+            )
+            candidate_boundaries.record_bytes(
+                SEMANTIC_BOUNDARY,
+                bytes.fromhex(candidate_projection.digest),
+                identity=ordinal,
+            )
+    finally:
+        oracle_effect_digest = (
+            _end_observable(oracle, oracle_effects)
+            if observable_effects else None)
+        candidate_effect_digest = (
+            _end_observable(candidate, candidate_effects)
+            if observable_effects else None)
+    oracle_boundary_digest = oracle_boundaries.finish(
+        "dos-re:semantic-point-states:v1")
+    candidate_boundary_digest = candidate_boundaries.finish(
+        "dos-re:semantic-point-states:v1")
+    comparison = oracle_projection.compare(candidate_projection)
+    boundary_equivalent = oracle_boundary_digest == candidate_boundary_digest
+    effects_equivalent = (
+        not observable_effects
+        or oracle_effect_digest == candidate_effect_digest
+    )
+    return _ObservedSegment(
+        start, end, oracle_projection, candidate_projection, comparison,
+        boundary_equivalent, effects_equivalent,
+        oracle_boundary_digest, candidate_boundary_digest,
+        oracle_effect_digest, candidate_effect_digest,
+    )
+
+
+def _refine_failed_segment(
+    artifact: ReplayArtifact,
+    oracle: ReplayDriver,
+    candidate: ReplayDriver,
+    start: ReplayPoint,
+    end: ReplayPoint,
+    *,
+    observable_effects: bool,
+) -> tuple[tuple[ReplayPoint, ReplayPoint], _ObservedSegment, int]:
+    _position_and_project(artifact, oracle, start)
+    _position_and_project(artifact, candidate, start)
+    previous = start
+    observed = 0
+    for ordinal in range(start.ordinal + 1, end.ordinal + 1):
+        point = ReplayPoint(ordinal, artifact.timeline_id)
+        segment = _observe_segment(
+            artifact, oracle, candidate, previous, point,
+            observable_effects=observable_effects,
+        )
+        observed += 1
+        if not segment.equivalent:
+            return (previous, point), segment, observed
+        previous = point
+    raise ReplayError(
+        "coarse interval digest differed but point refinement was equivalent; "
+        "an observable-effect adapter is non-deterministic")
+
+
+def _require_observable_driver(driver: ReplayDriver) -> None:
+    if not callable(getattr(driver, "begin_observable_interval", None)) or not callable(
+        getattr(driver, "end_observable_interval", None)
+    ):
+        raise ValueError(
+            f"replay driver {driver.profile.profile_id!r} does not provide "
+            "observable interval effects")
+
+
+def _begin_observable(driver: ReplayDriver):
+    return driver.begin_observable_interval()  # type: ignore[attr-defined]
+
+
+def _end_observable(
+    driver: ReplayDriver, token,
+) -> ObservableIntervalDigest:
+    digest = driver.end_observable_interval(token)  # type: ignore[attr-defined]
+    if not isinstance(digest, ObservableIntervalDigest):
+        raise ReplayError("observable replay driver returned an invalid digest")
+    return digest
+
+
+def _empty_interval_digest(schema_id: str) -> ObservableIntervalDigest:
+    return RollingEffectDigest(schema_id).finish(schema_id)
 
 
 def bisect_divergence(

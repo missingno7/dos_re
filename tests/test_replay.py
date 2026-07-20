@@ -26,8 +26,10 @@ from dos_re.replay import (
     StaleReplayError,
     bisect_divergence,
     machine_projection,
+    verify_checkpointed,
     verify_interval,
 )
+from dos_re.observable import RollingEffectDigest
 
 
 TIMELINE = "hook-verification-instruction-boundaries-v1"
@@ -190,6 +192,35 @@ class CounterDriver:
         )
 
 
+class ObservableCounterDriver(CounterDriver):
+    def __init__(self, *args, effect_bug_at=None, heal_at=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.effect_bug_at = effect_bug_at
+        self.heal_at = heal_at
+        self._observer = None
+
+    def begin_observable_interval(self):
+        assert self._observer is None
+        self._observer = RollingEffectDigest()
+        return self._observer
+
+    def end_observable_interval(self, token):
+        assert token is self._observer
+        self._observer = None
+        return token.finish()
+
+    def replay_to(self, artifact: ReplayArtifact, target: ReplayPoint) -> None:
+        while self.current_point.ordinal < target.ordinal:
+            ordinal = self.current_point.ordinal
+            super().replay_to(artifact, point(ordinal + 1))
+            if self.heal_at == ordinal:
+                self.total -= 1
+            if self._observer is not None:
+                value = VALUES[ordinal] + (
+                    1 if self.effect_bug_at == ordinal else 0)
+                self._observer.record(77, ordinal, value)
+
+
 def make_artifact(tmp_path, *, candidate=NATIVE):
     events = [ReplayEvent(point(i), i, "input", {"value": value})
               for i, value in enumerate(VALUES)]
@@ -228,6 +259,48 @@ def test_semantic_projection_verifies_native_candidate_and_caches_each_profile(t
     assert manifest["points"][point(9).key]["annotations"][0]["kind"] == "verified-endpoint"
     assert len(artifact.validations()) == 1
     assert not artifact.trusted
+
+
+def test_checkpointed_verifier_catches_state_divergence_that_reconverges(tmp_path):
+    candidate = profile(
+        "healing-native", "candidate", "detached-native", "native-v1")
+    artifact = make_artifact(tmp_path, candidate=candidate)
+    oracle = ObservableCounterDriver(ORACLE)
+    healing = ObservableCounterDriver(
+        candidate, bug_at=2, heal_at=3)
+
+    endpoint = verify_interval(
+        artifact, ObservableCounterDriver(ORACLE),
+        ObservableCounterDriver(candidate, bug_at=2, heal_at=3),
+        point(0), point(8),
+    )
+    assert endpoint.equivalent  # documents the endpoint-only false negative
+
+    checked = verify_checkpointed(
+        artifact, oracle, healing, point(0), point(8),
+        checkpoint_span=8, observable_effects=True,
+    )
+    assert not checked.equivalent
+    assert checked.failed_interval == (point(2), point(3))
+    assert "semantic-point state digest differs" in checked.comparison.differences
+
+
+def test_checkpointed_verifier_catches_healed_external_effect(tmp_path):
+    candidate = profile(
+        "effect-native", "candidate", "detached-native", "native-v1")
+    artifact = make_artifact(tmp_path, candidate=candidate)
+
+    checked = verify_checkpointed(
+        artifact,
+        ObservableCounterDriver(ORACLE),
+        ObservableCounterDriver(candidate, effect_bug_at=5),
+        point(0), point(10), checkpoint_span=10,
+        observable_effects=True,
+    )
+
+    assert not checked.equivalent
+    assert checked.failed_interval == (point(5), point(6))
+    assert "observable interval effect digest differs" in checked.comparison.differences
 
 
 def test_candidate_capture_becomes_trusted_only_after_full_validation(tmp_path):

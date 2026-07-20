@@ -69,6 +69,7 @@ from dos_re.replay import (
     ReplayPointCoordinate,
     ReplayRecording,
     bisect_divergence,
+    verify_checkpointed,
     verify_interval,
 )
 from dos_re.snapshot import (
@@ -92,7 +93,8 @@ class _RealReplayRecorder:
         self.recording = ReplayRecording(
             directory, timeline_id=timeline, profile=profile,
             base_state=base, metadata=metadata)
-        schema_id, value = frontend.replay_point_coordinate(rt, args)
+        schema_id, value = frontend.replay_point_coordinate(
+            rt, args, point_ordinal=0)
         self.recording.mark(0, schema_id=schema_id, value=value)
         self.directory = directory
         self._args = args
@@ -130,9 +132,11 @@ class _RealReplayRecorder:
         return sample
 
     def mark(self, frontend, args, rt, *, boundary: int) -> None:
-        schema_id, value = frontend.replay_point_coordinate(rt, args)
+        ordinal = self._ordinal(boundary)
+        schema_id, value = frontend.replay_point_coordinate(
+            rt, args, point_ordinal=ordinal)
         self.recording.mark(
-            self._ordinal(boundary), schema_id=schema_id, value=value)
+            ordinal, schema_id=schema_id, value=value)
 
     def stop(self, frontend, rt, *, boundary: int) -> Path:
         end = self._ordinal(boundary)
@@ -475,9 +479,14 @@ class GameFrontend:
         rt.cpu.run(args.steps_per_frame)
 
     def replay_point_coordinate(
-        self, rt, args: argparse.Namespace,
-    ) -> tuple[str, int]:
-        """Return the exact machine-time coordinate of the current boundary."""
+        self, rt, args: argparse.Namespace, *, point_ordinal: int | None = None,
+    ) -> tuple[str, object]:
+        """Return the exact coordinate of the current replay boundary.
+
+        The default is the low-level guest-instruction fallback.  Games should
+        override this with a semantic tick/present/input boundary and use the
+        ordinal only as its sequence identity, never as a host dispatch count.
+        """
         return GUEST_INSTRUCTION_COORDINATE, int(rt.cpu.instruction_count)
 
     def advance_replay_frame(
@@ -709,6 +718,23 @@ def build_arg_parser(frontend: GameFrontend,
                         help="last stable replay point (verification profile)")
     verify.add_argument("--bisect", action="store_true",
                         help="locate the first divergent transition in the interval")
+    verify.add_argument(
+        "--verify-mode",
+        choices=("checkpointed", "semantic-points", "endpoint"),
+        default="checkpointed",
+        help="checkpointed observes every semantic point and external effect; "
+             "semantic-points is the span-1 reference; endpoint is the cheapest "
+             "but can miss a divergence that reconverges before the end",
+    )
+    verify.add_argument(
+        "--verify-checkpoint-span", type=int, default=64,
+        help="full comparison interval for checkpointed verification",
+    )
+    verify.add_argument(
+        "--verify-observables", action=argparse.BooleanOptionalAction,
+        default=True,
+        help="include adapter-declared I/O/device/interrupt/input effects",
+    )
 
     pace = p.add_argument_group("pacing")
     pace.add_argument("--present-hz", type=int, default=frontend.default_present_hz,
@@ -1227,6 +1253,33 @@ def _run_differential_verification(
             return 0
         before, after, result = found
         print(f"DIVERGENT transition {before.ordinal}->{after.ordinal}")
+    elif getattr(args, "verify_mode", "endpoint") != "endpoint":
+        span = (
+            1 if getattr(args, "verify_mode", "endpoint") == "semantic-points"
+            else getattr(args, "verify_checkpoint_span", 64))
+        checked = verify_checkpointed(
+            artifact, oracle, candidate, start, end,
+            checkpoint_span=span,
+            observable_effects=getattr(args, "verify_observables", True),
+        )
+        result = checked.result
+        guarantee = (
+            "semantic+observable" if checked.observable_effects
+            else "semantic-boundaries")
+        if result.equivalent:
+            print(
+                f"EQUIVALENT {start.ordinal}..{end.ordinal} "
+                f"{result.comparison.oracle_digest} "
+                f"mode={guarantee} points={checked.points_observed} "
+                f"checkpoints={checked.checkpoints_compared} span={span}"
+            )
+            return 0
+        assert checked.failed_interval is not None
+        before, after = checked.failed_interval
+        print(
+            f"DIVERGENT transition {before.ordinal}->{after.ordinal} "
+            f"mode={guarantee}"
+        )
     else:
         result = verify_interval(artifact, oracle, candidate, start, end)
         if result.equivalent:
