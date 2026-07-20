@@ -1752,8 +1752,8 @@ def verify_interval(
 class _ObservedSegment:
     start: ReplayPoint
     end: ReplayPoint
-    oracle_projection: CanonicalState
-    candidate_projection: CanonicalState
+    oracle_projection: CanonicalState | None
+    candidate_projection: CanonicalState | None
     comparison: StateComparison
     boundary_equivalent: bool
     effects_equivalent: bool
@@ -1864,12 +1864,17 @@ def verify_checkpointed(
             True, True, digest, digest, None, None)
 
     if failed_interval is None:
-        oracle_projection = final_segment.oracle_projection
-        candidate_projection = final_segment.candidate_projection
+        # The rolling point digest already compared the complete canonical
+        # endpoint at every coarse checkpoint. Materialize rich projections
+        # only once at the requested final endpoint for retained diagnostics.
+        oracle_projection = _project(oracle)
+        candidate_projection = _project(candidate)
         comparison = oracle_projection.compare(candidate_projection)
     else:
         oracle_projection = final_segment.oracle_projection
         candidate_projection = final_segment.candidate_projection
+        assert oracle_projection is not None
+        assert candidate_projection is not None
         differences = list(final_segment.comparison.differences)
         if not final_segment.boundary_equivalent:
             differences.insert(0, "semantic-point state digest differs")
@@ -1936,25 +1941,32 @@ def _observe_segment(
     _driver_at(oracle, start, "observed segment start")
     _driver_at(candidate, start, "observed segment start")
     (
-        oracle_projection,
+        oracle_endpoint_digest,
         oracle_boundary_digest,
         oracle_effect_digest,
     ) = _observe_driver_segment(
         artifact, oracle, start, end,
         observable_effects=observable_effects)
     (
-        candidate_projection,
+        candidate_endpoint_digest,
         candidate_boundary_digest,
         candidate_effect_digest,
     ) = _observe_driver_segment(
         artifact, candidate, start, end,
         observable_effects=observable_effects)
-    comparison = oracle_projection.compare(candidate_projection)
     boundary_equivalent = oracle_boundary_digest == candidate_boundary_digest
     effects_equivalent = (
         not observable_effects
         or oracle_effect_digest == candidate_effect_digest
     )
+    oracle_projection = candidate_projection = None
+    if not boundary_equivalent or not effects_equivalent:
+        oracle_projection = _project(oracle)
+        candidate_projection = _project(candidate)
+        comparison = oracle_projection.compare(candidate_projection)
+    else:
+        comparison = StateComparison(
+            True, (), oracle_endpoint_digest, candidate_endpoint_digest)
     return _ObservedSegment(
         start, end, oracle_projection, candidate_projection, comparison,
         boundary_equivalent, effects_equivalent,
@@ -1971,24 +1983,21 @@ def _observe_driver_segment(
     *,
     observable_effects: bool,
 ) -> tuple[
-    CanonicalState,
+    str,
     ObservableIntervalDigest,
     ObservableIntervalDigest | None,
 ]:
     """Run one side contiguously so tracing does not defeat backend/JIT locality."""
     effects = _begin_observable(driver) if observable_effects else None
     boundaries = RollingEffectDigest("dos-re:semantic-point-states:v1")
-    projection = _project(driver)
+    endpoint_digest = _point_digest(driver)
     try:
         for ordinal in range(start.ordinal + 1, end.ordinal + 1):
             point = ReplayPoint(ordinal, artifact.timeline_id)
             driver.replay_to(artifact, point)
             _driver_at(driver, point, "semantic observation")
-            if ordinal == end.ordinal:
-                projection = _project(driver)
-                digest = projection.digest
-            else:
-                digest = _point_digest(driver)
+            digest = _point_digest(driver)
+            endpoint_digest = digest
             boundaries.record_bytes(
                 SEMANTIC_BOUNDARY, bytes.fromhex(digest), identity=ordinal)
     finally:
@@ -1996,7 +2005,7 @@ def _observe_driver_segment(
             _end_observable(driver, effects)
             if observable_effects else None)
     return (
-        projection,
+        endpoint_digest,
         boundaries.finish("dos-re:semantic-point-states:v1"),
         effect_digest,
     )
