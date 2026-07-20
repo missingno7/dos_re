@@ -443,6 +443,15 @@ class DetachmentReport:
                 "missing bootstrap artifacts: "
                 + ", ".join(self.missing_bootstrap_artifacts)
             )
+            instructions = sorted({
+                item.generation_instruction
+                for item in self.bootstrap_artifacts
+                if not item.materializable and item.generation_instruction
+            })
+            if instructions:
+                lines.append(
+                    "bootstrap generation: " + " | ".join(instructions)
+                )
         if self.development_only_services:
             lines.append(
                 "development-only services: " + ", ".join(self.development_only_services)
@@ -848,8 +857,6 @@ def _bootstrap_status(
         else:
             materializable = True
         if reason:
-            if artifact.generation_instruction:
-                reason += f"; {artifact.generation_instruction}"
             missing.append(reason)
         statuses.append(BootstrapArtifactStatus(
             artifact_id=artifact.artifact_id,
