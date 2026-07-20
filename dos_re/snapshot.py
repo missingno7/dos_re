@@ -118,19 +118,16 @@ def load_snapshot(exe_path: str | Path, snapshot_dir: str | Path, *, game_root: 
     return rt
 
 
-# The EXE-free restore path lives in a separate module so the strict-VMless
-# import graph never reaches this module's ``create_runtime`` loader edge
-# (scripts/lint_vmless_independence.py).  Re-exported here for callers that
-# already import restore helpers from dos_re.snapshot.
+# The EXE-free restore path lives in a separate module so release dependency
+# closure never reaches this module's ``create_runtime`` loader edge.
 from .snapshot_headless import (  # noqa: E402
     capture_dos_state, _restore_dos_state, _restore_speaker_from_port_log_tail)
-from .snapshot_runtime import load_snapshot_headless  # noqa: E402
 
 
 def clone_runtime_state(src: Runtime) -> Runtime:
     """Return a detached in-memory clone of a real-mode runtime.
 
-    Cloning is a snapshot operation, not a repro-artifact operation.  The
+    Cloning is an in-memory snapshot operation. The
     dos_re 3.0 replay drivers use it for independent oracle/candidate runs;
     persistent divergence reproduction lives in :mod:`dos_re.replay` as a
     cached stable point plus annotation.

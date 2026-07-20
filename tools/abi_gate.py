@@ -1,6 +1,6 @@
 """abi_gate.py -- the machine-checkable M3b (ABI-recovered CPUless) wall.
 
-Reports the acceptance counters from docs/abi_end_state.md over an emitted
+Reports the acceptance counters from docs/history/abi_end_state.md over an emitted
 ABI core corpus.  Every counter must be ZERO; anything non-zero names the
 exact files.  Functions that are NOT cores are reported separately as a
 CLASSIFIED EXCEPTION report -- each class owes a generated representation,

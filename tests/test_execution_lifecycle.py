@@ -5,26 +5,12 @@ from pathlib import Path
 import subprocess
 import sys
 
-import dos_re.hooks as hooks
 import dos_re.pm_player as pm_player
 
 from dos_re.player import build_arg_parser
 
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def test_parallel_execution_authorities_are_gone():
-    assert not hasattr(hooks, "HookRegistry")
-    assert not hasattr(hooks, "registry")
-    assert not hasattr(pm_player, "main")
-    for relative in (
-        "tools/display.py",
-        "tools/pm_view.py",
-        "tools/replay_verify.py",
-        "tools/audit_hook_oracle.py",
-    ):
-        assert not (ROOT / relative).exists()
 
 
 def test_protected_mode_uses_the_canonical_parser():

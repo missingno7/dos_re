@@ -8,8 +8,7 @@ view (which tool for which recovery step, with context) is
 
 | Tool | Command | When |
 |---|---|---|
-| `view.py` | `python tools/view.py --exe assets/GAME.EXE` | Watch any EXE run, zero setup — the standard player CLI (`--headless`, `--snapshot`, `--record-demo`, `--play-demo`; F10/F11/F12). Your port's `scripts/play.py` supersedes it once an adapter exists. |
-| `view.py` | `python tools/view.py --exe assets/GAME.EXE` or `--protected-mode` for DOS/4GW | Run the canonical profile-driven player with the generic real-mode or protected-mode frontend. |
+| `view.py` | `python tools/view.py --exe assets/GAME.EXE` or add `--protected-mode` for DOS/4GW | Run the canonical profile-driven player with the generic real-mode or protected-mode frontend (`--headless`, `--snapshot`, `--record-demo`, `--play-demo`; F10/F11/F12). A port exposes the same lifecycle through its sole `scripts/play.py`. |
 | `render_frame.py` | `python tools/render_frame.py <snapshot_dir>` | Day-0 "see output": snapshot (or `--exe` + `--steps`) → PNG. VGA 13h + EGA/VGA planar. |
 | `replay_info.py` | `python tools/replay_info.py <artifact-dir>` | Inspect a 3.0 replay's event identity, profiles, cached boundaries, function visits, and annotations. |
 | project `scripts/play.py` | `python scripts/play.py --profile verification --play-demo <artifact-dir> --verify-start X --verify-end Y [--bisect]` | Verify exactly X→Y or persistently bisect a divergent transition through the canonical player. |

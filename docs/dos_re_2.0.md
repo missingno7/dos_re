@@ -17,7 +17,7 @@ execution, dependency-detachment, and release authority is
 > game root is CPUless: recovered functions compute over `(mem, plat, *regs)`
 > with no CPU carrier, no interpreter, no lifted graph.  `detached profile` runs
 > the game standalone from the data-only boot image, and
-> `scripts/acceptance_cpuless.py` proves it BYTE-EXACT against the interpreted
+> the project's ReplayArtifact verification gate proves it byte-exact against the interpreted
 > oracle over the whole demo (regs + flags + poison-masked memory at every
 > boundary).  The generic machinery that made this automatic is catalogued in
 > §CPUless machinery below; everything game-specific stayed in `lemmings_port`
@@ -101,7 +101,7 @@ final representation:
 
 A stage may legitimately POSTPONE any of these — but the postponement must
 be recorded as debt against this goal, never re-labelled as "fine because
-the next stage does not need it".  (See `docs/abi_end_state.md` §6, which
+the next stage does not need it".  (See `docs/history/abi_end_state.md` §6, which
 was revised after this goal was stated: the M4-need test and the
 final-representation test are different tests, and the disposition table
 now says so.)
@@ -406,7 +406,7 @@ EXE-independence wall says the runtime does not depend on the original
 executable *at all* — not for code, not for data, not as a hidden byte source.
 It is enforced **physically**, not by convention:
 
-- **Data-only boot image.**  `scripts/build_vmless_boot_image.py` runs the
+- **Data-only boot image.**  The project's declared build-image bootstrap runs the
   loader (the PKLITE self-extractor + the machine-type menu — interpreted, at
   BUILD time) from the EXE to the canonical post-decompression entry, captures
   the memory + machine state, and **poisons the recovered code**: every byte the
@@ -429,8 +429,8 @@ It is enforced **physically**, not by convention:
   the binary by name OR by content hash (a rename does not launder it), while
   leaving game data readable.
 
-Enforced by tooling: `scripts/lint_vmless_independence.py` (static import-graph
-proof the runtime reaches no loader edge), `scripts/audit_vmless_boot_image.py`
+Enforced by tooling: the dependency-closure audit (static import-graph proof
+that the runtime reaches no loader edge) and the boot-image audit
 (no bundled executable; every recovered code byte poisoned or declared
 `code_as_data`), and `tests/test_vmless_cleanroom.py` (boot + run to gameplay in
 a temp dir with the EXE physically absent).  The runner prints a DERIVED banner
@@ -840,7 +840,8 @@ the next major mechanical stage after the VMless graph converges.
   oracle-clean.  Complete when no public recovered contract contains a CPU
   object, register-named parameter, or return-address mechanics — and
   unsupported ABI shapes fail loudly with evidence.  **End state + acceptance
-  gate: `docs/abi_end_state.md`** — which machine concepts must be eliminated
+  historical gate: `docs/history/abi_end_state.md`** — which machine concepts
+  must be eliminated
   before M4 (generic virtual stack, register-named public parameters,
   dict-keyed results, dead flag computation), which may remain as
   deterministic emission detail (CFG-shaped `bb` bodies, register-named

@@ -31,7 +31,7 @@ The JIT needs ~1–2M instructions of warmup before reaching steady state.)
 The rows above are raw interpretation. A frame-exact differential also captures
 and compares a framebuffer per frame, which does not speed up as much, so quote
 the harness number for a harness. Measured 2026-07-18, skyroads
-`scripts/verify_cpuless.py` over its 5,109-frame attract demo, end-to-end:
+A 5,109-frame CPUless ReplayArtifact verification run measured end-to-end:
 
 | run length | CPython | PyPy | speedup |
 |---|---|---|---|

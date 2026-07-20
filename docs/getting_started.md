@@ -89,29 +89,27 @@ Then follow the milestones (`dos_re_2.0.md` section 6):
 3. **M3+ — CPUless and beyond.**  De-carrier passes on the shared IR
    (in progress on the pilot; watch `lemmings_port`).
 
-## Inspecting and reproducing the Lemmings pilot
+## Validate the unified lifecycle
 
-Clone `lemmings_port`, supply your own game files in `assets/`, then:
+Each port exposes the same three operations through its own configuration:
 
 ```bash
-python scripts/build_vmless_boot_image.py    # EXE -> data-only boot image
-python scripts/play.py --profile detached    # strict EXE-free plan
-python scripts/acceptance_vmless.py          # the M2 gate (oracle differential)
+python scripts/play.py --profile development
+python scripts/play.py --profile verification --play-demo <artifact-dir>
+python scripts/play.py --profile release --plan-only
+python scripts/export_release.py <output-dir>
 ```
 
-Its `docs/lemmings/native_pilot.md` is the append-only ledger of every
-finding, failure, and capability the pilot produced.
+The release plan must select a materializable `BootstrapProvider`, prove
+complete non-EXE implementation coverage, and reject every forbidden
+development capability before export. The export must then pass its hermetic
+launch check without access to the original EXE, interpreter, replay services,
+or development imports.
 
-## Current status and known limitations
+## Current framework limitations
 
-- The pilot has **M2 accepted**: strict VMless + EXE-independent, demo-verified
-  to gameplay.  M3 (CPUless) is next; `recovered/`, `model/`, `native/` are
-  stubs until their walls are enforced.
 - 16-bit real mode is the proven path (Lemmings).  The 32-bit DOS/4GW (LE)
   side has a parallel toolchain (`pm*` modules, `emit32`) at an earlier stage.
-- Display-level known issue on the pilot: mid-frame palette switching is
-  deferred to the video-adapter stage (state stays byte-exact; it is a
-  presentation artifact only).
 - Performance: lifted Python is a verification tier, not a speed tier; the
   fast native runtime arrives with the CPUless/native stages
   ([`performance.md`](performance.md)).

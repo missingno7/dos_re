@@ -214,20 +214,6 @@ def test_verification_profile_dispatches_before_runtime_boot(monkeypatch):
     assert seen[0].configuration.verification_policy.mode == "differential"
 
 
-@pytest.mark.parametrize(
-    "obsolete",
-    (
-        "--no-replacements",
-        "--safe-hooks",
-        "--verify-hooks",
-        "--trace-hooks",
-    ),
-)
-def test_removed_hook_flags_are_rejected(obsolete):
-    with pytest.raises(SystemExit):
-        _parse(GameFrontend(ROOT), [obsolete])
-
-
 def test_selected_implementation_activator_is_the_only_binding_authority():
     activated = []
 

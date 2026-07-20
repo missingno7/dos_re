@@ -1,10 +1,9 @@
 """Optional destructive data-only boot-image proof generation.
 
 This is not the canonical release packager; ``dos_re.export`` owns physical
-release closure. The port's development proof script
-(e.g. Lemmings' ``scripts/build_vmless_boot_image.py``) does the game-specific
-part -- boot the interpreted runtime, run the game's loader to its canonical
-post-decompression entry, ``write_snapshot`` the state -- and then calls
+release closure. A port's declared build-image provider may use this optional
+development proof: boot the interpreted runtime, run the game's loader to its
+canonical post-decompression entry, ``write_snapshot`` the state, then call
 :func:`poison_snapshot_to_boot_image` here to turn that snapshot into a
 data-only boot image:
 

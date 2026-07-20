@@ -220,7 +220,7 @@ class TraceMem:
         # same segment would show up as semantic writes the de-stacked side
         # never makes -- a guaranteed false divergence.  Writes at or above
         # the floor are the machine stack; below it are the globals.  Same
-        # split as STACK_DATA_FLOOR in scripts/acceptance_cpuless.py.
+        # split used by the historical CPUless acceptance proof.
         self.ss_seg = ss_seg
         self.ss_globals_floor = ss_globals_floor
         self.writes: list[tuple[int, int, int, int]] = []

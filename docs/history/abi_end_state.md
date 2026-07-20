@@ -408,4 +408,4 @@ slice 11 flags-word-stack (pushf/popf) 7
 slice 12 acceptance gate + full-corpus poison proof on the canonical demo
 ```
 
-Then, and only then, M4 (`docs/memory_schema.md`).
+Then, and only then, M4 ([`../memory_schema.md`](../memory_schema.md)).
