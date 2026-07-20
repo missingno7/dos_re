@@ -6,30 +6,34 @@ implementation inputs until their migration phase lands.
 
 ## Decision
 
-dos_re has one original program, several reproducible baseline backends, and
-one optional authored override layer:
+dos_re has one original program, a catalog of reproducible baseline
+implementation providers, one optional authored override layer, and one
+execution planner:
 
 ```text
-                         original program identity
-                                   |
-          +------------------------+------------------------+
-          |                        |                        |
- interpreted EXE baseline   generated VMless baseline   generated CPUless /
-                                                       ABI-recovered baseline
-          \________________________|________________________/
-                                   |
-                         selected override plan
-             + faithful replacements
-             + non-authoritative enhancements
-             + behavioral modifications
-                                   |
-                         configured execution profile
+program identity + coverage source
+              |
+implementation catalog + override registry + runtime-service catalog
+              |
+execution planner (hybrid | standalone, product and verification profiles)
+              |
+immutable execution plan with per-function/region bindings
 ```
 
-The three baseline backends are alternative generated implementations of the
-same program. They are not patches, recovery islands, or authored variants.
+Interpreted original code, generated VMless code, and generated CPUless or
+ABI-recovered code are alternative baseline implementations of the same
+program. One plan may use different providers for different functions or
+regions; they are not mutually exclusive product types. They are not patches,
+recovery islands, or authored variants.
 Generated output remains disposable and reproducible from the executable,
 recovery IR, recovery facts, and toolchain.
+
+There are only two top-level dependency modes: **hybrid**, where the original
+EXE may remain available, and **standalone**, where it is forbidden at
+runtime. VMless, CPUless, ABI-recovered, DOS-memory-backed, and memoryless are
+implementation or state-adapter properties. The complete planning,
+reachability, readiness-report, and entrypoint contract is defined in
+[`execution_planner.md`](execution_planner.md).
 
 All manually or AI-authored program code belongs to the override layer. An
 override body is ordinary CPUless Python. It may use the DOS memory model when
@@ -55,7 +59,7 @@ The survey for this workstream found these current authorities:
 | `dos_re.verification` / `dos_re.pm_verification` | Backend-specific hook differential transactions and temporary hook maps | Retain the proof engines behind the faithful-replacement verification policy. Their temporary interceptors remain infrastructure, not overrides. |
 | `dos_re.hook_taxonomy` | Checkpoint, environment-wait, debug-probe, and glue roles | These are execution-point traits, not override categories. Move or rename them so the two classifications cannot be confused. |
 | `dos_re.runtime_code` and signature guards | Identification of live code variants and runtime-installed bodies | This belongs to baseline code identity/version selection. SMC is not a behavioral modification merely because bytes change at runtime. |
-| `player.py` hook modes and PM `install_hooks` callback | Port-defined selection, installation, verification modes, and replay-profile hashing | Replace with an explicit baseline backend plus selected override profile. Both players consume the same execution plan. |
+| `player.py` hook modes and PM `install_hooks` callback | Port-defined selection, installation, verification modes, and replay-profile hashing | Replace with one execution configuration selecting dependency mode, provider policy, product profile, and override profile. Both players consume the same execution plan. |
 | `bootstrap_lzexe`, `runtime_core`, `boundary_clock`, `pm_input_demo`, `frame_verify`, and profiling tools | Synthetic services, observation, parking, timing, or temporary wrapping installed at execution addresses | Route through a distinct interceptor/service channel. They are neither generated baseline functions nor authored program overrides. |
 
 Generated and handwritten code are mixed today in two important ways:
@@ -101,8 +105,9 @@ The following vocabulary is normative for new work:
 
 - **Original program**: the executable plus its observed runtime code
   identities.
-- **Baseline backend**: one generated way to execute the unchanged original
-  program: interpreted, VMless generated, or CPUless/ABI-recovered generated.
+- **Baseline implementation provider**: one reproducible way to execute an
+  unchanged original function or region: interpreted, VMless generated, or
+  CPUless/ABI-recovered generated.
 - **Baseline implementation**: the generated implementation of one original
   function for a selected backend.
 - **Override**: manually or AI-authored code intentionally selected instead of
@@ -171,9 +176,10 @@ OverrideSpec
 ```
 
 The registry is declarative. It does not install directly into a CPU, mutate
-`sys.modules`, or choose a player mode. It validates declarations and compiles
-an immutable `ExecutionPlan` for a chosen baseline backend and override
-profile.
+`sys.modules`, choose providers, or choose a player mode. It validates
+declarations and supplies them to the unified planner, which compiles an
+immutable `ExecutionPlan` for a dependency mode, product profile, provider
+policy, and override profile.
 
 Selection rules are deliberately strict:
 
@@ -324,7 +330,8 @@ capability that cannot be rebound to the override itself.
 
 An `ExecutionProfile` identifies:
 
-- baseline backend and generated implementation digest;
+- dependency mode, execution-plan digest, and all selected implementation
+  bindings;
 - program and code-version identities;
 - the complete selected override-plan digest;
 - adapter/runtime/device and state-schema identities.
@@ -357,8 +364,9 @@ silently interpret an unknown variant.
 
 Migration proceeds without changing all backends at once:
 
-1. Introduce stable target, category, declaration, and execution-plan types
-   with no dispatch behavior change.
+1. Introduce stable target, category, declaration, catalog, coverage-source,
+   execution-configuration, execution-plan, and detachment-report types with
+   no dispatch behavior change.
 2. Compile current `HookRegistry` declarations into plans and move direct
    CPU-dictionary mutation behind real-mode and PM backend adapters.
 3. Separate generated baseline dispatch from framework interceptors. Migrate
@@ -373,10 +381,14 @@ Migration proceeds without changing all backends at once:
 7. Route faithful verification through the existing hook oracles plus
    `ReplayArtifact` interval verification. Add enhancement isolation and
    behavioral-declaration tests.
-8. Replace player hook modes with baseline-backend and override-profile
-   selection. Both real-mode and PM players consume the same plan model.
-9. Remove the public legacy registration paths and update examples, tools,
-   audits, terminology, and documentation.
+8. Replace player hook modes and stage-named launch authorities with the
+   unified planner. Both real-mode and PM drivers consume the same plan model;
+   `play_hybrid` and `play_native` may remain thin presets.
+9. Adapt existing graph manifests and recovery facts to the program-coverage
+   interface. The future execution atlas can replace this adapter without
+   changing the planner.
+10. Remove the public legacy registration paths and update examples, tools,
+    audits, terminology, and documentation.
 
 Each phase must preserve an override-free execution plan and keep the original
 oracle uncontaminated.
@@ -424,7 +436,9 @@ The implementation order is:
 ```text
 stable identities and terminology
         ↓
-declarative OverrideSpec + immutable ExecutionPlan
+catalog/coverage protocols + declarative OverrideSpec
+        ↓
+ExecutionConfiguration + planner + immutable ExecutionPlan/DetachmentReport
         ↓
 interpreter / PM / VMless backend adapters
         ↓
@@ -437,14 +451,18 @@ player/CLI and project migration
 legacy registry and terminology removal
 ```
 
-The registry must not depend on a CPU backend. Verification depends on the
-registry model, not the reverse. Replay and atlas consume stable identities and
-execution-plan hashes without owning override dispatch.
+The registry and planner must not depend on a CPU backend. Verification
+depends on the plan model, not the reverse. Replay and the future atlas consume
+stable identities and execution-plan hashes without owning override dispatch.
+The planner consumes an abstract coverage source; it does not depend on the
+atlas implementation or storage schema.
 
 ## Non-goals for the first implementation slices
 
 - No automatic semantic naming.
 - No requirement to make the entire game memoryless.
+- No requirement that a standalone product use one uniform recovery property.
+- No implementation of the execution atlas in this workstream.
 - No new source-reconstruction claim.
 - No ordering semantics for multiple implementations at one target.
 - No silent compatibility loader for project-local hook formats.

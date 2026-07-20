@@ -7,6 +7,14 @@ implementation: M2 (strict VMless + EXE-independent) and M3 (CPUless via the
 automated de-carrier process) are both ACCEPTED and merged.  The next
 milestone is M4 (DOS-layout dissolution).**
 
+> **DOS_RE 3.0 executable-model supersession.** The recovery transformations
+> and hard walls in this document remain valid implementation properties and
+> proof gates. They no longer define separate product types or mandatory
+> runner names. Top-level launch has only hybrid and standalone dependency
+> modes, and one standalone plan may mix implementations at different recovery
+> levels. See [`execution_planner.md`](execution_planner.md) and
+> [`override_architecture.md`](override_architecture.md).
+
 > **M3 CPUless — ACCEPTED (2026-07-16).**  The whole reachable graph from the
 > game root is CPUless: recovered functions compute over `(mem, plat, *regs)`
 > with no CPU carrier, no interpreter, no lifted graph.  `play_cpuless` runs
@@ -357,7 +365,7 @@ Message wording: prefer *full VMless lifted graph*, *VMless lifted candidate*,
 implementation* — never *full native runtime* / *native assembly* / *native
 hooks* for a merely-VMless artifact.
 
-### 1a. Hard execution walls, and the runner naming contract
+### 1a. Hard execution walls as implementation properties
 
 The stage names are not labels on effort — each completed stage is defined by
 an **enforced, mechanically checkable execution wall**:
@@ -376,18 +384,12 @@ when the stage regenerates automatically AND its wall is enforced by tooling
 (a grep-class static check on the emitted artifacts at minimum, a runtime
 audit where static checking cannot see it).
 
-The walls fix the runner names in every port:
-
-```
-play_vmless.py    output of the automated VMless pipeline
-                  (lift → link → install the graph; NOT a hand-assembled hook set)
-play_cpuless.py   output of the automated CPUless transformation
-                  (NOT a manually refactored copy of play_vmless.py)
-play_native.py    output of the automated DOS-layout dissolution pipeline,
-                  plus only optional oracle-verifiable semantic cleanup
-```
-
-A runner may not carry a name whose wall its artifacts do not satisfy.
+These walls classify generated or authored implementations and state adapters.
+They feed the unified planner's detachment report. They do not require a
+uniform recovery level across a game and do not fix runner names. Product
+launch selects only `hybrid` (original EXE permitted) or `standalone`
+(original EXE forbidden); `play_hybrid` and `play_native` may be thin presets
+over that shared API.
 
 There are **two independent walls at the VMless stage**, and both must hold
 before M2 is accepted:

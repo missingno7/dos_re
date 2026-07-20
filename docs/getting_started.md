@@ -21,7 +21,8 @@ The canonical reference implementation is the **Lemmings pilot**
 | Concept | Where |
 |---|---|
 | The five recovery stages (interpreted oracle → hybrid → VMless → CPUless → DOS-layout-less → semantic port) | [`dos_re_2.0.md`](dos_re_2.0.md) section 1 |
-| The hard walls (VMless: interpretation impossible; CPUless: CPU-carrier access impossible; DOS-layout-less: historical memory-layout access impossible) + runner naming | section 1a |
+| The hard walls (VMless: interpretation impossible; CPUless: CPU-carrier access impossible; DOS-layout-less: historical memory-layout access impossible) as implementation properties | section 1a |
+| Hybrid/standalone launch modes, mixed implementation plans, and readiness reports | [`execution_planner.md`](execution_planner.md) |
 | The EXE-independence wall (data-only boot image; the runtime never sees the EXE) | section 1a' |
 | Oracle-guided convergence (fail-loud + end-to-end differential + auto-bisection) | section 2 |
 | The automation principle (automate the 99%, isolate the 1%; recovery facts) | section 3 |
@@ -53,6 +54,12 @@ python dos_re/tools/new_project.py --game mygame --output ../mygame_port
 ```
 
 This generates the minimal skeleton:
+
+> **Transitional scaffold:** the current generator still emits stage-named
+> diagnostic runners while the unified planner is implemented. Do not treat
+> these as separate product architectures or add new CPUless/memoryless runner
+> families. The target keeps only thin `play_hybrid` and `play_native`
+> presets over one launch API.
 
 ```
 mygame_port/

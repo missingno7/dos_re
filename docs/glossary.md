@@ -2,8 +2,8 @@
 
 The project's vocabulary in one place. Terms link to the doc that owns them.
 
-**The five execution stages ([`dos_re_2.0.md`](dos_re_2.0.md) §1 is the
-authority; "native" is banned as a bare term):**
+**Recovery properties and transformations ([`dos_re_2.0.md`](dos_re_2.0.md)
+§1):** these classify implementations; they are not top-level launch modes.
 
 | Stage term | Meaning |
 |---|---|
@@ -17,7 +17,7 @@ authority; "native" is banned as a bare term):**
 | **Platform adapter** | A reusable generic dos_re capability binding a recognized machine effect (file access, input, page flip, OPL write, timer wait) to a native interface (`platform.video.present(...)`). Oracle-compatible / faithful / enhanced / per-OS implementations behind one interface. |
 | **Recovery fact** | The smallest explicit, evidence-backed, versioned declaration of game-specific knowledge (jump table here, input-wait boundary there) fed into the generic pipeline — the alternative to hand-patching generated output. |
 | **Verification bridge** | Generated serializer reconstructing historical DOS machine state from the native object model so the oracle stays reachable after the CPU and memory model are gone. Depends on the native implementation, never vice versa; not shipped. |
-| **Hard execution wall** | The enforced, mechanically checkable property that defines a completed stage: VMless output cannot interpret instructions (zero `interp_one` sites on the declared corpus), CPUless output cannot access the CPU carrier, native output cannot access the DOS memory model. Fixes runner names: `play_vmless.py` / `play_cpuless.py` / `play_native.py` — a runner may not carry a name whose wall its artifacts do not satisfy. |
+| **Hard execution wall** | An enforced, mechanically checkable implementation property: VM-detached output cannot interpret instructions, CPU-detached output cannot access the CPU carrier, and memory-model-detached output cannot access the DOS layout. Walls feed the detachment report; they do not define product types or runner names. |
 | **Recovery IR** | The shared intermediate representation all analyses/transformations operate on; every stage artifact (VMless, CPUless, native, bridge, diagnostics) is an EMITTER PROJECTION of it. The system is never built around parsing generated Python from one stage into the next. |
 | **True native** | The ultimate target: no interpreter, no CPU carrier, no DOS-layout dependency, host-language control flow + data structures + platform adapters, oracle-verifiable via the optional bridge. The staged path (VMless → CPUless → DOS-layout-less) is the engineering strategy; direct binary→true-native emission is the goal. |
 
@@ -34,7 +34,9 @@ authority; "native" is banned as a bare term):**
 | **Glue** | A hook-taxonomy role: accidental ASM-boundary plumbing (tails, helpers, per-row scan steps) that exists only because a hook landed there — the collapse target when islands merge. Not an architectural layer. |
 | **Parity gate** | The enhanced layer's standing proof: at its neutral settings the enhanced game must be pixel- and state-identical to the faithful game, so "enhanced" can never silently mean "diverged". ([`enhancements.md`](enhancements.md)) |
 | **Hybrid runtime** | The workbench: the VM running the original game with recovered islands hooked live over it. |
-| **Native runtime** | DEPRECATED as a bare term — it conflated stages 1–4. Use the stage vocabulary above: a runtime is *VMless lifted*, *CPUless lifted*, *DOS-layout-less native*, or a *semantic clean port*. The shipped product is stage 3+ (no interpreter, no CPU carrier, no DOS layout, no bridge). |
+| **Standalone execution** | A plan whose selected product profile has complete reachable implementation and service coverage without loading the original EXE or interpreter. Its regions may have different VM/CPU/memory detachment properties. |
+| **Detachment report** | The planner's evidence-backed account of reachable coverage, selected bindings, unresolved edges, EXE/interpreter dependencies, required services, and standalone/package readiness. A runner name or successful playthrough is not a report. |
+| **Native runtime** | Avoid as an unqualified implementation claim. `play_native` may be a thin standalone preset, but the plan report states the actual per-region VM, CPU, ABI, DOS-memory, and memoryless properties. |
 | **Replay artifact / demo** | The single persistent oracle-verifiable recording: base continuation state, immutable normalized events, stable points, metadata, function visits, and derived base-relative boundary caches. “Demo” remains a player/CLI convenience term, not a second format. ([`demos_and_snapshots.md`](demos_and_snapshots.md)) |
 | **Snapshot** | Complete serialised memory, CPU, DOS, device, timing, interrupt, scheduler, and replay-cursor state for resuming machine-backed execution. It is not an independent replay record or a portable game save. |
 | **Replay timeline** | A canonical monotonic sequence of stable `ReplayPoint` identities. Backend adapters may observe different stop seams, but must agree on their semantic ordering and event positions. |

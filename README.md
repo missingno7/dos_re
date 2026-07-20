@@ -25,6 +25,14 @@ interpreted oracle → VMless lifted runtime → CPUless lifted runtime
 → DOS-layout-less native runtime → semantic clean source port
 ```
 
+**DOS_RE 3.0 executable model:** those stages are recovery transformations and
+per-function or per-region properties, not separate product architectures.
+One planner produces either a **hybrid** plan (the EXE is permitted) or a
+**standalone** plan (the EXE is forbidden), and may mix generated and authored
+implementations at different recovery levels. See
+[`docs/override_architecture.md`](docs/override_architecture.md) and
+[`docs/execution_planner.md`](docs/execution_planner.md).
+
 **Proven through M2 on the Lemmings pilot** (`lemmings_port`): strict VMless
 (zero interpreted instructions, interpreter poisoned) AND EXE-independent (a
 generated data-only boot image; the original binary is build-time input only),

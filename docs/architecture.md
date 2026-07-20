@@ -2,9 +2,12 @@
 
 `dos_re` is a reusable, oracle-driven DOS game recovery framework. The
 unchanged original program can run through interpreted, generated VMless, or
-generated CPUless/ABI-recovered baseline backends. Optional authored code is
+generated CPUless/ABI-recovered implementation providers. One execution plan
+may mix those providers by function or region. Optional authored code is
 selected through the separate override model defined in
-[`override_architecture.md`](override_architecture.md).
+[`override_architecture.md`](override_architecture.md); the two dependency
+modes and unified planner are defined in
+[`execution_planner.md`](execution_planner.md).
 
 ## The package boundary (the one hard rule)
 
@@ -119,26 +122,30 @@ tools/        lint, test runner, cleaner, linear disassembler, hotspot profiler,
 
 ## Execution configuration (no silent fallbacks)
 
-An execution configuration has two independent choices:
+One execution configuration describes these independent axes:
 
 | Dimension | Choices |
 |---|---|
-| **baseline backend** | interpreted original EXE; generated VMless graph; generated CPUless or ABI-recovered graph |
+| **dependency mode** | hybrid (original EXE permitted); standalone (original EXE forbidden) |
+| **provider policy** | ordered interpreted/generated/region implementation preferences |
 | **override profile** | none; selected faithful replacements; optional non-authoritative enhancements; optional behavioral modifications |
+| **product/service profile** | roots, features, platform services, assets, and package policy |
 
 Oracle and candidate are verification roles, not additional implementation
-layers. The oracle uses the untouched interpreted baseline. A candidate uses a
-declared baseline backend plus an immutable selected override plan.
+layers. The oracle uses the untouched interpreted implementation. A candidate
+uses an immutable plan with explicit bindings. VMless, CPUless, ABI-recovered,
+DOS-memory-backed, and memoryless describe those bindings or their state
+adapters; they are not launch modes.
 
 **No silent fallbacks.** A strict generated baseline that reaches uncovered
 behavior fails loud with a precise gap report. A stale or unsupported override
 target fails during plan construction. Neither case silently switches backend.
 
-**2.0 stage runners are stricter still** (docs/dos_re_2.0.md section 1a): a
-strict-VMless runner does not merely avoid interpretation -- it makes it
-IMPOSSIBLE (`cpu.interp_forbidden` raises on any uncovered address), and the
-EXE-independent runner boots from a generated data-only image with the
-original binary physically absent (section 1a').
+The existing wall audits remain strict evidence: VM-detached bindings make
+interpretation impossible (`cpu.interp_forbidden`), and standalone launch
+requires the original binary to be physically unavailable. The planner
+combines those per-binding facts with conservative reachability and service
+closure in a `DetachmentReport`; a runner name is never readiness evidence.
 
 ## Layering inside a game adapter
 
