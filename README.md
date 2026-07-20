@@ -1,201 +1,153 @@
-# dos_re — an oracle-driven DOS game recovery framework
+# dos_re 3.0
 
-A reusable **recovery machine** for turning an original DOS game (16-bit real
-mode or 32-bit DOS/4GW protected mode) into a verified source port.  **It is a
-recovery laboratory, not an emulator**: the original executable runs as the
-*oracle*, deterministic tooling mechanically lifts, links, and assembles the
-program into staged native runtimes, and every stage is verified against the
-original execution.  The key idea is not "AI writes code" — it is
-*deterministic tooling does the labor, AI unblocks it where it is stuck, and
-the original game remains executable truth.*
+dos_re is a modular, evidence-driven workspace for recovering and modifying DOS
+games. It keeps the original program available as an oracle during development,
+combines static and observed facts under stable identities, and lets generated
+and authored implementations coexist at any useful recovery depth.
 
-**DOS_RE 2.0** ([`docs/dos_re_2.0.md`](docs/dos_re_2.0.md) — the canonical
-architecture) is a staged pipeline of three mechanical detachments, each
-oracle-verified:
+There is no required decompilation ladder. One function may remain interpreted,
+another may use generated instruction-shaped code, a third may have a recovered
+ABI, and a renderer may be replaced with authored native code. A project can
+stop wherever the result is useful.
 
-```text
-binary → automatic CPU-less lifting → structurally linked VM-less graph
-→ automatically generated native shell → oracle-guided convergence → play_native
-→ automatic memory-structure recovery → generated verification bridge
-→ clean source port
-```
+## The model
 
 ```text
-interpreted oracle → VMless lifted runtime → CPUless lifted runtime
-→ DOS-layout-less native runtime → semantic clean source port
+stable program / image / function / region / point identities
+                 |
+       +---------+----------+----------------+----------------+
+       |                    |                |                |
+  static recovery      observed runs    manual facts    implementation
+  and Recovery IR      and replays      and contracts   descriptors
+       |                    |                |                |
+       +--------------------+----------------+                |
+                            |                                 |
+                 Execution Atlas projection                  |
+                 navigation + conservative coverage          |
+                            |                                 |
+                            +------ CoverageSource -----------+
+                                              |
+                     configuration + services + bootstrap
+                                              |
+                                      ExecutionPlan
+                              +---------------+---------------+
+                              |                               |
+                  development and verification        closed-world export
 ```
 
-**Proven through M2 on the Lemmings pilot** (`lemmings_port`): strict VMless
-(zero interpreted instructions, interpreter poisoned) AND EXE-independent (a
-generated data-only boot image; the original binary is build-time input only),
-demo-verified byte-exact against the interpreted oracle.  Current milestone:
-M3 -- CPUless via the automated de-carrier process over the recovery IR.
+The arrows are dependency boundaries, not a mandatory workflow. The Atlas can
+grow from observed execution or explicit facts before complete static recovery
+exists. Planning accepts any conservative `CoverageSource`; it does not require
+Atlas storage. Lifting and authored reconstruction can start with a targeted
+function and later contribute their facts to the same identity and provenance
+model.
 
-The largest supported graph is assembled mechanically and early; known-
-unsupported constructs fail loudly; the end-to-end oracle finds silent
-mistakes and auto-bisection localizes them; AI resolves only the concrete
-gaps.  Per-function proofs are metadata (hybrid installs, diagnostics,
-regression), never a gate on graph assembly.
+## What can be combined
 
-> **Do not port the game.  Build the machine that ports the game.**
-> Every blocker must improve the toolchain, not create another manual patch.
-> (The Ten Principles: `docs/dos_re_2.0.md` §0.)  The staged pipeline is the
-> engineering strategy; the ultimate goal is direct — *original binary +
-> recovery facts → automated recovery tool → true native implementation* —
-> with intermediate stages as verification projections of one shared
-> recovery IR.
+The workspace provides optional, composable operations:
 
-**This is infrastructure for AI agents, not a library for end users.** The
-expected operator is an autonomous AI agent handed a porting repo (this
-framework plugged in as a submodule) plus a game's files. A human's role in
-that workflow is to supply the game and occasionally play it; nobody is
-expected to drive these internals by hand. This README is the one
-human-facing document here — everything else in the repo is the agent's
-operating manual.
+- execute the original EXE through the real-mode or protected-mode runtime;
+- retain decoded structure and machine facts in Recovery IR;
+- record deterministic `ReplayArtifact`s with reusable continuation boundaries;
+- collect observed functions, transfers, runtime-code variants, and failures;
+- generate VMless, CPUless, or ABI-recovered implementations;
+- author faithful replacements, presentation enhancements, or behavioral
+  modifications;
+- query the Execution Atlas for relevant code, evidence, replays, and unresolved
+  uncertainty;
+- verify a selected implementation locally or over a replay interval;
+- plan a mixed implementation graph under explicit dependency policy;
+- export a closed-world product when its selected coverage and dependencies are
+  complete.
 
-The framework grew out of two real recovery projects: **Prehistorik 2**, where
-the method reached a complete, playable, VM-less native source port, and
-**Overkill**, the earlier pilot that stress-tested the same ideas on a far
-more chaotic codebase. It packages the machinery they shared — and it keeps
-growing: every new game exercises behaviour the last one didn't, and agents
-extend the framework (under [`AGENTS.md`](AGENTS.md)'s rules) as part of the
-job.
+VMless, CPUless, ABI-recovered, DOS-memory-backed, memoryless, and native are
+properties of individual implementations. They are not player modes or
+universal project stages.
 
-## What it is
+## Evidence and navigation
 
-- **Two VMs built for reverse engineering** — an 8086 real-mode interpreter
-  and a flat 386 protected-mode interpreter (`cpu386.py` + DOS/4GW host
-  `dos4gw.py` + LE loader `le.py`) — each an interpreter,
-  DOS/BIOS services, and hardware models (VGA/EGA planar video, PIT, PIC,
-  keyboard, PC speaker, AdLib/OPL2, Sound Blaster + DMA), all pure Python
-  (stdlib + numpy), all deterministic by default.
-- **Two proof engines** — a per-hook differential verifier that diffs a
-  replacement against the interpreted original ASM (registers + flags + full
-  memory) at every call, and a frame verifier that lockstep-diffs whole frames
-  between an ASM oracle and a hooked/native candidate.
-- **A determinism substrate** — full machine snapshots and input demos keyed
-  to an emulated boundary clock, so every finding is replayable and every
-  claim of equivalence is checkable.
-- **An automatic lifter** — a static decoder + emitter that turns a function
-  entry into a literal, per-instruction Python hook and proves it against the
-  oracle on every call, so recovery refactors a *verified* artifact instead of
-  hand-translating ASM.
+Facts remain owned by the artifact or declaration that produced them:
 
-## What it is not
+- Recovery IR retains static decoded structure and its provenance;
+- `ReplayArtifact` retains events, continuation state, observed visits and
+  transfers, annotations, and derived cached boundaries;
+- implementation descriptors retain availability, requirements, digests, and
+  verification references;
+- explicit fact documents retain reviewed manual claims.
 
-- **Not DOSBox** and not a general-purpose emulator: it models exactly what
-  recovered games proved they need, favours determinism over completeness, and
-  is not a way to *play* games.
-- **Not magic AI prompts and not video-to-code.** Recovery is evidence-driven:
-  the original executable runs in the VM and every recovered routine is diffed
-  against what the original actually did. Nothing is inferred from screenshots
-  or from "how DOS games usually work".
-- **Not a remake kit.** The output of the method is a faithful source port,
-  byte-exact against the original's observable behaviour.
+The Execution Atlas is a deterministic, queryable projection over those
+sources. It does not decode code, execute replays, select implementations, or
+turn absence of observation into proof. Conflicting and unresolved evidence
+stays visible.
 
-## The core principle
+## Execution and release
 
-**The original DOS binary is the oracle — the single source of truth.** A clean
-native routine is a hypothesis until it is diffed against the original ASM.
-Never guess; trace what the original did and match it. And no silent fallbacks:
-an unrecovered path fails loud and becomes the next task, it is never quietly
-faked or quietly handed back to the emulator.
+`ImplementationCatalog` is the available implementation inventory.
+`ExecutionConfiguration` selects composition, policy, bootstrap, services, and
+build target. `ExecutionPlanner` binds one implementation to each reachable
+identity and computes the dependency closure. The unified player executes that
+validated plan through a backend adapter without fallback outside it.
 
-## How recovery works
+Development may retain the EXE, interpreter, oracle comparison, replay,
+instrumentation, and diagnostics. A release configuration is a closed world:
+unknown reachable transfers fail planning, forbidden dependencies are excluded,
+bootstrap artifacts are materialized before launch, and export packages only
+the selected closure.
 
-```text
-original EXE ──▶ dos_re VM (the oracle) ──▶ traces / snapshots / demos
-                     │                            │
-        hook a routine at its CS:IP        deterministic replay
-                     ▼                            ▼
-     native recovered routine  ◀── verified ──  differential oracles
-        (pure rule + thin adapter)     (registers, flags, memory, ports, frames)
-                     │
-                     ▼
-   recovered systems gradually separate into a native source port;
-   the VM stays behind as the offline proof harness
-```
+EXE-detached, CPU-model-detached, DOS-memory-detached, and dos_re-runtime-
+detached are independent properties of a selection. None is the universal
+definition of a “finished” recovered game.
 
-1. The original EXE runs in a controlled VM; demos replay deterministic input.
-2. Routines are hooked at their original addresses — mechanically lifted or
-   hand-recovered as source (a pure rule behind a thin VM adapter).
-3. The framework diffs memory, registers, flags, ports, state, and frames
-   against the interpreted original, on every call.
-4. Verified islands merge into subsystems; higher-level meaning is earned from
-   evidence, never invented.
-5. The game separates from the VM into a native source port; the VM retires
-   into the oracle seat: testing, replay, debugging, proof.
+## Authored alternatives
 
-## Where the work happens
+- A **faithful replacement** claims equivalent authoritative behavior and needs
+  oracle evidence.
+- A **non-authoritative enhancement** changes presentation or host integration
+  while treating authoritative game state as read-only.
+- A **behavioral modification** declares intentional divergence and is tested
+  against its own contract.
 
-Game-specific work does **not** happen in this repo, and does not happen by a
-person driving these APIs by hand. It happens in a **port repo** — scaffolded
-by `python tools/new_project.py` and walked through in
-[`docs/getting_started.md`](docs/getting_started.md); the Lemmings pilot
-(`lemmings_port`) is the canonical reference implementation — with this
-framework wired in as the `dos_re/` submodule. (The old DOS_RE 1.0 starter,
-`template_dos_port`, is retired; see
-[`docs/migration_1.0_to_2.0.md`](docs/migration_1.0_to_2.0.md).) The hard boundary, enforced by
-lint: `dos_re/` never learns any game's addresses, filenames, or formats;
-everything game-specific lives in the port's adapter package.
+These categories are metadata on the same generic implementation mechanism.
 
-## Sanity check
+## Validate the checkout
+
+From Python 3.11 or newer:
 
 ```bash
-git clone --recurse-submodules <this repo>
-cd dos_re
-python examples/minimal_adapter/example.py       # the hook/verify/snapshot loop, 5 minutes
-python examples/tiny_frame_game/walkthrough.py   # the whole lifecycle on a synthetic game
-python -m pytest tests -q                        # framework suite (no game assets needed)
+python -m pytest -q
+python tools/lint.py
+python tools/check_undefined_names.py
+python tools/check_doc_links.py
+python examples/minimal_adapter/example.py
+python examples/tiny_frame_game/walkthrough.py
 ```
 
-## Who reads what
+The examples are independent teaching slices. `tiny_frame_game` runs several
+capabilities in one convenient order; that order is not a required port
+workflow.
 
-| Audience | Read |
-|---|---|
-| A human wondering what this is | this README — you're done |
-| Anyone touching architecture, terminology, or the roadmap | [`docs/dos_re_2.0.md`](docs/dos_re_2.0.md) — the canonical staged-recovery pipeline, vocabulary, risk model, milestones |
-| The agent porting a game | [`docs/getting_started.md`](docs/getting_started.md) (the workflow), then [`docs/agent_toolbox.md`](docs/agent_toolbox.md) (task → tool → command here); `lemmings_port` is the worked reference |
-| The agent extending this framework | [`AGENTS.md`](AGENTS.md) (the rules), [`docs/architecture.md`](docs/architecture.md) (the module map) |
-| Mechanism reference | [`docs/README.md`](docs/README.md) (hooks/verification, demos/snapshots, state mirrors, hardware status, lifting, performance, glossary) |
+## Start a port
 
-## Repository layout
-
-```text
-dos_re/       the framework package (VM + proof engines + lifter) — stdlib + numpy
-docs/         reference docs + the agent toolbox   → docs/README.md
-examples/     runnable demos (deletable; nothing imports them)
-tests/        framework tests (no game assets needed)
-tools/        run/see/read, lift/verify, and guardrail CLIs → tools/README.md
+```bash
+python tools/new_project.py --game mygame --output ../mygame_port
 ```
 
-## Requirements
+A port owns game-specific inputs, facts, implementations, services, assets,
+bootstrap materialization, and replay corpus. Keep dos_re as a dependency or
+submodule; do not copy its planner or invent project-local replay, coverage, or
+implementation-selection authorities.
 
-Python 3.11+. The core has **zero dependencies**. Optional: `pytest` (tests),
-`cffi` (build the OPL3 backend), `numpy`+`pygame` (interactive viewers).
-Headless workloads run unchanged — and much faster — under PyPy.
+Read [Getting started](docs/getting_started.md) and the
+[documentation map](docs/README.md). Commands are indexed in
+[tools/README.md](tools/README.md).
 
-## Provenance & honesty
+## Scope and license
 
-Extracted from `pre2_port` (primary) and `overkill_port` (earlier pilot);
-the retired 1.0 starter's `MIGRATION.md` (archived in `template_dos_port`)
-records exactly what came from where.  The 2.0 pipeline was proven on the
-Lemmings pilot (`lemmings_port` — strict VMless + EXE-independent, M2).
-[`docs/hardware_support.md`](docs/hardware_support.md) is the honest status of
-the hardware models — including what is *not* modeled.
+dos_re is a recovery framework, not a universal DOS emulator or turnkey
+decompiler. Hardware behavior and automatic recovery are intentionally
+incomplete; add only evidence-backed behavior required by a concrete target.
 
-No game code, assets, or executables are included. Bring your own legally
-owned game to port.
-
-## License
-
-MIT ([LICENSE](LICENSE)), except the OPTIONAL external `pynuked_opl3`
-submodule and `graveyard/opl3_exact.py` (a pure-Python translation of
-[Nuked-OPL3](https://github.com/nukeykt/Nuked-OPL3)) — both
-LGPL-2.1-or-later; self-contained and separable (see LICENSE).
-
-The framework's openness never extends to game IP: no game assets or
-executables are ever included here or in adapter repos; ports require a
-legally owned original copy; and any official/commercial packaging of a
-recovered port requires the rights holder's agreement. Framework code and
-game IP stay strictly separate.
+The repository contains framework code, not proprietary game binaries or
+assets. Generated boot images, snapshots, replays, and recovered assets may
+contain original-game material and must be handled under the relevant rights.
+The framework is licensed under the [MIT License](LICENSE).

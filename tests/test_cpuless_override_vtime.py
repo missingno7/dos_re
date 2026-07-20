@@ -1,43 +1,33 @@
-"""An override's VIRTUAL-TIME contract -- the seam that makes an authoritative
-override admissible to an instruction-count-keyed differential.
+"""Authored CPUless adapters must preserve deterministic virtual time.
 
 ``test_cpuless_override`` pins that an override composes byte-exactly in STATE.
 State is not the whole contract: a composed callee also returns a virtual-time
 ``cost`` in the compat channel, and the caller accumulates it into ``_cost``,
 which anchors every downstream platform effect (``plat.farcall``/``intr``/
-``boundary``) and -- for a consumer whose demo/gate is keyed on instruction
+``boundary``) and -- for a consumer whose replay/gate is keyed on instruction
 count -- decides WHERE recorded input lands.  A GENERATED body is
 instruction-exact by construction (per-block ``_cost += count``).  A
 hand-recovered OVERRIDE is not: it does not execute the original's control flow,
 so unless it DECLARES the original's per-invocation instruction count it silently
 shifts the whole downstream timeline.
 
-So an override now declares a virtual-time contract
-(``virtual_time: {kind: static|model|island[, cost]}``, :func:`_read_virtual_time`)
-and ``--overrides-time-exact-only`` seeds ONLY the exact ones, leaving an
-``island`` address on its instruction-exact generated body.
-
-The differential below is on the COST, in the same shape as the state one: the
+The implementation catalog selects authored code; generated-promotion tooling
+does not read a second override manifest. The selected backend adapter is
+responsible for a timing model supported by evidence. The differential below
+is on COST, in the same shape as the state one: the
 composed caller's accumulated ``_cost`` is diffed against the interpreter's own
 instruction count over the identical caller+override bytes.
 """
 from __future__ import annotations
 
-import json
 import sys
 import types
-from pathlib import Path
-
-import pytest
 
 from dos_re.cpu import CPU8086, CPUState
 from dos_re.lift.cfg import scan_function
 from dos_re.lift.emit_cpuless import (CalleeContract, check_promotable,
                                       emit_recovered, _contract_inputs)
 from dos_re.memory import Memory
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-import cpuless_promote  # noqa: E402
 
 OVR_SEG, OVR_OFF = 0x2000, 0x0000
 CALLER_OFF = 0x0100
@@ -136,56 +126,8 @@ def test_static_cost_override_is_virtual_time_exact():
     assert _composed_cost("t_ovr_vt_exact") == interp
 
 
-def test_island_cost_override_drifts_the_timeline():
-    """The ISLAND convention (one dispatch step) is NOT virtual-time-exact -- it
-    under-counts by exactly the instructions the original executed.  This is the
-    drift the contract exists to eliminate; pinning it keeps the seam honest."""
-    _install_body("t_ovr_vt_island", 1)
-    drift = _composed_cost("t_ovr_vt_island") - _interp_cost()
+def test_unmodelled_one_step_cost_drifts_the_timeline():
+    """A guessed one-step cost is not exact and therefore fails verification."""
+    _install_body("t_ovr_vt_inexact", 1)
+    drift = _composed_cost("t_ovr_vt_inexact") - _interp_cost()
     assert drift == 1 - _OVR_ASM_COST < 0
-
-
-def _contract(vt) -> dict:
-    spec = {"name": OVR_NAME, "inputs": ["sp", "ss"], "outputs": ["ax"],
-            "ret_kind": "far"}
-    if vt is not None:
-        spec["virtual_time"] = vt
-    return {"2000:0000": spec}
-
-
-def _load(tmp_path, vt):
-    p = tmp_path / "ov.json"
-    p.write_text(json.dumps({"overrides": _contract(vt)}), encoding="utf-8")
-    return cpuless_promote._read_overrides(p)
-
-
-def test_virtual_time_contract_parses_and_defaults_to_island(tmp_path):
-    _c, vt = _load(tmp_path, None)
-    assert vt["2000:0000"]["kind"] == "island"       # every pre-contract override
-    _c, vt = _load(tmp_path, {"kind": "static", "cost": _OVR_ASM_COST})
-    assert vt["2000:0000"] == {"kind": "static", "cost": _OVR_ASM_COST,
-                               "evidence": ""}
-    _c, vt = _load(tmp_path, {"kind": "model", "evidence": "per-path"})
-    assert vt["2000:0000"]["kind"] == "model"
-
-
-@pytest.mark.parametrize("vt", [
-    {"kind": "guess"},                       # unknown kind
-    {"kind": "static"},                      # no cost
-    {"kind": "static", "cost": 0},           # a callee always costs >= 1 (ret)
-    {"kind": "static", "cost": "12"},        # not an int
-    {"kind": "static", "cost": True},        # bool is not a cost
-    "static",                                # not a dict
-])
-def test_a_malformed_virtual_time_contract_fails_loud(tmp_path, vt):
-    """Never guess a cost: a bad contract is a hard error, not a silent island."""
-    with pytest.raises(SystemExit):
-        _load(tmp_path, vt)
-
-
-def test_only_exact_kinds_are_gate_admissible():
-    """--overrides-time-exact-only seeds static/model and drops island; that
-    partition is what keeps a mixed override graph gate-admissible."""
-    assert set(cpuless_promote._VT_EXACT) == {"static", "model"}
-    assert "island" in cpuless_promote._VT_KINDS
-    assert "island" not in cpuless_promote._VT_EXACT

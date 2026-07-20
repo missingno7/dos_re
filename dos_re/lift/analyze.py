@@ -1,4 +1,4 @@
-"""Deterministic analyses over lifted functions — the CPUless stage's input.
+"""Deterministic analyses over lifted functions.
 
 First pass: FLAG LIVENESS (backward dataflow over the function CFG), feeding
 the emitter's first de-carrier transformation — eliding flag computations
@@ -19,9 +19,8 @@ The effect model is deliberately asymmetric, which keeps it sound by default:
       know is treated as reading ALL flags (and killing none), so unknown
       opcodes never enable an elision around them.
 
-Analyses run on ``FunctionScan`` objects — which the recovery IR re-elaborates
-via ``dos_re.lift.ir`` — never by parsing emitted Python (docs/dos_re_2.0.md
-§1b).
+Analyses run on ``FunctionScan`` objects, which Recovery IR re-elaborates via
+``dos_re.lift.ir``; generated Python is never parsed as an authority.
 """
 from __future__ import annotations
 

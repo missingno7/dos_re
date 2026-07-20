@@ -1,22 +1,21 @@
-"""liftverify — M2: prove lifted hooks against the ASM oracle, in situ.
+"""liftverify — compare generated functions with the ASM oracle in situ.
 
-The pipeline that turns an emitted hook into a trusted one. Point it at a
+This optional verifier produces per-function evidence. Point it at a
 snapshot (a moment where the target functions run) and a set of entries; it
-emits each lifted hook, installs them all with the framework's strict
+emits each lifted implementation, installs them with the framework's strict
 auto-continuation verifier, runs the VM forward, and — every time a lifted
 function executes — interprets the ORIGINAL ASM from the same pre-state to the
-hook's own continuation and diffs the full machine state. No hand-written
+implementation's continuation and diffs the full machine state. No hand-written
 continuation metadata, no game-specific harness.
 
-Reports, and writes into a lift manifest (dos_re.lift.manifest — the lifter's
-own proof ledger, kept separate from recovered-source islands):
-    ORACLE_PASSING  the first --samples calls (per hook) were byte-exact
+Reports and writes generated-function evidence to ``dos_re.lift.manifest``:
+    ORACLE_PASSING  the first --samples calls (per function) were byte-exact
                     (+ block coverage M/K).  NOTE: this is a SAMPLE — verification
-                    retires each hook once it hits the --samples cap, so calls
+                    retires each function once it hits the --samples cap, so calls
                     beyond it, and blocks the run never reached (M<K, flagged
-                    "PARTIAL COVERAGE"), are unproven.  A hook can pass here and
+                    "PARTIAL COVERAGE"), are unproven. A function can pass here and
                     still differ on an unsampled deeper path; for whole-run
-                    assurance raise --samples/--steps or use the frame-verifier.
+                    assurance use replay verification at stable points.
     DIVERGED        a call differed from the ASM oracle (details printed)
     INCONCLUSIVE    the oracle could not be RUN to the hook's continuation in
                     the budget (--verify-timeout) — UNPROVEN, not disproven.
@@ -30,14 +29,13 @@ Usage:
         --entry 1010:4537 [--entry ...] [--entries-file F] \\
         [--steps 5000000] [--emit-dir lifted] [--manifest lifted/manifest.json]
 
-This is the optional accelerator a porting agent reaches for: instead of
-hand-translating a routine and hoping, lift it, run this, and either get a
-verified replacement island for free or a precise divergence to look at.
+This evidence does not select an implementation for execution and does not
+replace replay verification of a composed program.
 
-Scope: a PER-SLICE tool. Each sampled call re-interprets the original ASM to
-the hook's continuation, so verify a handful of related entries at a time
-(the "one routine, one verification, per slice" loop) — not the whole census
-in one process. `liftgen --report` is the tool for whole-census questions.
+Scope: a focused verifier. Each sampled call re-interprets the original ASM to
+the generated function's continuation, so verify a bounded set of related
+entries at a time. ``liftgen`` reports static emitter support across larger
+entry sets without running this differential.
 """
 from __future__ import annotations
 
@@ -57,7 +55,7 @@ from dos_re.lift.smc import analyze_smc  # noqa: E402
 from dos_re.lift.emit import EmitUnsupported, emit_function  # noqa: E402
 from dos_re.lift.manifest import LiftManifest, LiftRecord  # noqa: E402
 from dos_re.lift.runtime import LiftRuntimeError  # noqa: E402
-from dos_re.repro_artifacts import clone_runtime_state  # noqa: E402
+from dos_re.snapshot import clone_runtime_state  # noqa: E402
 from dos_re.snapshot import load_snapshot, parse_addr  # noqa: E402
 from dos_re.verification import (HookVerifierConfig, HookVerifyDivergence,  # noqa: E402
                                  HookVerifyInconclusive,
@@ -110,9 +108,9 @@ def main(argv=None) -> int:
     p.add_argument("--samples", type=int, default=20,
                    help="differential-verify each function this many times, then let "
                         "it run freely (each verification clones + re-runs the ASM "
-                        "oracle, so a hot function would otherwise crawl). Per-hook, "
+                        "oracle, so a hot function would otherwise crawl). Per function, "
                         "so one hot function never starves the sample budget of the "
-                        "others -- that sample is what proves the hook.")
+                        "others -- that sample is the recorded evidence.")
     p.add_argument("--drive", metavar="MOD:FUNC", default=None,
                    help="per-frame drive callback FUNC(rt, frame), called before "
                         "each frame's timer IRQs -- lets a game feed menu keys / "
@@ -127,14 +125,13 @@ def main(argv=None) -> int:
                    help="deliver N INT 08h timer interrupts per frame while running "
                         "forward (0 = none). Interrupt-gated code -- timer ISRs and "
                         "everything they call -- is never reached by a plain forward "
-                        "run; this is how you exercise it (mirror the game's own "
-                        "frontend, e.g. skyroads uses 6).")
+                        "run; mirror the selected frontend's interrupt cadence.")
     p.add_argument("--frame-steps", type=int, default=30_000, metavar="N",
                    help="(with --timer-irqs) VM instructions between IRQ bursts")
     p.add_argument("--emit-dir", default="lifted",
-                   help="where the generated hook modules are written / read")
+                   help="where generated implementation modules are written / read")
     p.add_argument("--max-iterations", type=int, default=None, metavar="N",
-                   help="raise the lifted hook's own runaway guard above the emitter's "
+                   help="raise the generated function's runaway guard above the emitter's "
                         "default (still at least instructions*5000 either way). Use "
                         "when a hit MAX_ITERATIONS is a real large data-driven loop, "
                         "not a decode bug -- the static census already cross-checks "
@@ -148,9 +145,6 @@ def main(argv=None) -> int:
                         "live code memory and put THAT through the same oracle "
                         "differential. Without this they are skipped as "
                         "not-liftable and stay unproven.")
-    p.add_argument("--install-passing", action="store_true",
-                   help="after the run, print the import line to install every "
-                        "ORACLE_PASSING hook (does not modify game code itself)")
     args = p.parse_args(argv)
 
     entries = [parse_addr(e) for e in args.entry]
@@ -368,11 +362,6 @@ def main(argv=None) -> int:
     npass, ndiv, ninc = len(passing), len(diverged), len(inconclusive)
     print(f"\n{npass} ORACLE_PASSING, {ndiv} DIVERGED, {ninc} INCONCLUSIVE "
           f"/ {len(hooks)} lifted; manifest: {manifest_path}")
-    if passing and args.install_passing:
-        print("\nto install the passing hooks, register them in your adapter's hooks.py:")
-        for entry, rec in passing:
-            print(f"  from {emit_dir.name}.{rec.module[:-3]} import {rec.module[:-3]}  "
-                  f"# @ {entry}")
     return 0 if not diverged else 1
 
 

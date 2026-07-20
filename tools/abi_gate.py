@@ -1,21 +1,21 @@
-"""abi_gate.py -- the machine-checkable M3b (ABI-recovered CPUless) wall.
+"""abi_gate.py -- static checks for generated ABI-recovered implementations.
 
-Reports the acceptance counters from docs/abi_end_state.md over an emitted
-ABI core corpus.  Every counter must be ZERO; anything non-zero names the
-exact files.  Functions that are NOT cores are reported separately as a
-CLASSIFIED EXCEPTION report -- each class owes a generated representation,
-not merely a name, so an exception is a finding rather than a silent gap.
+Reports structural acceptance counters over an emitted ABI core corpus. Every
+counter must be zero; anything non-zero names the exact files. Functions that
+are not cores are reported separately as classified exceptions. Each class
+owes a generated representation, not merely a name, so an exception is a
+finding rather than a silent gap.
 
 This is a STATIC gate over generated text and the census: it complements,
 never replaces, the seeded differential (tools/abi_core_verify.py) and the
-end-to-end oracle demo.  It exists because several real defects in this
-milestone were statically visible before they were dynamically visible --
+end-to-end oracle replay. It exists because several real defects were
+statically visible before they were dynamically visible --
 an unbound composed-call argument, a stale core module left on disk after
 its function was refused.
 
 Usage (from the game root):
     python dos_re/tools/abi_gate.py \
-        --abi-dir lemmings/recovered_abi \
+        --abi-dir game/recovered_abi \
         --census artifacts/abi/contract_census.json
 """
 from __future__ import annotations
@@ -148,7 +148,7 @@ def gate(abi_dir: Path, census: dict) -> dict:
             counters["virtual_stack_objects"].append(name)
         # A de-stacked core must not address memory through the MACHINE
         # STACK.  mem.*(ss, ...) is only a violation when ss is NOT a
-        # declared semantic segment parameter: slice 7 (ss-as-data) proved
+        # declared semantic segment parameter: ss-as-data evidence shows
         # some functions use ss purely as a data-segment selector -- there
         # the access is no more "stack" than a ds: one, and ss arrives as an
         # ordinary contract parameter.  When ss is NOT a parameter, the
@@ -195,7 +195,7 @@ def gate(abi_dir: Path, census: dict) -> dict:
         # signature that never declared `_flags_in`.  That is a NameError on
         # every call, and because the runtime catches BaseException around the
         # program thread it surfaced only as a missing park -- eight cores, a
-        # bisection, and several demo runs to find something a compiler-grade
+        # bisection, and several replay runs to find something a compiler-grade
         # check names instantly.  Generated code must be checked AS CODE.
         for fname, bad in _unbound_names(s).items():
             for nm in sorted(bad):
@@ -230,7 +230,7 @@ def main(argv=None) -> int:
     census = json.loads(Path(args.census).read_text(encoding="utf-8"))
     rep = gate(Path(args.abi_dir), census)
 
-    print(f"M3b ABI-recovered wall over {rep['cores']} emitted cores:")
+    print(f"ABI-recovered static checks over {rep['cores']} emitted cores:")
     failed = 0
     for name, hits in rep["counters"].items():
         n = len(hits)
@@ -244,12 +244,12 @@ def main(argv=None) -> int:
         print(f"  {reason:<44} {n:4d}")
 
     if failed:
-        print(f"\nWALL NOT CLOSED: {failed} violation(s).")
+        print(f"\nABI STATIC CHECKS FAILED: {failed} violation(s).")
         return 1
-    print("\nWALL COUNTERS ALL ZERO for the emitted core corpus. "
-          "(M3b completion additionally requires the exception list above "
+    print("\nABI static counters are zero for the emitted core corpus. "
+          "(coverage additionally requires the exception list above "
           "to be empty or fully represented, plus a green differential and "
-          "a green oracle demo.)")
+          "a green oracle replay.)")
     return 0
 
 

@@ -4,12 +4,8 @@ Lifted routines (Python reimplementations of original ASM running against VM
 memory/registers) must reproduce exact flag/register side effects.  These
 helpers encode common 8086 instruction semantics (INC/DEC preserving CF,
 REP MOVSB/STOSB/MOVSW fast paths that respect the EGA planar aperture, LOOP
-count wrap, ...) so every game adapter's lifted islands can share one proven
-implementation instead of re-deriving flag behaviour per hook.
-
-Origin: extracted from the Overkill port (``overkill/asm.py``), where these
-helpers were shared across its lifted islands.  The logic is game-neutral
-8086 semantics; only the module home changed.
+count wrap, ...) so generated and authored implementations can share one proven
+implementation instead of re-deriving flag behaviour per adapter.
 """
 from __future__ import annotations
 

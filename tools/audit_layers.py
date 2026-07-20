@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Audit an adapter's pure recovered layers for VM leakage (pitfall #17 made executable).
+"""Audit selected native implementation layers for machine-runtime leakage.
 
-The recovered game-logic layers must stay portable and VM-free — no ``dos_re``
-imports, no ``cpu``/``mem`` names or CPU/Memory types, no bare memory-layout
-constants. This is what keeps the future native core reachable; both source
-ports learned it the hard way when refactors quietly pulled the VM back in.
+Use this when an implementation declares that it is detached from the machine
+runtime: no ``dos_re`` imports, no ``cpu``/``mem`` names or CPU/Memory types,
+and no bare memory-layout constants. The rule applies only to directories
+assigned that property; DOS-memory-backed implementations remain valid.
 
 Usage:
     python tools/audit_layers.py <pure_dir> [<pure_dir> ...]
@@ -20,8 +20,6 @@ e.g. (from an adapter repo):
 as bare literals in pure code; a genuinely-justified value may carry a
 ``# layout-justified`` comment on its line. Run it with your test suite.
 
-Origin: generalized from overkill_port's scripts/audit_recovered_layers.py
-(roots, forbidden packages, and layout constants became CLI arguments).
 """
 from __future__ import annotations
 

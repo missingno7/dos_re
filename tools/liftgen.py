@@ -1,11 +1,11 @@
-"""liftgen — M0 census for the automatic lifter (docs/lifting_design.md §10).
+"""liftgen — inspect which selected functions the literal lifter supports.
 
 Given a snapshot and a list of function entry points, statically scan each
 function (dos_re.lift) with the interpreter cross-checking every decoded
 instruction length, and report: liftable or not, size, blocks, exits, call
-dependencies, INT usage, and the refusal taxonomy. No code generation — this
-tool exists to measure what fraction of REAL functions the v1 lifter subset
-would cover, before any emitter is written.
+dependencies, INT usage, and the refusal taxonomy. No code generation occurs;
+the result is capability evidence for these entries, not a required global
+operation.
 
 Usage:
     python tools/liftgen.py --exe GAME.EXE --snapshot DIR \
@@ -66,11 +66,11 @@ def main(argv=None) -> int:
     p.add_argument("--json", help="write full per-function results to this file")
     p.add_argument("--game-root", default=None)
     p.add_argument("--emit", metavar="DIR",
-                   help="M1: also generate a literal Python hook per liftable entry "
+                   help="also generate a literal Python implementation per liftable entry "
                         "into DIR (one module each, named lifted_<cs>_<ip>.py)")
     p.add_argument("--count-instructions", action="store_true",
                    help="(with --emit) make the lifted hook reproduce the ASM's "
-                        "instruction_count, so installing it is demo-clock transparent")
+                        "instruction_count, so installing it is replay-clock transparent")
     p.add_argument("--max-iterations", type=int, default=None, metavar="N",
                    help="(with --emit) raise the emitted hook's runaway guard above "
                         "the default -- for large data-driven loops, not decode bugs")

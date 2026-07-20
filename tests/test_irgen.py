@@ -36,19 +36,7 @@ CS = 0x1000
 ENTRY = 0x0100
 
 
-class _FakeMem:
-    """Just enough of Memory for irgen's signature recipe."""
-
-    def __init__(self, code: bytes, entry: int):
-        self.code, self.entry = code, entry
-
-    def rb(self, seg, off):
-        i = (off - self.entry) & 0xFFFF
-        return self.code[i] if i < len(self.code) else 0x90
-
-
 def test_ir_record_reemits_byte_identical():
-    irgen = _load_tool("irgen")
     liftemit = _load_tool("liftemit")
 
     # A function with a call, an int (effect tag), memory ops and a shared
@@ -64,8 +52,8 @@ def test_ir_record_reemits_byte_identical():
     scan = scan_function(fetch, ENTRY)
     assert scan.liftable
 
-    mem = _FakeMem(code, ENTRY)
-    rec = irgen._function_record(scan, CS, ENTRY, mem, keep_interpreted=set())
+    rec = irgen_core.function_record(
+        scan, CS, ENTRY, fetch, environment_wait_entries=set())
     assert rec["liftable"]
     assert any(i.get("platform_effect") == "int21_dos"
                for b in rec["blocks"] for i in b["instructions"])
@@ -205,15 +193,3 @@ def _build_with(**kw):
                     "toolchain": "test", "entries": 1},
         notice="TEST DOCUMENT",
         **kw)
-
-
-def test_dos_frontend_record_matches_core_record():
-    """tools/irgen.py stays a thin shim: its mem-based _function_record equals
-    the core record built from the equivalent fetch (byte-identical refactor
-    regression gate)."""
-    irgen = _load_tool("irgen")
-    scan = scan_function(_seam_fetch, ENTRY)
-    mem = _FakeMem(_SEAM_CODE, ENTRY)
-    shim = irgen._function_record(scan, CS, ENTRY, mem, keep_interpreted=set())
-    core = irgen_core.function_record(scan, CS, ENTRY, _seam_fetch, set())
-    assert shim == core

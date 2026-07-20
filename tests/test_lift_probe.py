@@ -71,7 +71,7 @@ def _rt(scribble_at=None):
 def _clone_passthrough(monkeypatch):
     """make_ip_delta_probe clones the runtime; the fake has no cloning machinery, so pass it
     through. The behaviour under test is the memory restore, not the clone."""
-    import dos_re.repro_artifacts as ra
+    import dos_re.snapshot as ra
     monkeypatch.setattr(ra, "clone_runtime_state", lambda rt: rt)
 
 

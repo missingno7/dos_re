@@ -70,7 +70,7 @@ def test_rearm_is_noop_when_not_streaming():
 
 def test_rearm_resumes_a_pending_block_faithfully_without_firing():
     """A block PENDING at save must resume at the same remaining offset on the
-    resuming clock — NOT fire at load.  Force-firing made a recorded demo's
+    resuming clock — NOT fire at load.  Force-firing made a recorded replay's
     block-IRQ land at load instead of its due instant, so the replay diverged
     ~one frame in.  Regression for that fix."""
     fired = []

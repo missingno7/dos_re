@@ -5,7 +5,7 @@ runtime (``self-modifying`` / ``code-patched-at-runtime`` -- cfg.py,
 irgen_core.py).  That refusal is the safety baseline and it stays: a FROZEN
 lift of mutable code bytes is never acceptable.
 
-This module is the separate, evidence-driven stage on top: it examines every
+This module is an optional evidence-driven analysis: it examines every
 statically-visible code write against the DECODED target instruction and
 decides whether the mutation can be modeled as ordinary data flow instead.
 
@@ -44,7 +44,7 @@ Verification contract
 ---------------------
 A candidate is CANDIDATE, not proven.  ``liftemit --desmc`` emits the
 transformed module (banner-marked), and the ordinary differential machinery
-(``liftverify`` in situ, then the end-to-end demo differential) is the
+(``liftverify`` in situ, then the end-to-end replay differential) is the
 promotion gate -- run it over inputs that exercise MULTIPLE patch
 configurations (e.g. every LZS file the boot decodes re-patches the widths).
 """

@@ -229,7 +229,7 @@ def test_int33_mouse_driver_reports_present_and_tracks_position():
     program's own coordinate range (AX=7/8).  A mouse-driven game (VGA Lemmings)
     only enables pointer control when detection succeeds -- so its front-end must
     set ``mouse_present`` (the interactive viewer does so unconditionally; replay
-    takes the recording's own answer via InputDemoPlayback.mouse_present_hint).
+    takes the recording's explicit ReplayArtifact ``mouse_present`` metadata).
 
     The mouse is opt-in rather than ambient because detecting one changes a game's
     startup control flow, which would silently diverge any recording made without

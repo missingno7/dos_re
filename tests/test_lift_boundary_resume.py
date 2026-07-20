@@ -7,13 +7,13 @@ head itself:
 
   * a snapshot captured while the game was spinning there -- and a game spends
     most of its wall clock in exactly this loop, so this is the LIKELIEST place
-    to catch it. Every one of skyroads' gameplay demos starts at 1010:22F8,
+    to catch it. Every one of skyroads' gameplay replays starts at 1010:22F8,
     mid-spin.
   * an IRET returning to the head, when an IRQ landed on that instruction.
 
 Neither could dispatch: the head was forced as a block leader but never
-exported, so no hook existed at it. Behind the strict-VMless wall that is a
-violation at frame 0 -- on the address the game is most often found at, in a
+exported, so no implementation existed at it. When interpreter fallback is
+forbidden that fails at frame 0 -- on the address the game is most often found at, in a
 function that WAS lifted and does contain it, which reads like a census bug and
 is not one.
 """

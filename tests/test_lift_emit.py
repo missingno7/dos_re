@@ -518,10 +518,10 @@ def test_instruction_count_option_reproduces_the_asm_clock():
     # A non-counting hook still gets step()'s classic +1.
     plain, _s2, _src2 = _lift(code, count_instructions=False)
     assert not getattr(plain, "owns_time", False)
-    legacy = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
-    legacy.replacement_hooks[(CS, ENTRY)] = plain
-    legacy.step()
-    assert legacy.instruction_count == 1
+    plain_cpu = _make_cpu(code, CPUState(**{k: getattr(st, k) for k in st.__slots__}))
+    plain_cpu.replacement_hooks[(CS, ENTRY)] = plain
+    plain_cpu.step()
+    assert plain_cpu.instruction_count == 1
 
 
 def test_runaway_internal_loop_fails_loud_not_hangs():
@@ -658,7 +658,7 @@ def test_entry_block_dispatches_first_even_when_not_the_lowest_leader():
     """A region can contain a branch target BELOW the entry; block_leaders()
     sorts by address, so the entry is not block 0.  The dispatch loop must
     start at the ENTRY block — hardcoding 0 executed the lowest-address block
-    first (found by the Lemmings pilot's whole-program census)."""
+    first (found by the Lemmings pilot's observed-entry census)."""
     base = 0x0100
     code = bytes.fromhex(
         "40"        # 0100: inc ax      backward target, below the entry
@@ -742,7 +742,7 @@ def test_linked_direct_call_replaces_emulate_call_and_stays_exact():
     """The linker seam: a near CALL to a lifted callee emits a direct native
     call (call_installed_hook_like_near_call) instead of emulate_call — no
     interpreter in the call path, byte-exact against the interpreted original.
-    This is the de-VM step of the recovery pipeline, proven in miniature."""
+    This proves the direct-call linking transformation in miniature."""
     # 0100: mov ax, 2 ; 0103: call 0x0110 ; 0106: add ax, 1 ; 0109: ret
     # 0110: add ax, 5 ; 0113: ret                       (the callee)
     code = bytes.fromhex("B80200" "E80A00" "050100" "C3"

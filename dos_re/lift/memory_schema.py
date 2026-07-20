@@ -1,4 +1,4 @@
-"""The Memory Schema IR -- M4's ownership and identity boundary.
+"""The Memory Schema IR -- memory ownership and identity boundary.
 
 docs/memory_schema.md §9, §10, §14.3.  This is NOT a struct declaration
 language: it is the machine-readable statement of WHO OWNS which historical
@@ -35,11 +35,11 @@ class Ownership(Enum):
     #: the native object is authoritative; historical bytes are generated
     #: from it for verification only
     NATIVE = "native"
-    #: bytes preserved verbatim during migration.  Legal only while promoted
-    #: native logic is PROVEN unable to depend on them -- preserving bytes for
-    #: comparison does not make an unmodelled dependency memoryless, and
-    #: before DETACHED every opaque range must become native-owned, proven
-    #: eliminated, or proven outside the runtime state.
+    #: bytes retained verbatim by a selected implementation. Legal only when
+    #: native logic is proven unable to depend on them. Preserving bytes for
+    #: comparison does not remove a memory dependency; a memory-detached
+    #: selection must make each opaque range native-owned, proven eliminated,
+    #: or proven outside runtime state.
     HISTORICAL_OPAQUE = "historical_opaque"
     #: a second spelling of bytes owned elsewhere (e.g. the same offset
     #: reached through two segment registers).  Never exports independently.
@@ -208,7 +208,7 @@ class Schema:
     #: digest of the INPUTS this schema was derived from (census, IR).  Every
     #: generated type, bridge, mask, rewrite and diagnostic embeds it; mixed
     #: or stale generations must refuse.  Same mechanism as the toolchain
-    #: signature that caught four stale runs during M3b.
+    #: content signature used to reject stale analysis results.
     input_digest: str = ""
 
     def __post_init__(self):

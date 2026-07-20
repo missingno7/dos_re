@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable, Literal, Sequence
 
 from .cpu import CPU8086, HaltExecution, UnsupportedInstruction
-from .repro_artifacts import clone_runtime_state
+from .snapshot import clone_runtime_state
 from .runtime import Runtime
 
 Addr = tuple[int, int]
@@ -81,7 +81,7 @@ AfterBoundaryCallback = Callable[[Runtime, str, Addr], None]
 TraceSampleCallback = Callable[[Runtime], bytes]
 # Returns (kind, canonical_addr) when the CPU is parked in a boundary-less input
 # wait loop, else None.  Lets the verifier treat such a loop as a frame boundary
-# so demo/live input is pumped there instead of spinning until the frame budget.
+# so replay/live input is pumped there instead of spinning until the frame budget.
 InputWaitDetector = Callable[["CPU8086"], "tuple[str, Addr] | None"]
 
 

@@ -16,7 +16,7 @@ So write it down. :func:`save_crash` dumps an ordinary snapshot plus a
 which is the whole point -- the fault becomes a starting position instead of a
 destination. It costs one 1 MB write on a path that was about to fail anyway.
 
-Loader-free by construction (see :mod:`dos_re.runtime_core`): a strict-VMless
+Loader-free by construction (see :mod:`dos_re.runtime_core`): a detached
 runner is exactly the caller that needs this most, and it may not import
 anything that reaches the EXE loader.
 """
@@ -120,7 +120,7 @@ def save_crash(rt, out_dir: str | Path, *, exc: BaseException | None = None,
     """Snapshot ``rt`` where it stands and record why. Returns the directory.
 
     ``context`` is whatever the caller knows that the machine does not -- the
-    frame number, the park counts, which demo was replaying. Put it in: the
+    frame number, the park counts, which replay was replaying. Put it in: the
     machine state says WHERE it broke and the context says WHEN, and the second
     question is usually the harder one to answer afterwards.
 

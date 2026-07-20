@@ -1,21 +1,14 @@
-"""The lifter's proof ledger — a per-function status file, JSON-backed.
+"""Generated-function verification evidence, stored per function as JSON.
 
-Kept DELIBERATELY separate from ``dos_re.islands`` / ``oracle_link``: those
-track *recovered* source (understood, refactored, part of a subsystem), and
-the metrics-honesty rule (docs/lifting_design.md §7) says a mechanically
-lifted function is NOT recovered — it is coverage of the *verification*
-frontier, not the *understanding* frontier. Mixing the two vocabularies would
-let a wall of unread-but-verified Python inflate the "recovered %" that the
-campaigns are steered by. So the lifter counts its own tier here.
+This ledger records what one verification run observed. It does not select
+implementations, describe runtime activation, or claim a global recovery
+stage.
 
-Status ladder:
-    LIFTED          generated; never executed as a replacement
-    ORACLE_PASSING  in-situ verified: N calls, 0 divergence, M/K blocks covered
-    NOT_REACHED     lifted, installed for a verify run, but never executed
-    DIVERGED        a verify run found a byte-level difference vs the ASM oracle
-    INSTALLED       running as the default replacement (still SMC-guarded)
-    REFACTORED      a human/AI rewrote it into real recovered Python; then it
-                    graduates to an oracle_link island and leaves this ledger
+Statuses:
+    LIFTED          generated but not verified in this run
+    ORACLE_PASSING  N sampled calls matched; M/K blocks were covered
+    NOT_REACHED     installed for verification but not reached
+    DIVERGED        a sampled call differed from the ASM oracle
 
 The ledger is plain data (no imports beyond the stdlib) so it round-trips
 cleanly and diffs readably in git.
@@ -26,8 +19,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-STATUSES = ("LIFTED", "ORACLE_PASSING", "NOT_REACHED", "DIVERGED",
-            "INSTALLED", "REFACTORED")
+STATUSES = ("LIFTED", "ORACLE_PASSING", "NOT_REACHED", "DIVERGED")
 
 
 @dataclass

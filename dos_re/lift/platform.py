@@ -1,5 +1,4 @@
-"""Platform-effect contract + backends for CPUless recovered functions
-(M3 stage 2, dos_re_2.0.md section 4).
+"""Platform-effect contract and backends for CPUless recovered functions.
 
 A recovered CPUless function computes game behaviour over ``(mem, plat, *regs)``
 and receives NO CPU object.  When it must reach the machine (a port read/write,
@@ -35,12 +34,12 @@ The timing is owned by the generated metadata, NOT by any VM.
 TWO BACKENDS implement the same contract:
 
   * :class:`VMlessPlatformAdapter` -- a VERIFICATION-ONLY binding, used while
-    CPUless functions execute inside the mixed VMless graph.  It binds effects
+    CPUless functions may execute inside a mixed generated graph. It binds effects
     to the live VM's ``port_reader``/``port_writer`` and sets the VM's
     ``instruction_count``.  It is NOT the runtime owner of platform behaviour.
 
-  * :class:`CPUlessPlatformRuntime` -- the STANDALONE backend used by
-    ``play_cpuless.py``.  It owns a device model (a :class:`DOSMachine`, which
+  * :class:`CPUlessPlatformRuntime` -- an EXE-detached backend. It owns a
+    device model (a :class:`DOSMachine`, which
     is pure hardware -- no instruction execution) and its OWN virtual clock.
     It imports no CPU8086, no interpreter, no lifted function.
 
@@ -57,7 +56,7 @@ class VMlessPlatformAdapter:
     """Bind the ``plat`` contract to a live VM (cpu + its DOS port hooks).
 
     VERIFICATION ONLY: used while a CPUless function runs inside the mixed
-    VMless graph, so its effects can be compared against the interpreted
+    generated graph, so its effects can be compared against the interpreted
     oracle.  ``entry`` is the VM's ``instruction_count`` at function entry;
     each effect's absolute virtual time is ``entry + cost``."""
 
@@ -154,7 +153,7 @@ class VMlessPlatformAdapter:
         """Boundary-head observer (verification binding).  Writes the live
         bundle back to the VM so a park resumes from CURRENT state, then
         fires the VM's boundary hook (which may raise BoundaryReached).
-        NOTE: parking functions are STANDALONE-ONLY in the demo graph (their
+        NOTE: parking functions are DIRECT-GRAPH-ONLY in a replay graph (their
         adapters are not installed -- an unwound park would lose composed
         caller locals), so this path serves the differential harness, where
         no hook is armed and the observer is inert."""
@@ -224,7 +223,8 @@ def _chain_iret_stub(mem, vec_seg: int, vec_off: int, regs: dict) -> tuple:
     register bundle and flags as the recovered body left them.  This is
     VERIFIED, not assumed -- the target's first byte is read from live memory
     and MUST be ``iret``.  Any other target is an unmodelled external handler:
-    fail loud (the hard wall).  Returns the ``(regs, compat)`` pair the emitter
+    fail with an unresolved-edge diagnostic. Returns the ``(regs, compat)``
+    pair the emitter
     expects from a chain, same shape as the recovered-handler dispatch."""
     op = mem.rb(vec_seg & 0xFFFF, vec_off & 0xFFFF)
     if op != 0xCF:
@@ -245,7 +245,7 @@ INT_REGS = ("ax", "bx", "cx", "dx", "si", "di", "bp", "ds", "es")
 class _IntCarrier:
     """A register + memory carrier the pure DOS service handlers manipulate.
     It executes NOTHING -- not a CPU carrier, just the explicit INT reg bundle
-    (dos_re_2.0 section 4: DOS services are platform adapters).  ``set_flag``
+    (DOS services are explicit platform-adapter effects). ``set_flag``
     and ``halted`` are the only handler hooks beyond ``s``/``mem``."""
 
     class _Regs:
@@ -286,7 +286,7 @@ def _run_int(dos, carrier, num, regs, cost, flags_in):
 
 
 class CPUlessPlatformRuntime:
-    """Standalone platform backend for ``play_cpuless.py``.
+    """Standalone platform backend for an EXE-detached execution plan.
 
     Owns the historical memory image + a device model (:class:`DOSMachine`,
     pure hardware) + its own virtual clock.  Implements the ``plat`` contract
@@ -300,10 +300,10 @@ class CPUlessPlatformRuntime:
         self.clock = 0
         self._entry = 0
         self._carrier = _ClockCarrier(mem)
-        #: the standalone SCHEDULER seam: play_cpuless installs a callback
+        #: the standalone SCHEDULER seam: the selected composition installs a callback
         #: (head_cs, head_ip, resume_ip, regs, abs_cost) -> (regs, flags,
         #: extra_cost) that counts boundary-head passes and, on quota, PARKS
-        #: in-line: applies demo inputs, delivers timer IRQs through the
+        #: in-line: applies replay inputs, delivers timer IRQs through the
         #: recovered HANDLERS, and returns the post-IRQ state.  Without a
         #: callback the observer is inert (free-running).
         self.boundary_cb = None
@@ -311,7 +311,7 @@ class CPUlessPlatformRuntime:
         #: with an empty type-ahead buffer must WAIT for input.  A flat CPU
         #: rewinds its IP and re-runs the instruction next frame; the CPUless
         #: backend cannot rewind a Python call stack, so a driver installs a
-        #: callback that advances ONE frame in place (capture + demo input +
+        #: callback that advances ONE frame in place (capture + replay input +
         #: timer IRQs) so awaited input can arrive, after which ``intr`` retries
         #: the read.  Without a callback a blocking read fails loud (the runner
         #: has no input source), never synthesising a phantom key.
@@ -360,7 +360,7 @@ class CPUlessPlatformRuntime:
             except ConsoleInputWouldBlock:
                 # A console read found the type-ahead buffer empty.  On a flat
                 # CPU the DOS handler rewinds IP and the read re-runs next frame;
-                # here the driver advances one frame in place (delivering demo
+                # here the driver advances one frame in place (delivering replay
                 # input + timer IRQs) so the awaited key can arrive, then we
                 # retry the SAME read.  No driver -> fail loud (never a phantom).
                 if self.blocking_read_cb is None:
@@ -392,7 +392,7 @@ class CPUlessPlatformRuntime:
     def farcall(self, seg: int, off: int, regs: dict, argbytes: int,
                 cost: int) -> dict:
         # The standalone backend does not yet own a platform-API device model
-        # for import-thunk far-calls (the play_cpuless analogue of the DOS INT
+        # for import-thunk far-calls (the detached analogue of the DOS INT
         # services): fail loud with a witness until a real platform adapter is
         # bound, exactly as an unmodelled INT does above.  The VMless
         # verification binding routes these through the live API registry, so

@@ -5,7 +5,7 @@ offset, following fallthrough and direct near branches. Direct/indirect calls
 and INTs do NOT extend the region (callees run through the VM at execution
 time — docs/lifting_design.md §6); they are recorded as external
 dependencies. The result is either a liftable region description or a
-structured refusal list — the M0 census consumes both.
+structured refusal list that analysis and generation tools can retain.
 
 An optional ``probe`` callback cross-checks each decoded instruction length
 against the interpreter (the authority). The walker itself stays OS-free and
@@ -22,7 +22,7 @@ from .decode import (CALL, CALL_FAR, CALL_IND, HLT, INT, IRET, JCC, JMP,
                      decode_one)
 
 #: kinds that terminate a path (function exits).  An indirect jump ends the
-#: region as a TAIL EXIT (the 32-bit pipeline's proven treatment): the emitted
+#: region as a TAIL EXIT (the 32-bit emitter uses the same treatment): the emitted
 #: hook computes the runtime target, sets CS:IP, and hands control back to the
 #: VM — a dispatcher lifts as prologue + tail transfer, its cases stay
 #: interpreted (and re-enter any hook installed at them).  Observed need:
@@ -60,7 +60,7 @@ class FunctionScan:
     cs_store_targets: list[tuple[int, int]] = field(default_factory=list)
     #: boundary-head IPs found inside the reachable set (subset of the caller's
     #: declared ``--boundary-heads``).  A boundary head is a scheduler-yield
-    #: point (docs/recovery_ir.md, dos_re_2.0.md §6a): the top-level frame/event
+    #: point (docs/recovery_ir.md): the top-level frame/event
     #: loop yields there each frame instead of returning.  A function whose only
     #: terminating construct is a boundary head is a legitimately non-returning
     #: COROUTINE, not a dead end -- so its presence suppresses the ``no-exit``
@@ -259,8 +259,7 @@ def scan_function(fetch: Callable[[int], int], entry: int, *,
     DOS game has: it yields one frame at the boundary instead of returning) — so
     the ``no-exit`` refusal is suppressed and the function stays liftable, its
     boundary head(s) recorded for the emitter's resume machinery.  Without this a
-    game's own main loop is unliftable, capping the VMless graph short of the
-    root (docs/dos_re_2.0.md §6a).
+    selected generated graph cannot cover that loop.
     """
     heads = boundary_heads or frozenset()
     scan = FunctionScan(entry=entry)
@@ -373,7 +372,7 @@ def scan_function(fetch: Callable[[int], int], entry: int, *,
     # decode garbage when the program retunes them (SkyRoads' LZS decoder
     # patches its per-file bit-width immediates exactly this way -- the lifted
     # copy read one file's widths for every file).  Refuse loud; the routine
-    # belongs to the keep-interpreted / hand-hook queue.  Writes landing in
+    # requires runtime-code evidence or a separately selected implementation. Writes landing in
     # OTHER functions are recorded on the scan and adjudicated document-wide
     # (irgen_core.build_document), where every censused region is known.
     for ip, inst in scan.insts.items():

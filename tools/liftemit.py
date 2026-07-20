@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""liftemit — batch-emit every census entry to lifted Python, in one pass.
+"""liftemit — batch-emit selected Recovery IR entries to lifted Python.
 
-The bulk-emission step of the DOS_RE 2.0 pipeline (docs/dos_re_2.0.md): given
-the census entry list and a snapshot whose memory is the code-bytes authority,
-emit a VMless lifted module per entry into ``--emit-dir``.  No verification
-and no driving — that is ``liftverify``'s job (per-slice diagnostics / hybrid
-tier) and, for the assembled graph, the END-TO-END oracle's.  Under
-oracle-guided convergence the whole census is emitted optimistically here,
-linked by ``liftlink`` (structural edges), then validated as a graph;
-``liftemit`` is the deterministic "labor" that produces the candidate modules.
+Given Recovery IR, or an entry list plus a code-byte snapshot, emit a generated
+implementation module per entry into ``--emit-dir``. Emission is a reproducible
+implementation recipe; it neither selects these modules for execution nor
+claims verification. ``liftverify`` and replay verification produce the
+corresponding evidence when needed.
 
 Emission uses ``liftverify``'s exact signature recipe and iteration default,
 but coverage instrumentation (per-block BLOCKS_SEEN bookkeeping) is OFF by
@@ -17,18 +14,14 @@ and per-call/per-block instrumentation is verification-tier overhead (it made
 the Lemmings fade paths measurably slower).  Pass ``--coverage`` to emit
 byte-identically to liftverify's modules when a proof pass will reuse them.
 
-The VMLESS WALL (docs/dos_re_2.0.md §1a) is checked here mechanically: after
-emission every module is scanned for ``interp_one`` call sites (instruction-
-interpretation fallback inside the declared corpus).  The count is always
-reported; ``--require-vmless-wall`` makes any nonzero count a hard failure —
-the flag a port's pipeline should pass once its corpus reaches zero, so a
-regression (a new opcode the emitter falls back on) fails the build instead
-of silently re-entering the interpreter.
+Every emitted module is scanned for ``interp_one`` call sites. The count is
+always reported; ``--require-no-interpreter-fallback`` makes any nonzero count
+a hard failure when a selected implementation set declares that property.
 
 Usage:
     python tools/liftemit.py --exe GAME.EXE --snapshot DIR \
         --entries-file entries.txt [--emit-dir lifted] [--max-iterations N] \
-        [--require-vmless-wall]
+        [--require-no-interpreter-fallback]
 """
 from __future__ import annotations
 
@@ -48,7 +41,7 @@ def _probe(rt, cs):
     """Interpreter length-probe over a scratch clone (identical to liftverify /
     liftlink) — the scanner uses it to resolve instruction lengths the pure
     static decode is unsure about."""
-    from dos_re.repro_artifacts import clone_runtime_state
+    from dos_re.snapshot import clone_runtime_state
     scratch = clone_runtime_state(rt)
     cpu = scratch.cpu
     cpu.replacement_hooks.clear(); cpu.hook_names.clear()
@@ -125,7 +118,7 @@ def emit_entry_from_ir(fn_rec: dict, emit_dir: Path, max_iterations,
     # ir.desmc_operand_slots): a function refused ONLY for runtime code patching,
     # whose every incoming write is a supported operand slot, may be emitted with
     # those operands read from live code memory. The module is banner-marked
-    # DESMC; the ordinary differential machinery (liftverify + the end-to-end demo
+    # DESMC; the ordinary differential machinery (liftverify + the end-to-end replay
     # gate) is the promotion decision.  Unlike cpuless_promote, the lifted emitter
     # supports far-target patches too (the JMP_FAR/CALL_FAR path in emit.py).
     slots = desmc_operand_slots(fn_rec)
@@ -159,8 +152,8 @@ def emit_entry_from_ir(fn_rec: dict, emit_dir: Path, max_iterations,
     return "ok", name
 
 
-def vmless_wall_report(emit_dir: Path):
-    """The VMless-wall static check: ``interp_one`` CALL SITES per module.
+def interpreter_fallback_report(emit_dir: Path):
+    """Count ``interp_one`` call sites per generated module.
 
     Counts real fallback invocations (``interp_one(``) — the import line and
     prose mentions do not match.  Returns {module_name: count} for modules
@@ -200,17 +193,17 @@ def main(argv=None) -> int:
     ap.add_argument("--coverage", action="store_true",
                     help="emit with per-block coverage instrumentation "
                          "(liftverify-identical modules); default OFF for "
-                         "the production corpus")
+                         "uninstrumented generated artifacts")
     ap.add_argument("--boundary-heads", default=None, metavar="@FILE",
                     help="boundary-head addresses (one CS:IP per line): each "
                          "gets an emitted observer event + a RESUME entry, so "
                          "the port's clock parks and resumes in host code "
-                         "(the VMless wall's boundary instrumentation)")
+                         "(host-side stable-boundary instrumentation)")
     ap.add_argument("--dispatch-entries", default=None, metavar="@FILE",
                     help="dynamic dispatch-entry addresses (one CS:IP per "
                          "line): interior addresses reached by indirect "
                          "control flow.  Each is forced as a block leader and "
-                         "exported so the installer registers a re-entry hook "
+                         "exported so the backend activator registers a re-entry hook "
                          "into the CONTAINING function -- sharing its "
                          "recovered blocks, not cloning them into a module.")
     ap.add_argument("--desmc", action="store_true",
@@ -224,10 +217,9 @@ def main(argv=None) -> int:
                          "unobservable by analyze.dead_flag_sites "
                          "(seam-conservative liveness). Judged end-to-end "
                          "like every transformation.")
-    ap.add_argument("--require-vmless-wall", action="store_true",
+    ap.add_argument("--require-no-interpreter-fallback", action="store_true",
                     help="fail (exit 2) if any emitted module contains an "
-                         "interp_one fallback call site -- the enforced VMless "
-                         "execution wall (docs/dos_re_2.0.md section 1a)")
+                         "interp_one fallback call site")
     args = ap.parse_args(argv)
     if not args.from_ir and not (args.exe and args.snapshot and args.entries_file):
         ap.error("either --from-ir IR.json or --exe + --snapshot + --entries-file")
@@ -302,17 +294,17 @@ def main(argv=None) -> int:
           f"(not-liftable={counts['not-liftable']}, "
           f"emit-unsupported={counts['emit-unsupported']})")
 
-    offenders = vmless_wall_report(emit_dir)
+    offenders = interpreter_fallback_report(emit_dir)
     total_sites = sum(offenders.values())
     if offenders:
-        print(f"VMless wall: {total_sites} interp_one fallback call site(s) "
+        print(f"interpreter fallback audit: {total_sites} interp_one call site(s) "
               f"in {len(offenders)} module(s):")
         for name, n in sorted(offenders.items()):
             print(f"  {name}: {n}")
     else:
-        print("VMless wall: HOLDS (0 interp_one call sites in the corpus)")
-    if args.require_vmless_wall and offenders:
-        print("--require-vmless-wall: FAIL")
+        print("interpreter fallback audit: clear (0 interp_one call sites)")
+    if args.require_no_interpreter_fallback and offenders:
+        print("--require-no-interpreter-fallback: FAIL")
         return 2
     return 0 if not skipped else 1
 

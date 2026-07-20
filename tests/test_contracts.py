@@ -1,4 +1,4 @@
-"""ABI-contract inference (dos_re.lift.contracts) -- the M3b analysis layer.
+"""ABI-contract inference (dos_re.lift.contracts).
 
 Locks contract proposals on a small synthetic recovery IR: interprocedural
 composition, caller-observed return narrowing, stack-argument evidence,

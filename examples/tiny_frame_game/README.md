@@ -1,33 +1,39 @@
-# tiny_frame_game — the whole method in ten minutes
+# tiny_frame_game — several dos_re capabilities in one run
 
-A synthetic DOS "game" small enough to read in one sitting (18 instructions:
-a retrace-wait frame loop, an INT 09h keyboard ISR, and a framebuffer row
-painted with `counter + keystate`), driven through **every core mechanism of
-the framework** in one runnable script:
+This synthetic DOS game is small enough to read in one sitting: a retrace-wait
+frame loop, keyboard ISR, and framebuffer row painted from two state bytes.
 
-```
+```bash
 python examples/tiny_frame_game/walkthrough.py
 ```
 
-| Stage | What it proves |
+The walkthrough puts several independent capabilities in one convenient
+demonstration order:
+
+| Capability | What it demonstrates |
 |---|---|
-| oracle | the EXE boots in the VM (mode 13h via INT 10h, ISR installed via the IVT) and the framebuffer follows the frame counter; frames are stepped with `dos_re.checkpoints` |
-| cold-start demo | a demo is an **input recording, not a video**: recorded with no snapshot, replayed from a fresh boot through the *same* boundary driver, byte-identical for 10 frames — with a key press visibly changing the output |
-| snapshot | freeze mid-run, restore, both continuations agree frame-for-frame |
-| hook oracle | a draw hook that fills **319 of 320** pixels — registers all correct — is caught by the strict differential verifier's full-memory diff at the exact byte; the correct hook then runs verified on every call |
-| frame oracle | `run_frame_verifier` locksteps a pure-ASM reference against the hooked candidate: 6 frames, 0 divergences; the wrong candidate is detected at frame 1 with diff artifacts dumped |
-| state mirror | a `StructView` gives the game's state human names (`view.counter`, `view.keystate`) over the exact bytes the oracle verifies |
+| stable identity | the image and draw function have backend-independent identities |
+| Recovery IR | retained static evidence can be imported without Atlas decoding the EXE |
+| ReplayArtifact | a base continuation and immutable events replay deterministically; visits add timeline evidence |
+| Execution Atlas | static and replay sources can be projected into conservative ProgramCoverage |
+| planning | one catalog supports development and package-ready release policies |
+| detachment | DetachmentReport explains why the selected release no longer needs the EXE |
+| continuation | captured machine state restores deterministically |
+| verification | an incorrect faithful replacement is caught and the correct one passes |
+| state view | named fields can project the same DOS-memory bytes verified by the oracle |
 
-The point is onboarding, not realism: [`game.py`](game.py) is the "original
-binary" (its docstring is the disassembly), [`walkthrough.py`](walkthrough.py)
-is the whole lifecycle. When you understand why each stage exists, read
-the retired 1.0 starter's lifecycle docs (historical) for how the same stages play out on a
-real game, and its `docs/porting_new_game.md` to start one.
+This is an integration fixture, not a required recovery sequence. An Atlas may
+start from replay or explicit facts without IR; a port may use generated code
+without state views; another may never need a release export.
 
-Two details worth noticing:
+The development and release plans select from the same implementation catalog
+under different policies. The example uses a native bootstrap declaration and
+complete synthetic coverage; a real export also supplies its exact file
+closure.
 
-- **One boundary driver.** Recording and replay share `run_session()` — a
-  single definition of "a frame". Per-driver boundary definitions are the
-  classic way demo proofs silently rot (`docs/demos_and_snapshots.md`).
-- **The wrong hook has correct registers.** Only the default full-memory diff
-  catches it. That is why narrowing the diff is pitfall #7.
+The low-level CPU hook is backend machinery. The authored draw body is ordinary
+Python, and its selected adapter handles registers, memory, return control, and
+hook installation.
+
+See [Getting started](../../docs/getting_started.md) for ways to combine the
+operations in a real port.

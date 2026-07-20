@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dos-re"
-version = "0.1.0"
-description = "Reusable oracle-driven DOS game reverse-engineering / source-port framework: 8086 VM, hook verification, deterministic demos, snapshots"
+version = "3.0.0"
+description = "Oracle-driven DOS program recovery with stable identities, deterministic replay, evidence Atlas, mixed implementations, and closed-world export"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "missingno7" }]

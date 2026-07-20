@@ -3,15 +3,15 @@
 A port whose recovery IR carries symbol identity emits SYMBOLIC module names
 (``simone_srand1.py`` instead of ``lifted_2f99_0a10.py``) and records the
 entry→stem mapping in the emit dir's ``graph_manifest.json``; the link/install
-machinery resolves entries through it, and falls back to the historical
-address-derived names for anything unmanifested.  Game-free (synthetic)."""
+machinery resolves entries through it and uses address-derived names for
+anything unmanifested. Game-free (synthetic)."""
 from __future__ import annotations
 
 import json
 
 import pytest
 
-from dos_re.lift.install import (_load_module, install_vmless_graph,
+from dos_re.lift.install import (_load_module, activate_generated_graph,
                                  resolve_links)
 from dos_re.lift.naming import MANIFEST_NAME, GraphNaming, default_stem
 
@@ -95,23 +95,23 @@ def test_resolve_links_missing_symbolic_callee_fails_loud(tmp_path):
         resolve_links(loaded, tmp_path)
 
 
-# --- install_vmless_graph through the manifest ------------------------------------
+# --- graph activation through the manifest -------------------------------------
 
-def test_install_vmless_graph_uses_manifest_names(tmp_path):
+def test_activate_generated_graph_uses_manifest_names(tmp_path):
     (tmp_path / "game_fn.py").write_text("def game_fn(cpu):\n    pass\n")
     (tmp_path / "lifted_1010_0300.py").write_text(
         "def lifted_1010_0300(cpu):\n    pass\n")
     GraphNaming({"1010:0100": "game_fn"}).save(tmp_path)
 
     cpu = FakeCPU()
-    installed = install_vmless_graph(cpu, tmp_path)
+    installed = activate_generated_graph(cpu, tmp_path)
     assert installed == {(0x1010, 0x0100): "game_fn.py",       # manifested
                          (0x1010, 0x0300): "lifted_1010_0300.py"}  # default-named
     assert cpu.hook_names[(0x1010, 0x0100)] == "game_fn"
     assert cpu.hook_names[(0x1010, 0x0300)] == "lifted_1010_0300"
 
 
-def test_install_vmless_graph_missing_manifested_module_fails_loud(tmp_path):
+def test_activate_generated_graph_missing_manifested_module_fails_loud(tmp_path):
     GraphNaming({"1010:0100": "game_fn"}).save(tmp_path)       # no game_fn.py
     with pytest.raises(FileNotFoundError, match="game_fn"):
-        install_vmless_graph(FakeCPU(), tmp_path)
+        activate_generated_graph(FakeCPU(), tmp_path)

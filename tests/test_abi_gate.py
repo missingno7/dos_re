@@ -1,7 +1,7 @@
-"""The M3b static wall (tools/abi_gate.py): every counter must be zero, and
-each violation must NAME its file.  These lock the shapes the milestone
-forbids -- including the two defects that actually occurred during the
-slice work (an unbound composed-call argument, and a stale core module left
+"""Static ABI-core checks (tools/abi_gate.py): every counter must be zero, and
+each violation must NAME its file. These lock the rejected shapes, including
+two defects found during implementation (an unbound composed-call argument
+and a stale core module left
 on disk after its function was refused).
 """
 from __future__ import annotations
@@ -68,8 +68,8 @@ def test_register_named_public_param_is_flagged(tmp_path):
 
 
 def test_unbound_composed_call_argument_is_flagged(tmp_path):
-    """The real slice-8 defect: a callee taking ss as a semantic segment,
-    composed by a caller that never binds ss."""
+    """A callee takes ss as a semantic segment but its caller never binds it,
+    so the composed call is rejected."""
     src = _CLEAN_CORE.replace(
         "    ax = mem.rw(ds, 4)",
         "    _o, _c = _core_1010_0200(mem, ss)\n    ax = _o[0]")

@@ -2,7 +2,8 @@
 
 ``_init_bios_environment`` points every unused hardware-IRQ vector at
 F000:FF53 and writes a single 0xCF (IRET) there.  An interpreted runtime just
-executes that byte -- but a strict-VMless runtime may not interpret ANY x86,
+executes that byte -- but an interpreter-free selected runtime may not execute
+any original x86,
 and chaining an IRQ vector to "the previous handler" is the universal DOS
 idiom (SkyRoads' timer ISR does exactly this: its far jump to the saved old
 vector is patched in by its installer, and it fires on EVERY timer tick).
@@ -51,7 +52,7 @@ def test_stub_performs_a_real_iret() -> None:
 
 def test_image_runtime_installs_the_stub_as_a_native_hook() -> None:
     # The EXE-free load path must carry the whole power-on BIOS environment as
-    # hooks: without this, the first chained IRQ fails the VMless wall.
+    # hooks: without this, a no-interpreter-fallback plan fails on chained IRQ.
     rt = create_runtime_from_image(bytes(Memory().data),
                                    CPUState(cs=0x1010, ip=0x0000),
                                    game_root=Path("."))
@@ -67,7 +68,7 @@ def test_exe_runtime_installs_the_same_bios_hooks(tmp_path: Path) -> None:
     It did not. The EXE path had INT 09h but not the IRET stub, and nothing
     noticed because that path is normally interpreted, where the 0xCF byte
     works fine. It surfaced only once a snapshot -- restored THROUGH this path
-    -- was run behind the VMless wall: first chained timer IRQ, violation at
+    -- was run with interpreter fallback forbidden: first chained timer IRQ at
     F000:FF53, and no game code anywhere near the blame.
     """
     from dos_re.runtime import create_runtime
@@ -80,7 +81,7 @@ def test_exe_runtime_installs_the_same_bios_hooks(tmp_path: Path) -> None:
 
 def test_snapshot_resume_installs_the_same_bios_hooks(tmp_path: Path) -> None:
     """A snapshot resume is a THIRD load path (it goes through create_runtime
-    and then overwrites memory + CPU state), and it is the one the VMless demo
+    and then overwrites memory + CPU state), and it is the one the VMless replay
     differential uses. Restoring the image must not cost the machine its BIOS
     hooks."""
     from dos_re.runtime import create_runtime
@@ -102,7 +103,7 @@ def test_chained_irq_returns_through_the_stub_with_no_interpretation() -> None:
                                             sp=0x0100, flags=0x0202),
                                    game_root=Path("."))
     cpu = rt.cpu
-    cpu.interp_forbidden = True            # arm the wall
+    cpu.interp_forbidden = True
     # Stand in for the game's ISR: push an IRQ frame, then jump to the stub.
     cpu.push(0x0202)                       # flags
     cpu.push(0x1010)                       # cs  (return into "game code")

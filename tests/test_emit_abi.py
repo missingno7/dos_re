@@ -1,4 +1,4 @@
-"""ABI-recovered emitter (dos_re.lift.emit_abi) -- M3b slice 1.
+"""ABI-recovered emitter (dos_re.lift.emit_abi).
 
 Generates the dual-entrypoint module for a census proposal and executes it
 against a stub mechanical core: the public entry must project the semantic

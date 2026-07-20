@@ -10,7 +10,7 @@ through which segment / which flags" from its own private opcode table:
 ``emit_cpuless._flags_defined_by``.  Tables that answer overlapping questions
 in separate files drift, and had: the census could not see string instructions
 at all (814 of them, across 99 functions), so it under-reported the memory
-touchers that an M4 ownership decision reads.
+touchers that a memory-ownership decision reads.
 
 This is deliberately NOT a p-code/IR/SSA layer.  It describes only the facts
 existing consumers already ask for, and it REFUSES anything it cannot describe
@@ -49,10 +49,9 @@ SEG_PREFIX = {0x26: "es", 0x2E: "cs", 0x36: "ss", 0x3E: "ds"}
 #: A LONE si/di (rm=4,5) goes in the BASE slot, not the index slot.  Either
 #: spelling names the same address, but ``Census.indexed_clusters()`` keys on
 #: ``(segment, base, index)``, so the choice decides cluster IDENTITY -- and
-#: the census is the incumbent.  Putting si in the index slot silently
-#: re-keyed 1,900 sites in the corpus shadow, which is a migration hazard
-#: rather than a bug, and exactly the kind of thing worth pinning in a
-#: comment before someone "tidies" it.
+#: the census is the incumbent. Putting si in the index slot silently changes
+#: the stable cluster identity of every affected site, so this convention is
+#: pinned explicitly.
 RM16 = {0: ("bx", "si"), 1: ("bx", "di"), 2: ("bp", "si"), 3: ("bp", "di"),
         4: ("si", None), 5: ("di", None), 6: ("bp", None), 7: ("bx", None)}
 

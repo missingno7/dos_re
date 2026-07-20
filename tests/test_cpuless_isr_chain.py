@@ -1,4 +1,4 @@
-"""De-SMC'd far-control-flow ISR chain (the timer-ISR tail, tier 13).
+"""De-SMC'd far-control-flow ISR chain through the timer-handler tail.
 
 A recovered interrupt handler ends by chaining (``jmp far``) to the PREVIOUS
 owner of its vector.  The ISR installer patched that far ptr16:16 into the

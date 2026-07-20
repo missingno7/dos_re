@@ -2,10 +2,9 @@
 (``dos_re.cpu``) and the pure device model (``dos_re.dos``) depend on.
 
 Extracting these here breaks the ``dos -> cpu`` import edge: the DOS/hardware
-device model no longer imports the interpreter, so the standalone CPUless
-platform runtime (``dos_re.lift.platform.CPUlessPlatformRuntime``) can own a
-device model without pulling ``CPU8086`` into its import graph (dos_re_2.0.md
-section 4; the play_cpuless import guard forbids the interpreter).
+device model no longer imports the interpreter, so a CPUless region runtime
+(``dos_re.lift.platform.CPUlessPlatformRuntime``) can own a device model
+without pulling ``CPU8086`` into its dependency closure.
 """
 from __future__ import annotations
 
@@ -50,7 +49,7 @@ class CPUState:
     # instruction, and slotted attribute access is measurably faster than
     # __dict__ lookup.  Consequence: no ad-hoc attributes, and clones use
     # dataclasses.replace() instead of CPUState(**s.__dict__) (verification.py
-    # and repro_artifacts.py were the only such sites in the ecosystem).
+    # and snapshot cloning were the only such sites in the ecosystem).
     ax: int = 0
     bx: int = 0
     cx: int = 0

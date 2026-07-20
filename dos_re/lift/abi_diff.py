@@ -1,7 +1,7 @@
-"""Seeded differential: mechanical CPUless core vs DE-STACKED ABI core.
+"""Seeded differential: mechanical CPUless core vs de-stacked ABI core.
 
-The M3b slice-2 verifier (docs/dos_re_2.0.md Stage 2b): for one function,
-drive the mechanical recovered implementation and the ABI-recovered core
+For one function, drive the mechanical recovered implementation and the
+ABI-recovered core
 over the SAME deterministic pseudo-random machine states and require:
 
   * every OBSERVED (contract) return value equal;
@@ -17,7 +17,7 @@ over the SAME deterministic pseudo-random machine states and require:
 The states are seeded, not recorded: a destackable LEAF function's behavior
 is a pure function of (memory contents, register inputs), so a
 deterministic synthetic state exercises it exactly; determinism keeps every
-run reproducible (the automation principle).  The end-to-end demo remains
+run reproducible (the automation principle).  The end-to-end replay remains
 the acceptance authority for the composed graph.
 """
 from __future__ import annotations
@@ -214,13 +214,13 @@ class TraceMem:
         self.data: dict[int, int] = {}
         self.shadow: dict[int, int] = {}
         self.shadow_seg = shadow_stack_seg
-        # slice 9: ss is a SEMANTIC selector for globals in a function that
+        # SS is a SEMANTIC selector for globals in a function that
         # ALSO uses the machine stack.  The shadow overlay is off (the globals
         # must be compared), so the mechanical side's push/pop through this
         # same segment would show up as semantic writes the de-stacked side
         # never makes -- a guaranteed false divergence.  Writes at or above
         # the floor are the machine stack; below it are the globals.  Same
-        # split as STACK_DATA_FLOOR in scripts/acceptance_cpuless.py.
+        # split used by the historical CPUless acceptance proof.
         self.ss_seg = ss_seg
         self.ss_globals_floor = ss_globals_floor
         self.writes: list[tuple[int, int, int, int]] = []
@@ -527,8 +527,8 @@ def diff_one(mech_fn, abi_core_fn, proposal: dict, *, states: int = 32,
     # seed ss identically on both sides and DISABLE the shadow overlay, so
     # those writes are compared instead of being hidden.
     #
-    # Slice 7 (ss_is_data_segment) has no stack traffic at all, so the overlay
-    # had nothing legitimate left to hide.  Slice 9 (ss_globals_floor) breaks
+    # ``ss_is_data_segment`` has no stack traffic at all, so the overlay had
+    # nothing legitimate left to hide. ``ss_globals_floor`` breaks
     # that premise: those functions reach globals through ss AND use the
     # machine stack.  With the overlay off, the mechanical side's push/pop
     # through the same segment becomes visible semantic writes the de-stacked

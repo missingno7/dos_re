@@ -1,135 +1,11 @@
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass
 from typing import Callable
 
 from .cpu import CPU8086
 
 
 Hook = Callable[[CPU8086], None]
-
-
-@dataclass(frozen=True)
-class Replacement:
-    cs: int
-    ip: int
-    name: str
-    handler: Hook
-
-
-class HookRegistry:
-    """Maps original DOS addresses to Python replacements.
-
-    The intended migration path is:
-    1. execute original ASM and collect traces,
-    2. understand a small routine,
-    3. register a replacement at its CS:IP,
-    4. let the rest of the original binary continue running.
-    """
-
-    def __init__(self) -> None:
-        self.replacements: dict[tuple[int, int], Replacement] = {}
-
-    def replace(self, cs: int, ip: int, name: str):
-        key = (cs & 0xFFFF, ip & 0xFFFF)
-
-        def deco(fn: Hook) -> Hook:
-            # Fail fast on duplicate registrations.  The map is keyed by CS:IP, so
-            # a second @replace at the same address would silently shadow the
-            # first; that is exactly how superseded hook implementations used to
-            # accrete unnoticed.  One address must have exactly one replacement.
-            existing = self.replacements.get(key)
-            if existing is not None:
-                raise ValueError(
-                    f"duplicate replacement at {key[0]:04X}:{key[1]:04X} "
-                    f"({existing.name!r} then {name!r})"
-                )
-            self.replacements[key] = Replacement(key[0], key[1], name, fn)
-            return fn
-        return deco
-
-    def install(self, cpu: CPU8086) -> None:
-        # Allow individual hooks to be disabled without code changes, e.g.
-        # DOS_RE_DISABLE_HOOKS=<cs>:<ip>,<cs>:<ip>.  Disabled addresses fall
-        # back to the interpreted original ASM, which is useful for A/B
-        # performance checks and for bisecting a suspected-incorrect hook.
-        disabled = _parse_disabled(os.environ.get("DOS_RE_DISABLE_HOOKS", ""))
-        for key, repl in self.replacements.items():
-            if key in disabled:
-                continue
-            cpu.replacement_hooks[key] = repl.handler
-            cpu.hook_names[key] = repl.name
-
-    def uninstall(self, cpu: CPU8086, *, keep=frozenset()) -> None:
-        """Strip every REGISTERED game replacement from ``cpu`` -- the pure-ASM
-        oracle.  Framework hooks installed outside the registry (the BIOS INT9
-        ISR, the dummy IRET stub) survive, because they are synthetic hardware,
-        not recovered game logic.
-
-        POST-BOOT STRIP, not import guarding.  Guarding the ``import`` of a
-        port's hooks module does NOT work: any other import in the process may
-        already have pulled it in, the registry is populated at decoration time,
-        and :meth:`install` then wires it onto the "pure" CPU anyway.  That is
-        not hypothetical -- it silently contaminated a cold-start differential
-        with a deliberately behaviour-changing optimisation hook, and the
-        differential blamed the candidate for a divergence the ORACLE was
-        producing.  Strip from the registry after boot and the import order
-        stops mattering."""
-        for key in self.replacements:
-            if key in keep:
-                continue
-            cpu.replacement_hooks.pop(key, None)
-            cpu.hook_names.pop(key, None)
-
-    def installed_on(self, cpu: CPU8086, *, allow=frozenset()) -> list:
-        """Registered game replacements currently live on ``cpu``, as
-        ``(key, name)`` sorted by address -- the evidence
-        :func:`assert_pure_oracle` reports."""
-        return sorted(
-            (key, self.replacements[key].name)
-            for key in self.replacements
-            if key in cpu.replacement_hooks and key not in allow)
-
-
-def assert_pure_oracle(cpu: CPU8086, *, allow=frozenset(),
-                       registry_=None) -> None:
-    """Fail loudly if a supposedly pure-ASM oracle carries game replacements.
-
-    A differential is only evidence if the reference side is the ORIGINAL
-    program.  A replacement hook on the oracle makes the comparison a check of
-    the candidate against a MODIFIED original -- and if that hook is a
-    deliberate optimisation (a skipped loop pass, a collapsed wait) the oracle
-    diverges from the real game while looking authoritative.  Such a run does
-    not fail; it reports a wrong frontier and sends the investigation after a
-    defect the candidate does not have.
-
-    So a harness that believes its oracle is pure should SAY so here, and get
-    an exception naming the offenders rather than a plausible wrong answer.
-    ``allow`` whitelists deliberate environment hooks (synthetic retrace/timer
-    stand-ins) that a headless oracle genuinely needs."""
-    reg = registry if registry_ is None else registry_
-    live = reg.installed_on(cpu, allow=allow)
-    if live:
-        listed = ", ".join(f"{cs:04X}:{ip:04X} {name}" for (cs, ip), name in live)
-        raise RuntimeError(
-            f"oracle is NOT pure: {len(live)} registered game replacement(s) "
-            f"still installed -- {listed}.  A differential against this CPU "
-            f"compares the candidate to a MODIFIED original, not to the game.  "
-            f"Strip them with registry.uninstall(cpu) AFTER boot (guarding the "
-            f"hooks import does not work), or pass them in allow= if they are "
-            f"deliberate environment stand-ins.")
-
-
-def _parse_disabled(text: str) -> set[tuple[int, int]]:
-    out: set[tuple[int, int]] = set()
-    for token in text.replace(";", ",").split(","):
-        token = token.strip()
-        if not token:
-            continue
-        cs, _, ip = token.partition(":")
-        out.add((int(cs, 16) & 0xFFFF, int(ip, 16) & 0xFFFF))
-    return out
 
 
 def call_installed_hook_like_near_call(
@@ -220,9 +96,6 @@ def call_installed_hook_like_far_call(
             cpu.hook_call_site = previous_call_site
 
 
-registry = HookRegistry()
-
-
 # ---- live-code signature guards ------------------------------------------------------------------
 # Games patch parts of their live code segment at runtime (self-modifying code, loader decor,
 # variant dispatch). A Python replacement bypasses the live bytes at CS:IP, so a hook that assumed
@@ -257,7 +130,8 @@ def self_disable_if_patched(cpu: CPU8086, ip: int, expected: bytes | tuple[bytes
     signature is fine; raises RuntimeError on an unknown variant.
     """
     # Under a poisoned data-only boot image the recovered code bytes are zeroed
-    # by design (the EXE-independence wall); the lifted host function is the
+    # by design for this detached execution diagnostic; the lifted host
+    # function is the
     # authoritative implementation, so the entry-signature comparison is both
     # meaningless and prone to false-alarm on the poisoned bytes.  Skip it.
     if getattr(cpu, "code_poisoned", False):

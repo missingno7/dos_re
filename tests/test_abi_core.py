@@ -1,4 +1,4 @@
-"""De-stacked ABI core (emit_abi slice 2) + the seeded differential
+"""De-stacked ABI core plus the seeded differential
 (abi_diff): the ABI core must BE the mechanical core for every driven
 state, minus the machine stack.
 """
@@ -86,7 +86,7 @@ def test_public_entry_over_the_one_core():
 
 
 def test_contract_metadata_records_pointer_roles():
-    """The generated _CONTRACT hands the NEXT stage the pointer/segment
+    """The generated _CONTRACT gives downstream consumers the pointer/segment
     structure explicitly: an offset used only to address memory is a
     near pointer, tagged with the segment parameter it addresses through."""
     # lodsb via ds:si, then store through it: si is address-only, ds a segment

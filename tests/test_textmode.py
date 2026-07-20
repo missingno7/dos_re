@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from dos_re.memory import Memory
-from dos_re.player import decode_frame_default
+from dos_re.framebuffer import decode_frame_default
 from dos_re.textmode import (
     CELL_HEIGHT,
     CELL_WIDTH,

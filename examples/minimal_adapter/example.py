@@ -1,13 +1,17 @@
-"""Minimal end-to-end walkthrough of the dos_re oracle workflow — no game assets needed.
+"""Narrow CPU-backed adapter and focused-verifier example — no game assets.
 
 This script builds a tiny synthetic DOS MZ executable (a stand-in "game"), then
-demonstrates the whole loop the framework exists for:
+demonstrates one optional low-level development slice:
 
   1. run the original binary in the VM (the oracle),
-  2. replace one original routine with a native Python hook,
-  3. let the differential hook verifier prove the hook byte-exact against the
+  2. select one authored implementation through the implementation catalog,
+  3. let the differential verifier prove its CPU adapter byte-exact against the
      interpreted original ASM (and watch it catch a deliberately wrong hook),
-  4. snapshot the machine and replay deterministically from the snapshot.
+  4. check that the backend's raw machine snapshot restores deterministically.
+
+This is not the persistent ReplayArtifact workflow and not a required recovery
+sequence. See ``examples/tiny_frame_game`` for an integration example and
+``docs/getting_started.md`` for the composable workspace model.
 
 Run it from the repo root:
 
@@ -33,8 +37,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from dos_re.asm import _inc_reg16_preserve_cf  # noqa: E402
 from dos_re.cpu import CPU8086, HaltExecution  # noqa: E402
+from dos_re.execution import (  # noqa: E402
+    ImplementationCatalog,
+    ImplementationDescriptor,
+    ImplementationEntry,
+    ImplementationOrigin,
+    OverrideCategory,
+    ProgramCoverage,
+    plan_execution,
+    profile_configuration,
+)
+from dos_re.player import GameFrontend  # noqa: E402
 from dos_re.runtime import Runtime, create_runtime  # noqa: E402
 from dos_re.snapshot import load_snapshot, write_snapshot  # noqa: E402
 from dos_re.verification import (  # noqa: E402
@@ -92,6 +106,53 @@ def run_to_halt(rt: Runtime, budget: int = 1000) -> None:
         raise RuntimeError("program did not halt within the step budget")
 
 
+def select_inc_implementation(
+    rt: Runtime,
+    implementation_id: str,
+    body,
+) -> None:
+    """Resolve and bind one authored body through the canonical plan."""
+    address = (rt.program.entry_cs, ROUTINE_OFFSET)
+    target = f"function:{address[0]:04x}:{address[1]:04x}:v1"
+
+    def activate(runtime, targets):
+        assert targets == (target,)
+
+        def cpu_adapter(cpu: CPU8086) -> None:
+            before = cpu.s.ax
+            carry = cpu.s.flags & 0x0001
+            cpu.s.ax = body(before)
+            cpu.set_add_flags(before, 1, cpu.s.ax, 16)
+            cpu.s.flags = (cpu.s.flags & ~0x0001) | carry
+            cpu.s.ip = cpu.mem.rw(cpu.s.ss, cpu.s.sp)
+            cpu.s.sp = (cpu.s.sp + 2) & 0xFFFF
+
+        runtime.cpu.replacement_hooks[address] = cpu_adapter
+        runtime.cpu.hook_names[address] = implementation_id
+
+    catalog = ImplementationCatalog((ImplementationEntry(
+        descriptor=ImplementationDescriptor(
+            implementation_id=implementation_id,
+            targets=frozenset({target}),
+            origin=ImplementationOrigin.AUTHORED,
+            category=OverrideCategory.FAITHFUL,
+            implementation_digest=implementation_id,
+        ),
+        implementation=body,
+        activate=activate,
+    ),))
+    plan = plan_execution(
+        profile_configuration(
+            "development",
+            program_identity="minimal-example",
+            selected_overrides=(implementation_id,),
+        ),
+        ProgramCoverage((target,), frozenset({target}), evidence_identity="v1"),
+        catalog,
+    )
+    GameFrontend(ROOT).bind_execution_plan(rt, plan)
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -108,14 +169,11 @@ def main() -> int:
         rt = create_runtime(exe)
         routine = (rt.program.entry_cs, ROUTINE_OFFSET)
 
-        # --- 2. A deliberately WRONG hook: the verifier must catch it ---------
-        def wrong_hook(cpu: CPU8086) -> None:
-            cpu.s.ax = (cpu.s.ax + 2) & 0xFFFF          # bug: +2 instead of INC
-            cpu.s.ip = cpu.mem.rw(cpu.s.ss, cpu.s.sp)   # RET
-            cpu.s.sp = (cpu.s.sp + 2) & 0xFFFF
+        # --- 2. A deliberately WRONG body: the verifier must catch it ---------
+        def wrong_inc(value: int) -> int:
+            return (value + 2) & 0xFFFF
 
-        rt.cpu.replacement_hooks[routine] = wrong_hook
-        rt.cpu.hook_names[routine] = "wrong_inc"
+        select_inc_implementation(rt, "wrong_inc", wrong_inc)
         # strict mode = auto-continuation: no per-hook metadata needed; the
         # verifier runs the hook, then replays the ORIGINAL ASM to the same
         # address and diffs registers + flags + memory.
@@ -131,17 +189,12 @@ def main() -> int:
         # --- 3. The CORRECT hook, verified on every call -----------------------
         rt = create_runtime(exe)
 
-        def inc_hook(cpu: CPU8086) -> None:
-            # Real INC updates arithmetic flags but PRESERVES CF — a naive
-            # set_add_flags() would clear CF and the verifier would catch it on
-            # the loop's second iteration (CF=1 from the caller's CMP).  The
-            # dos_re.asm helpers encode exactly these 8086 semantics.
-            _inc_reg16_preserve_cf(cpu, 0)              # INC AX
-            cpu.s.ip = cpu.mem.rw(cpu.s.ss, cpu.s.sp)   # RET
-            cpu.s.sp = (cpu.s.sp + 2) & 0xFFFF
+        def inc_body(value: int) -> int:
+            # Real INC updates arithmetic flags but preserves CF. The semantic
+            # body stays CPUless; the selected backend adapter handles flags.
+            return (value + 1) & 0xFFFF
 
-        rt.cpu.replacement_hooks[routine] = inc_hook
-        rt.cpu.hook_names[routine] = "recovered_inc"
+        select_inc_implementation(rt, "recovered_inc", inc_body)
         install_hook_verifier(rt, HookVerifierConfig.strict(verify_all=True), stops={})
         run_to_halt(rt)
         print(f"[hybrid]   recovered hook ran verified against the ASM oracle, AX = {rt.cpu.s.ax}")
@@ -160,7 +213,7 @@ def main() -> int:
               f"restored continuation AX = {restored.cpu.s.ax}  (must match)")
         assert rt.cpu.s.ax == restored.cpu.s.ax == 5
 
-    print("example completed: oracle run, verified hook, caught bad hook, deterministic snapshot")
+    print("adapter example completed: focused verification and snapshot restore are green")
     return 0
 
 

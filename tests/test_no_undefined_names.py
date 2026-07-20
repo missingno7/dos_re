@@ -5,8 +5,8 @@ It over-approximates "defined" (module imports + every def/class + every assigne
 names + comprehension/except/with targets + builtins), so it only flags names defined *nowhere* in the
 module — which is virtually always a real NameError waiting in an unexercised path.
 
-Game adapters built on this framework should point the same check at their own recovered layers
-(see the pre2_port original: tests/test_no_undefined_names.py scanning recovered/checkpoints/bridge/codecs).
+Game adapters built on this framework should point the same check at their own
+authored and generated layers.
 """
 from __future__ import annotations
 

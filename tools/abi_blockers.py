@@ -1,7 +1,7 @@
 """Which refusal is actually WORTH fixing -- root causes, not raw counts.
 
-The wall's exception list ranks tiers by how many functions carry them, and
-that ranking is misleading.  `leaf-only:call` is the largest tier, but it is
+Raw exception counts rank tiers by how many functions carry them, and that
+ranking is misleading. `leaf-only:call` is the largest tier, but it is
 not a shape this emitter cannot handle: it fires when a near call's target is
 not yet a core, i.e. the CALLEE was refused.  Those functions are blocked by
 somebody else's problem and need no work of their own.

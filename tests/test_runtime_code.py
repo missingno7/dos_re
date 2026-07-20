@@ -20,7 +20,6 @@ from dos_re.runtime_code import (
     identify_runtime_code_variant,
     require_runtime_code_variant,
     runtime_code_staticization_report,
-    variants_by_addr,
 )
 
 ADDR = (0x1010, 0x0100)
@@ -34,17 +33,17 @@ def _cpu_with_bytes(data: bytes) -> CPU8086:
     return cpu
 
 
-def _slots(*variants: RuntimeCodeVariant, staticization=None, installer_status="observed") -> dict:
+def _slots(*variants: RuntimeCodeVariant, staticization=None, writer_status="observed") -> dict:
     slot = RuntimeCodeSlot(
-        addr=ADDR, name="slot", island="test", owner=None, role="test slot",
-        variants=variants, staticization=staticization, installer_status=installer_status,
+        addr=ADDR, name="slot", subsystem="test", owner=None, role="test slot",
+        variants=variants, staticization=staticization, writer_status=writer_status,
     )
     return {ADDR: slot}
 
 
 def test_identify_matches_known_variant_by_signature():
-    accepted = RuntimeCodeVariant(addr=ADDR, name="accepted", signature=b"\x90\x90", island="x", status="hooked-verified")
-    other = RuntimeCodeVariant(addr=ADDR, name="cold", signature=b"\xCC\xCC", island="x", status="known-not-this-hook")
+    accepted = RuntimeCodeVariant(addr=ADDR, name="accepted", signature=b"\x90\x90", subsystem="x", status="staticized-verified")
+    other = RuntimeCodeVariant(addr=ADDR, name="cold", signature=b"\xCC\xCC", subsystem="x", status="observed-only")
     slots = _slots(accepted, other)
     cpu = _cpu_with_bytes(b"\x90\x90")
 
@@ -60,14 +59,14 @@ def test_identify_raises_on_unregistered_address():
 
 
 def test_identify_raises_on_unknown_bytes():
-    accepted = RuntimeCodeVariant(addr=ADDR, name="accepted", signature=b"\x90\x90", island="x", status="hooked-verified")
+    accepted = RuntimeCodeVariant(addr=ADDR, name="accepted", signature=b"\x90\x90", subsystem="x", status="staticized-verified")
     cpu = _cpu_with_bytes(b"\x11\x22")
     with pytest.raises(UnknownRuntimeCodeVariant):
         identify_runtime_code_variant(cpu, ADDR, _slots(accepted))
 
 
 def test_require_rejects_known_but_wrong_variant():
-    accepted = RuntimeCodeVariant(addr=ADDR, name="accepted", signature=b"\x90\x90", island="x", status="hooked-verified")
+    accepted = RuntimeCodeVariant(addr=ADDR, name="accepted", signature=b"\x90\x90", subsystem="x", status="staticized-verified")
     slots = _slots(accepted)
     cpu = _cpu_with_bytes(b"\x90\x90")
     assert require_runtime_code_variant(cpu, ADDR, "accepted", slots).name == "accepted"
@@ -76,7 +75,7 @@ def test_require_rejects_known_but_wrong_variant():
 
 
 def test_staticization_report_and_gate():
-    accepted = RuntimeCodeVariant(addr=ADDR, name="accepted", signature=b"\x90\x90", island="x", status="hooked-verified")
+    accepted = RuntimeCodeVariant(addr=ADDR, name="accepted", signature=b"\x90\x90", subsystem="x", status="staticized-verified")
     slots = _slots(accepted)
 
     report = runtime_code_staticization_report(slots)
@@ -93,14 +92,8 @@ def test_staticization_report_and_gate():
     assert_runtime_code_staticization_ready(staticized)  # must not raise
 
 
-def test_variants_by_addr_backwards_compatible_lookup():
-    accepted = RuntimeCodeVariant(addr=ADDR, name="accepted", signature=b"\x90\x90", island="x", status="hooked-verified")
-    slots = _slots(accepted)
-    assert variants_by_addr(slots) == {ADDR: (accepted,)}
-
-
 def test_write_tracer_fires_only_inside_registered_regions():
-    accepted = RuntimeCodeVariant(addr=ADDR, name="accepted", signature=b"\x90\x90", island="x", status="hooked-verified")
+    accepted = RuntimeCodeVariant(addr=ADDR, name="accepted", signature=b"\x90\x90", subsystem="x", status="staticized-verified")
     slots = _slots(accepted)
     cpu = _cpu_with_bytes(b"\x90\x90")
     regions = default_runtime_code_regions(slots)

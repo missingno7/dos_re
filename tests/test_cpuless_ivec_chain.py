@@ -16,7 +16,6 @@ from __future__ import annotations
 import pytest
 
 from dos_re.lift.platform import CPUlessPlatformRuntime, UnsupportedPlatformEffect
-from dos_re.lift.standalone import FailLoudPlatform
 from dos_re.memory import Memory
 
 _BIOS_IRET = (0xF000, 0xFF53)
@@ -58,11 +57,6 @@ def test_a_malformed_key_is_declined_so_the_caller_still_raises(tmp_path):
     the interrupt silently did nothing."""
     rt, _ = _runtime(tmp_path)
     assert rt.ivec("not-a-vector", 10, _regs()) is None
-
-
-def test_the_fail_loud_default_declines_everything():
-    """A port that has not bound a device model must not inherit a ROM stand-in by accident."""
-    assert FailLoudPlatform().ivec("F000:FF53", 0, _regs()) is None
 
 
 def test_the_generated_dyncall_offers_unknown_vectors_to_the_platform():

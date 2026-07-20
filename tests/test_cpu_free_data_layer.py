@@ -4,12 +4,12 @@ A CPUless runtime (dos_re.lift.platform.CPUlessPlatformRuntime) runs recovered
 Python with no interpreter anywhere in its import graph, and ports enforce that
 with a static purity lint.  These modules are pure data/device layers, so they
 must not drag ``dos_re.cpu`` in -- otherwise a CPU-free backend cannot record a
-demo, persist its machine state, or decide whether a game installed its own
+replay, persist its machine state, or decide whether a game installed its own
 INT 09h, and each port ends up duplicating the logic behind the wall.
 
 Each edge below was a real one that had to be broken:
-  * ``input_demo``  -> ``.runtime`` (type hints), ``.snapshot`` (start-snapshot
-    branch), ``.interrupts`` (default deliver);
+  * ``replay_input``  -> runtime types remain under ``TYPE_CHECKING`` and the
+    default interrupt delivery import stays inside the call;
   * ``keyboard``    -> held BIOS_INT9_ENTRY only in CPU-carrying ``runtime_core``;
   * ``snapshot_headless.capture_dos_state`` -> the state capture used to live
     inline in ``snapshot.write_snapshot``, which needs a CPU;
@@ -29,7 +29,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 CPU_FREE_MODULES = [
-    "dos_re.input_demo",
+    "dos_re.replay_input",
     "dos_re.keyboard",
     "dos_re.snapshot_headless",
     "dos_re.crash",

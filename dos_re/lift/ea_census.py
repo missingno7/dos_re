@@ -1,4 +1,4 @@
-"""Effective-address census -- the foundational M4 (memoryless) analysis.
+"""Read-only effective-address evidence for memory representation work.
 
 docs/memory_schema.md §4 and §14.2: the recovery IR pins instruction bytes and
 flags memory operands, but records no DECODED address expression.  Because the
@@ -17,7 +17,7 @@ program appears here.  A port supplies its own roots and reads the census.
 Refusal-first: an address shape this pass cannot express symbolically is
 REPORTED as a blocker with its site, never approximated.  An approximated
 address expression would silently widen or narrow an ownership closure, and
-the closure is what M4 promotion rests on.
+the closure is what any ownership or representation decision rests on.
 """
 from __future__ import annotations
 
@@ -142,7 +142,7 @@ class Census:
         """disp -> {segment: site count}, for STATIC sites reached through
         more than one segment register.
 
-        This is the check that changed the M4 plan.  A small-model program may
+        A small-model program may
         address the same bytes as ``ds:X`` and ``ss:X``; a region that looks
         tiny by byte extent then has an ownership closure spanning every
         function using either spelling.  Canonicalizing the two is only sound
@@ -159,8 +159,8 @@ class Census:
 
     def closure(self, disp: int) -> set:
         """Every function PROVABLY touching a static offset, through any
-        segment -- the ownership-closure size that decides whether a region is
-        a small first slice (section 9).
+        segment -- the ownership-closure size used to assess whether a region
+        is a small, well-bounded ownership candidate.
 
         This is the DEFINITE half only.  It is computed from expressible
         addresses, so a site whose address this pass cannot express does not
@@ -257,7 +257,7 @@ def sites_of(scan, key: str):
         # reach ds:si and/or es:di implicitly, so the `no modrm -> not a memory
         # instruction` shortcut below would drop them SILENTLY -- and a census
         # that under-reports touchers understates an ownership closure, which
-        # is exactly the input an M4 promotion decision trusts.  Refuse per the
+        # is exactly the input an ownership decision trusts. Refuse per the
         # refusal-first rule: their addresses are register-driven (si/di walked
         # by cx), so they need a range proof this census cannot supply.
         if i.op in _STRING_OPS:

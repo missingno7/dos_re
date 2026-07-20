@@ -1,14 +1,13 @@
 """Focused tests for tools/liftlink.py + install.resolve_links — the batch linker.
 
-The de-VM pass in miniature, synthetic (game-free tests rule): edge
+The linking recipe in miniature, synthetic (game-free tests rule): edge
 computation honours the link preconditions, and a two-function link runs
 end-to-end THROUGH THE INSTALLER — modules written to disk with the
-late-bound LINKS mechanism, loaded and resolved by install_passing_lifts,
+late-bound LINKS mechanism, loaded and resolved by graph activation,
 executed on a real CPU8086, byte-exact against the interpreted original."""
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 
@@ -17,7 +16,7 @@ import pytest
 from dos_re.cpu import CPU8086, CPUState
 from dos_re.lift.cfg import scan_function
 from dos_re.lift.emit import emit_function
-from dos_re.lift.install import (_load_module, install_passing_lifts,
+from dos_re.lift.install import (_load_module, activate_generated_graph,
                                  resolve_links)
 from dos_re.memory import Memory
 
@@ -41,8 +40,7 @@ def _scan_all(code: bytes, entry_ips):
 
 def _edge_fixture_code() -> bytes:
     """0100: call 0110 ; call 0120 ; call 0130 ; ret — three callee shapes:
-    0110 near-ret (linkable), 0120 retf (wrong exit shape), 0130 near-ret
-    but unproven."""
+    0110 near-ret (linkable), 0120 retf (wrong exit shape), 0130 near-ret."""
     code = bytearray(b"\x90" * 0x40)
     code[0x00:0x0A] = bytes.fromhex("E80D00" "E81A00" "E82700" "C3")
     code[0x10] = 0xC3          # 0110: ret
@@ -51,53 +49,23 @@ def _edge_fixture_code() -> bytes:
     return bytes(code)
 
 
-def test_edge_rule_structural_default_links_without_proof():
-    # DOS_RE 2.0 default: structural criterion only (liftable entry +
-    # all-near-ret exits) — proof status is irrelevant, exit shape still gates.
+def test_edge_rule_links_every_structurally_eligible_target():
+    # Proof status is separate evidence; return shape gates this transformation.
     scans = _scan_all(_edge_fixture_code(), [0x0100, 0x0110, 0x0120, 0x0130])
-    statuses = {"1000:0110": "ORACLE_PASSING", "1000:0120": "ORACLE_PASSING",
-                "1000:0130": "NOT_REACHED"}
-    edges, blocked = liftlink.compute_link_edges(scans, statuses)
+    edges, blocked = liftlink.compute_link_edges(scans)
     assert ("1000:0100", "1000:0110") in edges
-    assert ("1000:0100", "1000:0130") in edges          # unproven: still linked
+    assert ("1000:0100", "1000:0130") in edges
     # retf callee called WITHOUT push cs: the sharper residue slug (a retf
     # callee is linkable only through the push-cs idiom, proven per site).
     assert ("1000:0100", "1000:0120", "retf-callee-no-push-cs-idiom") in blocked
 
 
-def test_edge_rule_proven_gate_requires_oracle_passing():
-    # The 1.x conservative gate (--proven-edges / structural=False).
-    scans = _scan_all(_edge_fixture_code(), [0x0100, 0x0110, 0x0120, 0x0130])
-    statuses = {"1000:0110": "ORACLE_PASSING", "1000:0120": "ORACLE_PASSING",
-                "1000:0130": "NOT_REACHED"}
-    edges, blocked = liftlink.compute_link_edges(scans, statuses,
-                                                 structural=False)
-    assert edges == [("1000:0100", "1000:0110")]
-    assert ("1000:0100", "1000:0120", "retf-callee-no-push-cs-idiom") in blocked
-    assert ("1000:0100", "1000:0130", "not-passing") in blocked
-
-
 def test_edge_rule_target_must_be_a_census_entry():
     scans = _scan_all(_edge_fixture_code(), [0x0100, 0x0110])   # 0120/0130 unlisted
-    statuses = {"1000:0110": "ORACLE_PASSING"}
-    edges, blocked = liftlink.compute_link_edges(scans, statuses)
+    edges, blocked = liftlink.compute_link_edges(scans)
     assert edges == [("1000:0100", "1000:0110")]
     assert ("1000:0100", "1000:0120", "not-an-entry") in blocked
     assert ("1000:0100", "1000:0130", "not-an-entry") in blocked
-
-
-def test_board_merge_oracle_passing_wins_across_boards(tmp_path):
-    b1 = tmp_path / "b1.json"
-    b1.write_text(json.dumps({"1000:0110": {"entry": "1000:0110",
-                                            "status": "ORACLE_PASSING"}}))
-    b2 = tmp_path / "b2.json"
-    b2.write_text(json.dumps({"1000:0110": {"entry": "1000:0110",
-                                            "status": "NOT_REACHED"},
-                              "1000:0130": {"entry": "1000:0130",
-                                            "status": "DIVERGED"}}))
-    statuses = liftlink.load_statuses([b1, b2])
-    assert statuses["1000:0110"] == "ORACLE_PASSING"   # any pass qualifies
-    assert statuses["1000:0130"] == "DIVERGED"
 
 
 # --- the end-to-end link, THROUGH THE INSTALLER --------------------------------
@@ -145,14 +113,6 @@ def test_linked_two_function_module_set_installs_and_runs_exact(tmp_path):
     alone = _load_module(tmp_path / "lifted_1000_0100.py")
     assert alone.LINKS == {"1000:0110": None}
 
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text(json.dumps({
-        "1000:0100": {"entry": "1000:0100", "module": "lifted_1000_0100.py",
-                      "status": "ORACLE_PASSING"},
-        "1000:0110": {"entry": "1000:0110", "module": "lifted_1000_0110.py",
-                      "status": "ORACLE_PASSING"},
-    }))
-
     # Oracle: the interpreted original.
     asm = _make_cpu(code, _state())
     for _ in range(100):
@@ -164,7 +124,7 @@ def test_linked_two_function_module_set_installs_and_runs_exact(tmp_path):
     # Hybrid: install through the real installer (two-pass load + LINKS
     # resolution), then one step() dispatches the caller hook.
     hyb = _make_cpu(code, _state())
-    installed = install_passing_lifts(hyb, CS, tmp_path, [manifest])
+    installed = activate_generated_graph(hyb, tmp_path)
     assert set(installed) == {(CS, 0x0100), (CS, 0x0110)}
     hyb.step()
 
@@ -176,7 +136,7 @@ def test_linked_two_function_module_set_installs_and_runs_exact(tmp_path):
 
 
 def test_linked_caller_runs_direct_with_no_hooks_installed(tmp_path):
-    """The VM-less degradation: with an EMPTY replacement_hooks set, the
+    """With an empty replacement-hook set, the
     caller's linked call still reaches the callee through its resolved LINKS
     binding (no interpreter, no hook table)."""
     code = _e2e_code()
@@ -257,14 +217,6 @@ def test_far_linked_caller_and_retf_callee_run_exact(tmp_path):
     (tmp_path / "lifted_1000_0110.py").write_text(callee_src, encoding="utf-8")
     (tmp_path / "lifted_1000_0100.py").write_text(caller_src, encoding="utf-8")
 
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text(json.dumps({
-        "1000:0100": {"entry": "1000:0100", "module": "lifted_1000_0100.py",
-                      "status": "ORACLE_PASSING"},
-        "1000:0110": {"entry": "1000:0110", "module": "lifted_1000_0110.py",
-                      "status": "ORACLE_PASSING"},
-    }))
-
     asm = _make_cpu(code, _state())
     for _ in range(100):
         if (asm.s.cs, asm.s.ip) == (CS, RET_IP):
@@ -273,7 +225,7 @@ def test_far_linked_caller_and_retf_callee_run_exact(tmp_path):
     assert (asm.s.cs, asm.s.ip) == (CS, RET_IP)
 
     hyb = _make_cpu(code, _state())
-    installed = install_passing_lifts(hyb, CS, tmp_path, [manifest])
+    installed = activate_generated_graph(hyb, tmp_path)
     assert set(installed) == {(CS, 0x0100), (CS, 0x0110)}
     hyb.step()
 
@@ -298,7 +250,7 @@ def test_push_cs_near_call_to_retf_callee_links():
     scans = _scan_all(bytes(code), [0x0100, 0x0110])
     assert liftlink.all_far_ret_exits(scans[(CS, 0x0110)])
     assert liftlink.push_cs_idiom_at_all_sites(scans[(CS, 0x0100)], 0x0110)
-    edges, blocked = liftlink.compute_link_edges(scans, {})
+    edges, blocked = liftlink.compute_link_edges(scans)
     assert edges == [("1000:0100", "1000:0110")]
     assert not blocked
 
@@ -313,7 +265,7 @@ def test_push_cs_idiom_rejected_when_call_site_is_a_branch_target():
     code[0x10] = 0xCB                                     # 0110: retf
     scans = _scan_all(bytes(code), [0x0100, 0x0110])
     assert not liftlink.push_cs_idiom_at_all_sites(scans[(CS, 0x0100)], 0x0110)
-    edges, blocked = liftlink.compute_link_edges(scans, {})
+    edges, blocked = liftlink.compute_link_edges(scans)
     assert edges == []
     assert ("1000:0100", "1000:0110", "retf-callee-no-push-cs-idiom") in blocked
 
@@ -333,7 +285,7 @@ def test_mixed_graph_links_only_qualifying_push_cs_edges():
     code[0x30] = 0xC3                                     # 0130: ret
     code[0x40] = 0xCB                                     # 0140: retf
     scans = _scan_all(bytes(code), [0x0100, 0x0120, 0x0130, 0x0140])
-    edges, blocked = liftlink.compute_link_edges(scans, {})
+    edges, blocked = liftlink.compute_link_edges(scans)
     assert ("1000:0100", "1000:0120") in edges
     assert ("1000:0100", "1000:0130") in edges
     assert ("1000:0100", "1000:0140", "retf-callee-no-push-cs-idiom") in blocked
@@ -359,7 +311,7 @@ def test_push_cs_linked_caller_and_retf_callee_run_exact(tmp_path):
         "03C3"        # 0116: add ax, bx
         "CA0200")     # 0118: retf 2             (pops the arg too)
     scans = _scan_all(code, [0x0100, 0x0110])
-    edges, _blocked = liftlink.compute_link_edges(scans, {})
+    edges, _blocked = liftlink.compute_link_edges(scans)
     assert edges == [("1000:0100", "1000:0110")]
 
     callee_src = emit_function(scans[(CS, 0x0110)], CS, "lifted_1000_0110",
@@ -376,14 +328,6 @@ def test_push_cs_linked_caller_and_retf_callee_run_exact(tmp_path):
     (tmp_path / "lifted_1000_0110.py").write_text(callee_src, encoding="utf-8")
     (tmp_path / "lifted_1000_0100.py").write_text(caller_src, encoding="utf-8")
 
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text(json.dumps({
-        "1000:0100": {"entry": "1000:0100", "module": "lifted_1000_0100.py",
-                      "status": "ORACLE_PASSING"},
-        "1000:0110": {"entry": "1000:0110", "module": "lifted_1000_0110.py",
-                      "status": "ORACLE_PASSING"},
-    }))
-
     asm = _make_cpu(code, _state())
     for _ in range(100):
         if (asm.s.cs, asm.s.ip) == (CS, RET_IP):
@@ -392,7 +336,7 @@ def test_push_cs_linked_caller_and_retf_callee_run_exact(tmp_path):
     assert (asm.s.cs, asm.s.ip) == (CS, RET_IP)
 
     hyb = _make_cpu(code, _state())
-    installed = install_passing_lifts(hyb, CS, tmp_path, [manifest])
+    installed = activate_generated_graph(hyb, tmp_path)
     assert set(installed) == {(CS, 0x0100), (CS, 0x0110)}
     hyb.step()
 
@@ -418,12 +362,12 @@ def _chkstk_code() -> bytes:
 
 def test_computed_return_near_fact_links_where_exit_shape_blocked():
     scans = _scan_all(_chkstk_code(), [0x0100, 0x0110])
-    edges, blocked = liftlink.compute_link_edges(scans, {})
+    edges, blocked = liftlink.compute_link_edges(scans)
     assert edges == []                                  # jmp_ind exit: not linkable
     assert ("1000:0100", "1000:0110", "exit-shape") in blocked
 
     edges, blocked = liftlink.compute_link_edges(
-        scans, {}, computed_return_near=frozenset({"1000:0110"}))
+        scans, computed_return_near=frozenset({"1000:0110"}))
     assert edges == [("1000:0100", "1000:0110")]
     assert not any(b[1] == "1000:0110" for b in blocked)
 
@@ -438,21 +382,21 @@ def test_computed_return_far_fact_gates_far_and_push_cs_edges():
     code[0x10:0x1F] = bytes.fromhex("8F060004" "8F060204" "83EC04" "FF2E0004")
     scans = _scan_all(bytes(code), [0x0100, 0x0110])
 
-    edges, blocked = liftlink.compute_link_edges(scans, {})
+    edges, blocked = liftlink.compute_link_edges(scans)
     assert edges == []
     assert ("1000:0100", "1000:0110", "exit-shape") in blocked
 
     # The far fact alone qualifies the callee; the push-cs site rule still
     # applies (same as a genuine retf callee).
     edges, _ = liftlink.compute_link_edges(
-        scans, {}, computed_return_far=frozenset({"1000:0110"}))
+        scans, computed_return_far=frozenset({"1000:0110"}))
     assert edges == [("1000:0100", "1000:0110")]
 
     # And a DIRECT far call to the same callee links through the far edge set.
     far_edges, far_blocked = liftlink.compute_far_link_edges(
         scans, computed_return_far=frozenset({"1000:0110"}))
     assert far_edges == []                              # no far call site here
-    edges2, blocked2 = liftlink.compute_link_edges(scans, {})
+    edges2, blocked2 = liftlink.compute_link_edges(scans)
     assert ("1000:0100", "1000:0110", "exit-shape") in blocked2
 
 
@@ -471,14 +415,6 @@ def test_computed_return_near_linked_caller_runs_exact(tmp_path):
         liftlink.relink_source(scans[(CS, 0x0100)], CS, [0x0110],
                                signature=code[:6]), encoding="utf-8")
 
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text(json.dumps({
-        "1000:0100": {"entry": "1000:0100", "module": "lifted_1000_0100.py",
-                      "status": "ORACLE_PASSING"},
-        "1000:0110": {"entry": "1000:0110", "module": "lifted_1000_0110.py",
-                      "status": "ORACLE_PASSING"},
-    }))
-
     asm = _make_cpu(code, _state())
     for _ in range(100):
         if (asm.s.cs, asm.s.ip) == (CS, RET_IP):
@@ -487,7 +423,7 @@ def test_computed_return_near_linked_caller_runs_exact(tmp_path):
     assert (asm.s.cs, asm.s.ip) == (CS, RET_IP)
 
     hyb = _make_cpu(code, _state())
-    installed = install_passing_lifts(hyb, CS, tmp_path, [manifest])
+    installed = activate_generated_graph(hyb, tmp_path)
     assert set(installed) == {(CS, 0x0100), (CS, 0x0110)}
     hyb.step()
 

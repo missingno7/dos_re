@@ -1,4 +1,4 @@
-"""Per-instance CPU step observers with an address-set TRAP — the cheap demo-scale probe primitive.
+"""Per-instance CPU step observers with an address-set TRAP — the cheap replay-scale probe primitive.
 
 A probe typically wants a callback at a handful of ``(cs, ip)`` addresses over a replay of tens of
 millions of interpreted instructions (a frame boundary, a routine entry, a write leaf).  The two

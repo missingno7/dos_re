@@ -63,7 +63,7 @@ def test_configure_sound_preserves_restored_sb():
     re-armed block IRQ).  The viewer only needs to retarget its clock at wall
     time — rebuilding the device would blank the DMA programming and cut the
     audio off on resume."""
-    from dos_re.pm_player import _configure_sound
+    from dos_re.pm_backend import _configure_sound
     rt = make_rt()
     # Stand in for a snapshot-restored, actively-streaming device.
     sb = rt.dos.attach_sound_blaster(base=0x210, irq=7, dma=1)
@@ -83,12 +83,12 @@ def test_configure_sound_preserves_restored_sb():
 
 
 def test_configure_sound_deterministic_keeps_instruction_clock():
-    """Demo-replay fidelity contract: the reproducible paths (record, replay,
+    """Replay-replay fidelity contract: the reproducible paths (record, replay,
     headless) must keep the SB on the deterministic instruction-count clock,
     NOT wall time — the SB IRQ's firing point steers the whole execution, so a
-    demo only replays faithfully if record and replay share that clock."""
+    replay only replays faithfully if record and replay share that clock."""
     import time
-    from dos_re.pm_player import _configure_sound
+    from dos_re.pm_backend import _configure_sound
     rt = make_rt()
     sb = rt.dos.attach_sound_blaster(base=0x210, irq=7, dma=1)   # instruction-count clock
     clk0 = sb.clock
@@ -119,6 +119,25 @@ def test_snapshot_preserves_mouse_range():
     from dos_re.pm_snapshot import apply_pm_state
     apply_pm_state(rt, state, bytes(rt.mem.data), b"".join(rt.dos.vga.planes))
     assert rt.dos.mouse_range == [0, 639, 0, 199]
+
+
+def test_pm_replay_continuation_round_trip_includes_event_cursor_and_planes():
+    from dos_re.pm_snapshot import capture_pm_continuation, apply_pm_continuation
+    rt = make_rt()
+    rt.cpu.r[EAX] = 0x12345678
+    rt.dos.vga.planes[2][7] = 0xA5
+    rt.dos.mouse_range = [10, 20, 30, 40]
+    state = capture_pm_continuation(rt, event_cursor=29)
+
+    rt.cpu.r[EAX] = 0
+    rt.dos.vga.planes[2][7] = 0
+    rt.dos.mouse_range = [0, 1, 0, 1]
+    apply_pm_continuation(rt, state)
+
+    assert state.event_cursor == 29
+    assert rt.cpu.r[EAX] == 0x12345678
+    assert rt.dos.vga.planes[2][7] == 0xA5
+    assert rt.dos.mouse_range == [10, 20, 30, 40]
 
 
 def test_hook_dispatch_without_verifier():

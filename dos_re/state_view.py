@@ -17,7 +17,7 @@ descriptors address the backend in data-segment offsets:
   ASM addresses them with.
 * :class:`OverlayBackend` — read-through overlay: reads fall through to a base
   reader, writes ACCUMULATE a ``{offset: value}`` contract WITHOUT mutating the
-  base — for contract-returning islands (whole-routine transforms returning a
+  base — for whole-routine transforms returning a
   write set, verified against a golden).
 * :class:`WidthContractBackend` — write-only ``{offset: (value, width)}``
   accumulator for projection passes that read only original memory and emit a
@@ -50,9 +50,6 @@ Usage in a game adapter::
         def __init__(self, source):
             super().__init__(coerce_backend(source, DGROUP_BASE), 0)
 
-Origin: promoted verbatim (minus the game layouts, plus the parameterized
-``base``) from the Prehistorik 2 port's ``pre2/bridge/dgroup_view.py``, where
-this machinery carried the whole state-view migration byte-exactly.
 """
 from __future__ import annotations
 
@@ -118,7 +115,7 @@ class SegmentBackend:
 class OverlayBackend:
     """Read-through overlay: reads fall through to ``base_rb(offset)`` unless already written;
     writes accumulate the ``writes`` contract (``{offset: byte}``) and never touch the base.
-    A contract-returning island runs its whole-routine transform over one of these and returns
+    A contract-returning transform runs its whole-routine logic over one of these and returns
     ``overlay.writes`` as its write set — the pass stays a pure function of its inputs."""
 
     __slots__ = ("_base_rb", "writes")
@@ -144,8 +141,8 @@ class OverlayBackend:
 
 class WidthContractBackend:
     """A write-only contract accumulator emitting ``{offset: (value, width)}`` — the
-    width-tracking contract convention some islands use (vs :class:`OverlayBackend`'s
-    byte-level ``{offset: value}``). Reads delegate to the island's own ``rb``/``rw``
+    width-tracking contract convention (vs :class:`OverlayBackend`'s
+    byte-level ``{offset: value}``). Reads delegate to the implementation's own ``rb``/``rw``
     closures and do NOT see the accumulated writes — for projection passes that read
     only original memory and emit a fresh write set."""
 

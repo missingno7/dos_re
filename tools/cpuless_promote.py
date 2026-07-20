@@ -1,5 +1,4 @@
-"""cpuless_promote.py -- promote functions from the recovery IR into CPUless
-recovered Python + generated CPU-ABI adapters (M3 vertical slice).
+"""cpuless_promote.py -- generate CPUless functions and CPU-ABI adapters.
 
 For every candidate the STRICT first-subset gate runs (no calls, no
 interrupts, no boundary/dispatch addresses, no indirect transfers, no segment
@@ -17,8 +16,9 @@ reason.  With --apply, each promoted function produces:
                                          (one implementation: the recovered
                                          body is authoritative)
 
-This step runs AFTER liftemit/liftlink in the pipeline; regenerating the
-lifted corpus and re-running this tool reproduces the same promotion set.
+This recipe consumes Recovery IR directly. A port may generate these
+implementations wherever they are useful; it need not first convert unrelated
+functions. Re-running with identical inputs reproduces the same candidate set.
 
 Usage (from a port):
     python dos_re/tools/cpuless_promote.py --ir artifacts/lift/recovery_ir.json \
@@ -199,20 +199,20 @@ def _far_dyn_sites(scan, cs, dyn_evidence) -> dict:
 def _gate_dyn_evidence(scan, cs, dyn_evidence, done, dispatch_owner,
                        contracts_by_cs, iret_keys=frozenset(),
                        extra_leaders=frozenset()) -> None:
-    """Evidence-gated dynamic dispatch (tier 9): a function containing
+    """Evidence-gated dynamic dispatch: a function containing
     near-indirect transfers promotes only when every OBSERVED runtime target
-    of its sites (the canonical-demo probe evidence) is dispatchable --
+    of its sites (the canonical-replay probe evidence) is dispatchable --
 
       * an intra-function block leader (jump-table landing), or
       * an already-promoted NEAR-return function, or
       * a dispatch entry owned by a promoted function (alternate entry).
 
-    A site with no observed targets promotes optimistically: the demo never
+    A site with no observed targets promotes optimistically: the replay never
     executes it, and a live selector outside the registry raises the
     UnknownDispatchTarget witness -- never a fallback.  Refusals here retry
     every fixpoint round, so promotion order follows the evidence.
 
-    An ISR-CHAIN site (far vector tail, tier 13) gates its observed vectors
+    An ISR-chain site (a far-vector tail) gates its observed vectors
     against the promoted IRET-handler set instead."""
     leaders = None
     for i in scan.insts.values():
@@ -250,7 +250,7 @@ def _gate_dyn_evidence(scan, cs, dyn_evidence, done, dispatch_owner,
                                       or c.sp_delta != 0):
                     # the dyn bundle assumes a stack-balanced callee
                     raise emit_cpuless.Refusal("dyn-target-sp-escape")
-                # (tier 14) a flags-livein target is fine: the near-dyn
+                # A flags-livein target is fine: the near-dynamic
                 # bundle now carries the reconstructed FLAGS word, exactly
                 # like the vectored site, and _exec forwards it only when the
                 # target's contract declares it.
@@ -260,7 +260,7 @@ def _gate_dyn_evidence(scan, cs, dyn_evidence, done, dispatch_owner,
 
 def _gate_vector_evidence(scan, cs, vec_evidence, done, contracts_by_cs,
                           iret_keys) -> None:
-    """Evidence-gated interrupt dispatch (tier 12): a function containing
+    """Evidence-gated interrupt dispatch: a function containing
     game-vectored INT sites promotes only when every OBSERVED runtime
     vector of its sites resolves to a promoted (or tentative-this-round)
     IRET-contract handler.  A site with no observed vectors promotes
@@ -308,91 +308,6 @@ def _read_plat_farcalls(path: Path):
     return out
 
 
-#: the virtual-time contract kinds an override may declare (see
-#: :func:`_read_virtual_time`).  Only an EXACT kind is gate-admissible to an
-#: instruction-count-keyed differential.
-_VT_EXACT = ("static", "model")
-_VT_KINDS = _VT_EXACT + ("island",)
-
-
-def _read_virtual_time(key: str, spec: dict) -> dict:
-    """The override's VIRTUAL-TIME contract -- what its body promises to return
-    in the compat channel's ``cost``.
-
-    A composed callee's ``cost`` accumulates into its caller's ``_cost``, which
-    anchors every downstream platform effect and, for a consumer whose gate is
-    instruction-count-keyed, WHERE demo input lands.  A GENERATED body is
-    instruction-exact by construction; a hand-recovered OVERRIDE is not -- it
-    does not execute the original control flow -- so it must DECLARE what its
-    cost means:
-
-      ``{"kind": "static", "cost": N}``  the original's per-invocation
-          instruction count is a constant N (a single-path body, or one whose
-          every entry->ret path has equal length).  The body returns ``N``;
-          composition is virtual-time-exact.
-      ``{"kind": "model"}``  the body computes its exact per-invocation cost
-          itself (a path-dependent cost model) and returns it.  Exact; the
-          consumer owns the derivation and its evidence.
-      ``{"kind": "island"}``  the ISLAND convention -- one dispatch step,
-          semantically right but NOT virtual-time-exact.  Default when the key
-          is absent (every pre-contract override).
-
-    Missing/unknown shapes fail loud: a guessed cost is worse than none.
-    """
-    vt = spec.get("virtual_time")
-    if vt is None:
-        return {"kind": "island", "cost": 1}
-    if not isinstance(vt, dict) or vt.get("kind") not in _VT_KINDS:
-        raise SystemExit(f"cpuless_promote: override {key}: virtual_time must "
-                         f"be a dict with kind in {_VT_KINDS}, got {vt!r}")
-    kind = vt["kind"]
-    if kind == "static":
-        cost = vt.get("cost")
-        if not isinstance(cost, int) or isinstance(cost, bool) or cost < 1:
-            raise SystemExit(f"cpuless_promote: override {key}: virtual_time "
-                             f"kind 'static' needs an integer cost >= 1, got "
-                             f"{cost!r}")
-        return {"kind": "static", "cost": cost,
-                "evidence": vt.get("evidence", "")}
-    return {"kind": kind, "evidence": vt.get("evidence", "")}
-
-
-def _read_overrides(path: Path):
-    """Load the authoritative-override contracts a consumer supplies.
-
-    Returns ``({key: CalleeContract}, {key: virtual_time})`` keyed by paragraph
-    "CS:IP" (see :func:`_read_virtual_time`).  Each override is
-    the consumer's hand-recovered body; dos_re only seeds its contract (so
-    callers compose it) and bridges the CPU ABI around it -- the body itself is
-    imported from ``import_base.<name>``.  Missing scalar fields default to a
-    plain balanced near/far callee (ret_pop 0, sp_delta 0)."""
-    doc = json.loads(path.read_text(encoding="utf-8"))
-    entries = doc.get("overrides", doc)
-    out: dict[str, emit_cpuless.CalleeContract] = {}
-    vtimes: dict[str, dict] = {}
-    for key, spec in entries.items():
-        if key.startswith("_"):
-            continue
-        vtimes[key.upper()] = _read_virtual_time(key, spec)
-        ret_kind = spec.get("ret_kind", "near")
-        ret_pop = int(spec.get("ret_pop", 0))
-        sp_deltas = tuple(spec.get("sp_deltas", (spec.get("sp_delta", 0),)))
-        out[key.upper()] = emit_cpuless.CalleeContract(
-            name=spec["name"],
-            inputs=tuple(spec.get("inputs", ())),
-            outputs=tuple(spec.get("outputs", ())),
-            exit_flags=frozenset(spec.get("exit_flags", ())),
-            needs_plat=bool(spec.get("needs_plat", False)),
-            ret_kind=ret_kind,
-            df_livein=bool(spec.get("df_livein", False)),
-            sp_delta=spec.get("sp_delta", 0),
-            ret_pop=ret_pop,
-            sp_output=bool(spec.get("sp_output", False)),
-            sp_deltas=sp_deltas,
-            flags_livein=bool(spec.get("flags_livein", False)))
-    return out, vtimes
-
-
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ir", required=True)
@@ -407,7 +322,7 @@ def main(argv=None) -> int:
     ap.add_argument("--dispatch-entries", default=None,
                     help="@FILE of recorded dynamic-arrival addresses "
                          "(recovery facts): each becomes an ALTERNATE ENTRY "
-                         "of the recovered function containing it (tier 9)")
+                         "of the recovered function containing it")
     ap.add_argument("--dyn-evidence", default=None,
                     help="indirect_sites.json (per-site dynamic-target "
                          "probe evidence): a function with dynamic transfers "
@@ -415,11 +330,11 @@ def main(argv=None) -> int:
                          "sites is dispatchable (local leader, promoted "
                          "function, or owned dispatch entry)")
     ap.add_argument("--boundary-heads", default=None,
-                    help="@FILE of boundary-head CS:IP addresses (tier 13): "
+                    help="@FILE of boundary-head CS:IP addresses: "
                          "a head inside a function becomes an emitted "
                          "plat.boundary observer; the function (and its "
-                         "composed callers) become STANDALONE-ONLY -- the "
-                         "recovered module is written, but the VMless demo "
+                         "composed callers) become direct-graph-only -- the "
+                         "recovered module is written, but the VMless replay "
                          "graph keeps the original lifted module")
     ap.add_argument("--vector-evidence", default=None,
                     help="vector_sites.json (game-vectored INT probe "
@@ -439,36 +354,6 @@ def main(argv=None) -> int:
                          "slot.  A far-call into a boundary segment with no "
                          "contract refuses `platform-farcall-contract-unknown` "
                          "(never guesses the arg count).")
-    ap.add_argument("--overrides", default=None,
-                    help="@FILE (JSON) of AUTHORITATIVE OVERRIDE contracts: "
-                         "{\"CS:IP\": {name, inputs, outputs, ret_kind, "
-                         "ret_pop, sp_delta, sp_deltas, needs_plat, df_livein, "
-                         "flags_livein, exit_flags}}.  Each address gets its "
-                         "hand-recovered body (supplied by the consumer as "
-                         "import_base.<name>) as the SINGLE running "
-                         "implementation, composed by callers exactly like a "
-                         "generated callee -- the unified override-graph model "
-                         "(impl = overrides.get(addr, generated[addr])).  The "
-                         "generated body for the same address is still emitted "
-                         "for a differential cross-check; the override RUNS.  "
-                         "The tool emits only the identity-preserving CPU-ABI "
-                         "adapter (the body is the consumer's), seeds the "
-                         "callee contract so callers compose, and registers a "
-                         "balanced near-return override for dynamic dispatch.  "
-                         "Each entry may declare a VIRTUAL-TIME contract "
-                         "(virtual_time: {kind: static|model|island[, cost]}) "
-                         "-- see --overrides-time-exact-only.")
-    ap.add_argument("--overrides-time-exact-only", action="store_true",
-                    help="seed ONLY the overrides that declare an EXACT "
-                         "virtual-time contract (virtual_time kind static or "
-                         "model).  An 'island' override (one dispatch step) is "
-                         "semantically right but does not reproduce the "
-                         "original's per-invocation instruction count, so it "
-                         "shifts every downstream platform effect and desyncs "
-                         "an instruction-count-keyed differential; under this "
-                         "flag such an address falls back to its GENERATED "
-                         "body (which is instruction-exact), keeping the whole "
-                         "graph gate-admissible.")
     ap.add_argument("--absorb-dispatch-arms", action="store_true",
                     help="DISPATCH-ARM ABSORPTION (graph completeness): a "
                          "switch ARM reached only through a container's near "
@@ -504,7 +389,8 @@ def main(argv=None) -> int:
                          "or a census gap in an untested path). Emit a FAIL-LOUD "
                          "stub for it so a runtime-reached caller promotes; the "
                          "stub raises only if the dead call is ever reached "
-                         "(hard wall, not a silent fallback). For a standalone "
+                         "(a fail-loud unresolved edge, not a silent fallback). "
+                         "For a direct generated "
                          "CPUless corpus.")
     ap.add_argument("--apply", action="store_true",
                     help="write the generated files (default: dry-run census)")
@@ -555,7 +441,7 @@ def main(argv=None) -> int:
             ir, wanted, dyn_evidence, args.desmc)
         wanted = [k for k in wanted if k not in arm_owner]
 
-    # FIXPOINT over the call DAG (tier 4, call-ABI composition): each round
+    # Fixpoint over the call DAG for call-ABI composition: each round
     # promotes every candidate whose direct near callees are all already
     # promoted; the callee contracts feed the callers' gates and emitters.
     promoted: list[str] = []
@@ -609,33 +495,6 @@ def main(argv=None) -> int:
     dispatch_owner: dict[str, str] = {}
     iret_keys: set[str] = set()     # promoted IRET-contract handlers
     done: set[str] = set()
-    # AUTHORITATIVE OVERRIDES (the unified override-graph seam): seed each
-    # override's callee contract so callers compose it exactly like a generated
-    # callee (impl = overrides.get(addr, generated[addr])).  The override key is
-    # marked done so the promotion loop never generates a PARALLEL body for it;
-    # its authoritative body is the consumer's (import_base.<name>), and only
-    # its identity-preserving CPU-ABI adapter is emitted here (in --apply).
-    overrides: dict[str, emit_cpuless.CalleeContract] = {}
-    override_vtime: dict[str, dict] = {}
-    #: overrides DROPPED because they carry no exact virtual-time contract
-    #: (--overrides-time-exact-only): {key: kind}.  They are not seeded, so the
-    #: address keeps its instruction-exact GENERATED body.
-    override_time_inexact: dict[str, str] = {}
-    if args.overrides:
-        overrides, override_vtime = _read_overrides(
-            Path(args.overrides.lstrip("@")))
-        if args.overrides_time_exact_only:
-            for okey in sorted(overrides):
-                kind = override_vtime.get(okey, {}).get("kind", "island")
-                if kind not in _VT_EXACT:
-                    override_time_inexact[okey] = kind
-                    del overrides[okey]
-        for okey, oc in overrides.items():
-            ocs, oip = (int(x, 16) for x in okey.split(":"))
-            contracts_by_cs.setdefault(ocs, {})[oip] = oc
-            if oc.ret_kind == "far":
-                far_contracts[(ocs, oip)] = oc
-            done.add(okey)
     #: dead-register-output pruning (§ dead_register_outputs.md): per-function
     #: register outputs the exit-liveness prune dropped. Recorded on the real
     #: emission path so the report is what actually shipped. Expected empty
@@ -779,19 +638,6 @@ def main(argv=None) -> int:
 
     print(f"cpuless promotion census ({len(wanted)} candidates):")
     print(f"  promotable                     {len(promoted):4d}")
-    if overrides:
-        _vt = Counter(override_vtime.get(k, {}).get("kind", "island")
-                      for k in overrides)
-        print(f"  authoritative overrides        {len(overrides):4d} "
-              f"(seeded contracts; callers compose them) "
-              f"[virtual time: "
-              + ", ".join(f"{k} {n}" for k, n in sorted(_vt.items())) + "]")
-    if override_time_inexact:
-        _vt = Counter(override_time_inexact.values())
-        print(f"  overrides NOT seeded (inexact virtual time) "
-              f"{len(override_time_inexact):4d} "
-              + ", ".join(f"{k} {n}" for k, n in sorted(_vt.items()))
-              + " -- kept on the instruction-exact GENERATED body")
     if args.absorb_dispatch_arms:
         n_owned = sum(1 for a, o in arm_owner.items() if o in set(promoted))
         print(f"  dispatch arms ABSORBED          {len(arm_owner):4d} "
@@ -816,11 +662,6 @@ def main(argv=None) -> int:
             "_notice": "GENERATED by dos_re tools/cpuless_promote.py -- "
                        "regenerate, do not hand-edit.",
             "promotable": promoted,
-            "overrides": sorted(overrides),
-            "override_virtual_time": {k: override_vtime[k]
-                                      for k in sorted(overrides)
-                                      if k in override_vtime},
-            "override_time_inexact": dict(sorted(override_time_inexact.items())),
             # DISPATCH-ARM ABSORPTION: arm key -> owning container key (the arm
             # is an alternate entry of that container's body, not a function),
             # and the arms whose fusion was REFUSED.
@@ -857,37 +698,19 @@ def main(argv=None) -> int:
                                                      newline="\n")
             kcs, kip = (int(x, 16) for x in key.split(":"))
             if contracts_by_cs[kcs][kip].parks:
-                # STANDALONE-ONLY: the recovered body parks in-line via
-                # plat.boundary; the demo graph keeps the original lifted
+                # DIRECT-GRAPH-ONLY: the recovered body parks in-line via
+                # plat.boundary; the replay graph keeps the original lifted
                 # module (a park unwind would lose composed caller locals).
                 standalone_only.append(key)
                 continue
             (ad_dir / f"lifted_{stem}.py").write_text(ad_src, encoding="utf-8",
                                                       newline="\n")
         if standalone_only:
-            print(f"STANDALONE-ONLY (parking; no adapter installed): "
+            print(f"DIRECT-GRAPH-ONLY (parking; no adapter installed): "
                   f"{len(standalone_only)}: {', '.join(standalone_only)}")
-        # AUTHORITATIVE OVERRIDES: emit ONLY the identity-preserving CPU-ABI
-        # adapter (the body is the consumer's, already present in rec_dir under
-        # the override name).  Same lifted slot a generated twin would occupy.
-        for okey, oc in overrides.items():
-            stem = okey.replace(":", "_").lower()
-            rec = ir["functions"].get(okey)
-            if rec is None:
-                raise SystemExit(f"cpuless_promote: override {okey} is not an "
-                                 f"IR function (no signature to bind)")
-            ad_src = emit_cpuless.emit_override_adapter(
-                okey, oc, signature=bytes.fromhex(rec["signature"]),
-                recovered_import_base=args.import_base)
-            (ad_dir / f"lifted_{stem}.py").write_text(ad_src, encoding="utf-8",
-                                                      newline="\n")
-        if overrides:
-            print(f"OVERRIDES: {len(overrides)} authoritative body/bodies "
-                  f"composed as direct CPUless overrides (adapter emitted; "
-                  f"body is the consumer's authoritative implementation)")
         # the dynamic-dispatch registry: every promoted NEAR-return function
         # is a selector; owned dispatch entries route to their owner's
-        # generated alternate entry.  Regenerated every apply (tier 9).
+        # generated alternate entry. Regenerated every apply.
         registry: dict[str, tuple] = {}
         handlers: dict[str, tuple] = {}
         # Why a PROMOTED function is still not dynamically dispatchable.  This
@@ -941,30 +764,6 @@ def main(argv=None) -> int:
             registry[key] = (f"{args.import_base}.{c.name}", c.name, None,
                              tuple(c.inputs), c.needs_plat, c.df_livein,
                              c.flags_livein)
-        # AUTHORITATIVE OVERRIDES are dynamically dispatchable under the SAME
-        # rule as promoted functions (above): a near-return override whose sp
-        # effect is COMMUNICATED -- zero, or returned via sp_output -- can be a
-        # near-indirect target; a far / ret-pop / shifts-sp-without-returning-it
-        # override is static-call reachable only.
-        for okey, oc in overrides.items():
-            if oc.ret_kind == "iret":
-                handlers[okey] = (f"{args.import_base}.{oc.name}", oc.name,
-                                  None, tuple(oc.inputs), oc.needs_plat,
-                                  oc.df_livein, oc.flags_livein)
-                continue
-            reason = None
-            if oc.ret_kind != "near":
-                reason = f"ret-kind-{oc.ret_kind}"
-            elif oc.ret_pop:
-                reason = "ret-pop"
-            elif oc.sp_delta != 0 and not oc.sp_output:
-                reason = "sp-delta"
-            if reason is not None:
-                dispatch_excluded[okey] = reason
-                continue
-            registry[okey] = (f"{args.import_base}.{oc.name}", oc.name, None,
-                              tuple(oc.inputs), oc.needs_plat, oc.df_livein,
-                              oc.flags_livein)
         for dkey, owner in dispatch_owner.items():
             ocs, oip = (int(x, 16) for x in owner.split(":"))
             c = contracts_by_cs[ocs][oip]

@@ -668,7 +668,7 @@ def _terminator_lines(inst: Inst, cs: int, bb_of: dict[int, int], out: list[str]
             out.append(f"{indent}s.cs, s.ip = 0x{seg:04X}, 0x{off:04X}")
             out.append(f"{indent}return")
     elif kind == JMP_IND:
-        # Tail exit (the 32-bit pipeline's treatment): compute the runtime
+        # Tail exit (matching the 32-bit emitter): compute the runtime
         # target, set CS:IP, hand control back to the VM.  A dispatcher lifts
         # as prologue + tail transfer; the cases stay interpreted and any hook
         # installed at them dispatches normally.
@@ -703,7 +703,7 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     so a verify run can report *which paths* were exercised, not just that the
     hook passed (docs/lifting_design.md §7). It is inert otherwise.
 
-    ``link_map`` is THE LINKER SEAM (the recovery pipeline's de-VM step): a
+    ``link_map`` is the generated-call linker seam: a
     ``{near_call_target_ip: python_callable_expr}`` map. A direct near CALL to
     a mapped target emits ``call_installed_hook_like_near_call(cpu, key,
     <callee>, ret_ip)`` instead of ``emulate_call`` — original CALL/RET stack
@@ -730,7 +730,7 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     ``link_map`` when the whole corpus is emitted counting (a linked callee
     accounts for itself); a MIXED corpus (counting callers linking
     non-counting callees) would under-count, which is why the assembly
-    pipeline turns it on for every module or none.
+    generation recipe turns it on consistently for its selected modules.
     ``link_imports`` lines are appended to the module header verbatim — the
     link tool supplies its cross-module binding there (e.g. a module-level
     ``LINKS = {"CS:IP": None}`` table that ``dos_re.lift.install.resolve_links``
@@ -747,7 +747,7 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     already cross-checks every instruction length against live execution.
     """
     leaders = scan.block_leaders()
-    # BOUNDARY OBSERVERS (docs/dos_re_2.0.md §1a — the VMless wall): each
+    # BOUNDARY OBSERVERS: each
     # ``boundary_heads`` ip gets an emitted event call after its instruction,
     # and the instruction AFTER the head becomes a RESUME ENTRY — a block
     # leader exported in RESUME_ENTRIES so the installer can register a
@@ -769,9 +769,8 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     #
     # Without this a lifted body is a one-way door: the INT unwinds out of the
     # whole Python call chain and the resume finds no hook at the INT, so it
-    # continues INTERPRETED — a VMless wall violation, and a silent divergence
-    # anywhere the wall is not armed.  Found by skyroads' menu loop, whose
-    # ``mov ah,07 / int 21h`` (1010:5FEB) blocks on every keypress wait.
+    # continues interpreted, which is invalid when the selected plan forbids
+    # fallback.
     #
     # Forcing the INT as a leader is what makes re-entry FAITHFUL rather than
     # merely possible: the preceding ``mov ah,07`` stays in the previous block,
@@ -807,12 +806,10 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
             # The head is a re-entry point TOO, not just its successor. A park
             # leaves IP on the successor, so that is where a resumed park comes
             # back -- but it is not the only way to be here. The machine can sit
-            # ON the head: a snapshot captured while the game spun in the wait
-            # (skyroads' gameplay demos all start at 1010:22F8, mid-spin), or an
-            # IRET returning to it after an IRQ landed on that instruction. Both
-            # are ordinary; neither could dispatch, because the head was forced
-            # as a block leader but never exported, so the wall fired at the one
-            # address the game is most often found at.
+            # ON the head: a snapshot captured while the program spun in the
+            # wait, or an IRET returning to it after an IRQ landed on that
+            # instruction. Both are ordinary; neither could dispatch if the
+            # head were forced as a block leader but never exported.
             forced.add(h)
             resume_points.add(h)
             forced.add(nip)
@@ -822,7 +819,7 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
         # OUTER frame later resumes through its guest return address — the
         # instruction after its call site.  Those continuations must
         # therefore be RESUME entries in EVERY function whose frame can be
-        # abandoned (``resume_calls`` — set pipeline-wide whenever boundary
+        # abandoned (``resume_calls`` — set consistently whenever boundary
         # observation is on), or the abandoned callers would continue
         # INTERPRETED (a wall violation and a pass-count asymmetry).
         if resume_calls or heads:
@@ -940,7 +937,7 @@ def emit_function(scan: FunctionScan, cs: int, name: str, *,
     # targets BELOW the entry (a backward jump above the function head).
     # Hardcoding 0 executed the lowest-address block first — wrong code, at
     # the wrong time, for that entry class (found by the Lemmings pilot's
-    # whole-program census; caught in-situ as guaranteed DIVERGED lifts).
+    # observed-entry census; caught in situ as guaranteed DIVERGED lifts).
     A("    # A lifted function runs SYNCHRONOUSLY to completion: the interpreter")
     A("    # interleaves the outside world between instructions, but nothing")
     A("    # external can happen inside a lifted body -- so a loop WAITING for the")
