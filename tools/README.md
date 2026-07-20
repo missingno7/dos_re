@@ -11,6 +11,8 @@ view (which tool for which recovery step, with context) is
 | `view.py` | `python tools/view.py --exe assets/GAME.EXE` | Watch any EXE run, zero setup — the standard player CLI (`--headless`, `--snapshot`, `--record-demo`, `--play-demo`; F10/F11/F12). Your port's `scripts/play.py` supersedes it once an adapter exists. |
 | `pm_view.py` | `python tools/pm_view.py --exe assets/GAME.EXE` | Watch any DOS/4GW (MZ+LE) EXE run, zero setup — live viewer over the flat 386 runtime (KBC keys, INT 33h mouse, wall-clock vsync, F10/F12, `--snapshot` resume, `--headless`). A port's `scripts/play.py` (thin wrapper over `dos_re.pm_player.main`) supersedes it. |
 | `render_frame.py` | `python tools/render_frame.py <snapshot_dir>` | Day-0 "see output": snapshot (or `--exe` + `--steps`) → PNG. VGA 13h + EGA/VGA planar. |
+| `replay_info.py` | `python tools/replay_info.py <artifact-dir>` | Inspect a 3.0 replay's event identity, profiles, cached boundaries, function visits, and annotations. |
+| `replay_verify.py` | `python tools/replay_verify.py <artifact-dir> --driver game.replay:build --start X --end Y [--bisect]` | Verify exactly X→Y or persistently bisect a divergent transition. |
 | `lindis.py` | `python tools/lindis.py <exe> <snapshot_dir> <CS> <START> <END>` | Read code: linear disassembly at a snapshot (static lengths, interpreter-rendered text). |
 | `profile_hotspots.py` | `python tools/profile_hotspots.py <exe> <steps> --snapshot <snap> --top 40` | FIRST, before manual tracing: hot routines, tight backward edges (= wait loops / frame boundaries), boundary crossings. |
 | `le_info.py` | `python tools/le_info.py assets/GAME.EXE` | Day-0 for a DOS/4GW (MZ+LE) title: object table, entry/stack, fixup census, entry disassembly. `--rebase 0x100000` prints addresses where the runtime loads them. |
@@ -19,7 +21,7 @@ view (which tool for which recovery step, with context) is
 
 ## The 2.0 assembly pipeline (docs/dos_re_2.0.md)
 
-`codemap/irgen → liftemit → liftlink → install_vmless_graph (in the port's play_vmless) → end-to-end oracle → hook_bisect` — assemble the largest supported VMless graph early, judge it end-to-end, localize divergences automatically.
+`codemap/irgen → liftemit → liftlink → install_vmless_graph → replay.verify_interval → replay.bisect_divergence` — assemble the largest supported graph early, verify the relevant cached interval against the oracle, and localize divergence to a stable transition.
 
 | Tool | Command | When |
 |---|---|---|
@@ -27,7 +29,6 @@ view (which tool for which recovery step, with context) is
 | `irgen.py` | `python tools/irgen.py --exe <exe> --snapshot <snap> --entries-file <txt> --keep-interpreted @<file> --out recovery_ir.json` | Serialize the RECOVERY IR (docs/recovery_ir.md): decode+CFG+effect tags+provenance+facts in one regeneratable document — the single input every emitter consumes. `liftemit --from-ir` emits from it byte-identically to the scan path. |
 | `liftemit.py` | `python tools/liftemit.py --exe <exe> --snapshot <snap> --entries-file <txt> --emit-dir <game>/lifted` | Batch-emit the whole census to VMless lifted modules in one pass (byte-identical to liftverify's emit recipe). The bulk-emission step. |
 | `liftlink.py` | `python tools/liftlink.py --exe <exe> --snapshot <snap> --entries-file <txt> --emit-dir <game>/lifted` | Structural linking (default): near-CALL edges between lifted census entries with all-near-ret exits become direct Python calls. `--proven-edges` restores the 1.x ORACLE_PASSING gate (hybrid/debug only). |
-| `hook_bisect.py` | `python dos_re/tools/hook_bisect.py --driver <game>.bisect_driver:Driver --boundaries N` | When the assembled graph diverges from the oracle: binary-search the installed set to the smallest responsible function. Run from the port root. |
 
 ## Lift / verify (per-function diagnostics + the hybrid tier)
 
@@ -36,9 +37,6 @@ view (which tool for which recovery step, with context) is
 | `liftgen.py` | `python tools/liftgen.py --exe <exe> --snapshot <snap> --entries-file <txt>` | Census: which function entries are mechanically liftable, and the refusal reason for the rest. `--emit` writes the literal hooks. |
 | `liftverify.py` | `python tools/liftverify.py --exe <exe> --snapshot <snap> --entry CS:IP --steps N --emit-dir <game>/lifted` | Lift + prove in situ: every call diffed against the ASM oracle; writes the `LIFTED → ORACLE_PASSING` proof ledger. Feeds the hybrid auto-install tier and per-function diagnostics — NOT a gate on VMless graph assembly. |
 | `gen_island_manifest.py` | `python tools/gen_island_manifest.py <pkg>… -o docs/recovered_islands.md` | Regenerate the recovered-island ledger from `@oracle_link` tags. Generated, never hand-edited. |
-| `tick_demo_info.py` | `python tools/tick_demo_info.py <demo.bin>` | Inspect an endgame tick-demo recording (ticks, key record, sidebands, seed) before trusting it — corpus census, stale-file diagnosis. |
-| `pm_verify_demo.py` | `python dos_re/tools/pm_verify_demo.py --exe <exe> --demo <bundle> --install pkg.mod:install_hooks [--focus 0xADDR]` | The PM recovery proof loop: replay an input-demo bundle with `PMHookVerifier` diffing every hooked call against the interpreted original. `--focus` = fast loop while recovering one routine; unfocused = the pre-commit full pass. Run from the port root. |
-| `pm_census.py` | `python dos_re/tools/pm_census.py --exe <exe> --demo <bundle> --install … --region 0x110000:0x120000 [--leaf-only]` | "What do I recover next": rank the demo's hot `E8` call targets, statically profiled (ins/calls/INT/port-I/O, HOOKED tag). The top un-hooked pure LEAF in the game's code region is usually the next slice. |
 
 ## Guardrails (run with every change)
 

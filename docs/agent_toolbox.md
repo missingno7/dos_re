@@ -159,19 +159,19 @@ Classify what it finds:
 ## 7. Record / replay deterministic demos
 
 ```python
-from dos_re.input_demo import InputDemoRecorder, InputDemoPlayback
+from dos_re.replay import (ReplayArtifact, ReplayEvent, ReplayPoint,
+                           ExecutionProfile, verify_interval, bisect_divergence)
 ```
 
-Interactively: `python tools/view.py --exe GAME.EXE --record-demo NAME` (or
-F11), replay with `--play-demo <path>` (add `--headless` for speed). Keys are
-delivered via `dos_re.interrupts.deliver_scancode` (port 60h + the game's own
-INT 09h ISR — not BIOS); `dos_re.keyboard.KeyDispatcher` holds each key a full
-polled frame.
+Record the adapter's deterministic external events as one `ReplayArtifact`.
+Register the original interpreter and each candidate as an `ExecutionProfile`,
+then use `tools/replay_verify.py` or `verify_interval` for exact X→Y replay.
+Machine-backed profiles use complete machine projection; detached native
+profiles publish the same canonical semantic schema from native state.
 
-A demo is a proof artifact only if it replays byte-identically under every
-driver. Divergence deep into a demo? `InputDemoPlayback.write_suffix` carves a
-snapshot + rebased tail at the boundary — resume there, not from the start
-(`dos_re.repro_artifacts` pairs with it).
+On divergence use `bisect_divergence`. It persists the latest valid point and
+the failing successor inside the artifact; no second replay record is created.
+Inspect the corpus item with `python tools/replay_info.py <artifact-dir>`.
 
 ## 8. Hook a routine
 
@@ -205,7 +205,7 @@ original ASM there, diff registers + flags + **full memory**. Faster metadata
 mode: declare a `HookStop` per address. On divergence:
 
 ```bash
-OK_TRACE_HOOK=CS:IP python <your repro>    # prints the ASM oracle's trace
+OK_TRACE_HOOK=CS:IP python <failing-test-command>  # prints the ASM oracle's trace
 ```
 
 Read the trace before theorizing — the classic causes are freed-stack scratch
@@ -216,12 +216,12 @@ artifacts on mismatch).
 
 ## 10. Lift routines automatically (never hand-translate a first draft)
 
-> **The 2.0 default is WHOLE-GRAPH assembly, not per-slice proving**
+> **The 3.0 default is WHOLE-GRAPH assembly plus indexed interval replay**
 > ([`dos_re_2.0.md`](dos_re_2.0.md)): `tools/codemap.py` (census) →
 > `tools/liftemit.py` (batch-emit everything) → `tools/liftlink.py`
-> (structural linking) → `lift.install.install_vmless_graph` in the port's
-> `play_native` → end-to-end tick-boundary oracle → `tools/hook_bisect.py` on
-> divergence.  The per-slice `liftverify` loop below remains the tool for
+> (structural linking) → `lift.install.install_vmless_graph` →
+> `replay.verify_interval` → `replay.bisect_divergence` on divergence. The
+> per-slice `liftverify` loop below remains the tool for
 > per-function diagnostics and the hybrid auto-install tier.
 
 ```bash
@@ -255,138 +255,23 @@ recovered only after **you** rename and simplify it into clean pure-layer
 Python and tag it `@oracle_link` — with the same oracle tests unchanged. A
 wall of unread-but-verified lifted code must never inflate "recovered %".
 
-## 12. Prove the VM-less native core (the endgame proof)
+## 12. Prove detached execution with the shared replay corpus
 
-`dos_re.tick_demo` — the mode-independent equivalence engine. Input demos ride
-an instruction-count clock, which is **mode-dependent** (a hook runs fewer
-emulated instructions than the ASM it replaces) and doesn't exist VM-less; a
-tick demo is keyed to the GAME TICK, so one recording replays identically in
-pure-ASM, hybrid, and native.
+Use `ReplayArtifact` for gameplay and front-end intervals alike. Each oracle or
+candidate backend supplies an execution profile and replay driver. Machine-backed
+profiles compare complete continuation state; detached native profiles project
+their authoritative state into the same `CanonicalState` schema used by the
+oracle.
 
-```python
-from dos_re.tick_demo import TickDemo, masked_digest, record_ticks, verify_ticks
+Place stable points at meaningful game ticks, presentation transitions, decision
+seams, and function boundaries. Restore the nearest cached point, replay only the
+relevant X→Y interval, and call `replay.bisect_divergence` when a mismatch must be
+localized. Function changes should use the artifact's function-visit interval
+instead of replaying unrelated execution.
 
-# RECORD (VM = the oracle): adapter supplies the seam addresses + capture logic
-demo = record_ticks(rt, cs=0x1030, ds=0x1A0F,
-                    seed_ip=FRAME_TOP,            # main-loop top -> the native seed
-                    commit_ip=GAP_SITE,           # end-of-tick -> digest + commit
-                    observe={DECODE: grab_keys, KEY_SAMPLE: refine_keys},
-                    commit=finish_tick, digest=lambda rt: my_digest(rt),
-                    advance_one_frame=drive)      # an input-demo replay usually drives this
-demo.save("artifacts/.../tick_demo.bin")
-
-# VERIFY (no VM at all): every tick — inject keys+sidebands, ONE native tick, compare
-n_ok, div = verify_ticks(TickDemo.load(path), native_state,
-                         inject=my_inject, tick=my_tick, digest=my_digest)
-```
-
-All ticks matching = the VM-less game provably reproduced the oracle
-byte-for-byte (under the digest's ownership mask) over the whole recording —
-the "flip the engine" exit condition. The three rules that make it sound (each
-learned from a real divergence — the module docstring has the full stories):
-
-- **Capture at the consumption point** — keys are observed where the tick
-  *consumes* them (an ISR between frame-start and the read otherwise falsifies
-  the recording); later observers overwrite earlier ones by design.
-- **Sidebands** — state the native core can't reproduce (PIT-fed idle timers,
-  anything instruction-count-derived) is recorded per tick and *injected*.
-- **The digest is the ownership mask** — `masked_digest` neutralises
-  render/input-plumbing/audio state so a match means "same gameplay" by the
-  same definition the forward lockstep oracle proves.
-- `tick()` returns a terminal message for level-end/game-over/game-complete
-  (transitions whose VM frames have no native counterpart) — the compare ends
-  there legitimately; an unrecovered path raises and is reported.
-
-**On divergence, carve a repro — never re-debug from the seed.** `verify_ticks`
-reported tick `i`; reposition and slice:
-
-```python
-st = make_state(demo.seed)
-replay_to(demo, st, i, inject=my_inject, tick=my_tick)   # fast: no digest checks
-demo.suffix(i, capture_bytes(st)).save("artifacts/.../repro_tick_i.bin")
-```
-
-The suffix reproduces the divergence at its own tick 0 — every subsequent
-debugging iteration replays one tick, not the whole recording. (The input-demo
-analogue is `InputDemoPlayback.write_suffix`.) The same rule applies to the
-native runner itself: **every gap/crash writes a resumable snapshot and prints
-the exact repro command** — `dos_re.player` does this for VM runners; your
-VM-less native runner must implement the same (endgame accelerator; the
-completed port's `dump_gap_snapshot` is the worked example).
-
-Inspect a recording: `python tools/tick_demo_info.py <demo.bin>`.
-
-## 12b. Prove the VM-less FRONT END (the non-gameplay screens)
-
-The tick demo captures **zero** of the front end: intro / title / menu / attract
-/ world-map / tally all run with no game tick. Those are exactly where a VM-less
-port drifts undetected — a screen shown in the wrong ORDER, a dropped fade, a
-screen before/after the wrong transition (e.g. a "you must be expert" wall shown
-*after* the map+level load instead of *before*). `dos_re.frontend_timeline` is
-the front-end analogue of the tick demo: a per-PRESENT-FRAME timeline.
-
-A per-frame pixel diff is the WRONG proof here — the reference recording rides a
-wall-clock/instruction budget the native scene generator does not share, so frame
-cadences are incomparable. What IS well-defined and cadence-free is the flow's
-DISCRETE structure, proven by **four gates** (all in `dos_re.frontend_timeline`;
-worked end-to-end in pre2's `scripts/verify_native_frontend.py`):
-
-```python
-from dos_re.frontend_timeline import (capture, collapse, filter_runs, diff_sequence,
-                                      pack_fields, diff_fields,                 # gate 2
-                                      input_segments, SegmentedInput,           # causal input
-                                      diff_offsets, spread_beyond)              # gates 3+4
-
-ref  = filter_runs(collapse(capture(vm_sample, N)),  ignore=TRANSIENT)   # ground truth
-segs = input_segments(ref, per_frame_raw_input, N)   # the VM's input, segmented PER SCREEN
-feeder = SegmentedInput(segs, blank=ZEROS)           # candidate consumes it causally
-cand = filter_runs(collapse(capture(native_sample, N)), ignore=TRANSIENT)
-
-diff_sequence(ref, cand, duration_tolerance=None)          # [1] screen ORDER
-diff_fields(pack_fields(vm_d, FIELDS), pack_fields(nat_d, FIELDS), FIELDS)   # [2] per transition
-owned = set(diff_offsets(masked(seed_dgroup), masked(native_end_dgroup)))    # [3] ownership split
-spread_beyond(masked(a_tick), masked(b_tick), owned)                         # [4] inertness
-```
-
-- **[1] ORDER**: the filtered run-length screen sequence must match. Catches
-  out-of-order / extra / missing screens (e.g. a "you must be expert" wall shown
-  after the map+level load instead of before).
-- **[2] WITNESS at every transition**: the adapter declares the DECISION-STATE
-  fields (chosen level/mode, live-vs-attract input source, lives, password state)
-  and they are byte-compared at each screen change. Cadence-free; a mismatch is a
-  real behaviour divergence. (In pre2 this caught a fresh-start block the VM runs
-  at MENU entry that native deferred to level load.)
-- **[3] ENTRY-STATE OWNERSHIP**: the candidate's gameplay-entry state must be
-  byte-identical to the reference's first-gameplay-tick seed OUTSIDE an OWNED byte
-  set (`diff_offsets`) — the bytes where a VM-less product legitimately differs
-  (sound-driver module data in DGROUP, load-layout pointers, scene scratch).
-- **[4] INERTNESS — the ownership claim is PROVEN, not assumed**: replay the
-  demo's recorded gameplay ticks TWICE (from the reference seed and from the
-  candidate's own front-end output) with identical injected input; every tick must
-  show `spread_beyond(...) == []` — the owned bytes demonstrably never influence
-  gameplay. All four green = the native front end behaves like the original, from
-  cold boot through byte-identical gameplay.
-
-Input honesty (same oracle trick as the tick demo, plus causal alignment): while
-replaying the demo on the VM, capture the raw key-flag window the front end samples
-each frame (include EVERYTHING the flow reads — pre2's menu reads '1'/'2' flags at
-[0x27F6/F7] *below* the scancode table, and the idle counter drives the attract
-timeout). Then `input_segments` + `SegmentedInput` deliver it per-SCREEN, so a
-keypress lands on the same screen at the same relative moment with no shared clock.
-A cold-start demo (boot → oldies → titles → menu → level) is required so the native
-cold-boot entry aligns with the VM — and seed the candidate from the FRONT-END entry
-state (boot constants), not a level-jump bootstrap. pre2 adapters:
-`scripts/probe_frontend_timeline.py` (ground-truth prober — run on ANY demo to see
-what the original does) + `scripts/verify_native_frontend.py` (the 4-gate proof).
-
-Front-end iteration cost (two OVERKILL-learned gotchas): (1) front-end probing has
-no gameplay snapshot to seed from, so every attempt re-pays the full cold boot
-(~10 min of raw interpretation) — run the boot ONCE and `write_snapshot` at a
-present-frame just before the screens you are probing; every later probe loads it
-instantly and drives forward. (2) Front ends often pace on RETRACE POLLING
-(`in al, 3DAh`), NOT the game's timer wait — a fast-forward helper keyed to the
-timer-wait address (or a wait-flag poke) will stall or no-op there; raw-step the
-cpu instead (the VM toggles the 3DA retrace bit, so the poll loops complete).
+The rationale behind the consolidated model is recorded separately in
+[`history/replay_evolution.md`](history/replay_evolution.md). That history is not
+an API reference.
 
 ## 12c. Prove the VM-less AUDIO driver (the resident sound module)
 
@@ -396,7 +281,8 @@ INDEPENDENTLY of gameplay recovery, because its whole world is its own segment
 image: the game commands it by writing cells there (page/SFX requests), and its
 output is the register write stream. Two gates, both built on three trapped
 addresses (`dos_re.step_probe` — the tick entry, the register-write leaf, the
-game's frame boundary), captured per present-frame over a pure-VM demo replay:
+game's frame boundary), captured per present-frame over an oracle
+`ReplayArtifact` interval:
 
 - **FORWARD gate** (reads the tempo + proves the music tick): seed the recovered
   driver ONCE from the VM's segment image, run it forward at the captured
@@ -405,7 +291,7 @@ game's frame boundary), captured per present-frame over a pure-VM demo replay:
   SFX/page request written into the driver's cells mid-frame — invisible to a
   forward sim). That boundary is the music-isolation surface, not a bug; and the
   captured tick count fixes the TEMPO as a measurement instead of an ear-tune.
-- **PER-TICK gate** (the strongest form — verifies the WHOLE demo, SFX and page
+- **PER-TICK gate** (the strongest form — verifies the whole interval, SFX and page
   changes included): re-seed the recovered driver from the true segment image at
   EVERY tick entry and diff that one tick's writes. Each tick is independently
   seeded, so there is no forward drift and nothing is out of scope.
@@ -413,7 +299,7 @@ game's frame boundary), captured per present-frame over a pure-VM demo replay:
 A real driver bug shows up as a small mid-window mismatch (forward gate) or any
 per-tick mismatch; lock a short per-tick window into the suite as the regression
 gate. Validated on OVERKILL (`overkill/probes/verify_native_audio.py`): ~700
-ticks per demo across six levels/songs, zero divergence, through SFX bursts and
+ticks per replay across six levels/songs, zero divergence, through SFX bursts and
 page switches.
 
 ## 13. Measure progress (never estimate)

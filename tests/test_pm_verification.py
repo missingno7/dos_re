@@ -121,6 +121,25 @@ def test_snapshot_preserves_mouse_range():
     assert rt.dos.mouse_range == [0, 639, 0, 199]
 
 
+def test_pm_replay_continuation_round_trip_includes_event_cursor_and_planes():
+    from dos_re.pm_snapshot import capture_pm_continuation, apply_pm_continuation
+    rt = make_rt()
+    rt.cpu.r[EAX] = 0x12345678
+    rt.dos.vga.planes[2][7] = 0xA5
+    rt.dos.mouse_range = [10, 20, 30, 40]
+    state = capture_pm_continuation(rt, event_cursor=29)
+
+    rt.cpu.r[EAX] = 0
+    rt.dos.vga.planes[2][7] = 0
+    rt.dos.mouse_range = [0, 1, 0, 1]
+    apply_pm_continuation(rt, state)
+
+    assert state.event_cursor == 29
+    assert rt.cpu.r[EAX] == 0x12345678
+    assert rt.dos.vga.planes[2][7] == 0xA5
+    assert rt.dos.mouse_range == [10, 20, 30, 40]
+
+
 def test_hook_dispatch_without_verifier():
     rt = make_rt()
     calls = []

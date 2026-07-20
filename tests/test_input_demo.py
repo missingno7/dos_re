@@ -1,395 +1,95 @@
-from __future__ import annotations
-
-import json
+"""Real-mode ReplayArtifact recording and input-adapter tests."""
 from types import SimpleNamespace
 
-from dos_re.cpu import CPUState
-from dos_re.input_demo import InputDemoPlayback, InputDemoRecorder, dos_key_value, mouse_sample
+from dos_re.input_demo import (
+    DOS_KEY_CHANNEL,
+    MOUSE_CHANNEL,
+    SCAN_CHANNEL,
+    RealModeInputAdapter,
+    bios_key_value_from_scancode,
+    dos_key_payload,
+    mouse_payload,
+    mouse_sample,
+    scan_payload,
+)
+from dos_re.replay import (
+    ContinuationState,
+    ExecutionProfile,
+    ReplayArtifact,
+    ReplayRecording,
+)
 
 
 class DummyRuntime:
-    def __init__(self) -> None:
-        self.dos = SimpleNamespace(key_queue=[])
-        self.scans: list[int] = []
-
-
-class MouseRuntime(DummyRuntime):
-    """A runtime whose dos exposes set_mouse_norm, like the real DOSMachine."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.mouse_calls: list[tuple[float, float, int]] = []
-        self.dos.set_mouse_norm = lambda u, v, buttons: self.mouse_calls.append((u, v, buttons))
-
-
-def _deliver(rt: DummyRuntime, scancode: int) -> None:
-    rt.scans.append(scancode & 0xFF)
-
-
-def test_input_demo_playback_applies_events_once_at_recorded_boundaries(tmp_path):
-    demo = tmp_path / "demo"
-    demo.mkdir()
-    (demo / "snapshot").mkdir()
-    (demo / "input_demo.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "snapshot": "snapshot",
-                "events": [
-                    {"boundary": 0, "seq": 0, "kind": "scan", "value": 0x4D},
-                    {"boundary": 2, "seq": 1, "kind": "dos_key", "value": 0x3920, "scancode": 0x39, "text": " "},
-                    {"boundary": 2, "seq": 2, "kind": "scan", "value": 0xCD},
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    playback = InputDemoPlayback.load(demo)
-    rt = DummyRuntime()
-
-    assert playback.snapshot_path() == demo / "snapshot"
-    assert playback.apply_to_runtime(0, rt, deliver=_deliver) == 1
-    assert rt.scans == [0x4D]
-    assert rt.dos.key_queue == []
-
-    assert playback.apply_to_runtime(1, rt, deliver=_deliver) == 0
-    assert playback.apply_to_runtime(2, rt, deliver=_deliver) == 2
-    assert rt.scans == [0x4D, 0xCD]
-    assert rt.dos.key_queue == [0x3920]
-
-    assert playback.apply_to_runtime(99, rt, deliver=_deliver) == 0
-
-
-def test_input_demo_playback_can_feed_reference_and_candidate_pair(tmp_path):
-    demo = tmp_path / "demo"
-    demo.mkdir()
-    (demo / "input_demo.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "snapshot": "snapshot",
-                "events": [
-                    {"boundary": 1, "seq": 0, "kind": "scan", "value": 0x39},
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    playback = InputDemoPlayback.load(demo)
-    ref = DummyRuntime()
-    cand = DummyRuntime()
-
-    assert playback.apply_to_runtimes(0, (ref, cand), deliver=_deliver) == 0
-    assert playback.apply_to_runtimes(1, (ref, cand), deliver=_deliver) == 1
-    assert ref.scans == cand.scans == [0x39]
-
-
-def test_dos_key_value_matches_text_prompt_encoding():
-    assert dos_key_value(0x39, "") == 0x3920
-    assert dos_key_value(0x1C, "") == 0x1C0D
-    assert dos_key_value(0x2C, "z") == 0x2C7A
-    assert dos_key_value(0x3B, "") is None
-
-
-def test_input_demo_suffix_uses_playback_cursor_not_boundary_filter(tmp_path):
-    demo = tmp_path / "demo"
-    demo.mkdir()
-    (demo / "input_demo.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "snapshot": "snapshot",
-                "end_boundary": 7,
-                "metadata": {"video": "vga"},
-                "events": [
-                    {"boundary": 2, "seq": 0, "kind": "scan", "value": 0x4D},
-                    {"boundary": 2, "seq": 1, "kind": "scan", "value": 0xCD},
-                    {"boundary": 5, "seq": 2, "kind": "dos_key", "value": 0x3920, "scancode": 0x39, "text": " "},
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    playback = InputDemoPlayback.load(demo)
-    rt = DummyRuntime()
-
-    assert playback.apply_to_runtime(2, rt, deliver=_deliver) == 2
-    suffix = playback.remaining_events_from_cursor(boundary=2)
-
-    assert [event.to_json() for event in suffix] == [
-        {"boundary": 3, "seq": 0, "kind": "dos_key", "value": 0x3920, "scancode": 0x39, "text": " "},
-    ]
-
-
-class SnapshotRuntime:
-    def __init__(self) -> None:
-        self.program = SimpleNamespace(
-            memory=SimpleNamespace(
-                data=bytearray(1024 * 1024),
-                size=1024 * 1024,
-                ega_planar=False,
-                ega_map_mask=0,
-                ega_read_plane=0,
-                ega_display_start=0,
-            ),
-            exe=SimpleNamespace(path="PRE2"),
-            psp_segment=0,
-            load_segment=0,
-            entry_cs=0,
-            entry_ip=0,
-            initial_ss=0,
-            initial_sp=0,
-            overlay=b"",
-        )
-        self.program.exe.load_module = b""
-        self.cpu = SimpleNamespace(
-            instruction_count=123,
-            s=CPUState(cs=0x1010, ip=0x1234, flags=0x0202),
-            hook_names={},
-        )
+    def __init__(self):
+        self.scans = []
+        self.mouse = []
         self.dos = SimpleNamespace(
-            video_mode=0,
-            video_page=0,
-            text_mode_active=False,
-            cursor_row=0,
-            cursor_col=0,
-            ticks=0,
-            vga_status_reads=0,
-            _pit_channel2_access=0,
-            _pit_channel2_latch=0,
-            _pit_channel2_write_low=None,
-            pit_channel2_reload=0,
-            speaker_control=0,
-            opl_selected_register=0,
-            opl_status=0,
-            opl_registers={},
-            next_alloc_segment=0,
-            allocation_limit_segment=0,
-            allocations={},
-            files={},
-            stdout=[],
-            port_log=[],
-        )
+            key_queue=[],
+            set_mouse_norm=lambda *sample: self.mouse.append(sample))
 
 
-def test_input_demo_write_suffix_writes_snapshot_and_rebased_manifest(tmp_path):
-    demo = tmp_path / "demo"
-    demo.mkdir()
-    (demo / "input_demo.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "snapshot": "snapshot",
-                "end_boundary": 10,
-                "metadata": {"video": "vga", "sound": "adlib"},
-                "events": [
-                    {"boundary": 4, "seq": 0, "kind": "scan", "value": 0x4D},
-                    {"boundary": 9, "seq": 1, "kind": "scan", "value": 0xCD},
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    playback = InputDemoPlayback.load(demo)
-    playback.apply_to_runtime(4, DummyRuntime(), deliver=_deliver)
+def _profile():
+    return ExecutionProfile(
+        "real-oracle", "oracle", "interpreter", "image", "runtime", "devices",
+        "dos-re-real-mode-continuation-v1", "machine-v1")
 
-    out = playback.write_suffix(
-        SnapshotRuntime(),
-        root=tmp_path / "repros",
-        name="verify_divergence",
-        boundary=4,
-        status="test suffix snapshot",
-        metadata={"reason": "unit-test"},
+
+def _state(cursor, value=0):
+    return ContinuationState(
+        "dos-re-real-mode-continuation-v1",
+        {"cpu": {"ip": value}, "devices": {"timer": value}},
+        {"memory": bytes([value]) * 32},
+        cursor,
     )
 
-    manifest = json.loads((out / "input_demo.json").read_text(encoding="utf-8"))
-    assert (out / "snapshot" / "state.json").exists()
-    assert manifest["end_boundary"] == 6
-    assert manifest["metadata"]["video"] == "vga"
-    assert manifest["metadata"]["reason"] == "unit-test"
-    assert manifest["metadata"]["source_boundary"] == 4
-    assert manifest["events"] == [
-        {"boundary": 5, "seq": 0, "kind": "scan", "value": 0xCD},
-    ]
 
+def test_real_mode_recording_is_one_replay_artifact_and_replays(tmp_path):
+    recording = ReplayRecording(
+        tmp_path / "real", timeline_id="real-frames-v1",
+        profile=_profile(), base_state=_state(0),
+        metadata={"mouse_present": True})
+    recording.add(0, SCAN_CHANNEL, scan_payload(0x4D))
+    recording.add(2, DOS_KEY_CHANNEL, dos_key_payload(0x39, " ", 0x3920))
+    recording.add(2, MOUSE_CHANNEL, mouse_payload(0.5, 0.75, 1))
+    artifact = recording.finish(3, end_state=_state(3, 7))
 
-def test_cold_start_demo_records_without_snapshot_and_playback_flags_it(tmp_path):
-    """Cold-start demos (feature merged from the Overkill port): no start snapshot is
-    written, the manifest's ``snapshot`` is null, and playback must be told to boot a
-    fresh runtime instead of loading a snapshot."""
-    from dos_re.input_demo import InputDemoRecorder
-    import pytest
-
-    recorder = InputDemoRecorder(root=tmp_path, name="cold", metadata={"video": "vga"})
-    demo_dir = recorder.start(SnapshotRuntime(), boundary=0, write_start_snapshot=False)
-    recorder.record_scan(boundary=3, scancode=0x39)
-    recorder.stop(boundary=5)
-
-    manifest = json.loads((demo_dir / "input_demo.json").read_text(encoding="utf-8"))
-    assert manifest["snapshot"] is None
-    assert not (demo_dir / "snapshot").exists()
-
-    playback = InputDemoPlayback.load(demo_dir)
-    assert playback.is_cold_start
-    with pytest.raises(ValueError):
-        playback.snapshot_path()
-
-
-def test_apply_single_spreads_same_boundary_events_across_calls(tmp_path):
-    """``single=True`` (feature merged from the Overkill port) delivers at most one
-    event per call so release/re-press pairs recorded against the same boundary are
-    observed by successive keyboard-poll iterations instead of collapsing."""
-    demo = tmp_path / "demo"
-    demo.mkdir()
-    (demo / "input_demo.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "snapshot": "snapshot",
-                "events": [
-                    {"boundary": 2, "seq": 0, "kind": "scan", "value": 0xB9},
-                    {"boundary": 2, "seq": 1, "kind": "scan", "value": 0x39},
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    playback = InputDemoPlayback.load(demo)
+    assert (artifact.directory / "replay.json").is_file()
+    assert not (artifact.directory / "input_demo.json").exists()
+    reopened = ReplayArtifact.open(artifact.directory)
+    adapter = RealModeInputAdapter(reopened.events)
     rt = DummyRuntime()
-
-    assert playback.apply_to_runtime(2, rt, deliver=_deliver, single=True) == 1
-    assert rt.scans == [0xB9]
-    assert playback.apply_to_runtime(2, rt, deliver=_deliver, single=True) == 1
-    assert rt.scans == [0xB9, 0x39]
-    assert playback.apply_to_runtime(2, rt, deliver=_deliver, single=True) == 0
-
-
-def test_mouse_round_trip_mixed_key_and_mouse_events(tmp_path):
-    """Recorder saves scan + mouse events keyed to the same boundary counter;
-    playback loads them back and drives set_mouse_norm with the recorded
-    (quantized) values at the recorded boundaries."""
-    recorder = InputDemoRecorder(root=tmp_path, name="mouse", metadata={"video": "vga"})
-    demo_dir = recorder.start(SnapshotRuntime(), boundary=10, write_start_snapshot=False)
-
-    recorder.record_scan(boundary=10, scancode=0x39)
-    sample = recorder.record_mouse(boundary=11, u=0.123449, v=0.5, buttons=0)
-    assert sample == (0.1234, 0.5, 0)          # quantized sample the player must apply
-    # Identical consecutive states are deduped (a still mouse adds no events)...
-    assert recorder.record_mouse(boundary=12, u=0.123449, v=0.5, buttons=0) == sample
-    # ...and a button press at the same position is a new event.
-    recorder.record_mouse(boundary=13, u=0.123449, v=0.5, buttons=1)
-    recorder.stop(boundary=15)
-
-    manifest = json.loads((demo_dir / "input_demo.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == 2
-    assert manifest["events"] == [
-        {"boundary": 0, "seq": 0, "kind": "scan", "value": 0x39},
-        {"boundary": 1, "seq": 1, "kind": "mouse", "u": 0.1234, "v": 0.5, "buttons": 0},
-        {"boundary": 3, "seq": 2, "kind": "mouse", "u": 0.1234, "v": 0.5, "buttons": 1},
-    ]
-
-    playback = InputDemoPlayback.load(demo_dir)
-    rt = MouseRuntime()
-    assert playback.apply_to_runtime(0, rt, deliver=_deliver) == 1
-    assert rt.scans == [0x39]
-    assert rt.mouse_calls == []                # no mouse state recorded yet
-    assert playback.apply_to_runtime(1, rt, deliver=_deliver) == 1
-    assert rt.mouse_calls == [(0.1234, 0.5, 0)]
-    assert playback.apply_to_runtime(3, rt, deliver=_deliver) == 1
-    assert rt.mouse_calls[-1] == (0.1234, 0.5, 1)
-
-
-def test_mouse_state_is_reapplied_every_boundary_during_replay(tmp_path):
-    """Replay re-applies the last mouse sample on every apply call, not only
-    when a mouse event is due: set_mouse_norm maps through the game's CURRENT
-    INT 33h range, so a range change while the mouse is still must re-map
-    (mirrors the recording player, which applies the sample every frame)."""
-    demo = tmp_path / "demo"
-    demo.mkdir()
-    (demo / "input_demo.json").write_text(
-        json.dumps(
-            {
-                "version": 2,
-                "snapshot": "snapshot",
-                "events": [
-                    {"boundary": 1, "seq": 0, "kind": "mouse", "u": 0.25, "v": 0.75, "buttons": 2},
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    playback = InputDemoPlayback.load(demo)
-    rt = MouseRuntime()
-
-    assert playback.apply_to_runtime(0, rt, deliver=_deliver) == 0
-    assert rt.mouse_calls == []                # nothing before the first sample
-    assert playback.apply_to_runtime(1, rt, deliver=_deliver) == 1
-    assert playback.apply_to_runtime(2, rt, deliver=_deliver) == 0
-    assert playback.apply_to_runtime(3, rt, deliver=_deliver) == 0
-    assert rt.mouse_calls == [(0.25, 0.75, 2)] * 3
-
-    playback.reset()
-    rt2 = MouseRuntime()
-    assert playback.apply_to_runtime(0, rt2, deliver=_deliver) == 0
-    assert rt2.mouse_calls == []               # reset clears the held mouse state
-
-
-def test_old_keyboard_only_v1_demo_still_loads_and_replays(tmp_path):
-    demo = tmp_path / "demo"
-    demo.mkdir()
-    (demo / "input_demo.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "snapshot": "snapshot",
-                "events": [
-                    {"boundary": 0, "seq": 0, "kind": "scan", "value": 0x4D},
-                    {"boundary": 2, "seq": 1, "kind": "dos_key", "value": 0x3920, "scancode": 0x39, "text": " "},
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    playback = InputDemoPlayback.load(demo)
-    rt = DummyRuntime()                        # dos has no set_mouse_norm at all
-    assert playback.apply_to_runtime(0, rt, deliver=_deliver) == 1
-    assert playback.apply_to_runtime(2, rt, deliver=_deliver) == 1
+    deliver = lambda runtime, scan: runtime.scans.append(scan)
+    assert adapter.apply_to_runtime(0, rt, deliver=deliver) == 1
+    assert adapter.apply_to_runtime(2, rt, deliver=deliver) == 2
     assert rt.scans == [0x4D]
     assert rt.dos.key_queue == [0x3920]
+    assert rt.mouse[-1] == (0.5, 0.75, 1)
 
 
-def test_suffix_seeds_current_mouse_state_and_carries_mouse_fields(tmp_path):
-    demo = tmp_path / "demo"
-    demo.mkdir()
-    (demo / "input_demo.json").write_text(
-        json.dumps(
-            {
-                "version": 2,
-                "snapshot": "snapshot",
-                "events": [
-                    {"boundary": 1, "seq": 0, "kind": "mouse", "u": 0.1, "v": 0.2, "buttons": 1},
-                    {"boundary": 5, "seq": 1, "kind": "mouse", "u": 0.3, "v": 0.4, "buttons": 0},
-                    {"boundary": 6, "seq": 2, "kind": "scan", "value": 0x39},
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    playback = InputDemoPlayback.load(demo)
-    playback.apply_to_runtime(2, MouseRuntime(), deliver=_deliver)
-
-    suffix = playback.remaining_events_from_cursor(boundary=2)
-    assert [event.to_json() for event in suffix] == [
-        # The mouse state current at the suffix point is seeded at boundary 0 so
-        # the suffix replay keeps re-applying it (range changes re-map it).
-        {"boundary": 0, "seq": 0, "kind": "mouse", "u": 0.1, "v": 0.2, "buttons": 1},
-        {"boundary": 3, "seq": 1, "kind": "mouse", "u": 0.3, "v": 0.4, "buttons": 0},
-        {"boundary": 4, "seq": 2, "kind": "scan", "value": 0x39},
-    ]
+def test_adapter_can_feed_oracle_and_candidate_and_seek_cursor():
+    recording_events = []
+    from dos_re.replay import ReplayEvent, ReplayPoint
+    timeline = "real-frames-v1"
+    recording_events.append(
+        ReplayEvent(ReplayPoint(1, timeline), 0, SCAN_CHANNEL, scan_payload(0x39)))
+    recording_events.append(
+        ReplayEvent(ReplayPoint(1, timeline), 1, MOUSE_CHANNEL, mouse_payload(0.2, 0.3, 0)))
+    adapter = RealModeInputAdapter(recording_events)
+    oracle, candidate = DummyRuntime(), DummyRuntime()
+    adapter.apply_to_runtimes(
+        1, (oracle, candidate),
+        deliver=lambda runtime, scan: runtime.scans.append(scan))
+    assert oracle.scans == candidate.scans == [0x39]
+    assert oracle.mouse == candidate.mouse
+    adapter.seek(1)
+    adapter.apply_to_runtime(1, oracle, deliver=lambda runtime, scan: None)
+    assert adapter.event_cursor == 2
 
 
-def test_mouse_sample_quantizes_like_the_recorder():
-    assert mouse_sample(-0.5, 1.5, 0x1FF) == (0.0, 1.0, 0xFF)
-    assert mouse_sample(0.123449, 0.999949, 5) == (0.1234, 0.9999, 5)
+def test_input_normalization_has_no_legacy_mouse_fields():
+    assert mouse_sample(-1, 2, 9) == (0.0, 1.0, 1)
+    assert mouse_payload(0.25, 0.75, 2) == {
+        "u": 0.25, "v": 0.75, "buttons": 2}
+    assert bios_key_value_from_scancode(0x39, "") == 0x3920
+    assert bios_key_value_from_scancode(0x3B, "") is None

@@ -50,6 +50,8 @@ Worked examples: the Lemmings pilot's runners (lemmings_port/scripts/) and the t
 from __future__ import annotations
 
 import argparse
+import hashlib
+import inspect
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -57,7 +59,14 @@ from pathlib import Path
 from dos_re.cpu import HaltExecution, UnsupportedInstruction
 from dos_re.dos import ConsoleInputWouldBlock
 from dos_re.hooks import registry as hook_registry
-from dos_re.input_demo import InputDemoPlayback, InputDemoRecorder, mouse_sample
+from dos_re.input_demo import (
+    MOUSE_CHANNEL,
+    SCAN_CHANNEL,
+    RealModeInputAdapter,
+    mouse_payload,
+    mouse_sample,
+    scan_payload,
+)
 from dos_re.interrupts import deliver_interrupt, deliver_scancode
 from dos_re.keyboard import KeyDispatcher, scancode_table  # noqa: F401  (re-export)
 from dos_re.runtime_core import use_real_console_input
@@ -66,7 +75,17 @@ from dos_re.runtime_core import use_real_console_input
 # level.  A frontend that overrides create_runtime/load_snapshot_runtime (e.g.
 # the strict-VMless runner) then never pulls the loader onto its import graph
 # (scripts/lint_vmless_independence.py).  write_snapshot is EXE-free.
-from dos_re.snapshot import write_snapshot
+from dos_re.replay import (
+    ExecutionProfile,
+    ReplayArtifact,
+    ReplayPoint,
+    ReplayRecording,
+)
+from dos_re.snapshot import (
+    apply_runtime_continuation,
+    capture_runtime_continuation,
+    write_snapshot,
+)
 
 # The default framebuffer decoder is a LEAF (dos_re.framebuffer): decoding video
 # memory needs no CPU, and this module imports the interpreter at module level --
@@ -86,6 +105,126 @@ from dos_re.framebuffer import (WIDTH, HEIGHT, PLANAR_ROW_BYTES,  # noqa: F401
 
 def _timestamp_dir(root: Path, prefix: str) -> Path:
     return Path(root) / f"{prefix}_{datetime.now():%Y%m%d_%H%M%S}"
+
+
+class _RealReplayRecorder:
+    """Viewer capture state; persistence is delegated only to ReplayRecording."""
+
+    def __init__(self, frontend, args, rt, *, root: Path, name: str, metadata: dict):
+        directory = _timestamp_dir(root, f"replay_{_safe_name(name)}")
+        profile = frontend.replay_profile(args, rt)
+        base = frontend.capture_replay_state(rt, event_cursor=0)
+        timeline = f"real-mode-frame-boundaries:{frontend.name}:v1"
+        self.recording = ReplayRecording(
+            directory, timeline_id=timeline, profile=profile,
+            base_state=base, metadata=metadata)
+        self.directory = directory
+        self._start_boundary = 0
+        self._last_mouse = None
+
+    @property
+    def active(self) -> bool:
+        return self.recording.active
+
+    @property
+    def event_count(self) -> int:
+        return self.recording.event_count
+
+    def start(self, *, boundary: int) -> Path:
+        self._start_boundary = int(boundary)
+        return self.directory
+
+    def _ordinal(self, boundary: int) -> int:
+        return max(0, int(boundary) - self._start_boundary)
+
+    def record_scan(self, *, boundary: int, scancode: int) -> None:
+        self.recording.add(
+            self._ordinal(boundary), SCAN_CHANNEL, scan_payload(scancode))
+
+    def record_mouse(
+        self, *, boundary: int, u: float, v: float, buttons: int,
+    ) -> tuple[float, float, int]:
+        sample = mouse_sample(u, v, buttons)
+        if sample != self._last_mouse:
+            self.recording.add(
+                self._ordinal(boundary), MOUSE_CHANNEL,
+                mouse_payload(*sample))
+            self._last_mouse = sample
+        return sample
+
+    def stop(self, frontend, rt, *, boundary: int) -> Path:
+        end = self._ordinal(boundary)
+        state = frontend.capture_replay_state(
+            rt, event_cursor=self.recording.event_count)
+        self.recording.finish(end, end_state=state)
+        return self.directory
+
+
+class _RealReplayPlayback:
+    def __init__(self, artifact: ReplayArtifact, profile: ExecutionProfile):
+        self.artifact = artifact
+        self.profile = profile
+        self.adapter = RealModeInputAdapter(artifact.events)
+        meta = artifact.metadata
+        self.end_point = ReplayPoint.from_json(meta["end_point"])
+        self.mouse_present_hint = bool(meta["mouse_present"])
+
+    @classmethod
+    def open(cls, path: str | Path):
+        artifact = ReplayArtifact.open(path)
+        profile_id = str(artifact.metadata["recording_profile_id"])
+        profiles = {profile.profile_id: profile for profile, _ in artifact.profiles()}
+        if profile_id not in profiles:
+            raise ValueError(f"recording profile is absent from artifact: {profile_id!r}")
+        return cls(artifact, profiles[profile_id])
+
+    @property
+    def events(self):
+        return self.artifact.events
+
+    @property
+    def next_event_index(self) -> int:
+        return self.adapter.event_cursor
+
+    def finished(self, boundary: int) -> bool:
+        return int(boundary) >= self.end_point.ordinal
+
+    def apply_to_runtime(self, boundary, rt, *, deliver, single=False):
+        return self.adapter.apply_to_runtime(
+            boundary, rt, deliver=deliver, single=single)
+
+
+def _safe_name(value: str) -> str:
+    cleaned = "".join(
+        ch if ch.isalnum() or ch in "-_" else "_" for ch in str(value).strip())
+    return cleaned or "input"
+
+
+def _content_identity(path: str | Path | None) -> str:
+    if path:
+        candidate = Path(path)
+        if candidate.is_file():
+            return hashlib.sha256(candidate.read_bytes()).hexdigest()
+    return hashlib.sha256(str(path or "").encode("utf-8")).hexdigest()
+
+
+def _implementation_identity(frontend) -> str:
+    paths = [Path(inspect.getsourcefile(type(frontend)) or __file__)]
+    h = hashlib.sha256()
+    for path in sorted(set(paths), key=str):
+        h.update(str(path.name).encode("utf-8"))
+        h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+def _runtime_identity() -> str:
+    root = Path(__file__).parent
+    h = hashlib.sha256()
+    for name in ("cpu.py", "dos.py", "runtime.py", "snapshot.py", "replay.py"):
+        path = root / name
+        h.update(name.encode("utf-8"))
+        h.update(path.read_bytes())
+    return h.hexdigest()
 
 
 class HookModeUnsupported(SystemExit):
@@ -192,6 +331,38 @@ class GameFrontend:
             args.steps_per_frame = int(meta["steps_per_frame"])
         if "timer_irqs_per_frame" in meta:
             args.timer_irqs_per_frame = int(meta["timer_irqs_per_frame"])
+
+    def replay_profile(self, args: argparse.Namespace, rt) -> ExecutionProfile:
+        """Stable identity used to invalidate profile-local replay caches."""
+        mode = (
+            "oracle" if args.no_replacements else
+            "verify" if args.verify_hooks else
+            "trace" if args.trace_hooks else
+            "safe" if args.safe_hooks else "candidate"
+        )
+        overrides = tuple(sorted(
+            f"{key!r}:{value}" for key, value in rt.cpu.hook_names.items()))
+        implementation = _implementation_identity(self)
+        key = hashlib.sha256(
+            ("\n".join((mode, implementation, *overrides))).encode("utf-8")
+        ).hexdigest()[:12]
+        return ExecutionProfile(
+            profile_id=f"real-mode-{mode}-{key}",
+            role="oracle" if mode == "oracle" else "candidate",
+            implementation=implementation,
+            image=_content_identity(args.exe),
+            runtime=_runtime_identity(),
+            devices="dos-re-real-mode-devices-v1",
+            continuation_schema="dos-re-real-mode-continuation-v1",
+            projection_schema="dos-re-complete-machine-v1",
+            overrides=overrides,
+        )
+
+    def capture_replay_state(self, rt, *, event_cursor: int):
+        return capture_runtime_continuation(rt, event_cursor=event_cursor)
+
+    def apply_replay_state(self, rt, state) -> None:
+        apply_runtime_continuation(rt, state)
 
     # --- hook modes -----------------------------------------------------------------
 
@@ -416,10 +587,10 @@ def _step_frame(frontend: GameFrontend, rt, args, frame: int) -> tuple[str | Non
 # --- headless -----------------------------------------------------------------------------------
 
 def run_replay_headless(frontend: GameFrontend, rt, args,
-                        playback: InputDemoPlayback) -> int:
+                        playback: _RealReplayPlayback) -> int:
     """Fast deterministic demo replay: no pygame, no pacing, no presentation."""
-    # Report the mouse present only if the demo actually carries mouse input;
-    # a keyboard-only demo must replay with the mouse absent (as recorded).
+    # Mouse detection changes startup control flow, so replay the explicit
+    # recording-time answer even when the pointer never moved.
     rt.dos.mouse_present = playback.mouse_present_hint
     frame = 0
     status = "demo replay complete"
@@ -465,14 +636,10 @@ def run_headless(frontend: GameFrontend, rt, args) -> int:
 # --- the viewer -----------------------------------------------------------------------------------
 
 def run_view(frontend: GameFrontend, rt, args,
-             playback: InputDemoPlayback | None = None,
-             cold_boot: bool = False) -> int:
+             playback: _RealReplayPlayback | None = None) -> int:
     """The live pygame viewer: hybrid play, demo record/replay, F10/F11/F12.
 
-    ``cold_boot`` says this session began at power-on (``create_runtime``, not
-    a resumed snapshot).  Recording from boundary 0 of such a session captures
-    a COLD-START demo -- input-only, no start snapshot -- which every runtime
-    can replay by booting fresh.  See ``start_recording``.
+    Every recording captures a complete continuation base in ReplayArtifact.
     """
     try:
         import numpy as np
@@ -516,7 +683,7 @@ def run_view(frontend: GameFrontend, rt, args,
     clock = pygame.time.Clock()
 
     frame_box = {"n": 0}
-    recorder: dict[str, InputDemoRecorder | None] = {"rec": None}
+    recorder: dict[str, _RealReplayRecorder | None] = {"rec": None}
     last_rgb = [first]
 
     def start_recording(name: str) -> None:
@@ -526,29 +693,18 @@ def run_view(frontend: GameFrontend, rt, args,
         # happens to carry any mouse motion.
         meta = dict(frontend.demo_metadata(args))
         meta["mouse_present"] = bool(getattr(rt.dos, "mouse_present", False))
-        rec = InputDemoRecorder(root=Path(args.demo_dir), name=name, metadata=meta)
-        # A recording that begins at boundary 0 of a POWER-ON session needs no
-        # start snapshot: replay boots a fresh runtime and applies the inputs
-        # from boundary 0.  Writing one anyway is not merely redundant -- it is
-        # actively harmful on the strict runtimes.  The snapshot pins playback
-        # to the recorder's exact park CS:IP, and only registered heads /
-        # resume entries are re-enterable there, so a snapshot resume can trip
-        # the VMless wall on frame 0 while the identical demo replays clean
-        # from a fresh boot (lemmings F2 code-screen demo, 2026-07-17).
-        # frame_box["n"] alone cannot answer this: it is the VIEWER's counter
-        # and reads 0 for a resumed snapshot too -- hence cold_boot.
-        cold = cold_boot and frame_box["n"] == 0
-        out = rec.start(rt, boundary=frame_box["n"],
-                        write_start_snapshot=not cold)
+        rec = _RealReplayRecorder(
+            frontend, args, rt, root=Path(args.demo_dir),
+            name=name, metadata=meta)
+        out = rec.start(boundary=frame_box["n"])
         recorder["rec"] = rec
-        kind = "cold-start (input-only)" if cold else "snapshot-anchored"
         mouse = "mouse" if meta["mouse_present"] else "no-mouse"
-        print(f"recording demo [{kind}, {mouse}] -> {out}")
+        print(f"recording replay [embedded base, {mouse}] -> {out}")
 
     def stop_recording() -> None:
         rec = recorder["rec"]
         if rec is not None and rec.active:
-            out = rec.stop(boundary=frame_box["n"])
+            out = rec.stop(frontend, rt, boundary=frame_box["n"])
             print(f"saved demo ({rec.event_count} events) -> {out}")
         recorder["rec"] = None
 
@@ -748,18 +904,32 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
     args = build_arg_parser(frontend, description).parse_args(argv)
 
     if args.play_demo:
-        playback = InputDemoPlayback.load(args.play_demo)
-        frontend.apply_demo_metadata(args, playback.manifest.get("metadata", {}))
-        if playback.is_cold_start:
-            rt = frontend.create_runtime(args)
-        else:
-            rt = frontend.load_snapshot_runtime(args, playback.snapshot_path())
+        playback = _RealReplayPlayback.open(args.play_demo)
+        frontend.apply_demo_metadata(args, playback.artifact.metadata)
+        rt = frontend.create_runtime(args)
+        base = playback.artifact.restore(
+            playback.profile, ReplayPoint(0, playback.artifact.timeline_id))
+        frontend.apply_replay_state(rt, base)
+        playback.adapter.seek(base.event_cursor)
         frontend.apply_hook_mode(rt, args)
+        current = frontend.replay_profile(args, rt)
+        for field in ("image", "runtime", "devices", "continuation_schema"):
+            if getattr(current, field) != getattr(playback.profile, field):
+                raise ValueError(
+                    f"replay {field} identity differs from the recorded base")
+        registered = {profile.profile_id for profile, _ in playback.artifact.profiles()}
+        if current.profile_id not in registered:
+            playback.artifact.register_profile(
+                current,
+                base_point=ReplayPoint(0, playback.artifact.timeline_id),
+                base_state=base,
+            )
+        else:
+            playback.artifact.require_profile(current)
         _use_real_console_input(rt)
         if args.headless:
             return run_replay_headless(frontend, rt, args, playback)
-        return run_view(frontend, rt, args, playback=playback,
-                        cold_boot=playback.is_cold_start)
+        return run_view(frontend, rt, args, playback=playback)
 
     if args.snapshot:
         rt = frontend.load_snapshot_runtime(args, args.snapshot)
@@ -769,4 +939,4 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
     _use_real_console_input(rt)
     if args.headless:
         return run_headless(frontend, rt, args)
-    return run_view(frontend, rt, args, cold_boot=not args.snapshot)
+    return run_view(frontend, rt, args)

@@ -37,7 +37,7 @@ def make_ip_delta_probe(rt, cs: int, *, restore: bool = True):
 
     ``restore`` keeps the code segment pristine across probe steps and should stay on; it exists as a
     switch only so a test can demonstrate the corruption it prevents."""
-    from dos_re.repro_artifacts import clone_runtime_state
+    from dos_re.snapshot import clone_runtime_state
 
     scratch = clone_runtime_state(rt)
     cpu = scratch.cpu

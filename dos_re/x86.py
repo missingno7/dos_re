@@ -50,7 +50,7 @@ class CPUState:
     # instruction, and slotted attribute access is measurably faster than
     # __dict__ lookup.  Consequence: no ad-hoc attributes, and clones use
     # dataclasses.replace() instead of CPUState(**s.__dict__) (verification.py
-    # and repro_artifacts.py were the only such sites in the ecosystem).
+    # and snapshot cloning were the only such sites in the ecosystem).
     ax: int = 0
     bx: int = 0
     cx: int = 0

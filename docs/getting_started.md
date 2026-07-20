@@ -63,7 +63,7 @@ mygame_port/
 │   ├── facts.py            recovery-facts loader
 │   ├── recovery_facts/recovery_facts.json
 │   └── lifted/             generated corpus lands here (banner README)
-├── artifacts/              demos + build products (git-ignored)
+├── artifacts/              replay artifacts + build products (git-ignored)
 ├── generated/              data-only boot image (git-ignored)
 ├── scripts/
 │   ├── play_oracle.py      M1: the interpreted oracle viewer
@@ -76,12 +76,12 @@ Then follow the milestones (`dos_re_2.0.md` section 6):
 
 1. **M1 — interpreted oracle.**  Wire `mygame/runtime.py` (EXE identity, boot
    inputs, game-specific interrupt quirks) until `play_oracle.py` runs the
-   game deterministically.  Record a real input demo — **the recorded demo is
+   game deterministically. Record a real `ReplayArtifact`—**the recording is
    the test** for everything after.
 2. **M2 — strict VMless.**  Run the pipeline: `tools/irgen.py` (census + IR) →
    `tools/liftemit.py --from-ir` → `tools/liftlink.py --from-ir`; install the
-   graph; converge against the oracle (`tools/hook_bisect.py` localizes
-   divergences).  Close the walls: interpreter poison, boundary heads as
+   graph; converge against the oracle (`replay.bisect_divergence` localizes
+   divergences to stable timeline transitions). Close the walls: interpreter poison, boundary heads as
    recovery facts, data-only boot image (`dos_re.bootimage` +
    `dos_re.independence`, linted by `tools/lint_independence.py` and audited
    by `tools/audit_boot_image.py`).

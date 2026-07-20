@@ -1,182 +1,107 @@
-"""Deterministic input demos for the PM (DOS/4GW) runtime.
+"""Protected-mode input and frame-boundary adapters for ReplayArtifact.
 
-Records input (keyboard make/break + one mouse sample per frame) keyed to the
-game's own FRAME counter — an adapter-supplied ``frame_tick_addr`` that the
-program executes once per frame (e.g. its per-frame update entry).  Keying to
-the frame, not to wall-clock or instruction count, is what makes a demo
-replay identically: however many times the game spins on the retrace during
-live play, replay re-injects each frame's input at the same frame boundary.
-
-The clock is installed as a replacement hook at ``frame_tick_addr``: it counts
-the frame, fires a callback (record the mouse sample / inject this frame's
-events), then runs the original entry instruction via ``interp_one32`` so the
-frame proceeds normally.  Game-agnostic: the adapter supplies the address.
+Protected-mode execution needs a game-supplied frame seam, but it does not
+need or own another replay format.  ``FrameClock`` supplies stable points and
+``ProtectedModeInputAdapter`` applies normalized immutable replay events.
 """
 from __future__ import annotations
 
-import hashlib
-import json
-import struct
-from pathlib import Path
+from collections.abc import Callable, Sequence
 
+from .input_demo import MOUSE_CHANNEL, mouse_sample
 from .lift.runtime32 import interp_one32
+from .replay import ReplayEvent
+
+KEY_CHANNEL = "protected-mode.key"
 
 
-def frame_digest(cpu) -> str:
-    """A short, game-agnostic fingerprint of the FULL VM state at a frame seam.
+class ProtectedModeInputAdapter:
+    """Apply immutable ReplayArtifact input events to a DOS/4GW host."""
 
-    Hashing memory ALONE misses a divergence that lives only in a register or
-    the instruction count until the game happens to store it — a demo can then
-    read "matched" for hundreds of frames and diverge the instant a stale
-    register hits memory.  So the fingerprint covers the whole architectural
-    state the next frame depends on: flat memory + GP registers + eip/eflags +
-    the x87 stack + segments + the instruction count (which the SB clock and
-    RDTSC derive from, so it must match for strict determinism).  Kept to 8
-    bytes — enough to catch drift, cheap to store per frame."""
-    h = hashlib.sha1(cpu.mem.data)
-    h.update(struct.pack("<8I", *(r & 0xFFFFFFFF for r in cpu.r)))
-    h.update(struct.pack("<IIQ", cpu.eip & 0xFFFFFFFF, cpu.eflags & 0xFFFFFFFF,
-                         cpu.instruction_count & 0xFFFFFFFFFFFFFFFF))
-    h.update(struct.pack("<HH", cpu.fcw & 0xFFFF, cpu.fsw & 0xFFFF))
-    for f in cpu.st:                       # x87 stack (doubles stand in for ST(i))
-        h.update(struct.pack("<d", f))
-    for k in sorted(cpu.seg):              # segment selectors + their bases
-        h.update(struct.pack("<II", cpu.seg[k] & 0xFFFFFFFF,
-                             cpu.sbase.get(k, 0) & 0xFFFFFFFF))
-    return h.hexdigest()[:16]
+    def __init__(self, events: Sequence[ReplayEvent], *, event_cursor: int = 0):
+        self.events = tuple(events)
+        self._cursor = 0
+        self._last_mouse: tuple[float, float, int] | None = None
+        self.seek(event_cursor)
 
-# A PM demo is a self-contained BUNDLE directory (not a lone file), exactly
-# like the real-mode player's demos: a start snapshot the replay boots from,
-# plus the input manifest keyed to it.  This makes a demo deterministic and
-# game-agnostic — the same "record here, replay from here" flow for every
-# title, with snapshots/demos an internal detail the user never has to wire up.
-# v2: frame_digest covers the full CPU state (not memory alone), and the demo
-# carries a per-frame instruction_count channel for divergence diagnosis.  A v1
-# demo's memory-only digests are incomparable, so replay skips its digest check.
-DEMO_VERSION = 2
-INPUT_JSON = "input_demo.json"        # the manifest inside the bundle
-SNAPSHOT_NAME = "snapshot"            # the start-snapshot subdir inside the bundle
+    @property
+    def event_cursor(self) -> int:
+        return self._cursor
+
+    def seek(self, event_cursor: int) -> None:
+        cursor = int(event_cursor)
+        if not 0 <= cursor <= len(self.events):
+            raise ValueError("event cursor lies outside the replay event stream")
+        self._cursor = cursor
+        self._last_mouse = None
+        for event in self.events[:cursor]:
+            if event.channel == MOUSE_CHANNEL:
+                self._last_mouse = _mouse(event)
+
+    def apply(
+        self, ordinal: int, dos, *,
+        deliver_key: Callable[[object, str, bool], None],
+    ) -> int:
+        ordinal = max(0, int(ordinal))
+        applied = 0
+        while (
+            self._cursor < len(self.events)
+            and self.events[self._cursor].point.ordinal <= ordinal
+        ):
+            event = self.events[self._cursor]
+            if event.channel == KEY_CHANNEL:
+                if not isinstance(event.payload, dict):
+                    raise ValueError("protected-mode key payload must be an object")
+                deliver_key(dos, str(event.payload["name"]), bool(event.payload["make"]))
+            elif event.channel == MOUSE_CHANNEL:
+                self._last_mouse = _mouse(event)
+            else:
+                raise ValueError(
+                    f"unsupported protected-mode replay channel: {event.channel!r}")
+            self._cursor += 1
+            applied += 1
+        if self._last_mouse is not None:
+            dos.set_mouse_norm(*self._last_mouse)
+        return applied
 
 
-class PMInputDemo:
-    """A recorded input timeline: events tagged with a 0-based frame index,
-    plus the name of the start snapshot the replay boots from."""
+def key_payload(name: str, make: bool) -> dict[str, object]:
+    return {"name": str(name), "make": bool(make)}
 
-    def __init__(self, frame_tick_addr: int | None = None):
-        self.frame_tick_addr = frame_tick_addr
-        self.events: list = []        # [frame, kind, payload]
-        self.total_frames = 0
-        self.snapshot: str | None = None   # start-snapshot subdir name (None = cold start)
-        self.metadata: dict = {}
-        self.digests: dict[int, str] = {}  # frame index -> frame_digest(cpu) at record time
-        self.icounts: dict[int, int] = {}  # frame index -> instruction_count (divergence diagnosis)
-        self.status: str | None = None     # "complete" once F11-stopped; "recording" = never finished
-        self.version = DEMO_VERSION
 
-    def add(self, frame: int, kind: str, payload) -> None:
-        self.events.append([int(frame), kind, payload])
-
-    def by_frame(self) -> dict:
-        m: dict[int, list] = {}
-        for frame, kind, payload in self.events:
-            m.setdefault(frame, []).append((kind, payload))
-        return m
-
-    def _manifest(self, status: str) -> dict:
-        return {
-            "version": DEMO_VERSION,
-            "status": status,
-            "frame_tick_addr": self.frame_tick_addr,
-            "snapshot": self.snapshot,
-            "total_frames": self.total_frames,
-            "metadata": self.metadata,
-            "events": self.events,
-            "digests": {str(k): v for k, v in self.digests.items()},
-            "icounts": {str(k): v for k, v in self.icounts.items()},
-        }
-
-    def write_manifest(self, bundle_dir: str | Path, *, status: str) -> Path:
-        """Write ``input_demo.json`` into the bundle directory."""
-        d = Path(bundle_dir)
-        d.mkdir(parents=True, exist_ok=True)
-        p = d / INPUT_JSON
-        p.write_text(json.dumps(self._manifest(status), indent=2))
-        return p
-
-    def save(self, path: str | Path) -> Path:
-        """Back-compat: write just the manifest to an explicit path."""
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(self._manifest("complete"), indent=2))
-        return p
-
-    @classmethod
-    def load(cls, path: str | Path) -> "PMInputDemo":
-        """Load a demo from a bundle directory (reads ``input_demo.json``) or,
-        for back-compat, directly from a manifest JSON file."""
-        p = Path(path)
-        manifest = p / INPUT_JSON if p.is_dir() else p
-        d = json.loads(manifest.read_text())
-        o = cls(d.get("frame_tick_addr"))
-        o.events = d["events"]
-        o.total_frames = d.get("total_frames", 0)
-        o.snapshot = d.get("snapshot")
-        o.metadata = d.get("metadata", {})
-        o.digests = {int(k): v for k, v in d.get("digests", {}).items()}
-        o.icounts = {int(k): v for k, v in d.get("icounts", {}).items()}
-        o.status = d.get("status")
-        o.version = d.get("version", 1)
-        return o
-
-    @classmethod
-    def snapshot_dir(cls, path: str | Path) -> Path | None:
-        """The start-snapshot directory inside a demo bundle, or None if the
-        demo is a cold-start (no snapshot) or a legacy lone-JSON demo."""
-        p = Path(path)
-        if not p.is_dir():
-            return None
-        manifest = p / INPUT_JSON
-        if not manifest.exists():
-            return None
-        name = json.loads(manifest.read_text()).get("snapshot")
-        if not name:
-            return None
-        snap = p / name
-        return snap if snap.exists() else None
+def _mouse(event: ReplayEvent) -> tuple[float, float, int]:
+    if not isinstance(event.payload, dict):
+        raise ValueError("mouse replay event payload must be an object")
+    try:
+        return mouse_sample(
+            float(event.payload["u"]), float(event.payload["v"]),
+            int(event.payload["buttons"]))
+    except KeyError as exc:
+        raise ValueError(f"mouse replay event is missing {exc.args[0]!r}") from exc
 
 
 class FramePaced(Exception):
-    """Raised by the FrameClock to stop ``cpu.run`` exactly at a frame boundary.
-
-    The tick that would enter frame ``stop_at`` raises this WITHOUT running the
-    entry instruction, so ``cpu.eip`` stays on the frame-tick address — the run
-    resumes into that frame on the next call.  Lets a viewer advance exactly
-    one logical frame per present (correct game speed) instead of overshooting."""
+    """Stop CPU execution exactly before the requested frame boundary."""
 
 
 class FrameClock:
-    """Per-frame boundary counter installed at ``frame_tick_addr``.
-
-    ``on_frame(frame_index)`` runs at the start of each frame, before the
-    frame's own code — the record hook samples input there, the replay hook
-    injects it there.  Set ``stop_at`` to have the clock break the run at that
-    frame boundary (exact-frame pacing)."""
+    """Adapter-defined stable frame-point counter."""
 
     def __init__(self, cpu, addr: int, on_frame):
         self.cpu = cpu
-        self.addr = addr
+        self.addr = int(addr)
         self.on_frame = on_frame
         self.frame = 0
         self.stop_at = None
-        cpu.replacement_hooks[addr] = self._tick
-        cpu.hook_names[addr] = "frame_clock"
+        cpu.replacement_hooks[self.addr] = self._tick
+        cpu.hook_names[self.addr] = "frame_clock"
 
     def _tick(self, cpu) -> None:
         if self.stop_at is not None and self.frame >= self.stop_at:
-            raise FramePaced()            # break the run; eip stays on the tick address
+            raise FramePaced()
         self.on_frame(self.frame)
         self.frame += 1
-        interp_one32(cpu, self.addr)      # run the entry instruction; hook suppressed for it
+        interp_one32(cpu, self.addr)
 
     def remove(self) -> None:
         self.cpu.replacement_hooks.pop(self.addr, None)

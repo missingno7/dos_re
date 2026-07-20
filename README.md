@@ -73,9 +73,10 @@ job.
   replacement against the interpreted original ASM (registers + flags + full
   memory) at every call, and a frame verifier that lockstep-diffs whole frames
   between an ASM oracle and a hooked/native candidate.
-- **A determinism substrate** — full machine snapshots and input demos keyed
-  to an emulated boundary clock, so every finding is replayable and every
-  claim of equivalence is checkable.
+- **A determinism substrate** — `ReplayArtifact` recordings with immutable
+  events, stable points, complete continuation state, and independently
+  restorable cached boundaries, so every finding is replayable and every
+  equivalence claim is checkable.
 - **An automatic lifter** — a static decoder + emitter that turns a function
   entry into a literal, per-instruction Python hook and proves it against the
   oracle on every call, so recovery refactors a *verified* artifact instead of
@@ -104,7 +105,7 @@ faked or quietly handed back to the emulator.
 ## How recovery works
 
 ```text
-original EXE ──▶ dos_re VM (the oracle) ──▶ traces / snapshots / demos
+original EXE ──▶ dos_re VM (the oracle) ──▶ traces / snapshots / replay artifacts
                      │                            │
         hook a routine at its CS:IP        deterministic replay
                      ▼                            ▼
@@ -116,7 +117,8 @@ original EXE ──▶ dos_re VM (the oracle) ──▶ traces / snapshots / dem
    the VM stays behind as the offline proof harness
 ```
 
-1. The original EXE runs in a controlled VM; demos replay deterministic input.
+1. The original EXE runs in a controlled VM; `ReplayArtifact` events drive
+   deterministic oracle and candidate execution.
 2. Routines are hooked at their original addresses — mechanically lifted or
    hand-recovered as source (a pure rule behind a thin VM adapter).
 3. The framework diffs memory, registers, flags, ports, state, and frames

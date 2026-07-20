@@ -5,8 +5,8 @@ straight-line program, this walkthrough runs every core mechanism against a
 real *frame loop* (retrace wait, INT 09h keyboard ISR, framebuffer output):
 
   1. oracle run        — boot the EXE, step frame boundaries (dos_re.checkpoints)
-  2. cold-start demo   — record input-only (no snapshot), replay from a fresh
-                         boot, prove frame-by-frame framebuffer equality
+  2. replay artifact   — record input with an embedded continuation base and
+                         prove frame-by-frame framebuffer equality
   3. snapshot          — freeze mid-run, restore, prove both continuations agree
   4. wrong hook        — a subtly wrong draw routine is caught by the strict
                          differential hook verifier (full-memory diff)
@@ -24,6 +24,7 @@ the retired 1.0 starter's lifecycle docs (historical) for how these stages map o
 """
 from __future__ import annotations
 
+import hashlib
 import sys
 import tempfile
 from pathlib import Path
@@ -45,11 +46,13 @@ from game import (  # noqa: E402
 from dos_re.checkpoints import run_to_next_checkpoint  # noqa: E402
 from dos_re.cpu import CPU8086  # noqa: E402
 from dos_re.frame_verify import FrameVerifyConfig, make_frame_sample, run_frame_verifier  # noqa: E402
-from dos_re.input_demo import InputDemoPlayback, InputDemoRecorder  # noqa: E402
+from dos_re.input_demo import RealModeInputAdapter, SCAN_CHANNEL, scan_payload  # noqa: E402
 from dos_re.interrupts import deliver_scancode  # noqa: E402
 from dos_re.memory import linear  # noqa: E402
 from dos_re.runtime import Runtime, create_runtime  # noqa: E402
-from dos_re.snapshot import load_snapshot, write_snapshot  # noqa: E402
+from dos_re.replay import ExecutionProfile, ReplayPoint, ReplayRecording  # noqa: E402
+from dos_re.snapshot import (apply_runtime_continuation, capture_runtime_continuation,
+                             load_snapshot, write_snapshot)  # noqa: E402
 from dos_re.state_view import ByteBackend, StructView, U8  # noqa: E402
 from dos_re.verification import HookVerifierConfig, HookVerifyDivergence, install_hook_verifier  # noqa: E402
 
@@ -92,10 +95,10 @@ def stage_oracle(exe: Path) -> list[bytes]:
     return rows
 
 
-# ---- stage 2: cold-start demo record + replay ---------------------------------------------------
+# ---- stage 2: ReplayArtifact record + replay ----------------------------------------------------
 
-def run_session(rt: Runtime, frames: int, playback: InputDemoPlayback | None = None,
-                recorder: InputDemoRecorder | None = None) -> list[bytes]:
+def run_session(rt: Runtime, frames: int, playback: RealModeInputAdapter | None = None,
+                recorder: ReplayRecording | None = None) -> list[bytes]:
     """THE shared driver: one boundary definition for recording and replay.
 
     (Different drivers with different boundary definitions are the classic way
@@ -107,29 +110,39 @@ def run_session(rt: Runtime, frames: int, playback: InputDemoPlayback | None = N
             playback.apply_to_runtime(frame, rt)
         elif recorder is not None and frame in events:
             deliver_scancode(rt, events[frame])
-            recorder.record_scan(boundary=frame, scancode=events[frame])
+            recorder.add(frame, SCAN_CHANNEL, scan_payload(events[frame]))
         advance_frame(rt)
         rows.append(framebuffer_row(rt))
     return rows
 
 
-def stage_cold_start_demo(exe: Path, tmp: Path) -> None:
-    # Record: input-only capture from power-on — no start snapshot at all.
+def stage_replay_artifact(exe: Path, tmp: Path) -> None:
+    # Record from a stable frame seam with a complete embedded base.
     rt = boot(exe)
-    recorder = InputDemoRecorder(root=tmp, name="cold", metadata={"video": "mode13h"})
-    demo_dir = recorder.start(rt, boundary=0, write_start_snapshot=False)
+    profile = ExecutionProfile(
+        "tiny-oracle", "oracle", "tiny-frame-interpreter",
+        hashlib.sha256(exe.read_bytes()).hexdigest(),
+        "example-runtime-v1", "example-devices-v1",
+        "dos-re-real-mode-continuation-v1", "tiny-machine-v1")
+    recorder = ReplayRecording(
+        tmp / "tiny-replay", timeline_id="tiny-frame-boundaries-v1",
+        profile=profile, base_state=capture_runtime_continuation(rt, event_cursor=0),
+        metadata={"video": "mode13h"})
     recorded = run_session(rt, 10, recorder=recorder)
-    recorder.stop(boundary=10)
+    artifact = recorder.finish(
+        10, end_state=capture_runtime_continuation(
+            rt, event_cursor=recorder.event_count))
 
     # Replay: boot a FRESH runtime and feed only the recorded events.
-    playback = InputDemoPlayback.load(demo_dir)
-    assert playback.is_cold_start
     rt2 = boot(exe)
+    base = artifact.restore(profile, ReplayPoint(0, artifact.timeline_id))
+    apply_runtime_continuation(rt2, base)
+    playback = RealModeInputAdapter(artifact.events, event_cursor=base.event_cursor)
     replayed = run_session(rt2, 10, playback=playback)
 
-    assert recorded == replayed, "cold-start demo replay diverged from the recording run"
+    assert recorded == replayed, "ReplayArtifact diverged from the recording run"
     assert recorded[2][0] != recorded[4][0] - 2, "input visibly changed the output"
-    print(f"[demo]      cold-start demo (no snapshot) replays 10 frames byte-identically; "
+    print(f"[replay]    embedded-base replay runs 10 frames byte-identically; "
           f"key at frame 3 shifts colour {recorded[2][0]} -> {recorded[3][0]}")
 
 
@@ -281,12 +294,12 @@ def main() -> int:
         tmp = Path(tmp_str)
         exe = build_game_exe(tmp / "TINY.EXE")
         stage_oracle(exe)
-        stage_cold_start_demo(exe, tmp)
+        stage_replay_artifact(exe, tmp)
         stage_snapshot(exe, tmp)
         stage_hooks(exe)
         stage_frame_verifier(exe, tmp)
         stage_state_mirror(exe)
-    print("walkthrough complete: oracle, cold-start demo, snapshot, hook oracle, "
+    print("walkthrough complete: oracle, replay artifact, snapshot, hook oracle, "
           "frame oracle, state mirror -- all green")
     return 0
 

@@ -13,13 +13,12 @@ Audio: the Sound Blaster PCM plays through a low-latency callback ring buffer
 (``sounddevice``/PortAudio) when available, falling back to a chunked pygame
 mixer sink.  ``pip install sounddevice`` for smooth playback.
 
-A demo is a self-contained BUNDLE directory: F11 writes a start snapshot plus
-an input manifest keyed to the game's own frame counter (an adapter-supplied
-``frame_tick_addr`` hit once per frame — see ``pm_input_demo``).  ``--play-demo
-<dir>`` boots from that snapshot and re-injects the input at the same frame
-boundaries, so a demo recorded live replays identically headless — the perfect
-way to hand a captured game state back for oracle-verified recovery.  The
-snapshot is an internal detail: the user only ever names the bundle directory.
+A recording is one self-contained ReplayArtifact: F11 captures a complete
+continuation base plus normalized events keyed to the game's own frame counter
+(an adapter-supplied
+``frame_tick_addr`` hit once per frame; see ``pm_input_demo``). ``--play-demo
+<dir>`` restores that base and re-injects input at the same stable boundaries.
+The user names only the artifact directory.
 
 FRONTEND RING module: pygame imports stay lazy so headless use (and
 ``import dos_re``) never require it.
@@ -37,12 +36,17 @@ title), generalized to any PM runtime.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import inspect
 import threading as _threading
 import time
 from pathlib import Path
 
 from .dos4gw import DosInputExhausted, render_pm_frame
 from .frame_verify import write_rgb_png
+from .input_demo import MOUSE_CHANNEL, mouse_payload
+from .pm_snapshot import apply_pm_continuation, capture_pm_continuation
+from .replay import ExecutionProfile, ReplayArtifact, ReplayPoint, ReplayRecording
 
 try:                       # numpy is a first-class dep; audio resampling needs it
     import numpy as _np
@@ -82,6 +86,44 @@ SCANCODES = {
     "up": (0xE0, 0x48), "down": (0xE0, 0x50),
     "left": (0xE0, 0x4B), "right": (0xE0, 0x4D),
 }
+
+
+def _file_identity(path: str | Path) -> str:
+    p = Path(path)
+    payload = p.read_bytes() if p.is_file() else str(path).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _pm_profile(exe: str | Path, rt, install_hooks=None) -> ExecutionProfile:
+    implementation = hashlib.sha256()
+    if install_hooks is not None:
+        source = inspect.getsourcefile(install_hooks)
+        if source and Path(source).is_file():
+            implementation.update(Path(source).read_bytes())
+    runtime = hashlib.sha256()
+    root = Path(__file__).parent
+    for name in ("cpu386.py", "dos4gw.py", "runtime.py", "pm_snapshot.py", "replay.py"):
+        runtime.update(name.encode("utf-8"))
+        runtime.update((root / name).read_bytes())
+    overrides = tuple(sorted(
+        f"{key!r}:{value}" for key, value in rt.cpu.hook_names.items()
+        if value != "frame_clock"))
+    role = "candidate" if overrides else "oracle"
+    implementation_digest = implementation.hexdigest()
+    key = hashlib.sha256(
+        "\n".join((implementation_digest, *overrides)).encode("utf-8")
+    ).hexdigest()[:12]
+    return ExecutionProfile(
+        profile_id=f"protected-mode-{role}-{key}",
+        role=role,
+        implementation=implementation_digest,
+        image=_file_identity(exe),
+        runtime=runtime.hexdigest(),
+        devices="dos-re-protected-mode-devices-v1",
+        continuation_schema="dos-re-pm-continuation-v1",
+        projection_schema="dos-re-complete-machine-v1",
+        overrides=overrides,
+    )
 
 
 def send_key(dos, name: str, make: bool) -> None:
@@ -305,10 +347,10 @@ class _PcmSink:
 def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                artifacts_dir: str | Path = "artifacts",
                frame_tick_addr: int | None = None,
-               record_demo: str | None = None) -> int:
+               record_demo: str | None = None,
+               replay_profile: ExecutionProfile | None = None) -> int:
     import pygame
-    from .pm_input_demo import (PMInputDemo, FrameClock, FramePaced,
-                                SNAPSHOT_NAME)
+    from .pm_input_demo import FrameClock, FramePaced, KEY_CHANNEL, key_payload
 
     pygame.init()
     # A fixed 4:3 canvas: every VGA geometry this runtime produces (320x200
@@ -327,7 +369,7 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     # tags input with the frame index, so the demo replays deterministically.
     mouse_norm = [0.5, 0.5]
     mbtn = [0]                       # mouse-button mask (host copy)
-    rec = {"demo": None, "start": 0, "last_mouse": None, "dir": None}
+    rec = {"recording": None, "start": 0, "last_mouse": None, "dir": None}
     # While recording, input is BUFFERED and applied to the VM only at the frame
     # boundary (on_frame) — never mid-frame.  On a slow interpreter one game
     # frame spans several presents, so an async key/mouse event landing between
@@ -344,11 +386,8 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     stalled = [False]
 
     def on_frame(frame):
-        if rec["demo"] is not None:
+        if rec["recording"] is not None:
             f = frame - rec["start"]
-            from .pm_input_demo import frame_digest
-            rec["demo"].digests[f] = frame_digest(cpu)   # seam BEFORE this frame's input
-            rec["demo"].icounts[f] = cpu.instruction_count
             # Apply + record the input buffered since the previous boundary.
             # Apply EXACTLY the value we record (the rounded sample), not the
             # full-precision mouse_norm: the game maps the normalized mouse onto
@@ -358,10 +397,10 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
             sample = [round(mouse_norm[0], 4), round(mouse_norm[1], 4), mbtn[0]]
             dos.set_mouse_norm(sample[0], sample[1], sample[2])
             if sample != rec["last_mouse"]:
-                rec["demo"].add(f, "mouse", sample)
+                rec["recording"].add(f, MOUSE_CHANNEL, mouse_payload(*sample))
                 rec["last_mouse"] = sample
             for make, name in pending["keys"]:
-                rec["demo"].add(f, "key", [make, name])
+                rec["recording"].add(f, KEY_CHANNEL, key_payload(name, make))
                 send_key(dos, name, make)
             pending["keys"].clear()
 
@@ -507,12 +546,7 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                 if make and name == "f11":
                     if clock is None:
                         print("demo recording needs a frame_tick_addr (adapter)")
-                    elif rec["demo"] is None:
-                        # Start a demo BUNDLE: a directory holding the start
-                        # snapshot the replay boots from + the input manifest
-                        # keyed to it.  The snapshot is what makes a mid-game
-                        # demo replay deterministically.
-                        from .pm_snapshot import save_pm_snapshot
+                    elif rec["recording"] is None:
                         # Flip the SB to the deterministic instruction-count
                         # clock BEFORE snapshotting: the casual viewer paces
                         # audio by wall time, but a recording made on that clock
@@ -520,38 +554,47 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                         # The snapshot then captures the re-based block state, so
                         # replay continues it identically.
                         dos.set_sound_clock(deterministic=True)
-                        demo = PMInputDemo(frame_tick_addr)
                         bundle = (Path(record_demo) if record_demo else
-                                  artifacts / "demos" / f"demo_{int(now * 1000)}")
-                        bundle.mkdir(parents=True, exist_ok=True)
-                        save_pm_snapshot(rt, bundle / SNAPSHOT_NAME)
-                        demo.snapshot = SNAPSHOT_NAME
-                        demo.write_manifest(bundle, status="recording")
-                        rec.update(demo=demo, dir=bundle, start=clock.frame,
+                                  artifacts / "demos" / f"replay_{int(now * 1000)}")
+                        if replay_profile is None:
+                            raise ValueError("PM recording requires an execution profile")
+                        recording = ReplayRecording(
+                            bundle,
+                            timeline_id=f"protected-mode-frame-boundaries:{frame_tick_addr:#x}:v1",
+                            profile=replay_profile,
+                            base_state=capture_pm_continuation(rt, event_cursor=0),
+                            metadata={
+                                "frame_tick_addr": int(frame_tick_addr),
+                                "mouse_present": True,
+                            },
+                        )
+                        rec.update(recording=recording, dir=bundle, start=clock.frame,
                                    last_mouse=None)
-                        print(f"demo recording STARTED -> {bundle} "
-                              f"(snapshot + input; F11 again to stop)")
+                        print(f"replay recording STARTED -> {bundle} "
+                              f"(embedded base; F11 again to stop)")
                     else:
-                        demo = rec["demo"]
-                        demo.total_frames = clock.frame - rec["start"]
-                        demo.write_manifest(rec["dir"], status="complete")
-                        print(f"demo recording STOPPED -> {rec['dir']} "
-                              f"({demo.total_frames} frames, "
-                              f"{len(demo.events)} events)")
-                        rec["demo"] = None
+                        recording = rec["recording"]
+                        total_frames = clock.frame - rec["start"]
+                        end_state = capture_pm_continuation(
+                            rt, event_cursor=recording.event_count)
+                        recording.finish(total_frames, end_state=end_state)
+                        print(f"replay recording STOPPED -> {rec['dir']} "
+                              f"({total_frames} frames, "
+                              f"{recording.event_count} events)")
+                        rec["recording"] = None
                         dos.set_sound_clock(deterministic=False)  # back to live audio
                     continue
                 if name in ("f10", "f11", "f12"):
                     continue          # viewer hotkeys — never game input (the
                                       # F11 release used to leak into the demo)
-                if rec["demo"] is None:
+                if rec["recording"] is None:
                     send_key(dos, name, make)       # live play: deliver now
                 elif stalled[0]:
                     # Paused: on_frame won't fire to flush the buffer, so deliver
                     # now (unpauses the game) and record at the paused frame so
                     # the replay collapses the pause to zero.
                     f = max(0, clock.frame - 1 - rec["start"])
-                    rec["demo"].add(f, "key", [make, name])
+                    rec["recording"].add(f, KEY_CHANNEL, key_payload(name, make))
                     send_key(dos, name, make)
                 else:
                     pending["keys"].append((make, name))   # buffer for on_frame
@@ -567,13 +610,13 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                 # INT 33h virtual range by the host.
                 mouse_norm[0] = mx / max(1, ww - 1)
                 mouse_norm[1] = my / max(1, wh - 1)
-                if rec["demo"] is None:              # recording defers to on_frame
+                if rec["recording"] is None:              # recording defers to on_frame
                     dos.set_mouse_norm(mouse_norm[0], mouse_norm[1], mbtn[0])
             elif ev.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP):
                 down = ev.type == pygame.MOUSEBUTTONDOWN
                 bit = {1: 1, 3: 2}.get(ev.button, 0)
                 mbtn[0] = (mbtn[0] | bit) if down else (mbtn[0] & ~bit)
-                if rec["demo"] is None:              # recording defers to on_frame
+                if rec["recording"] is None:              # recording defers to on_frame
                     dos.mouse_buttons = mbtn[0]
 
         rgb, w, h = render_pm_frame(dos)
@@ -585,12 +628,15 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     # instead of pressing F11-to-stop must still save the captured demo, not
     # discard it — otherwise a full playthrough recorded live is lost and the
     # on-disk manifest is stuck at the empty START write (0 frames).
-    if rec["demo"] is not None and clock is not None:
-        demo = rec["demo"]
-        demo.total_frames = clock.frame - rec["start"]
-        demo.write_manifest(rec["dir"], status="complete")
+    if rec["recording"] is not None and clock is not None:
+        recording = rec["recording"]
+        total_frames = clock.frame - rec["start"]
+        recording.finish(
+            total_frames,
+            end_state=capture_pm_continuation(
+                rt, event_cursor=recording.event_count))
         print(f"demo recording flushed on exit -> {rec['dir']} "
-              f"({demo.total_frames} frames, {len(demo.events)} events)")
+              f"({total_frames} frames, {recording.event_count} events)")
     if hasattr(pcm, "close"):
         pcm.close()
     pygame.quit()
@@ -600,100 +646,56 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
 def run_replay(rt, demo_path, *, boot_keys=(), extra_frames: int = 30,
                max_steps: int = 200_000_000, snapshot_dir: str | None = None,
                png: str = "", show: bool = False, scale: int = 3,
-               title: str = "dos_re PM (replay)") -> int:
+               title: str = "dos_re PM (replay)",
+               replay_profile: ExecutionProfile | None = None) -> int:
     """Replay an input demo deterministically (no wall-clock pacing).
 
     Re-injects each frame's recorded input at the game's own frame boundary,
     then runs ``extra_frames`` past the demo's end.  Optionally saves a
     snapshot / PNG of the resulting state, or shows it in a window."""
-    from .pm_input_demo import PMInputDemo, FrameClock, FramePaced, frame_digest
+    from .pm_input_demo import (
+        FrameClock, FramePaced, ProtectedModeInputAdapter)
 
-    demo = PMInputDemo.load(demo_path)
-    if demo.frame_tick_addr is None:
-        print("demo has no frame_tick_addr; cannot replay")
-        return 1
-    if demo.status == "recording" or demo.total_frames == 0:
-        # A recording that was never F11-stopped (its manifest is stuck at the
-        # empty START write) has no input to replay — playback just sits on the
-        # start snapshot and looks frozen.  Say so instead of silently doing it.
-        print(f"WARNING: this demo is empty / never completed "
-              f"(status={demo.status!r}, {demo.total_frames} frames, "
-              f"{len(demo.events)} events) -- nothing to replay.  Re-record it: "
-              f"the recording is saved when you stop it (F11 again) or close "
-              f"the window; the empty manifest here means neither happened.")
-        if demo.total_frames == 0:
-            return 1
-    diverged = {"frame": None}       # first frame whose digest disagrees, if any
-    # A bundle with a start snapshot already holds the mid-game state, so the
-    # title-screen boot keys apply only to a cold-start (snapshot-less) replay.
-    if demo.snapshot is None:
-        for k in boot_keys:
-            rt.dos.key_queue.append(k)
+    artifact = ReplayArtifact.open(demo_path)
+    metadata = artifact.metadata
+    frame_tick_addr = int(metadata["frame_tick_addr"])
+    end_point = ReplayPoint.from_json(metadata["end_point"])
+    profile_id = str(metadata["recording_profile_id"])
+    profiles = {profile.profile_id: profile for profile, _ in artifact.profiles()}
+    if profile_id not in profiles:
+        raise ValueError(f"recording profile is absent from artifact: {profile_id!r}")
+    base = artifact.restore(
+        profiles[profile_id], ReplayPoint(0, artifact.timeline_id))
+    if replay_profile is not None:
+        source_profile = profiles[profile_id]
+        for field in ("image", "runtime", "devices", "continuation_schema"):
+            if getattr(replay_profile, field) != getattr(source_profile, field):
+                raise ValueError(
+                    f"replay {field} identity differs from the recorded base")
+        registered = {profile.profile_id for profile, _ in artifact.profiles()}
+        if replay_profile.profile_id not in registered:
+            artifact.register_profile(
+                replay_profile,
+                base_point=ReplayPoint(0, artifact.timeline_id),
+                base_state=base,
+            )
+        else:
+            artifact.require_profile(replay_profile)
+    apply_pm_continuation(rt, base)
+    adapter = ProtectedModeInputAdapter(
+        artifact.events, event_cursor=base.event_cursor)
     dos = rt.dos
-    by_frame = demo.by_frame()
-    end_frame = demo.total_frames + extra_frames
+    end_frame = end_point.ordinal + extra_frames
     done = {"flag": False}
-    # A v1 demo's digests fingerprint memory only; the current frame_digest
-    # covers the full CPU state, so they are incomparable — replay it, but skip
-    # the (guaranteed-to-mismatch) digest check.
-    check_digests = demo.version >= 2
 
     def on_frame(frame):
-        # Verify the replay against the recording BEFORE injecting this frame's
-        # input, so the digest compares the same end-of-previous-frame seam.
-        if check_digests and diverged["frame"] is None and frame in demo.digests:
-            if frame_digest(rt.cpu) != demo.digests[frame]:
-                diverged["frame"] = frame
-                # Report whether the instruction count also diverged here: a
-                # mismatch means the game ran a different NUMBER of instructions
-                # into this frame (a wall-clock-sensitive spin/poll drifted);
-                # matching icount but a differing digest means a register/FPU
-                # value diverged with the same instruction path.
-                rec_ic = demo.icounts.get(frame)
-                ic = rt.cpu.instruction_count
-                if rec_ic is None:
-                    tail = ""
-                elif rec_ic == ic:
-                    tail = f"; instruction_count MATCHES ({ic}) -> a register/FPU value diverged"
-                else:
-                    tail = (f"; instruction_count DIFFERS recording={rec_ic} "
-                            f"replay={ic} (delta {ic - rec_ic}) -> an instruction "
-                            f"path/spin drifted")
-                print(f"DEMO DIVERGED at frame {frame}: replay no longer matches "
-                      f"the recording (state fingerprint differs){tail}")
-        for kind, payload in by_frame.get(frame, ()):
-            if kind == "key":
-                send_key(dos, payload[1], payload[0])
-            elif kind == "mouse":
-                last_mouse[0] = payload
-        # Re-apply the mouse EVERY frame, not just on change: set_mouse_norm
-        # re-maps the normalized position through the game's CURRENT INT 33h
-        # range, and the game narrows that range (e.g. to the playfield when a
-        # ball launches).  Applying only on change leaves a stale mouse_x/y
-        # mapped with the OLD range, so the paddle diverges the moment the range
-        # changes while the mouse is still — the recorder re-applies every frame.
-        if last_mouse[0] is not None:
-            m = last_mouse[0]
-            dos.set_mouse_norm(m[0], m[1], m[2])
+        adapter.apply(frame, dos, deliver_key=send_key)
         if frame >= end_frame:
             done["flag"] = True
 
-    last_mouse = [None]
-    clock = FrameClock(rt.cpu, demo.frame_tick_addr, on_frame)
+    clock = FrameClock(rt.cpu, frame_tick_addr, on_frame)
 
     def _finish():
-        if demo.digests and not check_digests:
-            print(f"demo replayed (v{demo.version} digests are memory-only and "
-                  f"predate the full-state fingerprint -- self-verification "
-                  f"skipped; re-record to self-verify)")
-        elif demo.digests:
-            if diverged["frame"] is None:
-                print(f"demo VERIFIED: replay matched the recording on all "
-                      f"{len(demo.digests)} fingerprinted frames")
-            else:
-                print(f"demo DIVERGED at frame {diverged['frame']} "
-                      f"(of {demo.total_frames}); replay did not reproduce the "
-                      f"recording")
         if snapshot_dir:
             from .pm_snapshot import save_pm_snapshot
             save_pm_snapshot(rt, snapshot_dir)
@@ -712,7 +714,7 @@ def run_replay(rt, demo_path, *, boot_keys=(), extra_frames: int = 30,
                 steps += 50_000
         except Exception as e:  # noqa: BLE001
             print(f"STOP at eip=0x{rt.cpu.eip:X}: {type(e).__name__}: {e}")
-        print(f"replayed to frame ~{demo.total_frames}+{extra_frames}; "
+        print(f"replayed to frame ~{end_point.ordinal}+{extra_frames}; "
               f"{rt.cpu.instruction_count} instructions "
               f"(no window; pass --show to WATCH the replay)")
         _finish()
@@ -841,8 +843,8 @@ def main(argv=None, *, default_exe: str | None = None, create_runtime=None,
                     help="viewer: directory for the next F11 recording "
                          "(default: artifacts/demos/demo_<stamp>/)")
     ap.add_argument("--play-demo", default="",
-                    help="replay a demo bundle DIRECTORY deterministically "
-                         "(boots from the bundle's own snapshot; "
+                    help="replay a ReplayArtifact directory deterministically "
+                         "(restores the artifact's continuation base; "
                          "headless unless --show)")
     ap.add_argument("--save-snapshot", default="",
                     help="replay: save a snapshot of the final state here")
@@ -850,24 +852,15 @@ def main(argv=None, *, default_exe: str | None = None, create_runtime=None,
                     help="replay: show the final frame in a window")
     args = ap.parse_args(argv)
 
-    from .pm_input_demo import PMInputDemo
-
     build = create_runtime or create_pm_runtime
     # Reproducible paths keep the deterministic instruction-count SB clock:
     # recording a demo (so it can replay), replaying one, or a headless run.
     # Only a casual live viewer (none of these) uses wall-clock audio pacing.
     deterministic = bool(args.headless or args.play_demo or args.record_demo)
 
-    # Resolve the starting runtime.  Priority: an explicit --snapshot, then a
-    # demo bundle's OWN start snapshot (so a mid-game replay is deterministic),
-    # else a fresh boot.  A demo bundle is self-contained — the user points
-    # --play-demo at the directory and never has to supply the snapshot.
+    # An explicit --snapshot affects ordinary runs. Replay restores its own
+    # embedded continuation base after the runtime shell has been created.
     snapshot_src = args.snapshot or None
-    if args.play_demo and not snapshot_src:
-        bundle_snap = PMInputDemo.snapshot_dir(args.play_demo)
-        if bundle_snap is not None:
-            snapshot_src = str(bundle_snap)
-
     if snapshot_src:
         # Resume the frozen state, then re-install the adapter's recovered
         # hooks (load_pm_snapshot rebuilds a bare runtime; without this the
@@ -879,12 +872,15 @@ def main(argv=None, *, default_exe: str | None = None, create_runtime=None,
         rt = build(args.exe)
     if sound_blaster is not None and not args.no_sound:
         _configure_sound(rt.dos, sound_blaster, deterministic=deterministic)
+    profile = _pm_profile(args.exe, rt, install_hooks)
     if args.play_demo:
         return run_replay(rt, args.play_demo, boot_keys=boot_keys,
                           snapshot_dir=args.save_snapshot or None, png=args.png,
-                          show=args.show, scale=args.scale, title=title)
+                          show=args.show, scale=args.scale, title=title,
+                          replay_profile=profile)
     if args.headless:
         return run_headless(rt, steps=args.steps, png=args.png, boot_keys=boot_keys)
     return run_viewer(rt, scale=args.scale, title=title, artifacts_dir=artifacts_dir,
                       frame_tick_addr=frame_tick_addr,
-                      record_demo=args.record_demo or None)
+                      record_demo=args.record_demo or None,
+                      replay_profile=profile)

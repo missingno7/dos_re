@@ -7,8 +7,8 @@
 > auto-install tier.  Graph assembly is different: the largest supported
 > **VMless lifted graph** is emitted (`tools/liftemit.py`), structurally linked
 > (`tools/liftlink.py`), installed whole (`lift.install.install_vmless_graph`),
-> and judged by END-TO-END oracle comparison with auto-bisection
-> (`tools/hook_bisect.py`) — per-function ORACLE_PASSING is metadata, not a
+> and judged by END-TO-END oracle comparison with stable-point temporal bisection
+> (`dos_re.replay.bisect_divergence`) — per-function ORACLE_PASSING is metadata, not a
 > precondition.  Wherever this document says or implies "proven before
 > linked/installed", read it as describing the hybrid tier or as historical.
 > The M0–M4 roadmap in §10 is the 1.x lifter roadmap; the project-level

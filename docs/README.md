@@ -24,7 +24,7 @@ Reading order for the framework itself: the repo [README](../README.md) →
 | [`agent_toolbox.md`](agent_toolbox.md) | **The task index**: boot an EXE, diagnose fail-louds, snapshots, traces, frame boundaries, wait loops, demos, profiling, hooks, oracle verification, the lifter, LIFTED-vs-RECOVERED, progress metrics, guardrails — each with the command and when to use it. |
 | [`architecture.md`](architecture.md) | The package boundary, the framework module map, execution modes, adapter layering, dependencies. |
 | [`hooks_and_verification.md`](hooks_and_verification.md) | Hook registration and return mechanics, the differential hook oracle (metadata + strict modes), the frame oracle, hook taxonomy. |
-| [`demos_and_snapshots.md`](demos_and_snapshots.md) | Snapshots, repro artifacts, deterministic input demos (snapshot-anchored + cold-start), the boundary-clock invariant that keeps demo proofs valid, tick demos — the mode-independent endgame clock (`dos_re.tick_demo`) — and front-end timelines (`dos_re.frontend_timeline`), the per-frame proof for the non-gameplay screens. |
+| [`demos_and_snapshots.md`](demos_and_snapshots.md) | **dos_re 3.0 replay architecture:** one oracle/candidate replay artifact, stable points, profile-local continuation caches, machine or semantic canonical projections, persistent bisection boundaries, and function visits. No legacy formats or migration paths. |
 | [`state_mirrors.md`](state_mirrors.md) | The state-view seam: human-named views over the DOS memory image with swappable backends, without weakening byte-exact verification. |
 | [`hardware_support.md`](hardware_support.md) | Honest, status-legend-based matrix of the video/audio/timing/DOS models, the unmodeled-I/O policy, and the rule for extending them. |
 | [`performance.md`](performance.md) | How to run dos_re fast: PyPy for headless workloads (~13-17x interpretation), pytest-xdist for suites, and the byte-exact equivalence-gate method required for any interpreter optimization. |
@@ -35,6 +35,9 @@ Reading order for the framework itself: the repo [README](../README.md) →
 | [`enhancements.md`](enhancements.md), [`post_endgame.md`](post_endgame.md) | The enhanced-layer / post-endgame playbook (parity gate, overlay menu taxonomy). |
 | [`glossary.md`](glossary.md) | Every project term (oracle, island, coastline, golden, heartbeat, …) in one table — 1.x terms kept for reading historical ledgers; dos_re_2.0.md vocabulary wins. |
 
+Historical, non-normative design records live under [`history/`](history/).
+They are not API or workflow documentation.
+
 Related, outside `docs/`:
 
 - [`../tools/README.md`](../tools/README.md) — one entry per CLI tool:
@@ -43,7 +46,7 @@ Related, outside `docs/`:
   — runnable 5-minute demo of the hook/verify/snapshot loop on a synthetic EXE.
 - [`../examples/tiny_frame_game/`](../examples/tiny_frame_game/README.md) —
   the whole lifecycle in ten minutes: a synthetic frame-loop game through
-  oracle boot, cold-start demos, snapshots, both verification oracles, and a
+  oracle boot, embedded-base replay artifacts, snapshots, both verification oracles, and a
   state mirror.
 - [`../AGENTS.md`](../AGENTS.md) — the rules for extending this framework
   (including the missing-behaviour → extension recipes).

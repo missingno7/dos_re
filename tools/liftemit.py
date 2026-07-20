@@ -48,7 +48,7 @@ def _probe(rt, cs):
     """Interpreter length-probe over a scratch clone (identical to liftverify /
     liftlink) — the scanner uses it to resolve instruction lengths the pure
     static decode is unsure about."""
-    from dos_re.repro_artifacts import clone_runtime_state
+    from dos_re.snapshot import clone_runtime_state
     scratch = clone_runtime_state(rt)
     cpu = scratch.cpu
     cpu.replacement_hooks.clear(); cpu.hook_names.clear()
