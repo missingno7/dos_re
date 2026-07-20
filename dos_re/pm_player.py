@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 
 from .dos4gw import DosInputExhausted, render_pm_frame
-from .execution import ExecutionPlan
+from .execution import ExecutionPlan, execution_composition_digest
 from .frame_verify import write_rgb_png
 from .input_demo import MOUSE_CHANNEL, mouse_payload
 from .pm_snapshot import apply_pm_continuation, capture_pm_continuation
@@ -91,7 +91,7 @@ def _file_identity(path: str | Path) -> str:
 
 def _pm_profile(exe: str | Path, rt, plan: ExecutionPlan) -> ExecutionProfile:
     implementation = hashlib.sha256()
-    implementation.update(plan.plan_digest.encode("ascii"))
+    implementation.update(execution_composition_digest(plan).encode("ascii"))
     runtime = hashlib.sha256()
     root = Path(__file__).parent
     for name in ("cpu386.py", "dos4gw.py", "runtime.py", "pm_snapshot.py", "replay.py"):

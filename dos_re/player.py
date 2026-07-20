@@ -39,6 +39,7 @@ from dos_re.execution import (
     ProgramCoverage,
     RuntimeServiceCatalog,
     RuntimeServiceDescriptor,
+    execution_composition_digest,
     format_execution_plan,
     plan_execution,
     profile_configuration,
@@ -468,9 +469,12 @@ class GameFrontend:
         mode = plan.configuration.profile
         overrides = tuple(sorted(
             f"{key!r}:{value}" for key, value in rt.cpu.hook_names.items()))
-        plan_digest = getattr(getattr(args, "execution_plan", None), "plan_digest", "")
+        plan = getattr(args, "execution_plan", None)
+        composition_digest = (
+            execution_composition_digest(plan) if plan is not None else ""
+        )
         implementation = hashlib.sha256(
-            f"{_implementation_identity(self)}:{plan_digest}".encode("utf-8")
+            f"{_implementation_identity(self)}:{composition_digest}".encode("utf-8")
         ).hexdigest()
         key = hashlib.sha256(
             ("\n".join((mode, implementation, *overrides))).encode("utf-8")

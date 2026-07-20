@@ -192,6 +192,10 @@ An oracle observer may collect the section during recording or reconstruct it
 by replaying the immutable event stream. Both paths use the same
 `ReplayExecutionEvidence` semantics. Runtime observers report actual transfer
 events; the Atlas never derives an edge merely from consecutive visits.
+Replay execution profiles identify the selected implementation composition,
+not the planner's coverage digest: Atlas-derived coverage consumes replay
+evidence, so including that coverage in the profile would create a circular,
+ever-changing identity for an unchanged runtime.
 
 Dynamic nodes and edges absent from Recovery IR are accepted and explicitly
 marked observed. Dynamic absence never marks a node unreachable.
