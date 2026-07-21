@@ -108,6 +108,11 @@ def capture_dos_state(dos, memory) -> dict:
         "strict_ports": getattr(dos, "strict_ports", False),
         "unmodeled_port_reads": [list(item) for item in getattr(dos, "unmodeled_port_reads", [])],
         "stdout_tail": "".join(dos.stdout)[-4096:],
+        # The log is bounded at 4096 entries and that capacity affects future
+        # execution: once full, port writes stop appending.  Persist the
+        # logical length as well as the diagnostic suffix so a restored replay
+        # cannot start recording again and produce a different continuation.
+        "port_log_length": len(dos.port_log),
         "port_log_tail": dos.port_log[-128:],
     }
 
@@ -203,7 +208,15 @@ def _restore_dos_state(rt, dos_meta: dict):
         stdout_tail = str(dos_meta["stdout_tail"])
         rt.dos.stdout = [stdout_tail] if stdout_tail else []
     if "port_log_tail" in dos_meta:
-        rt.dos.port_log = [tuple(item) for item in dos_meta["port_log_tail"]]
+        tail = [tuple(item) for item in dos_meta["port_log_tail"]]
+        length = max(len(tail), int(dos_meta.get("port_log_length", len(tail))))
+        # Entries before the retained suffix are observational history only;
+        # preserve their count with an inert sentinel.  They can never enter a
+        # future 128-entry projection suffix because all new entries append
+        # after the exact retained tail.
+        rt.dos.port_log = [
+            ("history", 0, 0, 0)
+        ] * (length - len(tail)) + tail
     rt.dos.next_alloc_segment = dos_meta.get("next_alloc_segment", rt.dos.next_alloc_segment)
     rt.dos.allocation_limit_segment = dos_meta.get("allocation_limit_segment", rt.dos.allocation_limit_segment)
     rt.dos.allocations = {int(seg, 16): int(size) for seg, size in dos_meta.get("allocations", {}).items()}
