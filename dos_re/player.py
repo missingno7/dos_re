@@ -449,7 +449,7 @@ class GameFrontend:
 
     def launch(self, args: argparse.Namespace, plan: ExecutionPlan) -> int:
         """Run the selected plan through this frontend's execution driver."""
-        return _launch_real_mode(self, args)
+        return launch_real_mode(self, args)
 
     def verification_drivers(
         self,
@@ -1327,18 +1327,44 @@ def run_view(frontend: GameFrontend, rt, args,
     return _exit_report(rt, status=status, frames=frame_box["n"])
 
 
-def _launch_real_mode(frontend: GameFrontend, args: argparse.Namespace) -> int:
+def launch_real_mode(
+    frontend: GameFrontend,
+    args: argparse.Namespace,
+    *,
+    create_runtime=None,
+    load_snapshot_runtime=None,
+    bind_execution_plan=None,
+) -> int:
+    """Run one real-mode carrier through the canonical player lifecycle.
+
+    A selected carrier may provide its own runtime constructor and plan binder,
+    but it must not bypass this lifecycle.  Replay metadata is applied before
+    construction, the recording base is restored before execution, and viewer
+    versus headless dispatch remains owned here for every carrier.
+    """
+    create = create_runtime or frontend.create_runtime
+    load_snapshot = load_snapshot_runtime or frontend.load_snapshot_runtime
+    bind = bind_execution_plan or (
+        lambda runtime: frontend.bind_execution_plan(
+            runtime, args.execution_plan,
+        )
+    )
     if args.play_replay:
         playback = _RealReplayPlayback.open(args.play_replay)
         frontend.apply_replay_metadata(args, playback.artifact.metadata)
-        rt = frontend.create_runtime(args)
+        rt = create(args)
         base = playback.artifact.restore(
             playback.profile, ReplayPoint(0, playback.artifact.timeline_id))
         frontend.apply_replay_state(rt, base)
-        frontend.bind_execution_plan(rt, args.execution_plan)
+        bind(rt)
         playback.adapter.seek(base.event_cursor)
         current = frontend.replay_profile(args, rt)
-        for field in ("image", "runtime", "devices", "continuation_schema"):
+        # The implementation/runtime identity is intentionally allowed to
+        # change: replaying a captured failure against a corrected successor is
+        # a primary workflow.  It receives its own cache profile below.  The
+        # persisted continuation itself is portable only across the same image,
+        # device topology and continuation schema.
+        for field in ("image", "devices", "continuation_schema"):
             if getattr(current, field) != getattr(playback.profile, field):
                 raise ValueError(
                     f"replay {field} identity differs from the recorded base")
@@ -1357,10 +1383,10 @@ def _launch_real_mode(frontend: GameFrontend, args: argparse.Namespace) -> int:
         return run_view(frontend, rt, args, playback=playback)
 
     if args.snapshot:
-        rt = frontend.load_snapshot_runtime(args, args.snapshot)
+        rt = load_snapshot(args, args.snapshot)
     else:
-        rt = frontend.create_runtime(args)
-    frontend.bind_execution_plan(rt, args.execution_plan)
+        rt = create(args)
+    bind(rt)
     rt.dos.console_input_fallback = None
     if args.headless:
         return run_headless(frontend, rt, args)
@@ -1440,6 +1466,12 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
          description: str | None = None) -> int:
     """Resolve one canonical execution plan, then dispatch its frontend driver."""
     args = build_arg_parser(frontend, description).parse_args(argv)
+    if args.play_replay:
+        # Replay metadata can affect device topology, pacing and product
+        # configuration.  Restore it before planning or selecting a carrier so
+        # every launch path resolves the plan for the state it will replay.
+        artifact = ReplayArtifact.open(args.play_replay)
+        frontend.apply_replay_metadata(args, artifact.metadata)
     try:
         args.execution_plan = frontend.resolve_execution_plan(args)
     except (ExecutionPlanError, ValueError) as exc:

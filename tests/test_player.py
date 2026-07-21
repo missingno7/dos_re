@@ -152,6 +152,106 @@ def test_replay_metadata_roundtrip():
     assert fresh.steps_per_frame == 555 and fresh.timer_irqs_per_frame == 3
 
 
+def test_replay_metadata_is_applied_before_plan_selection(monkeypatch):
+    artifact = SimpleNamespace(metadata={"captured_product": "island"})
+    monkeypatch.setattr(
+        player.ReplayArtifact, "open", lambda path: artifact,
+    )
+
+    class Fe(GameFrontend):
+        def apply_replay_metadata(self, args, metadata):
+            args.captured_product = metadata["captured_product"]
+
+        def resolve_execution_plan(self, args):
+            assert args.captured_product == "island"
+            return SimpleNamespace(
+                configuration=SimpleNamespace(
+                    verification_policy=SimpleNamespace(mode="none"),
+                ),
+            )
+
+        def launch(self, args, plan):
+            assert args.captured_product == "island"
+            return 0
+
+    assert player.main(Fe(ROOT), ["--play-replay", "recording"]) == 0
+
+
+def test_replay_launch_allows_a_successor_runtime_profile(monkeypatch):
+    recorded = SimpleNamespace(
+        profile_id="recorded",
+        image="image-v1",
+        runtime="runtime-before-fix",
+        devices="devices-v1",
+        continuation_schema="continuation-v1",
+    )
+    current = SimpleNamespace(
+        profile_id="successor",
+        image="image-v1",
+        runtime="runtime-after-fix",
+        devices="devices-v1",
+        continuation_schema="continuation-v1",
+    )
+    base = SimpleNamespace(event_cursor=0)
+    registered = []
+
+    class Artifact:
+        metadata = {}
+        timeline_id = "timeline-v1"
+
+        def restore(self, profile, point):
+            assert profile is recorded and point.ordinal == 0
+            return base
+
+        def profiles(self):
+            return ((recorded, ReplayPoint(0, self.timeline_id)),)
+
+        def register_profile(self, profile, *, base_point, base_state):
+            registered.append((profile, base_point, base_state))
+
+    playback = SimpleNamespace(
+        artifact=Artifact(),
+        profile=recorded,
+        adapter=SimpleNamespace(seek=lambda cursor: None),
+    )
+    monkeypatch.setattr(
+        player._RealReplayPlayback, "open", lambda path: playback,
+    )
+    monkeypatch.setattr(
+        player, "run_replay_headless",
+        lambda frontend, runtime, args, opened: 17,
+    )
+
+    runtime = SimpleNamespace(
+        dos=SimpleNamespace(console_input_fallback=0x011B),
+    )
+
+    class Fe:
+        def apply_replay_metadata(self, args, metadata):
+            pass
+
+        def apply_replay_state(self, restored_runtime, state):
+            assert restored_runtime is runtime and state is base
+
+        def replay_profile(self, args, restored_runtime):
+            assert restored_runtime is runtime
+            return current
+
+    args = SimpleNamespace(
+        play_replay="recording",
+        headless=True,
+        execution_plan=object(),
+    )
+    assert player.launch_real_mode(
+        Fe(), args,
+        create_runtime=lambda parsed: runtime,
+        load_snapshot_runtime=lambda parsed, path: runtime,
+        bind_execution_plan=lambda restored_runtime: None,
+    ) == 17
+    assert registered == [(current, ReplayPoint(0, "timeline-v1"), base)]
+    assert runtime.dos.console_input_fallback is None
+
+
 def test_standard_io_options_declare_plan_capabilities():
     fe = GameFrontend(ROOT)
     replay_args = _parse(fe, ["--play-replay", "replay"])
