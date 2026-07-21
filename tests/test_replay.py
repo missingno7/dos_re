@@ -17,14 +17,19 @@ from dos_re.replay import (
     ReplayExecutionIdentity,
     FunctionVisitIndex,
     ReplayArtifact,
+    ReplayEvidenceRecorder,
     ReplayError,
     ReplayEvent,
     ReplayPoint,
+    ReplayPointCoordinate,
+    ReplayRecording,
     StaleReplayError,
     bisect_divergence,
     machine_projection,
+    verify_checkpointed,
     verify_interval,
 )
+from dos_re.observable import RollingEffectDigest
 
 
 TIMELINE = "hook-verification-instruction-boundaries-v1"
@@ -52,6 +57,47 @@ def profile(profile_id: str, role: str, implementation: str,
 
 ORACLE = profile("oracle", "oracle", "interpreter", "machine-v1")
 NATIVE = profile("native", "candidate", "detached-native", "native-v1")
+
+
+def test_timeline_coordinates_are_hashed_immutable_stop_contract(tmp_path):
+    recording = ReplayRecording(
+        tmp_path / "coordinate-replay",
+        timeline_id=TIMELINE,
+        profile=NATIVE,
+        base_state=CounterDriver(NATIVE).capture(),
+        metadata={"purpose": "coordinate-contract"},
+    )
+    recording.mark(0, schema_id="guest-instructions-v1", value=100)
+    recording.add(0, "input", {"value": 3})
+    recording.mark(1, schema_id="guest-instructions-v1", value=137)
+    artifact = recording.finish(1)
+
+    assert artifact.timeline_coordinate(point(0)).value == 100
+    assert artifact.timeline_coordinate(point(1)).value == 137
+    assert len(artifact.timeline_coordinates_sha256) == 64
+    with pytest.raises(ReplayError, match="immutable"):
+        artifact.set_timeline_coordinates(
+            [
+                ReplayPointCoordinate(point(0), "guest-instructions-v1", 99),
+                ReplayPointCoordinate(point(1), "guest-instructions-v1", 137),
+            ],
+            provenance={"kind": "conflicting-rewrite"},
+        )
+
+
+def test_coordinate_less_artifact_can_be_materialized_once(tmp_path):
+    artifact = make_artifact(tmp_path)
+    coordinates = [
+        ReplayPointCoordinate(point(i), "semantic-tick-v1", i * 2)
+        for i in range(len(VALUES) + 1)
+    ]
+
+    assert artifact.set_timeline_coordinates(
+        coordinates, provenance={"kind": "one-shot-test"})
+    assert not artifact.set_timeline_coordinates(
+        coordinates, provenance={"kind": "one-shot-test"})
+    reopened = ReplayArtifact.open(artifact.directory)
+    assert reopened.timeline_coordinate(point(7)).value == 14
 
 
 def test_replay_execution_identity_rejects_obsolete_or_unknown_fields():
@@ -146,12 +192,46 @@ class CounterDriver:
         )
 
 
+class ObservableCounterDriver(CounterDriver):
+    def __init__(self, *args, effect_bug_at=None, heal_at=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.effect_bug_at = effect_bug_at
+        self.heal_at = heal_at
+        self._observer = None
+
+    def begin_observable_interval(self):
+        assert self._observer is None
+        self._observer = RollingEffectDigest()
+        return self._observer
+
+    def end_observable_interval(self, token):
+        assert token is self._observer
+        self._observer = None
+        return token.finish()
+
+    def replay_to(self, artifact: ReplayArtifact, target: ReplayPoint) -> None:
+        while self.current_point.ordinal < target.ordinal:
+            ordinal = self.current_point.ordinal
+            super().replay_to(artifact, point(ordinal + 1))
+            if self.heal_at == ordinal:
+                self.total -= 1
+            if self._observer is not None:
+                value = VALUES[ordinal] + (
+                    1 if self.effect_bug_at == ordinal else 0)
+                self._observer.record(77, ordinal, value)
+
+
 def make_artifact(tmp_path, *, candidate=NATIVE):
     events = [ReplayEvent(point(i), i, "input", {"value": value})
               for i, value in enumerate(VALUES)]
     artifact = ReplayArtifact.create(
         tmp_path / "replay", timeline_id=TIMELINE, events=events,
-        metadata={"purpose": "hook-verification"}, page_size=8,
+        metadata={
+            "purpose": "hook-verification",
+            "recording_profile_id": candidate.profile_id,
+            "end_point": point(len(VALUES)).to_json(),
+        },
+        page_size=8,
     )
     oracle = CounterDriver(ORACLE)
     native = CounterDriver(candidate)
@@ -177,6 +257,131 @@ def test_semantic_projection_verifies_native_candidate_and_caches_each_profile(t
     manifest = json.loads((tmp_path / "replay" / "replay.json").read_text())
     assert set(manifest["profiles"]) == {"oracle", "native"}
     assert manifest["points"][point(9).key]["annotations"][0]["kind"] == "verified-endpoint"
+    assert len(artifact.validations()) == 1
+    assert not artifact.trusted
+
+
+def test_checkpointed_verifier_catches_state_divergence_that_reconverges(tmp_path):
+    candidate = profile(
+        "healing-native", "candidate", "detached-native", "native-v1")
+    artifact = make_artifact(tmp_path, candidate=candidate)
+    oracle = ObservableCounterDriver(ORACLE)
+    healing = ObservableCounterDriver(
+        candidate, bug_at=2, heal_at=3)
+
+    endpoint = verify_interval(
+        artifact, ObservableCounterDriver(ORACLE),
+        ObservableCounterDriver(candidate, bug_at=2, heal_at=3),
+        point(0), point(8),
+    )
+    assert endpoint.equivalent  # documents the endpoint-only false negative
+
+    checked = verify_checkpointed(
+        artifact, oracle, healing, point(0), point(8),
+        checkpoint_span=8, observable_effects=True,
+    )
+    assert not checked.equivalent
+    assert checked.failed_interval == (point(2), point(3))
+    assert "semantic-point state digest differs" in checked.comparison.differences
+
+
+def test_checkpointed_verifier_catches_healed_external_effect(tmp_path):
+    candidate = profile(
+        "effect-native", "candidate", "detached-native", "native-v1")
+    artifact = make_artifact(tmp_path, candidate=candidate)
+
+    checked = verify_checkpointed(
+        artifact,
+        ObservableCounterDriver(ORACLE),
+        ObservableCounterDriver(candidate, effect_bug_at=5),
+        point(0), point(10), checkpoint_span=10,
+        observable_effects=True,
+    )
+
+    assert not checked.equivalent
+    assert checked.failed_interval == (point(5), point(6))
+    assert "observable interval effect digest differs" in checked.comparison.differences
+
+
+def test_candidate_capture_becomes_trusted_only_after_full_validation(tmp_path):
+    artifact = make_artifact(tmp_path)
+    assert artifact.capture_profile() == NATIVE
+    assert not artifact.trusted
+
+    result = verify_interval(
+        artifact,
+        CounterDriver(ORACLE),
+        CounterDriver(NATIVE),
+        point(0),
+        point(len(VALUES)),
+    )
+
+    assert result.equivalent
+    assert artifact.trusted
+    assert len(artifact.validations()) == 1
+    revision = json.loads(artifact.path.read_text())["revision"]
+    assert not artifact.record_validation(result)
+    assert json.loads(artifact.path.read_text())["revision"] == revision
+
+
+def test_corrected_candidate_can_validate_a_provisional_capture(tmp_path):
+    artifact = make_artifact(tmp_path)
+    corrected = profile(
+        "native-corrected", "candidate", "detached-native-v2", "native-v1",
+        runtime="runtime-b",
+    )
+    artifact.register_profile(
+        corrected,
+        base_point=point(0),
+        base_state=CounterDriver(corrected).capture(),
+    )
+
+    result = verify_interval(
+        artifact,
+        CounterDriver(ORACLE),
+        CounterDriver(corrected),
+        point(0),
+        point(len(VALUES)),
+    )
+
+    assert result.equivalent
+    assert not artifact.capture_profile().same_execution_as(corrected)
+    assert artifact.trusted
+
+
+def test_execution_enrichment_is_idempotent_and_detects_nondeterminism(tmp_path):
+    artifact = make_artifact(tmp_path)
+    recorder = ReplayEvidenceRecorder()
+    recorder.enter("function:a", point(1))
+    recorder.observe_transfer("function:a", "function:b", "call", point(2))
+    recorder.exit("function:a", point(3))
+    evidence = recorder.evidence(
+        ORACLE,
+        provenance={
+            "kind": "post-hoc-oracle-replay",
+            "observer_digest": "observer-a",
+            "event_stream_sha256": artifact.event_stream_sha256,
+        },
+    )
+
+    assert artifact.set_execution_evidence(
+        ORACLE, evidence, visits=recorder.visits)
+    revision = json.loads(artifact.path.read_text())["revision"]
+    assert not artifact.set_execution_evidence(
+        ORACLE, evidence, visits=recorder.visits)
+    assert json.loads(artifact.path.read_text())["revision"] == revision
+
+    changed = ReplayEvidenceRecorder()
+    changed.enter("function:a", point(1))
+    changed.observe_transfer("function:a", "function:b", "call", point(2))
+    changed.observe_transfer("function:a", "function:b", "call", point(3))
+    changed.exit("function:a", point(4))
+    with pytest.raises(ReplayError, match="different observations"):
+        artifact.set_execution_evidence(
+            ORACLE,
+            changed.evidence(ORACLE, provenance=evidence.provenance),
+            visits=changed.visits,
+        )
 
 
 def test_repeated_interval_uses_nearest_profile_specific_boundary(tmp_path):
@@ -249,6 +454,57 @@ def test_changed_base_snapshot_identity_rejects_cached_boundary(tmp_path):
     reopened = ReplayArtifact.open(tmp_path / "replay")
     with pytest.raises(StaleReplayError, match="base snapshot identity"):
         reopened.restore(NATIVE, point(2))
+
+
+def test_boundary_delta_supports_added_removed_and_resized_regions(tmp_path):
+    artifact = ReplayArtifact.create(
+        tmp_path / "variable-regions",
+        timeline_id=TIMELINE,
+        events=(),
+        metadata={"recording_profile_id": ORACLE.profile_id},
+        page_size=4,
+    )
+    base = ContinuationState(
+        "machine-v1",
+        {"phase": "base"},
+        {
+            "grown": b"abcdefgh",
+            "removed": b"gone",
+            "shrunk": b"12345678",
+        },
+        0,
+    )
+    target = ContinuationState(
+        "machine-v1",
+        {"phase": "target"},
+        {
+            "added": b"new-region",
+            "grown": b"abXXefgh-more",
+            "shrunk": b"1234",
+        },
+        0,
+    ).normalized()
+    artifact.register_profile(
+        ORACLE, base_point=point(0), base_state=base)
+
+    assert artifact.cache(ORACLE, point(1), target)
+
+    reopened = ReplayArtifact.open(artifact.directory)
+    assert reopened.restore(ORACLE, point(1)) == target
+    record = reopened.require_profile(ORACLE)
+    boundary = json.loads(
+        reopened._resolve(
+            record["boundaries"][point(1).key]["manifest"]
+        ).read_text(encoding="utf-8")
+    )
+    assert boundary["regions"] == [
+        {"name": "added", "size": 10},
+        {"name": "grown", "size": 13},
+        {"name": "shrunk", "size": 4},
+    ]
+    assert {page["region"] for page in boundary["changed_pages"]} == {
+        "added", "grown",
+    }
 
 
 def test_artifact_metadata_is_returned_as_a_detached_copy(tmp_path):

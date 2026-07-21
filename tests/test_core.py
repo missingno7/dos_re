@@ -274,6 +274,34 @@ def test_unhandled_int_dispatches_to_installed_ivt_handler():
     assert mem.rw(0x2000, 0xFFF8) == 0x0050  # return ip (top of stack)
     assert mem.rw(0x2000, 0xFFFA) == 0x1000  # return cs
     assert mem.rw(0x2000, 0xFFFC) == 0x0202  # saved flags
+    assert cpu.call_depth == 1
+
+
+def test_indirect_calls_update_continuation_call_depth():
+    from dos_re.cpu import CPU8086, CPUState
+
+    # call word [0010h] -> 0104h; ret
+    near_mem = Memory()
+    near_mem.load(0x1000, 0, bytes.fromhex("FF161000"))
+    near_mem.ww(0x1000, 0x0010, 0x0104)
+    near = CPU8086(
+        near_mem,
+        CPUState(cs=0x1000, ip=0, ds=0x1000, ss=0x2000, sp=0x1000),
+    )
+    near.step()
+    assert near.call_depth == 1
+
+    # call far [0010h] -> 3000:0104h
+    far_mem = Memory()
+    far_mem.load(0x1000, 0, bytes.fromhex("FF1E1000"))
+    far_mem.ww(0x1000, 0x0010, 0x0104)
+    far_mem.ww(0x1000, 0x0012, 0x3000)
+    far = CPU8086(
+        far_mem,
+        CPUState(cs=0x1000, ip=0, ds=0x1000, ss=0x2000, sp=0x1000),
+    )
+    far.step()
+    assert far.call_depth == 1
 
 
 def test_unhandled_int_with_null_vector_still_fails_loud():

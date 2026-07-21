@@ -11,6 +11,7 @@ from .x86 import HaltExecution, UnsupportedInstruction, CF, ZF, IF, TF
 if TYPE_CHECKING:                       # type hints only -- not a runtime import
     from .cpu import CPU8086
 from .memory import EGA_APERTURE, EGA_PLANE_STRIDE, EGA_PLANE_WINDOW
+from .observable import CONSOLE_OUTPUT, PORT_WRITE, SOFTWARE_INTERRUPT
 
 # Which device tracker owns which OUT port (see DOSMachine.port_write, which
 # routes a write to exactly one of them instead of offering it to all four).
@@ -191,6 +192,11 @@ class DOSMachine:
     opl_status: int = 0
     opl_registers: dict[int, int] = field(default_factory=dict)
     port_log: list[tuple[str, int, int, int]] = field(default_factory=list)
+    # Transient verification observer.  It is intentionally absent from
+    # snapshots/continuations: a verifier attaches a fresh interval-local sink
+    # after restore and removes it before caching state.
+    observable_effect_sink: object | None = field(
+        default=None, repr=False, compare=False)
     # Optional emulated sound hardware (a Sound Blaster + its DMA channel) and the
     # master PIC.  Left None on the deterministic/headless path; an interactive
     # front-end enables them (see runtime.enable_sound_blaster) so the program's
@@ -336,6 +342,9 @@ class DOSMachine:
                 row = min(24, row + 1)
 
     def _console_output(self, cpu: CPU8086, text: str) -> None:
+        sink = self.observable_effect_sink
+        if sink is not None:
+            sink.record_bytes(CONSOLE_OUTPUT, text.encode("utf-8"))
         self.stdout.append(text)
         if self.text_mode_active and self.video_mode in (0, 1, 2, 3, 7):
             for ch in text:
@@ -799,20 +808,35 @@ class DOSMachine:
         """
         sb = self.sound_blaster
         if sb.owns_port(port):
+            sink = self.observable_effect_sink
+            if sink is not None:
+                sink.record(PORT_WRITE, port, value & 0xFF, 8)
             sb.port_write(port, value)
             return True
         if port <= 0x0F:                    # 8237 DMA controller #1
+            sink = self.observable_effect_sink
+            if sink is not None:
+                sink.record(PORT_WRITE, port, value & 0xFF, 8)
             sb.dma_controller_write(port, value)
             return True
         if 0x80 <= port <= 0x8F:            # DMA page registers
+            sink = self.observable_effect_sink
+            if sink is not None:
+                sink.record(PORT_WRITE, port, value & 0xFF, 8)
             sb.page_write(port, value)
             return True
         if self.pic is not None:
             if port == 0x20:                # PIC command (non-specific EOI = 0x20)
+                sink = self.observable_effect_sink
+                if sink is not None:
+                    sink.record(PORT_WRITE, port, value & 0xFF, 8)
                 if value == 0x20:
                     self.pic.eoi()
                 return True
             if port == 0x21:                # PIC mask
+                sink = self.observable_effect_sink
+                if sink is not None:
+                    sink.record(PORT_WRITE, port, value & 0xFF, 8)
                 self.pic.set_mask(value)
                 return True
         return False
@@ -875,6 +899,12 @@ class DOSMachine:
             return
 
         reg = self.opl_selected_register & 0xFF
+        sink = self.observable_effect_sink
+        if sink is not None:
+            # Canonical audio effect: register/value, independent of whether a
+            # machine backend reached it through two raw OUT instructions or a
+            # native backend emitted the semantic OPL write directly.
+            sink.record(PORT_WRITE, 0x0389, reg, value)
         self.opl_registers[reg] = value
         self._notify_adlib(reg, value)
         if reg == 0x04:
@@ -900,6 +930,9 @@ class DOSMachine:
             channel = (value >> 6) & 0x03
             access = (value >> 4) & 0x03
             if channel == 2:
+                sink = self.observable_effect_sink
+                if sink is not None:
+                    sink.record(PORT_WRITE, port, value, bits)
                 self._pit_channel2_access = access
                 self._pit_channel2_write_low = True
                 if access in (1, 2):
@@ -937,6 +970,9 @@ class DOSMachine:
                     self.pit_channel0_anchor_ticks = self._pit_elapsed_ticks(cpu)
             return
         if port == 0x42:
+            sink = self.observable_effect_sink
+            if sink is not None:
+                sink.record(PORT_WRITE, port, value, bits)
             access = self._pit_channel2_access
             if access == 1:
                 self.pit_channel2_reload = (self.pit_channel2_reload & 0xFF00) | value
@@ -954,6 +990,9 @@ class DOSMachine:
                     self._notify_speaker()
             return
         if port == 0x61:
+            sink = self.observable_effect_sink
+            if sink is not None:
+                sink.record(PORT_WRITE, port, value, bits)
             self.speaker_control = value
             self._notify_speaker()
 
@@ -1079,6 +1118,18 @@ class DOSMachine:
             mem.ega_h_display_end = value
 
     def interrupt(self, cpu: CPU8086, num: int) -> None:
+        sink = self.observable_effect_sink
+        if sink is not None:
+            # Four input words are enough to distinguish DOS/BIOS service
+            # selection and its ordinary arguments without coupling the
+            # semantic stream to CS:IP or guest instruction timing.
+            sink.record(
+                SOFTWARE_INTERRUPT,
+                num & 0xFF,
+                cpu.s.ax & 0xFFFF,
+                ((cpu.s.bx & 0xFFFF) << 16) | (cpu.s.cx & 0xFFFF),
+                ((cpu.s.dx & 0xFFFF) << 16) | (cpu.s.si & 0xFFFF),
+            )
         if num == 0x20:
             cpu.halted = True
             raise HaltExecution()
@@ -1124,6 +1175,7 @@ class DOSMachine:
             cpu.push(cpu.s.flags)
             cpu.push(cpu.s.cs & 0xFFFF)
             cpu.push(cpu.s.ip & 0xFFFF)
+            cpu.call_depth += 1
             cpu.set_flag(IF, False)
             cpu.set_flag(TF, False)
             cpu.s.cs, cpu.s.ip = seg & 0xFFFF, off & 0xFFFF

@@ -34,9 +34,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
+from .observable import (
+    ObservableIntervalDigest,
+    RollingEffectDigest,
+    SEMANTIC_BOUNDARY,
+)
+
 FORMAT_VERSION = 1
 DEFAULT_PAGE_SIZE = 4096
 MANIFEST = "replay.json"
+GUEST_INSTRUCTION_COORDINATE = "dos-re:guest-instruction-count:v1"
 
 
 class ReplayError(RuntimeError):
@@ -82,6 +89,43 @@ class ReplayPoint:
 
 
 @dataclass(frozen=True)
+class ReplayPointCoordinate:
+    """Backend-neutral declaration of where a timeline point actually stops.
+
+    An ordinal orders points; it does not by itself make the stop reproducible
+    across implementations with different dispatch granularity.  The frontend
+    chooses a coordinate schema (guest instruction count, simulation tick,
+    presentation fence, native transaction id, ...), and every replay driver
+    for that timeline must stop at the declared coordinate exactly.
+    """
+
+    point: ReplayPoint
+    schema_id: str
+    value: Any
+
+    def __post_init__(self) -> None:
+        if not self.schema_id:
+            raise ValueError("timeline coordinate schema_id must not be empty")
+        object.__setattr__(
+            self, "value", _json_value(self.value, "timeline coordinate value"))
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "point": self.point.to_json(),
+            "schema_id": self.schema_id,
+            "value": self.value,
+        }
+
+    @classmethod
+    def from_json(cls, raw: Mapping[str, Any]) -> "ReplayPointCoordinate":
+        return cls(
+            ReplayPoint.from_json(raw["point"]),
+            str(raw["schema_id"]),
+            raw.get("value"),
+        )
+
+
+@dataclass(frozen=True)
 class ReplayEvent:
     """One deterministic external event applied at a stable point."""
 
@@ -118,8 +162,11 @@ class ContinuationState:
     metadata: Mapping[str, Any]
     regions: Mapping[str, bytes]
     event_cursor: int
+    _is_normalized: bool = field(default=False, repr=False, compare=False)
 
     def normalized(self) -> "ContinuationState":
+        if self._is_normalized:
+            return self
         if not self.schema_id:
             raise ValueError("continuation schema_id must not be empty")
         cursor = int(self.event_cursor)
@@ -132,7 +179,8 @@ class ContinuationState:
                 raise ValueError(f"invalid continuation region name: {name!r}")
             regions[name] = bytes(data)
         return ContinuationState(
-            self.schema_id, _json_value(self.metadata, "continuation metadata"), regions, cursor)
+            self.schema_id, _json_value(self.metadata, "continuation metadata"),
+            regions, cursor, True)
 
     @property
     def digest(self) -> str:
@@ -154,8 +202,11 @@ class CanonicalState:
     event_cursor: int
     fields: Mapping[str, Any] = field(default_factory=dict)
     regions: Mapping[str, bytes] = field(default_factory=dict)
+    _is_normalized: bool = field(default=False, repr=False, compare=False)
 
     def normalized(self) -> "CanonicalState":
+        if self._is_normalized:
+            return self
         if not self.schema_id:
             raise ValueError("canonical schema_id must not be empty")
         cursor = int(self.event_cursor)
@@ -168,17 +219,14 @@ class CanonicalState:
                 raise ValueError(f"invalid canonical region name: {name!r}")
             regions[name] = bytes(data)
         return CanonicalState(
-            self.schema_id, cursor, _json_value(self.fields, "canonical fields"), regions)
+            self.schema_id, cursor,
+            _json_value(self.fields, "canonical fields"), regions, True)
 
     @property
     def digest(self) -> str:
         state = self.normalized()
-        h = hashlib.sha256(_canonical_json({
-            "schema_id": state.schema_id, "event_cursor": state.event_cursor,
-            "fields": state.fields,
-        }))
-        _hash_regions(h, state.regions)
-        return h.hexdigest()
+        return canonical_state_digest(
+            state.schema_id, state.event_cursor, state.fields, state.regions)
 
     def compare(self, other: "CanonicalState") -> "StateComparison":
         left, right = self.normalized(), other.normalized()
@@ -225,7 +273,29 @@ def machine_projection(state: ContinuationState, *, schema_id: str) -> Canonical
             "metadata": state.metadata,
         },
         regions=state.regions,
+        _is_normalized=True,
     )
+
+
+def canonical_state_digest(
+    schema_id: str,
+    event_cursor: int,
+    fields: Mapping[str, Any],
+    regions: Mapping[str, bytes | bytearray | memoryview],
+) -> str:
+    """Stream the canonical projection digest without materializing regions.
+
+    Machine adapters use this for point fingerprints over live bytearrays.  It
+    is exactly the digest produced by :class:`CanonicalState`, not a weaker
+    summary; tests require the fast and materialized paths to agree.
+    """
+    h = hashlib.sha256(_canonical_json({
+        "schema_id": str(schema_id),
+        "event_cursor": int(event_cursor),
+        "fields": fields,
+    }))
+    _hash_regions(h, regions)
+    return h.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -264,6 +334,29 @@ class ReplayExecutionIdentity:
     @property
     def storage_key(self) -> str:
         return f"{_safe_name(self.profile_id)}-{self.identity_digest[:16]}"
+
+    def same_execution_as(self, other: "ReplayExecutionIdentity") -> bool:
+        """Return whether two profiles select the same deterministic runtime.
+
+        Profile names and roles describe how an execution is being used.  They
+        do not change the selected implementation, image, runtime, devices, or
+        state schemas that determine replay compatibility.
+        """
+        return (
+            self.implementation,
+            self.image,
+            self.runtime,
+            self.devices,
+            self.continuation_schema,
+            self.projection_schema,
+        ) == (
+            other.implementation,
+            other.image,
+            other.runtime,
+            other.devices,
+            other.continuation_schema,
+            other.projection_schema,
+        )
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -417,6 +510,7 @@ class ReplayExecutionEvidence:
     transfers: tuple[ObservedTransfer, ...] = ()
     runtime_variants: tuple[str, ...] = ()
     incomplete_functions: tuple[str, ...] = ()
+    provenance: Mapping[str, Any] = field(default_factory=dict)
     version: int = 1
 
     def __post_init__(self) -> None:
@@ -434,6 +528,24 @@ class ReplayExecutionEvidence:
         object.__setattr__(self, "runtime_variants", tuple(sorted(set(self.runtime_variants))))
         object.__setattr__(
             self, "incomplete_functions", tuple(sorted(set(self.incomplete_functions))))
+        object.__setattr__(
+            self, "provenance",
+            _json_value(self.provenance, "execution evidence provenance"),
+        )
+
+    @property
+    def evidence_identity_digest(self) -> str:
+        """Identity of one reproducible observation recipe.
+
+        Observed counts are deliberately excluded. Re-running the same plan
+        and observer over the same artifact must reproduce the same content or
+        be rejected as non-deterministic evidence.
+        """
+        return _sha256(_canonical_json({
+            "version": self.version,
+            "profile_identity_digest": self.profile_identity_digest,
+            "provenance": self.provenance,
+        }))
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -442,6 +554,7 @@ class ReplayExecutionEvidence:
             "transfers": [item.to_json() for item in self.transfers],
             "runtime_variants": list(self.runtime_variants),
             "incomplete_functions": list(self.incomplete_functions),
+            "provenance": self.provenance,
         }
 
     @classmethod
@@ -451,6 +564,7 @@ class ReplayExecutionEvidence:
             tuple(ObservedTransfer.from_json(item) for item in raw.get("transfers", ())),
             tuple(map(str, raw.get("runtime_variants", ()))),
             tuple(map(str, raw.get("incomplete_functions", ()))),
+            raw.get("provenance", {}),
             int(raw.get("version", 0)),
         )
 
@@ -486,14 +600,19 @@ class ReplayEvidenceRecorder:
             raise ValueError("runtime variant identity must not be empty")
         self._runtime_variants.add(str(variant_id))
 
-    def evidence(self, profile: ReplayExecutionIdentity) -> ReplayExecutionEvidence:
+    def evidence(
+        self,
+        profile: ReplayExecutionIdentity,
+        *,
+        provenance: Mapping[str, Any] | None = None,
+    ) -> ReplayExecutionEvidence:
         incomplete = tuple(
             record.function_id for record in self.visits.records()
             if record.invocation_count and record.incomplete
         )
         return ReplayExecutionEvidence(
             profile.identity_digest, tuple(self._transfers.values()),
-            tuple(self._runtime_variants), incomplete)
+            tuple(self._runtime_variants), incomplete, provenance or {})
 
 
 class ReplayDriver(Protocol):
@@ -531,6 +650,89 @@ class VerificationResult:
         return self.comparison.equivalent
 
 
+@dataclass(frozen=True)
+class CheckpointVerificationResult:
+    """Single-pass semantic-point verification with localized failure data.
+
+    ``checkpoint_span`` controls rolling-digest comparison and refinement
+    batches, not observation coverage. Every semantic point contributes its complete
+    canonical-state fingerprint to an order-sensitive rolling digest.  In
+    observable mode, backend adapters additionally digest effects that escape
+    between those points.
+    """
+
+    result: VerificationResult
+    checkpoint_span: int
+    points_observed: int
+    checkpoints_compared: int
+    observable_effects: bool
+    failed_interval: tuple[ReplayPoint, ReplayPoint] | None = None
+    observable_event_count: int = 0
+
+    @property
+    def equivalent(self) -> bool:
+        return self.result.equivalent
+
+    @property
+    def comparison(self) -> StateComparison:
+        return self.result.comparison
+
+
+@dataclass(frozen=True)
+class ReplayValidation:
+    """One persisted oracle/candidate interval comparison."""
+
+    oracle_profile_identity_digest: str
+    candidate_profile_identity_digest: str
+    start: ReplayPoint
+    end: ReplayPoint
+    equivalent: bool
+    oracle_digest: str
+    candidate_digest: str
+    version: int = 1
+
+    def __post_init__(self) -> None:
+        if self.version != 1:
+            raise ValueError("unsupported replay-validation version")
+        if (
+            not self.oracle_profile_identity_digest
+            or not self.candidate_profile_identity_digest
+            or not self.oracle_digest
+            or not self.candidate_digest
+        ):
+            raise ValueError("replay validation identities must not be empty")
+        _ordered_interval(self.start, self.end)
+
+    @property
+    def identity_digest(self) -> str:
+        return _sha256(_canonical_json(self.to_json()))
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "oracle_profile_identity_digest": self.oracle_profile_identity_digest,
+            "candidate_profile_identity_digest": self.candidate_profile_identity_digest,
+            "start": self.start.to_json(),
+            "end": self.end.to_json(),
+            "equivalent": bool(self.equivalent),
+            "oracle_digest": self.oracle_digest,
+            "candidate_digest": self.candidate_digest,
+        }
+
+    @classmethod
+    def from_json(cls, raw: Mapping[str, Any]) -> "ReplayValidation":
+        return cls(
+            str(raw["oracle_profile_identity_digest"]),
+            str(raw["candidate_profile_identity_digest"]),
+            ReplayPoint.from_json(raw["start"]),
+            ReplayPoint.from_json(raw["end"]),
+            bool(raw["equivalent"]),
+            str(raw["oracle_digest"]),
+            str(raw["candidate_digest"]),
+            int(raw.get("version", 0)),
+        )
+
+
 class ReplayRecording:
     """In-memory event capture finalized as one immutable ReplayArtifact.
 
@@ -550,6 +752,7 @@ class ReplayRecording:
         self.base_state = base_state.normalized()
         self.metadata = _json_value(metadata or {}, "recording metadata")
         self._events: list[ReplayEvent] = []
+        self._coordinates: dict[int, ReplayPointCoordinate] = {}
         self._sequence = 0
         self._finished = False
 
@@ -571,6 +774,21 @@ class ReplayRecording:
         self._sequence += 1
         return event
 
+    def mark(
+        self, ordinal: int, *, schema_id: str, value: Any,
+    ) -> ReplayPointCoordinate:
+        """Declare the exact cross-backend stop coordinate for one point."""
+        if self._finished:
+            raise RuntimeError("replay recording is already complete")
+        coordinate = ReplayPointCoordinate(
+            ReplayPoint(int(ordinal), self.timeline_id), schema_id, value)
+        existing = self._coordinates.get(coordinate.point.ordinal)
+        if existing is not None and existing != coordinate:
+            raise ValueError(
+                f"timeline point {coordinate.point.ordinal} was marked twice")
+        self._coordinates[coordinate.point.ordinal] = coordinate
+        return coordinate
+
     def finish(
         self, end_ordinal: int, *, end_state: ContinuationState | None = None,
     ) -> "ReplayArtifact":
@@ -583,6 +801,15 @@ class ReplayRecording:
             raise ValueError("recording end precedes an event")
         if end_state is not None and end_state.normalized().event_cursor != len(self._events):
             raise ValueError("recording endpoint cursor does not cover every event")
+        if self._coordinates:
+            expected = set(range(end.ordinal + 1))
+            actual = set(self._coordinates)
+            if actual != expected:
+                missing = sorted(expected - actual)
+                extra = sorted(actual - expected)
+                raise ValueError(
+                    "recording timeline coordinates must cover every ordinal; "
+                    f"missing={missing[:8]} extra={extra[:8]}")
         metadata = dict(self.metadata)
         metadata.update({
             "recording_profile_id": self.profile.profile_id,
@@ -590,7 +817,9 @@ class ReplayRecording:
         })
         artifact = ReplayArtifact.create(
             self.directory, timeline_id=self.timeline_id,
-            events=self._events, metadata=metadata)
+            events=self._events,
+            coordinates=self._coordinates.values(),
+            metadata=metadata)
         base = ReplayPoint(0, self.timeline_id)
         artifact.register_profile(
             self.profile, base_point=base, base_state=self.base_state)
@@ -617,6 +846,7 @@ class ReplayArtifact:
         *,
         timeline_id: str,
         events: Iterable[ReplayEvent],
+        coordinates: Iterable[ReplayPointCoordinate] = (),
         metadata: Mapping[str, Any] | None = None,
         page_size: int = DEFAULT_PAGE_SIZE,
     ) -> "ReplayArtifact":
@@ -635,6 +865,20 @@ class ReplayArtifact:
             if key in seen:
                 raise ValueError(f"duplicate event position/sequence: {key}")
             seen.add(key)
+        ordered_coordinates = sorted(
+            coordinates, key=lambda coordinate: coordinate.point.ordinal)
+        coordinate_ordinals: set[int] = set()
+        coordinate_schemas = {item.schema_id for item in ordered_coordinates}
+        if len(coordinate_schemas) > 1:
+            raise ValueError("one replay timeline cannot mix coordinate schemas")
+        for coordinate in ordered_coordinates:
+            if coordinate.point.timeline_id != timeline_id:
+                raise ValueError("timeline coordinate uses a different timeline")
+            if coordinate.point.ordinal in coordinate_ordinals:
+                raise ValueError(
+                    f"duplicate timeline coordinate: {coordinate.point.ordinal}")
+            coordinate_ordinals.add(coordinate.point.ordinal)
+        encoded_coordinates = [item.to_json() for item in ordered_coordinates]
         manifest = {
             "format_version": FORMAT_VERSION,
             "revision": 0,
@@ -642,10 +886,15 @@ class ReplayArtifact:
             "page_size": int(page_size),
             "events": [event.to_json() for event in ordered],
             "event_stream_sha256": _sha256(_canonical_json([e.to_json() for e in ordered])),
+            "timeline_coordinates": encoded_coordinates,
+            "timeline_coordinates_sha256": _sha256(
+                _canonical_json(encoded_coordinates)),
+            "timeline_coordinate_provenance": None,
             "metadata": _json_value(metadata or {}, "artifact metadata"),
             "profiles": {},
             "function_visits": [],
             "execution_evidence": None,
+            "validations": [],
             "points": {},
         }
         artifact = cls(directory, manifest)
@@ -667,6 +916,15 @@ class ReplayArtifact:
         expected = _sha256(_canonical_json([event.to_json() for event in artifact.events]))
         if expected != manifest.get("event_stream_sha256"):
             raise ReplayError("event stream hash mismatch")
+        encoded_coordinates = [
+            coordinate.to_json()
+            for coordinate in artifact.timeline_coordinates
+        ]
+        coordinate_digest = _sha256(_canonical_json(encoded_coordinates))
+        if coordinate_digest != manifest.get(
+            "timeline_coordinates_sha256", coordinate_digest
+        ):
+            raise ReplayError("timeline coordinate hash mismatch")
         return artifact
 
     @property
@@ -686,13 +944,95 @@ class ReplayArtifact:
         return str(self._manifest["event_stream_sha256"])
 
     @property
+    def timeline_coordinates(self) -> tuple[ReplayPointCoordinate, ...]:
+        return tuple(
+            ReplayPointCoordinate.from_json(raw)
+            for raw in self._manifest.get("timeline_coordinates", ())
+        )
+
+    @property
+    def timeline_coordinates_sha256(self) -> str:
+        encoded = [item.to_json() for item in self.timeline_coordinates]
+        return str(self._manifest.get(
+            "timeline_coordinates_sha256",
+            _sha256(_canonical_json(encoded)),
+        ))
+
+    def timeline_coordinate(self, point: ReplayPoint) -> ReplayPointCoordinate:
+        self._point(point)
+        matches = [
+            coordinate for coordinate in self.timeline_coordinates
+            if coordinate.point == point
+        ]
+        if len(matches) != 1:
+            raise ReplayError(
+                f"timeline point {point.ordinal} has no exact stop coordinate")
+        return matches[0]
+
+    def set_timeline_coordinates(
+        self,
+        coordinates: Iterable[ReplayPointCoordinate],
+        *,
+        provenance: Mapping[str, Any],
+    ) -> bool:
+        """Materialize a previously unindexed timeline exactly once.
+
+        This is intentionally not a compatibility playback path. A project may
+        run an explicit one-shot materializer over a valuable recording, after
+        which normal replay requires and consumes the resulting coordinates.
+        """
+        ordered = tuple(sorted(
+            coordinates, key=lambda coordinate: coordinate.point.ordinal))
+        if not ordered:
+            raise ValueError("timeline coordinate materialization is empty")
+        schemas = {item.schema_id for item in ordered}
+        if len(schemas) != 1:
+            raise ValueError("one replay timeline cannot mix coordinate schemas")
+        ordinals: set[int] = set()
+        for coordinate in ordered:
+            self._point(coordinate.point)
+            if coordinate.point.ordinal in ordinals:
+                raise ValueError(
+                    f"duplicate timeline coordinate: {coordinate.point.ordinal}")
+            ordinals.add(coordinate.point.ordinal)
+        end_raw = self.metadata.get("end_point")
+        if isinstance(end_raw, Mapping):
+            end = ReplayPoint.from_json(end_raw)
+            expected = set(range(end.ordinal + 1))
+            if ordinals != expected:
+                missing = sorted(expected - ordinals)
+                extra = sorted(ordinals - expected)
+                raise ValueError(
+                    "materialized timeline coordinates must cover every ordinal; "
+                    f"missing={missing[:8]} extra={extra[:8]}")
+        encoded = [item.to_json() for item in ordered]
+        digest = _sha256(_canonical_json(encoded))
+        encoded_provenance = _json_value(
+            provenance, "timeline coordinate provenance")
+        with self._locked_mutation():
+            current = self._manifest.get("timeline_coordinates", [])
+            if current:
+                if (
+                    current == encoded
+                    and self._manifest.get("timeline_coordinate_provenance")
+                    == encoded_provenance
+                ):
+                    return False
+                raise ReplayError("timeline coordinates are immutable once materialized")
+            self._manifest["timeline_coordinates"] = encoded
+            self._manifest["timeline_coordinates_sha256"] = digest
+            self._manifest["timeline_coordinate_provenance"] = encoded_provenance
+            self._write()
+        return True
+
+    @property
     def metadata(self) -> dict[str, Any]:
         """Return a detached copy of artifact-level canonical JSON metadata."""
         return _json_value(self._manifest["metadata"], "artifact metadata")
 
     @property
     def identity_digest(self) -> str:
-        """Stable identity of the immutable timeline and its oracle base."""
+        """Stable identity of the immutable timeline and its capture base."""
         recording_profile_id = str(self._manifest.get("metadata", {}).get(
             "recording_profile_id", ""))
         profile = self._manifest.get("profiles", {}).get(recording_profile_id)
@@ -705,9 +1045,103 @@ class ReplayArtifact:
             "format_version": int(self._manifest["format_version"]),
             "timeline_id": self.timeline_id,
             "event_stream_sha256": self.event_stream_sha256,
+            "timeline_coordinates_sha256": self.timeline_coordinates_sha256,
             "recording_profile_id": recording_profile_id,
             "recording_profile": record,
         }))
+
+    def capture_profile(self) -> ReplayExecutionIdentity:
+        """Return the execution profile that captured the immutable inputs."""
+        profile_id = str(self.metadata.get("recording_profile_id", ""))
+        profiles = {
+            profile.profile_id: profile for profile, _ in self.profiles()
+        }
+        try:
+            return profiles[profile_id]
+        except KeyError as exc:
+            raise ReplayError(
+                f"capture profile is absent from artifact: {profile_id!r}"
+            ) from exc
+
+    def profile_by_digest(
+        self, identity_digest: str,
+    ) -> ReplayExecutionIdentity:
+        matches = [
+            profile for profile, _ in self.profiles()
+            if profile.identity_digest == str(identity_digest)
+        ]
+        if len(matches) != 1:
+            raise ReplayError(
+                "replay profile identity is absent or ambiguous: "
+                f"{identity_digest}"
+            )
+        return matches[0]
+
+    def validations(self) -> tuple[ReplayValidation, ...]:
+        return tuple(
+            ReplayValidation.from_json(raw)
+            for raw in self._manifest.get("validations", ())
+        )
+
+    def record_validation(self, result: VerificationResult) -> bool:
+        """Persist a comparison once; identical reruns are idempotent."""
+        validation = ReplayValidation(
+            result.oracle.profile.identity_digest,
+            result.candidate.profile.identity_digest,
+            result.start,
+            result.end,
+            result.equivalent,
+            result.comparison.oracle_digest,
+            result.comparison.candidate_digest,
+        )
+        with self._locked_mutation():
+            self.require_profile(result.oracle.profile)
+            self.require_profile(result.candidate.profile)
+            self._point(result.start)
+            self._point(result.end)
+            records = self._manifest.setdefault("validations", [])
+            encoded = validation.to_json()
+            if encoded in records:
+                return False
+            records.append(encoded)
+            records.sort(key=lambda raw: ReplayValidation.from_json(
+                raw).identity_digest)
+            self._write()
+        return True
+
+    @property
+    def trusted(self) -> bool:
+        """Whether this finite captured timeline is oracle-backed evidence.
+
+        This says nothing about unobserved inputs to functions visited by the
+        replay. Function correctness remains a set of scoped verification
+        claims, never a consequence of artifact trust.
+        """
+        capture = self.capture_profile()
+        if capture.role == "oracle":
+            return True
+        end_raw = self.metadata.get("end_point")
+        if not isinstance(end_raw, Mapping):
+            return False
+        end = ReplayPoint.from_json(end_raw)
+        start = ReplayPoint(0, self.timeline_id)
+        for validation in self.validations():
+            if (
+                validation.equivalent
+                and validation.start == start
+                and validation.end == end
+            ):
+                oracle = self.profile_by_digest(
+                    validation.oracle_profile_identity_digest)
+                candidate = self.profile_by_digest(
+                    validation.candidate_profile_identity_digest)
+                # Capture may use a provisional or subsequently corrected
+                # implementation. Trust is an oracle-backed claim about the
+                # finite immutable event timeline, not a certification of the
+                # runtime that happened to collect those inputs.
+                if oracle.role == "oracle" and candidate.role == "candidate":
+                    return True
+        return False
 
     def register_profile(
         self, profile: ReplayExecutionIdentity, *, base_point: ReplayPoint,
@@ -795,7 +1229,24 @@ class ReplayArtifact:
             raise StaleReplayError("cached boundary belongs to another base snapshot")
         if ReplayPoint.from_json(manifest["point"]) != point:
             raise ReplayError("cached boundary point mismatch")
-        regions = {name: bytearray(data) for name, data in base.regions.items()}
+        layout = manifest.get("regions")
+        if layout is None:
+            # Boundaries written before variable-region support always had the
+            # exact base layout.
+            regions = {
+                name: bytearray(data) for name, data in base.regions.items()
+            }
+        else:
+            regions = {}
+            for item in layout:
+                name, size = str(item["name"]), int(item["size"])
+                if not name or name in regions or size < 0:
+                    raise ReplayError("invalid cached boundary region layout")
+                original = base.regions.get(name, b"")
+                data = bytearray(original[:size])
+                if len(data) < size:
+                    data.extend(b"\x00" * (size - len(data)))
+                regions[name] = data
         for page in manifest["changed_pages"]:
             name, index = str(page["region"]), int(page["index"])
             if name not in regions or index < 0:
@@ -834,11 +1285,6 @@ class ReplayArtifact:
             base = self._read_full_state(record["base"], base_point, profile)
             if base.digest != record.get("base_state_sha256"):
                 raise StaleReplayError("profile base snapshot identity changed")
-            if set(state.regions) != set(base.regions):
-                raise ValueError("continuation region set differs from profile base")
-            for name in base.regions:
-                if len(state.regions[name]) != len(base.regions[name]):
-                    raise ValueError(f"continuation region size differs from base: {name!r}")
             root = Path("profiles") / profile.storage_key / "boundaries" / point.key
             final = self.directory / root
             final.parent.mkdir(parents=True, exist_ok=True)
@@ -848,10 +1294,15 @@ class ReplayArtifact:
             pages: list[dict[str, Any]] = []
             try:
                 for region_no, name in enumerate(sorted(state.regions)):
-                    current, original = state.regions[name], base.regions[name]
+                    current = state.regions[name]
+                    original = base.regions.get(name, b"")
                     for index, start in enumerate(range(0, len(current), self.page_size)):
                         payload = current[start:start + self.page_size]
-                        if payload == original[start:start + self.page_size]:
+                        original_page = original[start:start + len(payload)]
+                        if (
+                            len(original_page) == len(payload)
+                            and payload == original_page
+                        ):
                             continue
                         rel = Path("pages") / f"{region_no:04d}" / f"{index:08x}.zlib"
                         path = temp / rel
@@ -868,6 +1319,10 @@ class ReplayArtifact:
                     "schema_id": state.schema_id, "metadata": state.metadata,
                     "event_cursor": state.event_cursor, "state_sha256": state.digest,
                     "boundary_metadata": _json_value(metadata or {}, "boundary metadata"),
+                    "regions": [
+                        {"name": name, "size": len(state.regions[name])}
+                        for name in sorted(state.regions)
+                    ],
                     "changed_pages": pages,
                 })
                 self._publication_stage("prepared")
@@ -926,26 +1381,38 @@ class ReplayArtifact:
                 })
         return tuple(result)
 
-    def set_function_visits(self, index: FunctionVisitIndex) -> None:
+    def set_function_visits(self, index: FunctionVisitIndex) -> bool:
         with self._locked_mutation():
             for visit in index.records():
                 if visit.first_entry is not None:
                     self._point(visit.first_entry)
                 if visit.last_exit is not None:
                     self._point(visit.last_exit)
-            self._manifest["function_visits"] = index.to_json()
+            encoded = index.to_json()
+            if self._manifest["function_visits"] == encoded:
+                return False
+            self._manifest["function_visits"] = encoded
             self._write()
+        return True
 
     def set_execution_evidence(
-        self, profile: ReplayExecutionIdentity, evidence: ReplayExecutionEvidence,
-    ) -> None:
-        """Persist authoritative observations from this artifact's oracle run."""
+        self,
+        profile: ReplayExecutionIdentity,
+        evidence: ReplayExecutionEvidence,
+        *,
+        visits: FunctionVisitIndex | None = None,
+    ) -> bool:
+        """Persist post-hoc oracle observations with idempotence guarantees.
+
+        The oracle that enriches a replay need not be the profile that captured
+        its input stream. A candidate-captured artifact becomes Atlas-eligible
+        only after full validation, while its function/edge evidence remains
+        owned by this explicitly identified oracle observation run.
+        """
         with self._locked_mutation():
             record = self.require_profile(profile)
             if profile.role != "oracle":
                 raise ValueError("execution evidence must be recorded by an oracle profile")
-            if self.metadata.get("recording_profile_id") != profile.profile_id:
-                raise ValueError("execution evidence profile is not the recording oracle")
             if evidence.profile_identity_digest != profile.identity_digest:
                 raise StaleReplayError("execution evidence profile identity changed")
             for transfer in evidence.transfers:
@@ -953,8 +1420,41 @@ class ReplayArtifact:
                 self._point(transfer.last_observed)
             if record.get("identity_digest") != evidence.profile_identity_digest:
                 raise StaleReplayError("registered oracle identity changed")
-            self._manifest["execution_evidence"] = evidence.to_json()
+            encoded_evidence = evidence.to_json()
+            encoded_visits = (
+                self._manifest["function_visits"]
+                if visits is None else visits.to_json()
+            )
+            for visit in encoded_visits:
+                first, last = visit.get("first_entry"), visit.get("last_exit")
+                if first is not None:
+                    self._point(ReplayPoint.from_json(first))
+                if last is not None:
+                    self._point(ReplayPoint.from_json(last))
+            existing_raw = self._manifest.get("execution_evidence")
+            if existing_raw is not None:
+                existing = ReplayExecutionEvidence.from_json(existing_raw)
+                if (
+                    existing.evidence_identity_digest
+                    == evidence.evidence_identity_digest
+                    and (
+                        existing_raw != encoded_evidence
+                        or self._manifest["function_visits"] != encoded_visits
+                    )
+                ):
+                    raise ReplayError(
+                        "the same execution plan and evidence provenance "
+                        "produced different observations"
+                    )
+            if (
+                existing_raw == encoded_evidence
+                and self._manifest["function_visits"] == encoded_visits
+            ):
+                return False
+            self._manifest["function_visits"] = encoded_visits
+            self._manifest["execution_evidence"] = encoded_evidence
             self._write()
+        return True
 
     def execution_evidence(self) -> ReplayExecutionEvidence | None:
         raw = self._manifest.get("execution_evidence")
@@ -1223,6 +1723,7 @@ def verify_interval(
         candidate.profile, candidate_restored, start, end, _project(candidate))
     comparison = oracle_run.projection.compare(candidate_run.projection)
     result = VerificationResult(start, end, oracle_run, candidate_run, comparison)
+    artifact.record_validation(result)
     if comparison.equivalent:
         artifact.annotate(end, kind="verified-endpoint", metadata={
             "oracle_profile": oracle.profile.profile_id,
@@ -1245,6 +1746,326 @@ def verify_interval(
             "differences": list(comparison.differences[:16]),
         })
     return result
+
+
+@dataclass(frozen=True)
+class _ObservedSegment:
+    start: ReplayPoint
+    end: ReplayPoint
+    oracle_projection: CanonicalState | None
+    candidate_projection: CanonicalState | None
+    comparison: StateComparison
+    boundary_equivalent: bool
+    effects_equivalent: bool
+    oracle_boundary_digest: ObservableIntervalDigest
+    candidate_boundary_digest: ObservableIntervalDigest
+    oracle_effect_digest: ObservableIntervalDigest | None
+    candidate_effect_digest: ObservableIntervalDigest | None
+
+    @property
+    def equivalent(self) -> bool:
+        return (
+            self.comparison.equivalent
+            and self.boundary_equivalent
+            and self.effects_equivalent
+        )
+
+
+def verify_checkpointed(
+    artifact: ReplayArtifact,
+    oracle: ReplayDriver,
+    candidate: ReplayDriver,
+    start: ReplayPoint,
+    end: ReplayPoint,
+    *,
+    checkpoint_span: int = 64,
+    observable_effects: bool = True,
+    cache_verified_end: bool = True,
+) -> CheckpointVerificationResult:
+    """Verify every semantic point in one pass, comparing rolling checkpoints.
+
+    The verifier hashes each complete canonical point state, so a divergence at
+    a point cannot disappear merely because both sides reconverge before the
+    next coarse checkpoint.  With ``observable_effects=True`` each driver must
+    also implement ``begin_observable_interval`` and
+    ``end_observable_interval``; this catches ordered I/O/device/interrupt/input
+    effects that can occur and disappear between semantic points.
+
+    Rich projections are materialized at the requested endpoint or after a
+    digest mismatch, not at every green checkpoint. On a failed coarse interval
+    only that interval is restored and replayed one point at a time. The returned
+    ``failed_interval`` is therefore the first divergent semantic transition,
+    ready for a backend-specific detailed trace.
+    This is not instruction-trace equivalence: internal instruction order and
+    guest coordinates remain irrelevant unless an adapter emits a timing/yield
+    effect at the semantic boundary.
+    """
+    if checkpoint_span <= 0:
+        raise ValueError("checkpoint_span must be positive")
+    if oracle.profile.role != "oracle" or candidate.profile.role != "candidate":
+        raise ValueError("verify_checkpointed requires oracle and candidate profiles")
+    if oracle.profile.projection_schema != candidate.profile.projection_schema:
+        raise ValueError("oracle and candidate must declare the same projection schema")
+    _ordered_interval(start, end)
+    if observable_effects:
+        _require_observable_driver(oracle)
+        _require_observable_driver(candidate)
+
+    oracle_restored, oracle_start = _position_and_project(artifact, oracle, start)
+    candidate_restored, candidate_start = _position_and_project(
+        artifact, candidate, start)
+    start_comparison = oracle_start.compare(candidate_start)
+    if not start_comparison.equivalent:
+        raise ReplayError(
+            "verification interval starts from non-equivalent oracle/candidate state: "
+            + "; ".join(start_comparison.differences[:3]))
+    if not artifact.has_cached(oracle.profile, start):
+        artifact.cache(
+            oracle.profile, start, oracle.capture(),
+            metadata={"kind": "verified-start"})
+    if not artifact.has_cached(candidate.profile, start):
+        artifact.cache(
+            candidate.profile, start, candidate.capture(),
+            metadata={"kind": "verified-start"})
+
+    cursor = start
+    points_observed = 0
+    checkpoints = 0
+    observable_event_count = 0
+    final_segment: _ObservedSegment | None = None
+    failed_interval: tuple[ReplayPoint, ReplayPoint] | None = None
+    while cursor.ordinal < end.ordinal:
+        checkpoint = ReplayPoint(
+            min(end.ordinal, cursor.ordinal + checkpoint_span),
+            artifact.timeline_id,
+        )
+        segment = _observe_segment(
+            artifact, oracle, candidate, cursor, checkpoint,
+            observable_effects=observable_effects,
+        )
+        points_observed += checkpoint.ordinal - cursor.ordinal
+        checkpoints += 1
+        final_segment = segment
+        if segment.oracle_effect_digest is not None:
+            observable_event_count += segment.oracle_effect_digest.event_count
+        if not segment.equivalent:
+            failed_interval, segment, refined_points = _refine_failed_segment(
+                artifact, oracle, candidate, cursor, checkpoint,
+                observable_effects=observable_effects,
+            )
+            points_observed += refined_points
+            final_segment = segment
+            break
+        cursor = checkpoint
+
+    if final_segment is None:
+        # Empty interval: the already-compared start is also the endpoint.
+        digest = _empty_interval_digest("dos-re:semantic-point-states:v1")
+        final_segment = _ObservedSegment(
+            start, end, oracle_start, candidate_start, start_comparison,
+            True, True, digest, digest, None, None)
+
+    if failed_interval is None:
+        # The rolling point digest already compared the complete canonical
+        # endpoint at every coarse checkpoint. Materialize rich projections
+        # only once at the requested final endpoint for retained diagnostics.
+        oracle_projection = _project(oracle)
+        candidate_projection = _project(candidate)
+        comparison = oracle_projection.compare(candidate_projection)
+    else:
+        oracle_projection = final_segment.oracle_projection
+        candidate_projection = final_segment.candidate_projection
+        assert oracle_projection is not None
+        assert candidate_projection is not None
+        differences = list(final_segment.comparison.differences)
+        if not final_segment.boundary_equivalent:
+            differences.insert(0, "semantic-point state digest differs")
+        if not final_segment.effects_equivalent:
+            differences.insert(0, "observable interval effect digest differs")
+        comparison = StateComparison(
+            False,
+            tuple(differences or ("observed interval differs",)),
+            oracle_projection.digest,
+            candidate_projection.digest,
+        )
+
+    oracle_run = IntervalRun(
+        oracle.profile, oracle_restored, start, end, oracle_projection)
+    candidate_run = IntervalRun(
+        candidate.profile, candidate_restored, start, end,
+        candidate_projection)
+    result = VerificationResult(
+        start, end, oracle_run, candidate_run, comparison)
+    artifact.record_validation(result)
+    if result.equivalent:
+        artifact.annotate(end, kind="verified-semantic-interval", metadata={
+            "oracle_profile": oracle.profile.profile_id,
+            "candidate_profile": candidate.profile.profile_id,
+            "checkpoint_span": checkpoint_span,
+            "points_observed": points_observed,
+            "observable_effects": observable_effects,
+            "observable_event_count": observable_event_count,
+            "digest": comparison.oracle_digest,
+        })
+        if cache_verified_end:
+            if not artifact.has_cached(oracle.profile, end):
+                artifact.cache(
+                    oracle.profile, end, oracle.capture(),
+                    metadata={"kind": "verified-end"})
+            if not artifact.has_cached(candidate.profile, end):
+                artifact.cache(
+                    candidate.profile, end, candidate.capture(),
+                    metadata={"kind": "verified-end"})
+    else:
+        assert failed_interval is not None
+        before, after = failed_interval
+        artifact.annotate(before, kind="latest-valid-before-divergence", metadata={
+            "oracle_profile": oracle.profile.profile_id,
+            "candidate_profile": candidate.profile.profile_id,
+            "first_observed_mismatch_at": after.to_json(),
+            "verification_mode": (
+                "semantic+observable" if observable_effects else "semantic"),
+            "differences": list(comparison.differences[:16]),
+        })
+    return CheckpointVerificationResult(
+        result, checkpoint_span, points_observed, checkpoints,
+        observable_effects, failed_interval, observable_event_count)
+
+
+def _observe_segment(
+    artifact: ReplayArtifact,
+    oracle: ReplayDriver,
+    candidate: ReplayDriver,
+    start: ReplayPoint,
+    end: ReplayPoint,
+    *,
+    observable_effects: bool,
+) -> _ObservedSegment:
+    _driver_at(oracle, start, "observed segment start")
+    _driver_at(candidate, start, "observed segment start")
+    (
+        oracle_endpoint_digest,
+        oracle_boundary_digest,
+        oracle_effect_digest,
+    ) = _observe_driver_segment(
+        artifact, oracle, start, end,
+        observable_effects=observable_effects)
+    (
+        candidate_endpoint_digest,
+        candidate_boundary_digest,
+        candidate_effect_digest,
+    ) = _observe_driver_segment(
+        artifact, candidate, start, end,
+        observable_effects=observable_effects)
+    boundary_equivalent = oracle_boundary_digest == candidate_boundary_digest
+    effects_equivalent = (
+        not observable_effects
+        or oracle_effect_digest == candidate_effect_digest
+    )
+    oracle_projection = candidate_projection = None
+    if not boundary_equivalent or not effects_equivalent:
+        oracle_projection = _project(oracle)
+        candidate_projection = _project(candidate)
+        comparison = oracle_projection.compare(candidate_projection)
+    else:
+        comparison = StateComparison(
+            True, (), oracle_endpoint_digest, candidate_endpoint_digest)
+    return _ObservedSegment(
+        start, end, oracle_projection, candidate_projection, comparison,
+        boundary_equivalent, effects_equivalent,
+        oracle_boundary_digest, candidate_boundary_digest,
+        oracle_effect_digest, candidate_effect_digest,
+    )
+
+
+def _observe_driver_segment(
+    artifact: ReplayArtifact,
+    driver: ReplayDriver,
+    start: ReplayPoint,
+    end: ReplayPoint,
+    *,
+    observable_effects: bool,
+) -> tuple[
+    str,
+    ObservableIntervalDigest,
+    ObservableIntervalDigest | None,
+]:
+    """Run one side contiguously so tracing does not defeat backend/JIT locality."""
+    effects = _begin_observable(driver) if observable_effects else None
+    boundaries = RollingEffectDigest("dos-re:semantic-point-states:v1")
+    endpoint_digest = _point_digest(driver)
+    try:
+        for ordinal in range(start.ordinal + 1, end.ordinal + 1):
+            point = ReplayPoint(ordinal, artifact.timeline_id)
+            driver.replay_to(artifact, point)
+            _driver_at(driver, point, "semantic observation")
+            digest = _point_digest(driver)
+            endpoint_digest = digest
+            boundaries.record_bytes(
+                SEMANTIC_BOUNDARY, bytes.fromhex(digest), identity=ordinal)
+    finally:
+        effect_digest = (
+            _end_observable(driver, effects)
+            if observable_effects else None)
+    return (
+        endpoint_digest,
+        boundaries.finish("dos-re:semantic-point-states:v1"),
+        effect_digest,
+    )
+
+
+def _refine_failed_segment(
+    artifact: ReplayArtifact,
+    oracle: ReplayDriver,
+    candidate: ReplayDriver,
+    start: ReplayPoint,
+    end: ReplayPoint,
+    *,
+    observable_effects: bool,
+) -> tuple[tuple[ReplayPoint, ReplayPoint], _ObservedSegment, int]:
+    _position_and_project(artifact, oracle, start)
+    _position_and_project(artifact, candidate, start)
+    previous = start
+    observed = 0
+    for ordinal in range(start.ordinal + 1, end.ordinal + 1):
+        point = ReplayPoint(ordinal, artifact.timeline_id)
+        segment = _observe_segment(
+            artifact, oracle, candidate, previous, point,
+            observable_effects=observable_effects,
+        )
+        observed += 1
+        if not segment.equivalent:
+            return (previous, point), segment, observed
+        previous = point
+    raise ReplayError(
+        "coarse interval digest differed but point refinement was equivalent; "
+        "an observable-effect adapter is non-deterministic")
+
+
+def _require_observable_driver(driver: ReplayDriver) -> None:
+    if not callable(getattr(driver, "begin_observable_interval", None)) or not callable(
+        getattr(driver, "end_observable_interval", None)
+    ):
+        raise ValueError(
+            f"replay driver {driver.profile.profile_id!r} does not provide "
+            "observable interval effects")
+
+
+def _begin_observable(driver: ReplayDriver):
+    return driver.begin_observable_interval()  # type: ignore[attr-defined]
+
+
+def _end_observable(
+    driver: ReplayDriver, token,
+) -> ObservableIntervalDigest:
+    digest = driver.end_observable_interval(token)  # type: ignore[attr-defined]
+    if not isinstance(digest, ObservableIntervalDigest):
+        raise ReplayError("observable replay driver returned an invalid digest")
+    return digest
+
+
+def _empty_interval_digest(schema_id: str) -> ObservableIntervalDigest:
+    return RollingEffectDigest(schema_id).finish(schema_id)
 
 
 def bisect_divergence(
@@ -1321,6 +2142,16 @@ def _project(driver: ReplayDriver) -> CanonicalState:
     return projection
 
 
+def _point_digest(driver: ReplayDriver) -> str:
+    fast = getattr(driver, "point_digest", None)
+    if callable(fast):
+        digest = str(fast())
+        if len(digest) != 64:
+            raise ReplayError("replay driver returned an invalid point digest")
+        return digest
+    return _project(driver).digest
+
+
 def _diff_json(a: Any, b: Any, path: str) -> list[str]:
     if type(a) is not type(b):
         return [f"{path}: oracle type {type(a).__name__} != candidate {type(b).__name__}"]
@@ -1347,7 +2178,9 @@ def _diff_json(a: Any, b: Any, path: str) -> list[str]:
     return [] if a == b else [f"{path}: oracle {a!r} != candidate {b!r}"]
 
 
-def _hash_regions(h, regions: Mapping[str, bytes]) -> None:
+def _hash_regions(
+    h, regions: Mapping[str, bytes | bytearray | memoryview],
+) -> None:
     for name in sorted(regions):
         encoded, payload = name.encode("utf-8"), regions[name]
         h.update(len(encoded).to_bytes(4, "little")); h.update(encoded)

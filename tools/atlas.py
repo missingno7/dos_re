@@ -63,6 +63,7 @@ def main(argv=None) -> int:
     ingest = commands.add_parser("ingest-replay", help="import oracle replay evidence")
     ingest.add_argument("atlas")
     ingest.add_argument("replay")
+    ingest.add_argument("--json", action="store_true")
 
     facts = commands.add_parser(
         "ingest-facts", help="import explicit identity-based node/edge evidence")
@@ -111,7 +112,22 @@ def main(argv=None) -> int:
         print(atlas.identity_digest)
         return 0
     if args.command == "ingest-replay":
-        print(_atlas(args.atlas).ingest_replay(args.replay))
+        report = _atlas(args.atlas).ingest_replay_with_report(args.replay)
+        if args.json:
+            _emit(report.to_json(), True)
+        else:
+            value = report.to_json()
+            print(
+                f"{report.replay_id}: "
+                f"{value['visited_function_count']} visited functions, "
+                f"{report.invocation_count} invocations, "
+                f"{value['observed_edge_count']} observed edges / "
+                f"{report.observation_count} transfers; "
+                f"corpus delta +{len(report.new_node_ids)} nodes, "
+                f"+{len(report.new_edges)} edges, "
+                f"-{len(report.removed_node_ids)} nodes, "
+                f"-{len(report.removed_edges)} edges"
+            )
         return 0
     if args.command == "ingest-facts":
         document = json.loads(Path(args.facts).read_text(encoding="utf-8"))

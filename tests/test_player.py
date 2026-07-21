@@ -27,6 +27,12 @@ from dos_re.execution import (
     profile_configuration,
 )
 from dos_re.player import GameFrontend, build_arg_parser
+from dos_re.replay import (
+    GUEST_INSTRUCTION_COORDINATE,
+    ReplayError,
+    ReplayPoint,
+    ReplayPointCoordinate,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -80,8 +86,38 @@ def test_standard_cli_defaults():
     assert args.present_hz == GameFrontend.default_present_hz
     assert args.snapshot is None and args.save_snapshot is None
     assert args.dos_args == ""
+    assert args.verify_mode == "checkpointed"
+    assert args.verify_checkpoint_span == 64
+    assert args.verify_observables is False
 
 
+def test_replay_frame_stops_on_guest_coordinate_not_dispatch_count():
+    frontend = GameFrontend(ROOT)
+    args = SimpleNamespace(timer_irqs_per_frame=0)
+
+    class CPU:
+        instruction_count = 10
+
+        def step(self):
+            self.instruction_count += 3
+
+    runtime = SimpleNamespace(cpu=CPU())
+    point = ReplayPoint(1, "test-timeline")
+    coordinate = ReplayPointCoordinate(
+        point, GUEST_INSTRUCTION_COORDINATE, 16)
+
+    frontend.advance_replay_frame(runtime, args, 0, coordinate)
+    assert runtime.cpu.instruction_count == 16
+
+    runtime.cpu.instruction_count = 10
+    with pytest.raises(ReplayError, match="crossed replay point"):
+        frontend.advance_replay_frame(
+            runtime,
+            args,
+            0,
+            ReplayPointCoordinate(
+                point, GUEST_INSTRUCTION_COORDINATE, 15),
+        )
 def test_frontend_defaults_flow_into_parser():
     class Fe(GameFrontend):
         name = "tinygame"

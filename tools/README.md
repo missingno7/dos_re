@@ -31,7 +31,7 @@ Examples:
 
 ```bash
 python tools/atlas.py create artifacts/atlas --program my-game:1
-python tools/atlas.py ingest-replay artifacts/atlas artifacts/replays/gameplay
+python tools/atlas.py ingest-replay artifacts/atlas artifacts/replays/gameplay --json
 python tools/atlas.py ingest-facts artifacts/atlas atlas_facts.json
 python tools/atlas.py ingest-ir artifacts/atlas --ir recovery_ir.json \
   --program my-game:1 --image-label GAME.EXE --image-sha256 SHA256 \

@@ -563,11 +563,6 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                                   artifacts / "replays" / f"replay_{int(now * 1000)}")
                         if replay_profile is None:
                             raise ValueError("PM recording requires an execution profile")
-                        if replay_profile.role != "oracle":
-                            raise RuntimeError(
-                                "ReplayArtifact recording requires the untouched "
-                                "oracle plan"
-                            )
                         recording = ReplayRecording(
                             bundle,
                             timeline_id=f"protected-mode-frame-boundaries:{frame_tick_addr:#x}:v1",

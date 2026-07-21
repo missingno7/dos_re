@@ -27,8 +27,10 @@ def call_installed_hook_like_near_call(
     name = cpu.hook_names.get(key, getattr(handler, "__name__", "replacement"))
     call_site = (cpu.s.cs & 0xFFFF, cpu.s.ip & 0xFFFF)
     previous_call_site = getattr(cpu, "hook_call_site", None)
+    previous_call_depth = cpu.call_depth
     cpu.hook_call_site = (call_site[0], call_site[1], key[0] & 0xFFFF, key[1] & 0xFFFF, return_ip & 0xFFFF)
     cpu.push(return_ip & 0xFFFF)
+    cpu.call_depth += 1
     cpu.s.cs = key[0] & 0xFFFF
     cpu.s.ip = key[1] & 0xFFFF
     verifier = getattr(cpu, "hook_verifier", None)
@@ -42,6 +44,7 @@ def call_installed_hook_like_near_call(
         else:
             handler(cpu)
     finally:
+        cpu.call_depth = previous_call_depth
         if previous_call_site is None:
             try:
                 delattr(cpu, "hook_call_site")
@@ -71,9 +74,11 @@ def call_installed_hook_like_far_call(
     name = cpu.hook_names.get(key, getattr(handler, "__name__", "replacement"))
     call_site = (cpu.s.cs & 0xFFFF, cpu.s.ip & 0xFFFF)
     previous_call_site = getattr(cpu, "hook_call_site", None)
+    previous_call_depth = cpu.call_depth
     cpu.hook_call_site = (call_site[0], call_site[1], key[0] & 0xFFFF, key[1] & 0xFFFF, return_ip & 0xFFFF)
     cpu.push(return_cs & 0xFFFF)
     cpu.push(return_ip & 0xFFFF)
+    cpu.call_depth += 1
     cpu.s.cs = key[0] & 0xFFFF
     cpu.s.ip = key[1] & 0xFFFF
     verifier = getattr(cpu, "hook_verifier", None)
@@ -87,6 +92,7 @@ def call_installed_hook_like_far_call(
         else:
             handler(cpu)
     finally:
+        cpu.call_depth = previous_call_depth
         if previous_call_site is None:
             try:
                 delattr(cpu, "hook_call_site")

@@ -50,7 +50,7 @@ from dos_re.identity import (FunctionIdentity, ImageIdentity, ProgramIdentity,
 from dos_re.memory import linear  # noqa: E402
 from dos_re.player import GameFrontend  # noqa: E402
 from dos_re.runtime import Runtime, create_runtime  # noqa: E402
-from dos_re.replay import (FunctionVisitIndex, ReplayArtifact,
+from dos_re.replay import (ReplayArtifact, ReplayEvidenceRecorder,
                            ReplayExecutionIdentity, ReplayPoint,
                            ReplayRecording)  # noqa: E402
 from dos_re.snapshot import (apply_runtime_continuation, capture_runtime_continuation,
@@ -146,11 +146,24 @@ def demonstrate_replay_artifact(
     artifact = recorder.finish(
         10, end_state=capture_runtime_continuation(
             rt, event_cursor=recorder.event_count))
-    visits = FunctionVisitIndex()
+    evidence = ReplayEvidenceRecorder()
     for frame in range(10):
-        visits.enter(function_id, ReplayPoint(frame, artifact.timeline_id))
-        visits.exit(function_id, ReplayPoint(frame + 1, artifact.timeline_id))
-    artifact.set_function_visits(visits)
+        evidence.enter(function_id, ReplayPoint(frame, artifact.timeline_id))
+        evidence.exit(function_id, ReplayPoint(frame + 1, artifact.timeline_id))
+    artifact.set_execution_evidence(
+        profile,
+        evidence.evidence(
+            profile,
+            provenance={
+                "kind": "posthoc-oracle-observation",
+                "observer_digest": "tiny-frame-game-v1",
+                "event_stream_sha256": artifact.event_stream_sha256,
+                "start_ordinal": 0,
+                "end_ordinal": 10,
+            },
+        ),
+        visits=evidence.visits,
+    )
 
     # Replay: boot a FRESH runtime and feed only the recorded events.
     rt2 = boot(exe)

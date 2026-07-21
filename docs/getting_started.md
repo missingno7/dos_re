@@ -57,6 +57,11 @@ python scripts/play.py --play-replay artifacts/replays/gameplay --replay-continu
 A replay owns immutable normalized events, stable points, complete continuation
 bases, function visits, observed transfers, annotations, and base-relative
 cached boundaries. It is the only persistent deterministic replay format.
+Recording may use a responsive generated or verified-override composition.
+The artifact retains that capture-plan identity; it becomes trusted evidence
+only after a complete oracle/candidate validation of the same capture
+execution. Function visits and transfers may be attached later by replaying
+the immutable inputs on the oracle with explicit observer provenance.
 
 ### Create or enrich an Atlas
 
@@ -64,7 +69,7 @@ An Atlas can begin empty and accept whichever evidence exists:
 
 ```bash
 python tools/atlas.py create artifacts/atlas --program my-game:1
-python tools/atlas.py ingest-replay artifacts/atlas artifacts/replays/gameplay
+python tools/atlas.py ingest-replay artifacts/atlas artifacts/replays/gameplay --json
 python tools/atlas.py ingest-facts artifacts/atlas atlas_facts.json
 ```
 

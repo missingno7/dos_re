@@ -210,10 +210,11 @@ cached snapshots, canonical-state bridges, instrumentation, and several
 implementation candidates. Their descriptors make those dependencies visible.
 
 A release plan forbids those capabilities. Faithful implementations can still
-be verified against the oracle before export; the resulting evidence digest is
-an input to selection, not a production import or callback. Enhancements and
-behavioral modifications retain their existing category-specific verification
-contracts.
+accumulate scoped oracle comparisons before export; the selected release policy
+names the finite evidence suite that must pass. Evidence digests are inputs to
+selection, not production imports or callbacks, and no replay count is treated
+as proof over every possible input. Enhancements and behavioral modifications
+retain their existing category-specific verification contracts.
 
 ## Closed-world export and proof
 

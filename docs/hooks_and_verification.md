@@ -95,6 +95,38 @@ is detached or memoryless. A reproduction is always a boundary reference
 inside the original replay artifact; verification creates no secondary replay
 artifact.
 
+## Verification is a scoped claim
+
+A passing comparison proves one finite statement:
+
+> this implementation digest, under this execution-plan identity, matched this
+> oracle identity over this replay and exact interval using this projection
+> schema.
+
+It does not prove the function correct for all possible inputs. Reports and
+implementation descriptors should cite those claim identities and summarize
+their observed replays, intervals, invocations, paths or blocks. A bare
+`verified=True` is not an architectural authority.
+
+dos_re defines no global minimum replay count, invocation count, or
+block-coverage percentage before development may select a faithful
+implementation. The practical default is to proceed after one relevant
+passing oracle interval and focused contract tests, then accumulate more
+evidence whenever new replays visit the implementation. Projects may demand
+more for unusually risky subsystems, but evidence counts are prioritization
+signals rather than universal promotion gates.
+
+A newly discovered divergence is a new counterexample, not evidence that the
+earlier passing claims were fictitious: those claims remain true for their
+recorded scope. Persist the failing boundary, fix the implementation under a
+new digest, replay that smallest counterexample first, and then rerun every
+previously passing claim affected by the old digest.
+
+Release closure and behavioral confidence are separate. Release must have a
+closed implementation/dependency graph and pass the finite verification suite
+declared by its policy. Closed-world packaging does not pretend that the suite
+enumerates every possible program input.
+
 ## Framework interceptors
 
 Replay clocks, wait parking, profilers, diagnostic probes, device entrypoints,

@@ -40,12 +40,38 @@ policy profiles in `dos_re.execution`. A policy profile constrains allowed
 capabilities; a `ReplayExecutionIdentity` keys the exact continuation semantics
 of one selected mixed plan.
 
+The capture profile is provenance, not an assertion of correctness. Interactive
+capture may select previously replay-backed performance overrides or a provisional
+candidate plan. An oracle capture is trusted immediately. A candidate capture
+becomes trusted only after an equivalent `0 -> end_point` validation whose
+registered oracle and current candidate reproduce the complete finite timeline.
+The candidate may be a corrected successor to the provisional capture runtime;
+the validation certifies the immutable replay, not the code that recorded it.
+Partial green intervals remain useful verification records but do not promote
+the whole replay to evidence.
+Replay trust means only that this finite event stream is oracle-backed. It
+never certifies every function visited by the replay for unobserved inputs.
+
 ## Stable points and events
 
 A replay chooses one canonical monotonic timeline. `ReplayPoint` is
-`(timeline_id, ordinal)`; the pair is its stable identity. Function entry,
-function exit, frame, instruction count, crash, divergence, and manual names
-are annotations on a point, not competing clocks.
+`(timeline_id, ordinal)`; the pair is its stable identity and ordering key.
+Every executable ordinal also has a `ReplayPointCoordinate`: a schema-tagged,
+backend-neutral declaration of where execution must stop. The primary
+coordinate should be an event the recovered program itself exposes: a completed
+simulation tick, main-loop park, page flip/presentation fence, input-consumption
+boundary, or native transaction. Function entry, function exit, crash,
+divergence, and manual names remain annotations, not competing clocks.
+
+Guest instruction count is a diagnostic/fallback coordinate for bootstrap or a
+region that has not exposed a semantic yield yet. It is not the architectural
+clock. A semantic implementation does not imitate instruction counts merely to
+replay. Host dispatch count is never a coordinate: `CPU.run(N)` performs `N`
+calls to `step()`, while one generated-function dispatch may account many guest
+instructions. A low-level fallback must still be reached exactly; overshooting
+fails loudly and identifies a long atomic implementation that needs an explicit
+yield if an interrupt or device effect can occur inside it. The coordinate hash
+is part of the artifact identity.
 
 `ReplayEvent` stores a point, stable sequence number, channel, and canonical
 JSON payload. The event-stream hash is part of the artifact. Drivers apply the
@@ -53,12 +79,18 @@ same events according to their own representation while stopping at exactly
 the requested point.
 
 The interactive players capture through `ReplayRecording`. It buffers
-normalized immutable events, then finalizes exactly one `ReplayArtifact` with
-the complete base continuation and optional cached endpoint. Real-mode
+normalized immutable events and point coordinates, then finalizes exactly one
+`ReplayArtifact` with the complete base continuation and optional cached
+endpoint. Real-mode
 `replay_input.py` and protected-mode `pm_replay_input.py` are adapters only:
 keyboard/mouse normalization and application, plus the PM stable frame seam.
 They define no file names, manifests, versions, snapshots, or compatibility
 branches.
+
+Recording does not require an untouched interpreter plan. Capture composition
+and device identity are retained so the same plan can be validated later.
+Frontend metadata must also retain every deterministic knob needed to recreate
+that topology.
 
 ## Continuation state is not comparison state
 
@@ -78,6 +110,11 @@ native control state, timers, pending interrupts, devices, scheduler state,
 open-resource positions, runtime state, and event cursor. The replay core does
 not guess whether a runtime adapter is complete; the adapter's resume tests
 must prove it.
+
+External host persistence is execution policy, not continuation state. A DOS
+replay retains open-file contents and its in-memory read-your-writes overlay,
+but capture and restore detach the interactive player's save directory. Replay
+must never observe a save file changed after the recording began.
 
 ### CanonicalState
 
@@ -109,6 +146,13 @@ boundary stores:
 Boundaries never form delta chains. Restoration always loads the identity's base
 and applies one boundary's changed pages. The closest cached point at or before
 X is restored, replay advances to X, X is cached lazily, and only X→Y executes.
+
+The boundary also declares its target region layout. Regions created after the
+base—such as a newly opened DOS file—are stored as wholly changed pages;
+removed regions are omitted; grown or shrunk regions reuse their matching base
+prefix and store only changed or added pages. This remains one independent
+base-relative delta and allows ordinary dynamic resources without a checkpoint
+chain or fixed-region assumption.
 
 The on-disk shape is:
 
@@ -148,7 +192,24 @@ recording a new artifact. Changing a replay execution identity creates a new
 cache namespace. Changing its base state invalidates every boundary in
 that namespace. There is no partial cache migration.
 
-## Differential verification
+## Differential verification and guarantees
+
+The verification terms are deliberately separate:
+
+- **semantic-boundary equivalence**: canonical state agrees at each declared
+  program boundary;
+- **observable-interval equivalence**: the ordered canonical stream of input,
+  interrupts, I/O/device output, presentation/audio/filesystem effects, and
+  boundary state fingerprints also agrees between boundaries;
+- **full continuation-state equivalence**: both implementations can continue
+  deterministically from the compared endpoint and project to equal
+  authoritative state;
+- **strict instruction-trace equivalence**: guest instructions and intermediate
+  machine effects agree. This is a low-level diagnostic, not a requirement for
+  a faithful semantic/native implementation.
+
+`verify_interval` is the inexpensive endpoint continuation check. It does not
+claim interval equivalence: a wrong intermediate state can reconverge before Y.
 
 `verify_interval(artifact, oracle, candidate, X, Y)`:
 
@@ -160,9 +221,53 @@ that namespace. There is no partial cache migration.
 6. projects and compares both endpoints in their shared canonical schema;
 7. caches Y for both identities only when the endpoint is equivalent.
 
+`verify_checkpointed` is the long-replay verifier. It advances both sides once,
+adds every complete canonical point-state digest to a compact rolling digest,
+and asks adapters for an ordered `ObservableIntervalDigest`. It compares rolling
+digests at a configurable checkpoint span and materializes rich state only at
+the requested endpoint or after a mismatch. A failed digest causes only the
+most recent interval to be restored and replayed point by point, yielding the
+first divergent semantic transition for detailed tracing.
+
+The rolling accumulator packs primitive integer records into one reusable
+64 KiB buffer; it does not allocate event objects in hot I/O paths. Machine
+adapters emit canonical interrupts and port reads/writes directly. Input and
+presentation adapters emit their own stable identities. Complete canonical
+state at every point covers memory and stateful device changes that survive to
+a semantic boundary. Machine adapters canonicalize externally consumed output
+(for example OPL register writes) instead of hashing every raw setup/polling I/O
+instruction; final video-controller state is covered by the presentation-point
+projection. If intermediate memory or device state is externally observable
+(for example an interrupt or scanline presenter may read it), that
+interrupt/yield/effect must be represented in the stream. Raw write-by-write
+memory or port traces are stricter optional diagnostics because equivalent
+native code may legitimately use a different write order.
+
+The player exposes three modes:
+
+- `checkpointed` (default): rolling complete semantic-point state digests, with
+  detailed comparison every `--verify-checkpoint-span` points;
+- `semantic-points`: the span-1 reference with the same semantic/observable
+  contract;
+- `endpoint`: the former cheapest endpoint-only continuation check.
+
+`--verify-observables` adds the adapter's ordered external-effect stream. It is
+not enabled merely because an adapter exists: a port first measures its real
+replay overhead. Without it, output deliberately claims semantic-boundary plus
+continuation equivalence, not full observable-interval equivalence. The strict
+reference command enables it explicitly; ports whose measured cost is
+negligible may make that choice in their own verification wrapper.
+
 On mismatch, the already-diverged candidate endpoint is not cached as valid.
 The artifact annotates X as the latest valid point before the observed
 divergence.
+
+Each equivalent result is retained as a scoped claim over the exact
+implementation, oracle, replay, interval, and projection identities. No number
+of such claims becomes an exhaustive proof. Projects normally use the first
+relevant passing interval to keep development moving, accumulate further
+claims as the corpus grows, and turn every later divergence into a permanent
+focused regression.
 
 ## Divergence localization
 
@@ -190,6 +295,20 @@ ends marks the visit incomplete and invalidates interval verification, even if
 an earlier invocation completed; no exit is fabricated for the active call.
 These records become the execution atlas's inverse index from function to
 covering replay artifacts.
+
+Visit and transfer collection is independent of input capture. A project may
+observe them inline when measured overhead is negligible, but the authoritative
+path is replaying any existing artifact on the untouched oracle. Post-hoc
+evidence records the exact oracle `ReplayExecutionIdentity`, event-stream hash,
+observer identity/digest, and observed interval. Repeating the same recipe is
+idempotent; different results under the same evidence identity are rejected as
+non-deterministic.
+
+Atlas ingestion accepts only a trusted artifact with oracle-produced execution
+evidence. This preserves useful fast or provisional capture without allowing
+its unverified observations to become program facts. Hooks can hide transfers
+inside replaced bodies, so a post-hoc oracle run remains authoritative even
+when lightweight inline observation is enabled.
 
 ## Runtime adapters
 

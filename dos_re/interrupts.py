@@ -13,6 +13,7 @@ state (e.g. the keyboard scan-code table) -- instead of guessing that state.
 from __future__ import annotations
 
 from .cpu import IF, TF
+from .observable import HARDWARE_INTERRUPT
 from .runtime import BIOS_INT9_ENTRY, Runtime
 
 
@@ -36,12 +37,20 @@ def deliver_interrupt(rt: Runtime, num: int, *, max_steps: int = 200_000) -> boo
     if seg == 0 and off == 0:
         return False
 
+    sink = getattr(rt.dos, "observable_effect_sink", None)
+    if sink is not None:
+        # Delivery is the observable timing seam.  Do not include CS:IP or
+        # guest instruction count: a semantic backend must deliver the same
+        # interrupt at the same declared yield, not mimic assembler progress.
+        sink.record(HARDWARE_INTERRUPT, num & 0xFF)
+
     ret_cs, ret_ip = cpu.s.cs & 0xFFFF, cpu.s.ip & 0xFFFF
     sp0 = cpu.s.sp & 0xFFFF
     # Hardware interrupt entry sequence.
     cpu.push(cpu.s.flags)
     cpu.push(ret_cs)
     cpu.push(ret_ip)
+    cpu.call_depth += 1
     cpu.set_flag(IF, False)
     cpu.set_flag(TF, False)
     cpu.s.cs, cpu.s.ip = seg & 0xFFFF, off & 0xFFFF

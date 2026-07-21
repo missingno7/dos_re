@@ -640,17 +640,20 @@ def _terminator_lines(inst: Inst, cs: int, bb_of: dict[int, int], out: list[str]
         out.append(f"{indent}s.ip = cpu.pop()")
         if inst.imm:
             out.append(f"{indent}s.sp = (s.sp + 0x{inst.imm:X}) & 0xFFFF")
+        out.append(f"{indent}cpu.call_depth = max(0, cpu.call_depth - 1)")
         out.append(f"{indent}return")
     elif kind == RETF:
         out.append(f"{indent}s.ip = cpu.pop()")
         out.append(f"{indent}s.cs = cpu.pop()")
         if inst.imm:
             out.append(f"{indent}s.sp = (s.sp + 0x{inst.imm:X}) & 0xFFFF")
+        out.append(f"{indent}cpu.call_depth = max(0, cpu.call_depth - 1)")
         out.append(f"{indent}return")
     elif kind == IRET:
         out.append(f"{indent}s.ip = cpu.pop()")
         out.append(f"{indent}s.cs = cpu.pop()")
         out.append(f"{indent}s.flags = cpu.pop() | 0x0002")
+        out.append(f"{indent}cpu.call_depth = max(0, cpu.call_depth - 1)")
         out.append(f"{indent}return")
     elif kind == JMP_FAR:
         slot = getattr(inst, "patched_slot", None)

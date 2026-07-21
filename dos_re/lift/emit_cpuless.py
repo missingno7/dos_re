@@ -3444,6 +3444,7 @@ def emit_adapter(scan, abi, key: str, *, signature: bytes,
         A("    s.ip = cpu.pop()")
     if ret_pop:
         A(f"    s.sp = (s.sp + {ret_pop}) & 0xFFFF   # ret {ret_pop}")
+    A("    cpu.call_depth = max(0, cpu.call_depth - 1)")
     if needs_plat:
         # plat effects already moved instruction_count to _entry + <mid cost>;
         # settle it at the absolute total (an increment would double-count).
@@ -3539,6 +3540,7 @@ def emit_override_adapter(key: str, contract: "CalleeContract", *,
     if contract.ret_pop:
         A(f"    s.sp = (s.sp + {contract.ret_pop}) & 0xFFFF"
           f"   # ret {contract.ret_pop}")
+    A("    cpu.call_depth = max(0, cpu.call_depth - 1)")
     if contract.needs_plat:
         A("    cpu.instruction_count = _entry + _compat['cost']")
     else:

@@ -112,8 +112,17 @@ def make_replay(path):
     recorder.observe_runtime_variant("runtime-variant:fixture-dispatch:a")
     recorder.enter(function(0x400), ReplayPoint(5, TIMELINE))
     recorder.exit(function(0x100), ReplayPoint(6, TIMELINE))
-    artifact.set_function_visits(recorder.visits)
-    artifact.set_execution_evidence(ORACLE, recorder.evidence(ORACLE))
+    artifact.set_execution_evidence(
+        ORACLE,
+        recorder.evidence(
+            ORACLE,
+            provenance={
+                "kind": "post-hoc-oracle-replay",
+                "observer_digest": "fixture-observer-v1",
+            },
+        ),
+        visits=recorder.visits,
+    )
     artifact.annotate(
         ReplayPoint(5, TIMELINE),
         kind="divergence-predecessor",
@@ -139,7 +148,18 @@ def test_static_and_replay_sources_build_queries_and_planner_coverage(tmp_path):
     atlas.import_recovery_ir(
         ir, image=IMAGE, roots=["1010:0100"], runtime_code=[slot])
     replay = make_replay(tmp_path / "replay")
-    atlas.ingest_replay(replay.directory)
+    contribution = atlas.ingest_replay_with_report(replay.directory)
+    assert contribution.visited_function_ids == (
+        function(0x100), function(0x200), function(0x400))
+    assert contribution.invocation_count == 3
+    assert len(contribution.observed_edges) == 1
+    assert contribution.observation_count == 1
+    assert function(0x200) not in contribution.new_node_ids
+    assert any("--call/observed-->" in edge for edge in contribution.new_edges)
+    assert atlas.ingest_replay_with_report(
+        replay.directory).new_node_ids == ()
+    assert atlas.ingest_replay_with_report(
+        replay.directory).new_edges == ()
 
     assert atlas.resolve("1010:0100").identity == function(0x100)
     assert {edge.target for edge in atlas.callees(function(0x100))} >= {
@@ -257,6 +277,41 @@ def test_execution_evidence_rejects_candidate_profile(tmp_path):
     with pytest.raises(ValueError, match="oracle"):
         replay.set_execution_evidence(
             candidate, ReplayExecutionEvidence(candidate.identity_digest))
+
+
+def test_atlas_rejects_unvalidated_candidate_capture(tmp_path):
+    candidate = ReplayExecutionIdentity(
+        "capture-candidate", "candidate", "fast-hooks", str(IMAGE),
+        "runtime-v1", "devices-v1", "machine-v1", "canonical-v1")
+    artifact = ReplayArtifact.create(
+        tmp_path / "candidate-replay",
+        timeline_id=TIMELINE,
+        events=(),
+        metadata={
+            "recording_profile_id": candidate.profile_id,
+            "end_point": ReplayPoint(8, TIMELINE).to_json(),
+        },
+    )
+    state = ContinuationState(
+        "machine-v1", {"cpu": {}}, {"ram": bytes(16)}, 0)
+    artifact.register_profile(
+        candidate, base_point=ReplayPoint(0, TIMELINE), base_state=state)
+    artifact.register_profile(
+        ORACLE, base_point=ReplayPoint(0, TIMELINE), base_state=state)
+    recorder = ReplayEvidenceRecorder()
+    recorder.enter(function(0x100), ReplayPoint(0, TIMELINE))
+    artifact.set_execution_evidence(
+        ORACLE,
+        recorder.evidence(
+            ORACLE,
+            provenance={"kind": "post-hoc", "observer_digest": "fixture"},
+        ),
+        visits=recorder.visits,
+    )
+    atlas = ExecutionAtlas.create(tmp_path / "atlas", program=PROGRAM)
+
+    with pytest.raises(AtlasError, match="complete equivalent"):
+        atlas.ingest_replay(artifact.directory)
 
 
 def test_atlas_can_grow_from_manual_facts_without_recovery_ir(tmp_path):

@@ -60,12 +60,16 @@ from dos_re.x86 import HaltExecution, UnsupportedInstruction
 # frontend can therefore construct its selected runtime without importing the
 # interpreter loader. ``write_snapshot`` itself is EXE-free.
 from dos_re.replay import (
+    GUEST_INSTRUCTION_COORDINATE,
     ReplayExecutionIdentity,
     ReplayArtifact,
     ReplayDriver,
+    ReplayError,
     ReplayPoint,
+    ReplayPointCoordinate,
     ReplayRecording,
     bisect_divergence,
+    verify_checkpointed,
     verify_interval,
 )
 from dos_re.snapshot import (
@@ -84,16 +88,16 @@ class _RealReplayRecorder:
     def __init__(self, frontend, args, rt, *, root: Path, name: str, metadata: dict):
         directory = _timestamp_dir(root, f"replay_{_safe_name(name)}")
         profile = frontend.replay_profile(args, rt)
-        if profile.role != "oracle":
-            raise RuntimeError(
-                "ReplayArtifact recording requires the untouched oracle plan"
-            )
         base = frontend.capture_replay_state(rt, event_cursor=0)
         timeline = f"real-mode-frame-boundaries:{frontend.name}:v1"
         self.recording = ReplayRecording(
             directory, timeline_id=timeline, profile=profile,
             base_state=base, metadata=metadata)
+        schema_id, value = frontend.replay_point_coordinate(
+            rt, args, point_ordinal=0)
+        self.recording.mark(0, schema_id=schema_id, value=value)
         self.directory = directory
+        self._args = args
         self._start_boundary = 0
         self._last_mouse = None
 
@@ -127,8 +131,16 @@ class _RealReplayRecorder:
             self._last_mouse = sample
         return sample
 
+    def mark(self, frontend, args, rt, *, boundary: int) -> None:
+        ordinal = self._ordinal(boundary)
+        schema_id, value = frontend.replay_point_coordinate(
+            rt, args, point_ordinal=ordinal)
+        self.recording.mark(
+            ordinal, schema_id=schema_id, value=value)
+
     def stop(self, frontend, rt, *, boundary: int) -> Path:
         end = self._ordinal(boundary)
+        self.mark(frontend, self._args, rt, boundary=boundary)
         state = frontend.capture_replay_state(
             rt, event_cursor=self.recording.event_count)
         self.recording.finish(end, end_state=state)
@@ -169,6 +181,10 @@ class _RealReplayPlayback:
     def apply_to_runtime(self, boundary, rt, *, deliver, single=False):
         return self.adapter.apply_to_runtime(
             boundary, rt, deliver=deliver, single=single)
+
+    def coordinate_after(self, boundary: int) -> ReplayPointCoordinate:
+        return self.artifact.timeline_coordinate(ReplayPoint(
+            int(boundary) + 1, self.artifact.timeline_id))
 
 
 def _safe_name(value: str) -> str:
@@ -462,6 +478,50 @@ class GameFrontend:
             deliver_interrupt(rt, 0x08)
         rt.cpu.run(args.steps_per_frame)
 
+    def replay_point_coordinate(
+        self, rt, args: argparse.Namespace, *, point_ordinal: int | None = None,
+    ) -> tuple[str, object]:
+        """Return the exact coordinate of the current replay boundary.
+
+        The default is the low-level guest-instruction fallback.  Games should
+        override this with a semantic tick/present/input boundary and use the
+        ordinal only as its sequence identity, never as a host dispatch count.
+        """
+        return GUEST_INSTRUCTION_COORDINATE, int(rt.cpu.instruction_count)
+
+    def advance_replay_frame(
+        self,
+        rt,
+        args: argparse.Namespace,
+        frame: int,
+        coordinate: ReplayPointCoordinate,
+    ) -> None:
+        """Advance to a declared point without using backend dispatch counts.
+
+        ``CPU.run(N)`` means N calls to ``step``. A generated function may
+        account thousands of guest instructions in one call, so that host
+        dispatch count is never a valid cross-backend replay coordinate.
+        """
+        if coordinate.schema_id != GUEST_INSTRUCTION_COORDINATE:
+            raise ReplayError(
+                f"unsupported real-mode replay coordinate: {coordinate.schema_id!r}")
+        from dos_re.interrupts import deliver_interrupt
+
+        for _ in range(max(0, args.timer_irqs_per_frame)):
+            deliver_interrupt(rt, 0x08)
+        target = int(coordinate.value)
+        if rt.cpu.instruction_count > target:
+            raise ReplayError(
+                f"replay point {coordinate.point.ordinal} is behind the runtime: "
+                f"{target} < {rt.cpu.instruction_count}")
+        while rt.cpu.instruction_count < target:
+            rt.cpu.step()
+            if rt.cpu.instruction_count > target:
+                raise ReplayError(
+                    f"implementation crossed replay point "
+                    f"{coordinate.point.ordinal}: {rt.cpu.instruction_count} > {target}; "
+                    "the selected implementation needs a resumable boundary")
+
     def decode_frame(self, rt):
         """Return the current screen as an HxWx3 uint8 array."""
         from dos_re.framebuffer import decode_frame_default
@@ -546,18 +606,32 @@ class GameFrontend:
         implementation = hashlib.sha256(
             f"{_implementation_identity(self)}:{composition_digest}".encode("utf-8")
         ).hexdigest()
+        image = _content_identity(args.exe)
+        runtime = _runtime_identity()
+        devices = self.replay_device_identity(args, rt)
+        continuation_schema = "dos-re-real-mode-continuation-v1"
+        projection_schema = "dos-re-complete-machine-v1"
         key = hashlib.sha256(
-            f"{mode}\n{implementation}".encode("utf-8")
+            repr((
+                mode,
+                role,
+                implementation,
+                image,
+                runtime,
+                devices,
+                continuation_schema,
+                projection_schema,
+            )).encode("utf-8")
         ).hexdigest()[:12]
         return ReplayExecutionIdentity(
             profile_id=f"real-mode-{mode}-{key}",
             role=role,
             implementation=implementation,
-            image=_content_identity(args.exe),
-            runtime=_runtime_identity(),
-            devices=self.replay_device_identity(args, rt),
-            continuation_schema="dos-re-real-mode-continuation-v1",
-            projection_schema="dos-re-complete-machine-v1",
+            image=image,
+            runtime=runtime,
+            devices=devices,
+            continuation_schema=continuation_schema,
+            projection_schema=projection_schema,
         )
 
     def capture_replay_state(self, rt, *, event_cursor: int):
@@ -644,6 +718,24 @@ def build_arg_parser(frontend: GameFrontend,
                         help="last stable replay point (verification profile)")
     verify.add_argument("--bisect", action="store_true",
                         help="locate the first divergent transition in the interval")
+    verify.add_argument(
+        "--verify-mode",
+        choices=("checkpointed", "semantic-points", "endpoint"),
+        default="checkpointed",
+        help="checkpointed observes every semantic point and external effect; "
+             "semantic-points is the span-1 reference; endpoint is the cheapest "
+             "but can miss a divergence that reconverges before the end",
+    )
+    verify.add_argument(
+        "--verify-checkpoint-span", type=int, default=64,
+        help="full comparison interval for checkpointed verification",
+    )
+    verify.add_argument(
+        "--verify-observables", action=argparse.BooleanOptionalAction,
+        default=False,
+        help="include adapter-declared I/O/device/interrupt/input effects "
+             "(stronger but backend-dependent overhead; measured before enabling)",
+    )
 
     pace = p.add_argument_group("pacing")
     pace.add_argument("--present-hz", type=int, default=frontend.default_present_hz,
@@ -740,7 +832,10 @@ def _exit_report(rt, *, status: str, frames: int) -> int:
     return 0 if not status.startswith(("unsupported", "exception")) else 1
 
 
-def _step_frame(frontend: GameFrontend, rt, args, frame: int) -> tuple[str | None, bool]:
+def _step_frame(
+    frontend: GameFrontend, rt, args, frame: int,
+    *, replay_coordinate: ReplayPointCoordinate | None = None,
+) -> tuple[str | None, bool]:
     """One guarded frame advance.  Returns (status_or_None, keep_running).
 
     Every failure mode prints the cheap diagnostics (_diagnostic_lines) and
@@ -748,7 +843,11 @@ def _step_frame(frontend: GameFrontend, rt, args, frame: int) -> tuple[str | Non
     "program halted"/"unsupported instruction" with no further context meant
     the only way to diagnose it was to reproduce it by hand from scratch."""
     try:
-        frontend.advance_frame(rt, args, frame)
+        if replay_coordinate is None:
+            frontend.advance_frame(rt, args, frame)
+        else:
+            frontend.advance_replay_frame(
+                rt, args, frame, replay_coordinate)
     except ConsoleInputWouldBlock:
         return "waiting for DOS key", True
     except HaltExecution:
@@ -789,7 +888,10 @@ def run_replay_headless(frontend: GameFrontend, rt, args,
             status = f"frame budget reached ({args.frames})"
             break
         playback.apply_to_runtime(frame, rt, deliver=lambda r, sc: frontend.deliver_input(r, sc))
-        new_status, keep_running = _step_frame(frontend, rt, args, frame)
+        new_status, keep_running = _step_frame(
+            frontend, rt, args, frame,
+            replay_coordinate=playback.coordinate_after(frame),
+        )
         if new_status:
             status = new_status
         if not keep_running:
@@ -1048,10 +1150,20 @@ def run_view(frontend: GameFrontend, rt, args,
                 dispatcher.pump()
                 sample_mouse_for_replay()
 
-            new_status, keep_running = _step_frame(frontend, rt, args, frame_box["n"])
+            new_status, keep_running = _step_frame(
+                frontend, rt, args, frame_box["n"],
+                replay_coordinate=(
+                    playback.coordinate_after(frame_box["n"])
+                    if replaying else None
+                ),
+            )
             if new_status:
                 status = new_status
             running = running and keep_running
+            rec = recorder["rec"]
+            if rec is not None and rec.active:
+                rec.mark(
+                    frontend, args, rt, boundary=frame_box["n"] + 1)
 
             if audio is not None:
                 audio.pump()
@@ -1142,6 +1254,34 @@ def _run_differential_verification(
             return 0
         before, after, result = found
         print(f"DIVERGENT transition {before.ordinal}->{after.ordinal}")
+    elif getattr(args, "verify_mode", "endpoint") != "endpoint":
+        span = (
+            1 if getattr(args, "verify_mode", "endpoint") == "semantic-points"
+            else getattr(args, "verify_checkpoint_span", 64))
+        checked = verify_checkpointed(
+            artifact, oracle, candidate, start, end,
+            checkpoint_span=span,
+            observable_effects=getattr(args, "verify_observables", True),
+        )
+        result = checked.result
+        guarantee = (
+            "semantic+observable" if checked.observable_effects
+            else "semantic-boundaries")
+        if result.equivalent:
+            print(
+                f"EQUIVALENT {start.ordinal}..{end.ordinal} "
+                f"{result.comparison.oracle_digest} "
+                f"mode={guarantee} points={checked.points_observed} "
+                f"checkpoints={checked.checkpoints_compared} span={span} "
+                f"effects={checked.observable_event_count}"
+            )
+            return 0
+        assert checked.failed_interval is not None
+        before, after = checked.failed_interval
+        print(
+            f"DIVERGENT transition {before.ordinal}->{after.ordinal} "
+            f"mode={guarantee}"
+        )
     else:
         result = verify_interval(artifact, oracle, candidate, start, end)
         if result.equivalent:
