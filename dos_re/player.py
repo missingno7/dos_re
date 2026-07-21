@@ -1303,6 +1303,20 @@ def run_view(frontend: GameFrontend, rt, args,
     running = True
     status = "replaying" if replaying else "running"
 
+    # Some backends reach one semantic replay boundary through many small
+    # execution slices.  Let them keep the host window alive without turning
+    # those implementation-specific slices into replay points or simulation
+    # ticks.  The callback is deliberately presentation-only: it keeps SDL
+    # responsive, but never delivers input, renders partially-mutated
+    # semantic state, or advances authoritative state.
+    _missing_host_yield = object()
+    previous_host_yield = getattr(rt, "_dos_re_host_yield", _missing_host_yield)
+
+    def service_host_during_semantic_seek() -> None:
+        pygame.event.pump()
+
+    rt._dos_re_host_yield = service_host_during_semantic_seek
+
     if not replaying and args.record_replay:
         start_recording(args.record_replay)
 
@@ -1438,6 +1452,10 @@ def run_view(frontend: GameFrontend, rt, args,
             )
     finally:
         stop_recording()
+        if previous_host_yield is _missing_host_yield:
+            delattr(rt, "_dos_re_host_yield")
+        else:
+            rt._dos_re_host_yield = previous_host_yield
         pygame.quit()
 
     _save_exit_snapshot(frontend, rt, args, status=status)
