@@ -16,6 +16,9 @@ import pytest
 
 from dos_re import player
 from dos_re.execution import (
+    BackendAdapter,
+    CPU_MODEL_BACKEND,
+    CPULESS_BACKEND,
     DependencyCapability,
     NativeBootstrapProvider,
     ImplementationCatalog,
@@ -401,9 +404,10 @@ def test_selected_implementation_activator_is_the_only_binding_authority():
             return ImplementationCatalog((ImplementationEntry(
                 descriptor,
                 implementation=lambda: None,
-                activate=lambda runtime, targets: activated.append(
-                    (runtime, targets)
-                ),
+                adapters=(BackendAdapter(
+                    CPU_MODEL_BACKEND,
+                    lambda runtime, targets: activated.append((runtime, targets)),
+                ),),
             ),))
 
     frontend = Fe(ROOT)
@@ -412,6 +416,44 @@ def test_selected_implementation_activator_is_the_only_binding_authority():
     runtime = object()
     frontend.bind_execution_plan(runtime, plan)
     assert activated == [(runtime, ("frame",))]
+
+
+def test_selected_implementation_never_silently_falls_back_on_wrong_backend():
+    class Fe(GameFrontend):
+        default_provider_preference = ("native-frame",)
+
+        def execution_configuration(self, args):
+            return profile_configuration(
+                args.profile,
+                program_identity=self.program_identity(args),
+                selected_overrides=("native-frame",),
+                provider_preference=self.default_provider_preference,
+            )
+
+        def execution_coverage(self, args):
+            return ProgramCoverage(
+                roots=("frame",), reachable=frozenset({"frame"}),
+                evidence_identity="frame-v1",
+            )
+
+        def execution_implementations(self, args):
+            descriptor = ImplementationDescriptor(
+                implementation_id="native-frame",
+                targets=frozenset({"frame"}),
+                origin=ImplementationOrigin.AUTHORED,
+                category=OverrideCategory.FAITHFUL,
+                implementation_digest="native-v1",
+            )
+            return ImplementationCatalog((ImplementationEntry(
+                descriptor,
+                implementation=lambda: None,
+                adapters=(BackendAdapter(CPU_MODEL_BACKEND, lambda *_: None),),
+            ),))
+
+    frontend = Fe(ROOT)
+    plan = frontend.resolve_execution_plan(_parse(frontend, []))
+    with pytest.raises(RuntimeError, match="no adapter for backend 'cpuless'"):
+        frontend.bind_execution_plan(object(), plan, backend_id=CPULESS_BACKEND)
 
 
 def test_selected_enhancement_activates_at_its_seam_without_owning_it():
@@ -449,8 +491,11 @@ def test_selected_enhancement_activates_at_its_seam_without_owning_it():
                 )
                 entries.append(ImplementationEntry(
                     descriptor,
-                    activate=lambda runtime, targets, name=implementation_id:
-                    activated.append((name, runtime, targets)),
+                    adapters=(BackendAdapter(
+                        CPU_MODEL_BACKEND,
+                        lambda runtime, targets, name=implementation_id:
+                        activated.append((name, runtime, targets)),
+                    ),),
                 ))
             return ImplementationCatalog(tuple(entries))
 

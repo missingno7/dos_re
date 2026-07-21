@@ -405,34 +405,11 @@ class GameFrontend:
             f"{type(self).__name__} does not provide differential replay drivers"
         )
 
-    def bind_execution_plan(self, runtime, plan: ExecutionPlan) -> None:
+    def bind_execution_plan(self, runtime, plan: ExecutionPlan, *,
+                            backend_id: str = "cpu-model") -> None:
         """Install selected providers through their declared backend activators."""
-        targets_by_implementation: dict[str, list[str]] = {}
-        for binding in plan.bindings:
-            targets_by_implementation.setdefault(
-                binding.implementation_id, []
-            ).append(binding.target)
-        for descriptor in plan.implementations:
-            if descriptor.category is OverrideCategory.ENHANCEMENT:
-                targets_by_implementation.setdefault(
-                    descriptor.implementation_id, []
-                ).extend(descriptor.targets)
-        descriptors = {
-            item.implementation_id: item for item in plan.implementations
-        }
-        for implementation_id, targets in sorted(targets_by_implementation.items()):
-            descriptor = descriptors[implementation_id]
-            entry = next(
-                item for item in plan.catalog.entries
-                if item.descriptor.implementation_id == implementation_id
-            )
-            if entry.activate is not None:
-                entry.activate(runtime, tuple(sorted(targets)))
-            elif descriptor.origin is not ImplementationOrigin.INTERPRETED:
-                raise RuntimeError(
-                    f"selected implementation {implementation_id!r} has no "
-                    "backend activator"
-                )
+        from dos_re.execution import bind_plan_implementations
+        bind_plan_implementations(runtime, plan, backend_id=backend_id)
 
     def default_save_dir(self, args: argparse.Namespace) -> Path:
         """Where the live product persists the game's own saved files (progress,

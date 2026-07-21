@@ -39,6 +39,8 @@ sys.path.insert(0, str(ROOT))
 
 from dos_re.cpu import CPU8086, HaltExecution  # noqa: E402
 from dos_re.execution import (  # noqa: E402
+    BackendAdapter,
+    CPU_MODEL_BACKEND,
     ImplementationCatalog,
     ImplementationDescriptor,
     ImplementationEntry,
@@ -139,7 +141,7 @@ def select_inc_implementation(
             implementation_digest=implementation_id,
         ),
         implementation=body,
-        activate=activate,
+        adapters=(BackendAdapter(CPU_MODEL_BACKEND, activate),),
     ),))
     plan = plan_execution(
         profile_configuration(
