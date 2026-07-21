@@ -313,10 +313,42 @@ class RuntimeServiceDescriptor:
 
 
 @dataclass(frozen=True)
+class BackendAdapter:
+    """A backend-specific bridge for one backend-neutral implementation.
+
+    The implementation catalog owns the semantic body and stable target
+    identity.  A bridge is allowed to marshal that body through a particular
+    carrier (CPU registers, a recovered ABI call, or a native state object),
+    but it must not become a second implementation authority.
+    """
+
+    backend_id: str
+    activate: Callable[[object, tuple[str, ...]], None]
+
+    def __post_init__(self) -> None:
+        if not self.backend_id:
+            raise ValueError("backend adapter ID must not be empty")
+
+
+# Backend IDs describe the carrier available at the activation seam, not a
+# whole-game recovery level.  A generated VMless graph still uses the CPU
+# carrier, while an ABI-recovered graph uses the CPUless call contract.
+CPU_MODEL_BACKEND = "cpu-model"
+CPULESS_BACKEND = "cpuless"
+
+
+@dataclass(frozen=True)
 class ImplementationEntry:
     descriptor: ImplementationDescriptor
     implementation: Callable | None = None
-    activate: Callable[[object, tuple[str, ...]], None] | None = None
+    adapters: tuple[BackendAdapter, ...] = ()
+
+    def __post_init__(self) -> None:
+        backend_ids = [adapter.backend_id for adapter in self.adapters]
+        if len(set(backend_ids)) != len(backend_ids):
+            raise ValueError(
+                f"implementation {self.descriptor.implementation_id!r} has "
+                "more than one adapter for the same backend")
 
 
 @dataclass(frozen=True)
@@ -337,6 +369,66 @@ class ImplementationCatalog:
             if entry.descriptor.implementation_id == implementation_id:
                 return entry.implementation
         raise KeyError(implementation_id)
+
+
+def bind_plan_implementations(
+    runtime: object,
+    plan: "ExecutionPlan",
+    *,
+    backend_id: str,
+) -> None:
+    """Install plan-selected backend bridges into an already-created runtime.
+
+    Selection remains entirely in :class:`ExecutionPlan`; this function only
+    binds the adapter that can cross the selected runtime's carrier.  Whole
+    program providers own their own launch mechanics and consequently need no
+    per-target adapter here.  A selected function implementation without a
+    bridge for ``backend_id`` is a configuration error, never a silent fallback.
+    """
+    targets_by_implementation: dict[str, list[str]] = {}
+    for binding in plan.bindings:
+        targets_by_implementation.setdefault(binding.implementation_id, []).append(
+            binding.target
+        )
+    for descriptor in plan.implementations:
+        if descriptor.category is OverrideCategory.ENHANCEMENT:
+            targets_by_implementation.setdefault(
+                descriptor.implementation_id, []
+            ).extend(descriptor.targets)
+
+    entries = {
+        item.descriptor.implementation_id: item for item in plan.catalog.entries
+    }
+    descriptors = {
+        item.implementation_id: item for item in plan.implementations
+    }
+    for implementation_id, targets in sorted(targets_by_implementation.items()):
+        entry = entries[implementation_id]
+        adapter = next(
+            (item for item in entry.adapters if item.backend_id == backend_id),
+            None,
+        )
+        if adapter is not None:
+            adapter.activate(runtime, tuple(sorted(targets)))
+            continue
+
+        descriptor = descriptors[implementation_id]
+        if descriptor.region_id is not None or (
+            descriptor.origin is ImplementationOrigin.INTERPRETED
+        ):
+            # A region provider is launched by its owning backend.  The
+            # interpreted baseline uses the untouched bytes and has no bridge.
+            continue
+        if entry.adapters:
+            available = ", ".join(sorted(item.backend_id for item in entry.adapters))
+            raise RuntimeError(
+                f"selected implementation {implementation_id!r} has no "
+                f"adapter for backend {backend_id!r} (available: {available})"
+            )
+        raise RuntimeError(
+            f"selected implementation {implementation_id!r} has no backend "
+            "adapter"
+        )
 
 
 @dataclass(frozen=True)
@@ -553,6 +645,11 @@ class RuntimeCapabilityViolation(RuntimeError):
 def format_execution_plan(plan: ExecutionPlan) -> str:
     """Stable, concise human report for ``play.py --plan-only`` and CI logs."""
     report = plan.report
+    binding_counts: dict[str, int] = {}
+    for binding in report.bindings:
+        binding_counts[binding.implementation_id] = (
+            binding_counts.get(binding.implementation_id, 0) + 1
+        )
     lines = [
         f"execution profile: {plan.configuration.profile}",
         f"program: {plan.configuration.program_identity}",
@@ -564,6 +661,10 @@ def format_execution_plan(plan: ExecutionPlan) -> str:
         + (", ".join(report.required_capabilities) or "none"),
         f"package ready: {str(report.package_ready).lower()}",
     ]
+    lines.extend(
+        f"implementation: {implementation_id} ({count} identities)"
+        for implementation_id, count in sorted(binding_counts.items())
+    )
     lines.extend(
         f"{item.capability} detached: {str(item.detached).lower()}"
         for item in report.detachment_milestones

@@ -24,6 +24,7 @@ from dos_re.execution import (
     RuntimeServiceDescriptor,
     RuntimeCapabilityViolation,
     execution_composition_digest,
+    format_execution_plan,
     plan_execution,
     profile_configuration,
 )
@@ -136,6 +137,12 @@ def test_development_plan_may_mix_interpreted_and_generated():
     }
     assert plan.report.requires(DependencyCapability.ORIGINAL_EXE)
     assert not plan.report.is_detached_from(DependencyCapability.ORIGINAL_EXE)
+    assert "implementation: generated-root (1 identities)" in (
+        format_execution_plan(plan)
+    )
+    assert "implementation: interpreted (1 identities)" in (
+        format_execution_plan(plan)
+    )
 
 
 def test_selected_enhancement_attaches_without_claiming_authoritative_coverage():

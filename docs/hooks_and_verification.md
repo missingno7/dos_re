@@ -20,14 +20,19 @@ ImplementationEntry(
         implementation_digest="...",
     ),
     implementation=sqz_decode,
-    activate=real_mode_sqz_adapter,
+    adapters=(BackendAdapter(
+        CPU_MODEL_BACKEND,
+        real_mode_sqz_adapter,
+    ),),
 )
 ```
 
 Authored entries are inactive unless selected by
 `ExecutionConfiguration.selected_overrides`. The planner chooses one owner for
 each reachable target. `GameFrontend.bind_execution_plan` invokes only the
-activators in that resolved plan.
+adapter for the runtime's declared carrier in that resolved plan. A selected
+implementation with no adapter for that carrier fails loudly; it never falls
+back to another implementation.
 
 There is no global hook registry, import-time selection, environment selection,
 or player flag which installs program behavior.

@@ -37,7 +37,8 @@ from game import (  # noqa: E402
 
 from dos_re.atlas import ExecutionAtlas  # noqa: E402
 from dos_re.cpu import CPU8086  # noqa: E402
-from dos_re.execution import (BuildTarget, ImplementationCatalog,
+from dos_re.execution import (BackendAdapter, BuildTarget, CPU_MODEL_BACKEND,
+                              ImplementationCatalog,
                               ImplementationDescriptor, ImplementationEntry,
                               ImplementationOrigin, NativeBootstrapProvider,
                               OverrideCategory, ProgramCoverage, plan_execution,
@@ -247,7 +248,7 @@ def draw_catalog(
             implementation_digest=f"{implementation_id}:{fill_width}",
         ),
         implementation=body,
-        activate=activate,
+        adapters=(BackendAdapter(CPU_MODEL_BACKEND, activate),),
     ),))
 
 
