@@ -166,6 +166,7 @@ class _RealReplayPlayback:
         self, artifact: ReplayArtifact, profile: ReplayExecutionIdentity,
     ):
         self.artifact = artifact
+        self.capture_profile = profile
         self.profile = profile
         self.adapter = RealModeInputAdapter(artifact.events)
         meta = artifact.metadata
@@ -175,11 +176,11 @@ class _RealReplayPlayback:
     @classmethod
     def open(cls, path: str | Path):
         artifact = ReplayArtifact.open(path)
-        profile_id = str(artifact.metadata["recording_profile_id"])
-        profiles = {profile.profile_id: profile for profile, _ in artifact.profiles()}
-        if profile_id not in profiles:
-            raise ValueError(f"recording profile is absent from artifact: {profile_id!r}")
-        return cls(artifact, profiles[profile_id])
+        return cls(artifact, artifact.capture_profile())
+
+    def select_profile(self, profile: ReplayExecutionIdentity) -> None:
+        """Select the profile-local base/cache used by this playback run."""
+        self.profile = profile
 
     @property
     def events(self):
@@ -684,6 +685,41 @@ class GameFrontend:
 
     def apply_replay_state(self, rt, state) -> None:
         apply_runtime_continuation(rt, state)
+
+    def materialize_replay_profile_base(
+        self,
+        args: argparse.Namespace,
+        rt,
+        artifact: ReplayArtifact,
+        *,
+        source_profile: ReplayExecutionIdentity,
+        requested_profile: ReplayExecutionIdentity,
+        source_state,
+    ):
+        """Materialize point zero for a new profile-local continuation cache.
+
+        The immutable event stream and semantic timeline are portable across
+        behavior-preserving compositions.  Continuation state is not.  The
+        default adapter permits a successor implementation/runtime to reuse a
+        base only when its executable image, device topology, and continuation
+        schema are identical.  A project that can safely translate a base
+        between carriers or device selections must override this method and
+        return a complete state for ``requested_profile``; snapshot validation
+        remains strict after that state is registered in its own namespace.
+        """
+        del args, rt, artifact
+        protected = ("image", "devices", "continuation_schema")
+        differences = tuple(
+            field for field in protected
+            if getattr(source_profile, field) != getattr(requested_profile, field)
+        )
+        if differences:
+            raise ReplayError(
+                "replay event stream is portable, but no compatible base can "
+                f"be materialized for profile {requested_profile.profile_id!r}; "
+                "the capture base differs in " + ", ".join(differences)
+            )
+        return source_state
 
     # --- presentation ------------------------------------------------------------
 
@@ -1353,30 +1389,82 @@ def launch_real_mode(
         playback = _RealReplayPlayback.open(args.play_replay)
         frontend.apply_replay_metadata(args, playback.artifact.metadata)
         rt = create(args)
-        base = playback.artifact.restore(
-            playback.profile, ReplayPoint(0, playback.artifact.timeline_id))
-        frontend.apply_replay_state(rt, base)
         bind(rt)
-        playback.adapter.seek(base.event_cursor)
         current = frontend.replay_profile(args, rt)
-        # The implementation/runtime identity is intentionally allowed to
-        # change: replaying a captured failure against a corrected successor is
-        # a primary workflow.  It receives its own cache profile below.  The
-        # persisted continuation itself is portable only across the same image,
-        # device topology and continuation schema.
-        for field in ("image", "devices", "continuation_schema"):
-            if getattr(current, field) != getattr(playback.profile, field):
-                raise ValueError(
-                    f"replay {field} identity differs from the recorded base")
-        registered = {profile.profile_id for profile, _ in playback.artifact.profiles()}
-        if current.profile_id not in registered:
+        point_zero = ReplayPoint(0, playback.artifact.timeline_id)
+        registered = {
+            profile.profile_id: profile
+            for profile, _ in playback.artifact.profiles()
+        }
+        exact = registered.get(current.profile_id)
+        if exact is not None:
+            playback.artifact.require_profile(current)
+            base = playback.artifact.restore(current, point_zero)
+            base_status = "exact profile-local base"
+            rejected_reason = "none"
+        else:
+            source = playback.capture_profile
+            source_base = playback.artifact.restore(source, point_zero)
+            changed = tuple(
+                field for field in (
+                    "role", "implementation", "runtime", "devices",
+                    "continuation_schema", "projection_schema",
+                )
+                if getattr(source, field) != getattr(current, field)
+            )
+            rejected_reason = (
+                "capture cache belongs to another execution profile"
+                + (f" ({', '.join(changed)})" if changed else "")
+            )
+            base = frontend.materialize_replay_profile_base(
+                args,
+                rt,
+                playback.artifact,
+                source_profile=source,
+                requested_profile=current,
+                source_state=source_base,
+            )
             playback.artifact.register_profile(
                 current,
-                base_point=ReplayPoint(0, playback.artifact.timeline_id),
+                base_point=point_zero,
                 base_state=base,
             )
-        else:
-            playback.artifact.require_profile(current)
+            base_status = (
+                "materialized profile-local base from capture point zero"
+            )
+        frontend.apply_replay_state(rt, base)
+        playback.select_profile(current)
+        playback.adapter.seek(base.event_cursor)
+        coordinate = playback.artifact.timeline_coordinate(point_zero)
+        print("replay selection:")
+        print(
+            f"  recording profile: {playback.capture_profile.profile_id} "
+            f"({playback.capture_profile.role})"
+        )
+        print(
+            f"  requested playback profile: {current.profile_id} "
+            f"({current.role})"
+        )
+        print(
+            "  composition: "
+            f"{getattr(args, 'composition', 'default')}"
+        )
+        print(f"  selected base: {base_status}")
+        print(f"  rejected cache: {rejected_reason}")
+        print(
+            "  device identity: "
+            f"capture={playback.capture_profile.devices} "
+            f"requested={current.devices}"
+        )
+        print(
+            "  composition identity: "
+            f"capture={playback.capture_profile.implementation[:12]} "
+            f"requested={current.implementation[:12]}"
+        )
+        print(
+            "  timeline authority: "
+            f"{playback.artifact.timeline_id} / {coordinate.schema_id}"
+        )
         rt.dos.console_input_fallback = None
         if args.headless:
             return run_replay_headless(frontend, rt, args, playback)

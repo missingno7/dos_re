@@ -180,17 +180,23 @@ def test_replay_metadata_is_applied_before_plan_selection(monkeypatch):
 def test_replay_launch_allows_a_successor_runtime_profile(monkeypatch):
     recorded = SimpleNamespace(
         profile_id="recorded",
+        role="candidate",
+        implementation="implementation-before-fix",
         image="image-v1",
         runtime="runtime-before-fix",
         devices="devices-v1",
         continuation_schema="continuation-v1",
+        projection_schema="projection-v1",
     )
     current = SimpleNamespace(
         profile_id="successor",
+        role="candidate",
+        implementation="implementation-after-fix",
         image="image-v1",
         runtime="runtime-after-fix",
         devices="devices-v1",
         continuation_schema="continuation-v1",
+        projection_schema="projection-v1",
     )
     base = SimpleNamespace(event_cursor=0)
     registered = []
@@ -209,10 +215,18 @@ def test_replay_launch_allows_a_successor_runtime_profile(monkeypatch):
         def register_profile(self, profile, *, base_point, base_state):
             registered.append((profile, base_point, base_state))
 
+        def require_profile(self, profile):
+            raise AssertionError("successor profile must be materialized")
+
+        def timeline_coordinate(self, point):
+            return ReplayPointCoordinate(point, "semantic-boundary-v1", {})
+
     playback = SimpleNamespace(
         artifact=Artifact(),
+        capture_profile=recorded,
         profile=recorded,
         adapter=SimpleNamespace(seek=lambda cursor: None),
+        select_profile=lambda profile: None,
     )
     monkeypatch.setattr(
         player._RealReplayPlayback, "open", lambda path: playback,
@@ -237,6 +251,15 @@ def test_replay_launch_allows_a_successor_runtime_profile(monkeypatch):
             assert restored_runtime is runtime
             return current
 
+        def materialize_replay_profile_base(
+            self, args, restored_runtime, artifact, *, source_profile,
+            requested_profile, source_state,
+        ):
+            assert restored_runtime is runtime
+            assert source_profile is recorded
+            assert requested_profile is current
+            return source_state
+
     args = SimpleNamespace(
         play_replay="recording",
         headless=True,
@@ -250,6 +273,69 @@ def test_replay_launch_allows_a_successor_runtime_profile(monkeypatch):
     ) == 17
     assert registered == [(current, ReplayPoint(0, "timeline-v1"), base)]
     assert runtime.dos.console_input_fallback is None
+
+
+def test_replay_launch_uses_an_existing_requested_profile_base(monkeypatch):
+    recorded = SimpleNamespace(
+        profile_id="recorded", role="candidate", implementation="capture",
+        image="image", runtime="runtime", devices="capture-devices",
+        continuation_schema="continuation", projection_schema="projection",
+    )
+    current = SimpleNamespace(
+        profile_id="oracle", role="oracle", implementation="oracle",
+        image="image", runtime="runtime", devices="oracle-devices",
+        continuation_schema="continuation", projection_schema="projection",
+    )
+    capture_base = SimpleNamespace(event_cursor=0)
+    oracle_base = SimpleNamespace(event_cursor=3)
+
+    class Artifact:
+        metadata = {}
+        timeline_id = "timeline"
+
+        def profiles(self):
+            return ((recorded, 0), (current, 0))
+
+        def require_profile(self, profile):
+            assert profile is current
+
+        def restore(self, profile, point):
+            assert point.ordinal == 0
+            return oracle_base if profile is current else capture_base
+
+        def timeline_coordinate(self, point):
+            return ReplayPointCoordinate(point, "semantic-boundary-v1", {})
+
+    playback = SimpleNamespace(
+        artifact=Artifact(), capture_profile=recorded, profile=recorded,
+        adapter=SimpleNamespace(seek=lambda cursor: None),
+        select_profile=lambda profile: None,
+    )
+    monkeypatch.setattr(player._RealReplayPlayback, "open", lambda path: playback)
+    monkeypatch.setattr(player, "run_replay_headless", lambda *items: 23)
+    runtime = SimpleNamespace(dos=SimpleNamespace(console_input_fallback=1))
+
+    class Fe:
+        apply_replay_metadata = staticmethod(lambda args, metadata: None)
+        replay_profile = staticmethod(lambda args, rt: current)
+
+        @staticmethod
+        def apply_replay_state(rt, state):
+            assert state is oracle_base
+
+        @staticmethod
+        def materialize_replay_profile_base(*args, **kwargs):
+            raise AssertionError("an exact profile base must be restored directly")
+
+    args = SimpleNamespace(
+        play_replay="recording", headless=True, execution_plan=object(),
+        composition="oracle",
+    )
+    assert player.launch_real_mode(
+        Fe(), args, create_runtime=lambda args: runtime,
+        load_snapshot_runtime=lambda args, path: runtime,
+        bind_execution_plan=lambda rt: None,
+    ) == 23
 
 
 def test_standard_io_options_declare_plan_capabilities():

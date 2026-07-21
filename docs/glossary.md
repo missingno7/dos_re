@@ -8,8 +8,8 @@
 | **Stable identity** | Backend-independent serialized identity for a program, image, function, region, execution point, boundary, or runtime-code variant. |
 | **Evidence source** | The artifact or declaration that owns a fact, such as Recovery IR, ReplayArtifact, an explicit fact document, or an implementation descriptor. |
 | **Execution Atlas** | Deterministic materialized projection and query index over cited evidence sources. It does not execute, decode, or select code. |
-| **ReplayArtifact** | Sole persistent deterministic replay format: base continuation state, immutable events, points, metadata, visits, transfers, annotations, and derived boundaries. |
-| **Capture profile** | Exact execution composition used to record a ReplayArtifact's immutable input stream. It may be an oracle or candidate and is provenance, not a correctness claim. |
+| **ReplayArtifact** | Sole persistent deterministic replay format: one portable immutable behavioral timeline plus profile-local base continuations, points, visits, transfers, annotations, and derived boundaries. |
+| **Capture profile** | Exact execution composition used to record a ReplayArtifact's immutable input stream. It may be an oracle or candidate and is provenance, not the playback authority or a correctness claim. |
 | **Trusted replay** | An oracle-captured artifact, or a candidate-captured artifact whose complete finite timeline has passed equivalent oracle/candidate validation for the same capture execution. Trust is scoped to that event stream, not every possible function input. |
 | **Verification claim** | Reproducible finite result binding an implementation digest, oracle and candidate execution identities, ReplayArtifact, exact interval, and comparison schema. A passing claim is not universal correctness. |
 | **Counterexample** | Persisted replay boundary and mismatch showing one verification claim fails; it becomes a focused regression for the next implementation digest. |

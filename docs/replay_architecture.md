@@ -8,6 +8,22 @@ Earlier recording formats are unsupported. Downstream projects record new
 artifacts through the current players. Design history is isolated in
 [`history/replay_evolution.md`](history/replay_evolution.md).
 
+The artifact has two different ownership layers:
+
+- its portable behavioral record is the immutable normalized event stream,
+  semantic timeline, game/assets identity, feature events, and deterministic
+  environment configuration;
+- each `ReplayExecutionIdentity` owns its backend-specific point-zero
+  continuation and every boundary derived from it.
+
+The composition that captured the input is provenance only. Playback first
+constructs the requested composition, computes its execution identity, and
+selects that identity's base. If none exists, the frontend may explicitly
+materialize one from a compatible point-zero state. A device or continuation
+mismatch rejects only the attempted source cache. It never makes the immutable
+event stream intrinsically unplayable, and incompatible machine state is never
+silently restored.
+
 ## The verification model
 
 ```text
@@ -88,9 +104,12 @@ They define no file names, manifests, versions, snapshots, or compatibility
 branches.
 
 Recording does not require an untouched interpreter plan. Capture composition
-and device identity are retained so the same plan can be validated later.
-Frontend metadata must also retain every deterministic knob needed to recreate
-that topology.
+and device identity are retained as provenance. Frontend metadata must retain
+every deterministic environment knob needed to construct an equivalent
+topology on another composition. Presentation-only choices must not silently
+change emulated devices; if a choice changes interrupt or continuation
+semantics, it is deterministic environment configuration and receives a
+different profile-local base.
 
 ## Continuation state is not comparison state
 
@@ -147,6 +166,15 @@ Boundaries never form delta chains. Restoration always loads the identity's base
 and applies one boundary's changed pages. The closest cached point at or before
 X is restored, replay advances to X, X is cached lazily, and only X→Y executes.
 
+Playback never restores the capture profile and then relabels it as the
+requested profile. It either restores an exact requested-profile base or asks
+the frontend to materialize a complete requested-profile base, registers it in
+that profile's namespace, and then restores it normally. Materialization is an
+adapter contract for genuinely shared stateâ€”for example a DOS-memory-backed
+oracle may restore verified executable bytes into ranges deliberately poisoned
+by a generated carrier. It is not permission to weaken device or snapshot
+validation.
+
 The boundary also declares its target region layout. Regions created after the
 base—such as a newly opened DOS file—are stored as wholly changed pages;
 removed regions are omitted; grown or shrunk regions reuse their matching base
@@ -191,6 +219,11 @@ Invalidation is deliberately coarse and safe. Changing the event stream means
 recording a new artifact. Changing a replay execution identity creates a new
 cache namespace. Changing its base state invalidates every boundary in
 that namespace. There is no partial cache migration.
+
+The player reports the recording profile, requested profile and composition,
+selected/materialized base, rejected cache and reason, both device identities,
+both composition identities, and the semantic coordinate schema. These are
+runtime facts, not inferences from the requested CLI spelling.
 
 ## Differential verification and guarantees
 
