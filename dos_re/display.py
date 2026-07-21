@@ -23,7 +23,7 @@ _TITLE = "dos_re native viewer"
 
 
 class Display:
-    def __init__(self, size, *, title: str = _TITLE):
+    def __init__(self, size, *, title: str = _TITLE, opengl: bool = False):
         self.integer_scale = False
         self.par = 1.0                     # displayed pixel aspect (height/width). 1.0 = square pixels;
         #                                    1.2 = the DOS 4:3 look (320x200 shown at 4:3 -> pixels 1.2x tall).
@@ -39,6 +39,15 @@ class Display:
         self._ksurf = {}
         self._last_rect = None             # where the last frame was drawn (see window_to_frame_norm)
         self._ov = {}                      # cached overlay textures keyed by id(surface)
+        self.opengl = bool(opengl)
+        self._opengl_flags = pygame.RESIZABLE | pygame.OPENGL | pygame.DOUBLEBUF
+        if self.opengl:
+            # A product-selected GPU presenter owns the OpenGL drawing.  Keep
+            # the same Display geometry/input API, but do not create SDL's 2D
+            # renderer on the same window/context.
+            self.screen = pygame.display.set_mode(size, self._opengl_flags)
+            pygame.display.set_caption(title)
+            return
         try:
             from pygame._sdl2 import video as sdl2
             self._sdl2 = sdl2
@@ -90,6 +99,10 @@ class Display:
             pygame.transform.scale(self._srcsurf, rect.size, self.screen.subsurface(rect))
         self._last_rect = rect
         return rect
+
+    def set_presented_rect(self, rect) -> None:
+        """Record a custom presenter's frame rect for mouse mapping."""
+        self._last_rect = pygame.Rect(rect)
 
     # --- GPU compositing primitives -------------------------------------------------------------------
     # For viewers that build the window from a SMALL source frame with a free camera (zoom/pan) instead of
@@ -191,7 +204,9 @@ class Display:
         return pygame.Surface(self.get_size(), pygame.SRCALPHA)
 
     def flip(self) -> None:
-        if self.gpu:
+        if self.opengl:
+            pygame.display.flip()
+        elif self.gpu:
             self.renderer.present()
         else:
             pygame.display.flip()
@@ -199,7 +214,11 @@ class Display:
     # --- window state ---------------------------------------------------------------------------------
     def resize(self, w: int, h: int) -> None:
         """Handle a user window drag-resize (software path re-creates the surface; GPU auto-tracks)."""
-        if self.gpu:
+        if self.opengl:
+            self.screen = pygame.display.set_mode(
+                (max(160, w), max(100, h)), self._opengl_flags,
+            )
+        elif self.gpu:
             self.window.size = (max(160, w), max(100, h))
         else:
             self.screen = pygame.display.set_mode((max(160, w), max(100, h)), pygame.RESIZABLE)

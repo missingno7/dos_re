@@ -607,6 +607,18 @@ class GameFrontend:
         del args, interpolation
         return self.decode_frame(rt)
 
+    def create_gpu_frame_presenter(self, rt, args: argparse.Namespace):
+        """Return an optional product GPU presenter for the live viewer.
+
+        A presenter receives already-rendered presentation RGB frames and may
+        draw them through an OpenGL context owned by pygame.  It has no access
+        to simulation progression, input delivery, replay state, or the
+        execution plan.  Returning ``None`` selects the normal SDL display
+        path.
+        """
+        del rt, args
+        return None
+
     def deliver_input(self, rt, scancode: int) -> None:
         """Deliver one XT scancode to the game (override e.g. to bound ISR steps)."""
         from dos_re.interrupts import deliver_scancode
@@ -1182,9 +1194,13 @@ def run_view(frontend: GameFrontend, rt, args,
     )
     fh, fw = first.shape[:2]
     par = 1.0 if args.square_pixels else 1.2
+    gpu_presenter = frontend.create_gpu_frame_presenter(rt, args)
     display = Display((fw * args.scale, int(fh * par) * args.scale),
-                      title=frontend.window_title(args, "replay" if replaying else "live"))
+                      title=frontend.window_title(args, "replay" if replaying else "live"),
+                      opengl=gpu_presenter is not None)
     display.par = par
+    if gpu_presenter is not None:
+        gpu_presenter.initialize(display)
     scancodes = scancode_table(pygame)
     clock = pygame.time.Clock()
     simulation_hz = int(getattr(args, "simulation_hz", 0) or args.present_hz)
@@ -1339,6 +1355,8 @@ def run_view(frontend: GameFrontend, rt, args,
                     running = False
                 elif event.type == pygame.VIDEORESIZE:
                     display.resize(event.w, event.h)
+                    if gpu_presenter is not None:
+                        gpu_presenter.resize(display)
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_F12:
                     out = _timestamp_dir(frontend.artifacts_dir, f"snapshot_{frontend.name}")
                     write_snapshot(rt, out, status="manual viewer snapshot",
@@ -1434,7 +1452,10 @@ def run_view(frontend: GameFrontend, rt, args,
                 np.uint8,
             )
             last_rgb[0] = rgb
-            display.draw_game(rgb)
+            if gpu_presenter is None:
+                display.draw_game(rgb)
+            else:
+                gpu_presenter.present(rgb, display)
             display.flip()
             pygame.display.set_caption(
                 f"{frontend.window_title(args, 'replay' if replaying else 'live')} | {status} | "
@@ -1452,6 +1473,8 @@ def run_view(frontend: GameFrontend, rt, args,
             )
     finally:
         stop_recording()
+        if gpu_presenter is not None:
+            gpu_presenter.close()
         if previous_host_yield is _missing_host_yield:
             delattr(rt, "_dos_re_host_yield")
         else:
