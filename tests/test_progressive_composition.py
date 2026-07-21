@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -155,14 +156,20 @@ def test_same_authored_body_binds_through_two_carriers() -> None:
     assert interpreted.catalog.implementation("authored:b") is (
         vmless.catalog.implementation("authored:b")
     )
+    interpreted_runtime = SimpleNamespace()
+    vmless_runtime = SimpleNamespace()
     bind_plan_implementations(
-        object(), interpreted, carrier_id=INTERPRETED_CPU_CARRIER
+        interpreted_runtime, interpreted, carrier_id=INTERPRETED_CPU_CARRIER
     )
     bind_plan_implementations(
-        object(), vmless, carrier_id=GENERATED_VMLESS_CARRIER
+        vmless_runtime, vmless, carrier_id=GENERATED_VMLESS_CARRIER
     )
     assert interpreted_activations == [(INTERPRETED_CPU_CARRIER, (B,))]
     assert vmless_activations == [(GENERATED_VMLESS_CARRIER, (B,))]
+    assert interpreted_runtime.execution_plan is interpreted
+    assert interpreted_runtime.execution_carrier_id == INTERPRETED_CPU_CARRIER
+    assert vmless_runtime.execution_plan is vmless
+    assert vmless_runtime.execution_carrier_id == GENERATED_VMLESS_CARRIER
 
 
 def test_larger_provider_collapses_known_hook_boundaries() -> None:
@@ -296,6 +303,8 @@ def test_long_lived_region_collapses_contextual_targets_and_materializes_handoff
         ),
     )
     activated = []
+    inner_activations: list[tuple[str, tuple[str, ...]]] = []
+    inner = _authored(inner_activations)
     contract = ExecutionRegionContract(
         region_id=region_id,
         carrier_id=NATIVE_STATE_CARRIER,
@@ -332,7 +341,10 @@ def test_long_lived_region_collapses_contextual_targets_and_materializes_handoff
         "development",
         program_identity=ROOT,
         provider_preference=("baseline:vmless",),
-        selected_overrides=(island.descriptor.implementation_id,),
+        selected_overrides=(
+            inner.descriptor.implementation_id,
+            island.descriptor.implementation_id,
+        ),
     )
     config = replace(
         config,
@@ -352,6 +364,7 @@ def test_long_lived_region_collapses_contextual_targets_and_materializes_handoff
                 ).descriptor,
                 targets=region_coverage.reachable,
             )),
+            inner,
             island,
         )),
     )
@@ -360,11 +373,12 @@ def test_long_lived_region_collapses_contextual_targets_and_materializes_handoff
     resolved = plan.regions[0]
     assert resolved.covered_targets == (A, B)
     assert {item.target for item in resolved.suppressed_bindings} == {A, B}
-    runtime = object()
+    runtime = SimpleNamespace()
     bind_plan_implementations(
         runtime, plan, carrier_id=GENERATED_VMLESS_CARRIER
     )
     assert activated == [(runtime, resolved)]
+    assert inner_activations == []
 
     class Session:
         def __init__(self):

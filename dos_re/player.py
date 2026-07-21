@@ -416,6 +416,17 @@ class GameFrontend:
             self.execution_features(args),
         )
 
+    def format_execution_plan(
+        self, args: argparse.Namespace, plan: ExecutionPlan,
+    ) -> str:
+        """Render the standard plan report.
+
+        A game may append product-role diagnostics, but this method must only
+        describe the already materialized plan.  It is not another selection
+        or fallback hook.
+        """
+        return format_execution_plan(plan)
+
     def launch(self, args: argparse.Namespace, plan: ExecutionPlan) -> int:
         """Run the selected plan through this frontend's execution driver."""
         return _launch_real_mode(self, args)
@@ -818,6 +829,22 @@ def _diagnostic_lines(rt) -> list[str]:
     compact DOS memory-allocator summary, and open file handles (useful when
     the failure is mid asset-load). "program halted" alone hides all of this."""
     lines = []
+    plan = getattr(rt, "execution_plan", None)
+    if plan is not None:
+        lines.append(
+            "execution: carrier="
+            f"{getattr(rt, 'execution_carrier_id', plan.report.execution_carrier)} "
+            f"plan={plan.plan_digest[:12]}"
+        )
+    dispatcher = getattr(rt, "execution_regions", None)
+    if dispatcher is not None and dispatcher.last_region_id:
+        active = dispatcher.active_region_id or "none"
+        last_exit = dispatcher.last_exit_id or "none"
+        lines.append(
+            f"execution region: active={active} "
+            f"last={dispatcher.last_region_id} "
+            f"entry={dispatcher.last_entry_id or 'none'} exit={last_exit}"
+        )
     dos = getattr(rt, "dos", None)
     if dos is None:
         return lines
@@ -1341,7 +1368,7 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if args.plan_only:
-        print(format_execution_plan(args.execution_plan))
+        print(frontend.format_execution_plan(args, args.execution_plan))
         return 0
     if args.execution_plan.configuration.verification_policy.mode == "differential":
         return _run_differential_verification(

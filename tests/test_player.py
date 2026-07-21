@@ -289,6 +289,20 @@ def test_plan_only_reports_without_runtime_construction(capsys):
     assert "plan digest:" in output
 
 
+def test_plan_only_uses_frontend_diagnostics_without_replanning(capsys):
+    class Fe(GameFrontend):
+        def format_execution_plan(self, args, plan):
+            return super().format_execution_plan(args, plan) + "\nproduct role: shell"
+
+        def create_runtime(self, args):
+            raise AssertionError("--plan-only must not construct a runtime")
+
+    assert player.main(
+        Fe(ROOT), ["--exe", str(Path(__file__)), "--plan-only"]
+    ) == 0
+    assert "product role: shell" in capsys.readouterr().out
+
+
 def test_run_headless_respects_frame_budget(capsys):
     class Fe(GameFrontend):
         name = "stub"
@@ -415,7 +429,7 @@ def test_selected_implementation_activator_is_the_only_binding_authority():
     frontend = Fe(ROOT)
     args = _parse(frontend, [])
     plan = frontend.resolve_execution_plan(args)
-    runtime = object()
+    runtime = SimpleNamespace()
     frontend.bind_execution_plan(runtime, plan)
     assert activated == [(runtime, ("frame",))]
 
@@ -461,7 +475,7 @@ def test_selected_implementation_never_silently_falls_back_on_wrong_backend():
     plan = frontend.resolve_execution_plan(_parse(frontend, []))
     with pytest.raises(RuntimeError, match="no adapter for carrier 'generated-cpuless'"):
         frontend.bind_execution_plan(
-            object(), plan, carrier_id=GENERATED_CPULESS_CARRIER
+            SimpleNamespace(), plan, carrier_id=GENERATED_CPULESS_CARRIER
         )
 
 
@@ -516,9 +530,33 @@ def test_selected_enhancement_activates_at_its_seam_without_owning_it():
     assert [(item.target, item.implementation_id) for item in plan.bindings] == [
         ("frame", "generated-frame"),
     ]
-    runtime = object()
+    runtime = SimpleNamespace()
     frontend.bind_execution_plan(runtime, plan)
     assert activated == [
         ("generated-frame", runtime, ("frame",)),
         ("wide-presenter", runtime, ("frame",)),
     ]
+
+
+def test_runtime_diagnostics_expose_bound_plan_and_region_lifecycle():
+    runtime = SimpleNamespace(
+        execution_plan=SimpleNamespace(
+            plan_digest="a" * 64,
+            report=SimpleNamespace(execution_carrier="interpreted-cpu"),
+        ),
+        execution_carrier_id="interpreted-cpu",
+    )
+    runtime.execution_regions = SimpleNamespace(
+        active_region_id="native-gameplay",
+        last_region_id="native-gameplay",
+        last_entry_id="start-level",
+        last_exit_id="",
+    )
+
+    lines = player._diagnostic_lines(runtime)
+
+    assert lines[0].startswith("execution: carrier=interpreted-cpu plan=")
+    assert lines[1] == (
+        "execution region: active=native-gameplay last=native-gameplay "
+        "entry=start-level exit=none"
+    )

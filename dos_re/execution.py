@@ -677,6 +677,21 @@ def bind_plan_implementations(
     per-target adapter here.  A selected function implementation without a
     bridge for ``carrier_id`` is a configuration error, never a silent fallback.
     """
+    previous_plan = getattr(runtime, "execution_plan", None)
+    previous_carrier = getattr(runtime, "execution_carrier_id", None)
+    if previous_plan is not None and previous_plan.plan_digest != plan.plan_digest:
+        raise RuntimeError(
+            "runtime is already bound to a different execution plan: "
+            f"{previous_plan.plan_digest[:12]} != {plan.plan_digest[:12]}"
+        )
+    if previous_carrier is not None and previous_carrier != carrier_id:
+        raise RuntimeError(
+            "runtime is already bound to a different execution carrier: "
+            f"{previous_carrier!r} != {carrier_id!r}"
+        )
+    runtime.execution_plan = plan
+    runtime.execution_carrier_id = carrier_id
+
     for region in plan.regions:
         entry = plan.catalog.entry(region.implementation_id)
         adapter = next((
@@ -691,8 +706,15 @@ def bind_plan_implementations(
             )
         adapter.activate(runtime, region)
 
+    suppressed_bindings = {
+        (binding.target, binding.implementation_id)
+        for region in plan.regions
+        for binding in region.suppressed_bindings
+    }
     targets_by_implementation: dict[str, list[str]] = {}
     for binding in plan.bindings:
+        if (binding.target, binding.implementation_id) in suppressed_bindings:
+            continue
         targets_by_implementation.setdefault(binding.implementation_id, []).append(
             binding.target
         )
