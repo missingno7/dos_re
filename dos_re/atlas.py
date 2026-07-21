@@ -1076,6 +1076,7 @@ class ExecutionAtlas:
             if edge.status in {"resolved", "observed"} \
                     and node_kinds.get(edge.target) in {
                         "function", "execution-point", "runtime-code-variant",
+                        "region",
                     }:
                 outgoing.setdefault(edge.source, []).append(edge.target)
         reachable: set[str] = set()
