@@ -1503,21 +1503,20 @@ def _run_differential_verification(
     start = ReplayPoint(args.verify_start, artifact.timeline_id)
     end = ReplayPoint(args.verify_end, artifact.timeline_id)
     oracle, candidate = frontend.verification_drivers(args, plan, artifact)
-    oracle_contract = getattr(oracle, "verification_projection_contract", None)
-    candidate_contract = getattr(candidate, "verification_projection_contract", None)
-    oracle_contract = (
-        oracle_contract() if callable(oracle_contract) else oracle_contract
-    )
-    candidate_contract = (
-        candidate_contract() if callable(candidate_contract) else candidate_contract
-    )
-    if oracle_contract is not None or candidate_contract is not None:
-        if oracle_contract != candidate_contract:
-            print("verification projection: oracle/candidate contract mismatch")
-        elif oracle_contract is not None:
-            print("verification projection:")
-            for line in projection_contract_diagnostics(oracle_contract):
-                print("  " + line)
+
+    def report_endpoint_projection() -> None:
+        """Report the contract actually selected at the compared endpoint."""
+        left = getattr(oracle, "verification_projection_contract", None)
+        right = getattr(candidate, "verification_projection_contract", None)
+        left = left() if callable(left) else left
+        right = right() if callable(right) else right
+        if left is not None or right is not None:
+            if left != right:
+                print("verification projection: oracle/candidate contract mismatch")
+            elif left is not None:
+                print("verification endpoint projection:")
+                for line in projection_contract_diagnostics(left):
+                    print("  " + line)
     if args.bisect:
         points = tuple(
             ReplayPoint(ordinal, artifact.timeline_id)
@@ -1525,6 +1524,7 @@ def _run_differential_verification(
         )
         found = bisect_divergence(artifact, oracle, candidate, points)
         if found is None:
+            report_endpoint_projection()
             print(f"EQUIVALENT {start.ordinal}..{end.ordinal}")
             return 0
         before, after, result = found
@@ -1543,6 +1543,7 @@ def _run_differential_verification(
             "semantic+observable" if checked.observable_effects
             else "semantic-boundaries")
         if result.equivalent:
+            report_endpoint_projection()
             print(
                 f"EQUIVALENT {start.ordinal}..{end.ordinal} "
                 f"{result.comparison.oracle_digest} "
@@ -1560,12 +1561,14 @@ def _run_differential_verification(
     else:
         result = verify_interval(artifact, oracle, candidate, start, end)
         if result.equivalent:
+            report_endpoint_projection()
             print(
                 f"EQUIVALENT {start.ordinal}..{end.ordinal} "
                 f"{result.comparison.oracle_digest}"
             )
             return 0
         print(f"DIVERGENT {start.ordinal}..{end.ordinal}")
+    report_endpoint_projection()
     for difference in result.comparison.differences:
         print("  " + difference)
     return 1

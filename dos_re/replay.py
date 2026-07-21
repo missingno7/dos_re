@@ -2292,6 +2292,13 @@ def _compare_driver_projections(
 
 
 def _point_digest(driver: ReplayDriver) -> str:
+    # A declared semantic contract is part of every observed point, not just
+    # the materialized endpoint.  SkyRoads' native-friendly fast path already
+    # builds this projection for its digest; validating it here prevents a
+    # candidate from passing a rolling comparison by omitting the same required
+    # field at every intermediate boundary.
+    if _driver_projection_contract(driver) is not None:
+        return _project(driver).digest
     fast = getattr(driver, "point_digest", None)
     if callable(fast):
         digest = str(fast())
