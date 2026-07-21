@@ -240,6 +240,12 @@ def make_artifact(tmp_path, *, candidate=NATIVE):
     return artifact
 
 
+def test_artifact_exposes_immutable_end_point(tmp_path):
+    artifact = make_artifact(tmp_path)
+
+    assert artifact.end_point == point(len(VALUES))
+
+
 def test_semantic_projection_verifies_native_candidate_and_caches_each_profile(tmp_path):
     artifact = make_artifact(tmp_path)
     oracle, native = CounterDriver(ORACLE), CounterDriver(NATIVE)

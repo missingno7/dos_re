@@ -1031,6 +1031,16 @@ class ReplayArtifact:
         return _json_value(self._manifest["metadata"], "artifact metadata")
 
     @property
+    def end_point(self) -> ReplayPoint:
+        """The immutable final point of the replay timeline."""
+        raw = self.metadata.get("end_point")
+        if not isinstance(raw, Mapping):
+            raise ReplayError("replay metadata has no valid end point")
+        point = ReplayPoint.from_json(raw)
+        self._point(point)
+        return point
+
+    @property
     def identity_digest(self) -> str:
         """Stable identity of the immutable timeline and its capture base."""
         recording_profile_id = str(self._manifest.get("metadata", {}).get(
