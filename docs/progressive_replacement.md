@@ -34,6 +34,12 @@ retains a CPU-shaped carrier and many recovery seams. Replacing larger regions
 with authored or ABI-recovered implementations improves the same product. It
 does not start a second port.
 
+Long-lived subsystem ownership is specified by
+[`ExecutionRegionContract`](execution_regions.md). A selected region suppresses
+its inner bindings only while it owns control, yields declared semantic replay
+boundaries, and returns through named continuations. This collapses historical
+function-hook seams without erasing their evidence identities.
+
 ## Separate concepts
 
 - An **implementation** owns original-program semantics for stable targets.
@@ -84,7 +90,10 @@ ownership:
 - equal owner: the edge is internal and counted as collapsed;
 - different owner: the report emits an `ExecutionBoundary`, including the
   active carrier and target adapter identity;
-- unresolved transfer: detached and release policy still fail conservatively.
+- unresolved transfer: the selected graph classifies it as region-collapsed,
+  selected-provider-owned, target-available, unknown-dynamic, or a probable
+  gap. Detached development warns and fails only if execution reaches a real
+  miss; strict closure and release reject remaining blockers before startup.
 
 This makes collapse measurable. A leaf replacement creates seams around a
 small island. A subsystem provider claiming the verified contained targets
@@ -183,12 +192,13 @@ native code as production-ready.
 3. **Generated CPUless binding:** emit or materialize stable internal call
    bindings so authored ABI candidates can replace targets inside a generated
    whole-program graph without dynamic planner imports.
-4. **Larger subsystem providers:** promote only evidenced native assemblies,
-   declare their contained identities and external contracts, and watch their
-   internal boundaries collapse in the same report.
-5. **State ownership:** add DOS-memory and native-state adapters for those same
-   bodies, then detach CPU, DOS memory, DOS services, and dos_re independently
-   as the selected dependency closure permits.
+4. **Larger subsystem providers:** the long-lived region contract, contextual
+   suppression, runtime dispatcher, and materialized graph are implemented;
+   ports promote only evidenced native assemblies through these authorities.
+5. **State ownership:** add native-state adapters for regions that have moved
+   beyond the already-supported shared-DOS-memory ownership, then detach CPU,
+   DOS memory, DOS services, and dos_re independently as the selected
+   dependency closure permits.
 6. **Product surface:** drive presentation enhancements and behavioral options
    from the common feature controller/overlay contract, with authoritative
    writes restricted to declared behavioral features.

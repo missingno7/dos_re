@@ -23,6 +23,7 @@ anything that reaches the EXE loader.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import traceback
 from pathlib import Path
@@ -161,6 +162,125 @@ def save_crash(rt, out_dir: str | Path, *, exc: BaseException | None = None,
         print(f"[crash] could not save the crash snapshot to {out}: "
               f"{type(write_failed).__name__}: {write_failed}")
         return out
+
+
+def save_recovery_frontier(
+    rt,
+    out_dir: str | Path,
+    *,
+    exc: BaseException,
+    status: str = "runtime-frontier",
+    source_identity: str = "",
+    target_identity: str = "",
+    edge_kind: str = "",
+    selected_provider: str = "",
+    candidate_containing_identity: str = "",
+    recent_atlas_path=(),
+    **context,
+) -> Path:
+    """Save a resumable machine snapshot plus a structured frontier witness.
+
+    Unlike static closure findings, this records a target that execution
+    actually reached.  The selected plan, replay/timeline cursor, active
+    region, call chain, and snapshot references make the miss directly usable
+    by Atlas-driven repair tooling.
+    """
+    out = save_crash(
+        rt,
+        out_dir,
+        exc=exc,
+        status=status,
+        recent_atlas_path=list(recent_atlas_path),
+        **context,
+    )
+    try:
+        from .runtime_miss import RuntimeExecutionFrontier
+        from .materialized_plan import materialized_plan_payload
+
+        plan = getattr(rt, "execution_plan", None)
+        dispatcher = getattr(rt, "execution_regions", None)
+        replay = dict(getattr(rt, "_dos_re_replay_context", {}) or {})
+        chain = recovered_call_chain(exc)
+        target_address = (
+            exc.target_address
+            if isinstance(exc, RuntimeExecutionFrontier)
+            else witness_address(exc)
+        )
+        source_identity = source_identity or (
+            exc.source_identity
+            if isinstance(exc, RuntimeExecutionFrontier) else ""
+        ) or (chain[-1] if chain else "")
+        target_identity = target_identity or (
+            exc.target_identity
+            if isinstance(exc, RuntimeExecutionFrontier) else ""
+        )
+        edge_kind = edge_kind or (
+            exc.edge_kind
+            if isinstance(exc, RuntimeExecutionFrontier)
+            else "runtime-transfer"
+        )
+        reason = (
+            exc.reason
+            if isinstance(exc, RuntimeExecutionFrontier) else str(exc)
+        )
+        if plan is not None and not selected_provider:
+            selected_provider = next((
+                binding.implementation_id for binding in plan.bindings
+                if binding.target in {source_identity, target_identity}
+            ), "")
+        seed = {
+            "plan": "" if plan is None else plan.plan_digest,
+            "source": source_identity,
+            "target": target_identity or target_address,
+            "edge_kind": edge_kind,
+            "reason": reason,
+            "timeline": replay,
+        }
+        frontier_id = hashlib.sha256(json.dumps(
+            seed, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        payload = {
+            "schema": "dos_re.recovery-frontier/v1",
+            "frontier_id": frontier_id,
+            "source_identity": source_identity or None,
+            "target_identity": target_identity or None,
+            "target_address": target_address,
+            "edge_kind": edge_kind,
+            "reason": reason,
+            "active_execution_carrier": getattr(
+                rt, "execution_carrier_id", ""
+            ),
+            "selected_provider": selected_provider or None,
+            "active_execution_region": (
+                dispatcher.active_region_id
+                if dispatcher is not None and dispatcher.active else None
+            ),
+            "candidate_containing_identity": (
+                candidate_containing_identity or (chain[-1] if chain else None)
+            ),
+            "call_stack": chain,
+            "replay": replay,
+            "recent_atlas_path": list(recent_atlas_path),
+            "snapshot": {
+                "state": "state.json",
+                "memory": "memory_1mb.bin",
+                "crash": "crash.json",
+            },
+            "execution_plan": (
+                None if plan is None else materialized_plan_payload(plan)
+            ),
+            "context": context,
+        }
+        (out / "recovery_frontier.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except Exception as write_failed:  # noqa: BLE001
+        print(
+            f"[crash] could not save recovery frontier to {out}: "
+            f"{type(write_failed).__name__}: {write_failed}"
+        )
+    return out
 
 
 def crash_dir(root: str | Path, name: str, stamp: str) -> Path:

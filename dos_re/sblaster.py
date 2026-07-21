@@ -378,6 +378,8 @@ class SoundBlaster:
     def snapshot_state(self) -> dict:
         return {
             "base": self.base, "irq": self.irq, "dma": self.dma,
+            "detection_only": self.detection_only,
+            "dma_requests": self._dma_requests,
             "speaker_on": self.speaker_on, "time_constant": self.time_constant,
             "sample_rate": self.sample_rate, "block_len": self.block_len,
             "auto_init": self.auto_init, "dma_active": self.dma_active,
@@ -395,9 +397,17 @@ class SoundBlaster:
         }
 
     def restore_state(self, d: dict) -> None:
+        recorded_mode = d.get("detection_only")
+        if recorded_mode is not None and bool(recorded_mode) != self.detection_only:
+            raise ValueError(
+                "Sound Blaster continuation mode differs: "
+                f"state={'detection-only' if recorded_mode else 'capture'}, "
+                f"runtime={'detection-only' if self.detection_only else 'capture'}"
+            )
         self.base = d.get("base", self.base)
         self.irq = d.get("irq", self.irq)
         self.dma = d.get("dma", self.dma)
+        self._dma_requests = int(d.get("dma_requests", 0))
         self.speaker_on = d.get("speaker_on", False)
         self.time_constant = d.get("time_constant", 0)
         self.sample_rate = d.get("sample_rate", 0)

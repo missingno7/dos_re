@@ -8,8 +8,8 @@
 | **Stable identity** | Backend-independent serialized identity for a program, image, function, region, execution point, boundary, or runtime-code variant. |
 | **Evidence source** | The artifact or declaration that owns a fact, such as Recovery IR, ReplayArtifact, an explicit fact document, or an implementation descriptor. |
 | **Execution Atlas** | Deterministic materialized projection and query index over cited evidence sources. It does not execute, decode, or select code. |
-| **ReplayArtifact** | Sole persistent deterministic replay format: base continuation state, immutable events, points, metadata, visits, transfers, annotations, and derived boundaries. |
-| **Capture profile** | Exact execution composition used to record a ReplayArtifact's immutable input stream. It may be an oracle or candidate and is provenance, not a correctness claim. |
+| **ReplayArtifact** | Sole persistent deterministic replay format: one portable immutable behavioral timeline plus profile-local base continuations, points, visits, transfers, annotations, and derived boundaries. |
+| **Capture profile** | Exact execution composition used to record a ReplayArtifact's immutable input stream. It may be an oracle or candidate and is provenance, not the playback authority or a correctness claim. |
 | **Trusted replay** | An oracle-captured artifact, or a candidate-captured artifact whose complete finite timeline has passed equivalent oracle/candidate validation for the same capture execution. Trust is scoped to that event stream, not every possible function input. |
 | **Verification claim** | Reproducible finite result binding an implementation digest, oracle and candidate execution identities, ReplayArtifact, exact interval, and comparison schema. A passing claim is not universal correctness. |
 | **Counterexample** | Persisted replay boundary and mismatch showing one verification claim fails; it becomes a focused regression for the next implementation digest. |
@@ -29,8 +29,11 @@
 | **Feature** | Planned optional presentation, behavioral, or instrumentation policy. It does not own recovered program targets. |
 | **ExecutionConfiguration** | Explicit composition, execution policy, verification policy, bootstrap, features, services, and build target. |
 | **Policy profile** | Development, verification, detached, or release preset for allowed capabilities. It is not a recovery level. |
+| **Closure policy** | Permissive, observed-corpus, or strict handling of uncertainty in the resolved selected implementation graph. It does not control EXE detachment. |
+| **Fallback policy** | Whether runtime execution may leave the selected implementation graph. Detached and release execution forbid fallback. |
 | **ExecutionPlan** | Immutable implementation binding and dependency closure for one configuration and coverage identity. |
 | **DetachmentReport** | Explanation of coverage, unresolved frontiers, retained dependencies, bootstrap status, and package readiness. |
+| **Recovery frontier** | An actually reached missing runtime target, persisted with continuation state, execution plan, replay position, and Atlas path for direct repair and reproduction. |
 | **BootstrapProvider** | Declared source of initial runtime state and its build/runtime artifacts and capabilities. |
 | **RuntimeService** | Selected host or framework facility that does not own recovered code. |
 | **Faithful replacement** | Authored implementation claiming equivalent authoritative behavior. |

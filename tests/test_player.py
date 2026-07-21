@@ -152,6 +152,192 @@ def test_replay_metadata_roundtrip():
     assert fresh.steps_per_frame == 555 and fresh.timer_irqs_per_frame == 3
 
 
+def test_replay_metadata_is_applied_before_plan_selection(monkeypatch):
+    artifact = SimpleNamespace(metadata={"captured_product": "island"})
+    monkeypatch.setattr(
+        player.ReplayArtifact, "open", lambda path: artifact,
+    )
+
+    class Fe(GameFrontend):
+        def apply_replay_metadata(self, args, metadata):
+            args.captured_product = metadata["captured_product"]
+
+        def resolve_execution_plan(self, args):
+            assert args.captured_product == "island"
+            return SimpleNamespace(
+                configuration=SimpleNamespace(
+                    verification_policy=SimpleNamespace(mode="none"),
+                ),
+            )
+
+        def launch(self, args, plan):
+            assert args.captured_product == "island"
+            return 0
+
+    assert player.main(Fe(ROOT), ["--play-replay", "recording"]) == 0
+
+
+def test_replay_launch_allows_a_successor_runtime_profile(monkeypatch):
+    recorded = SimpleNamespace(
+        profile_id="recorded",
+        role="candidate",
+        implementation="implementation-before-fix",
+        image="image-v1",
+        runtime="runtime-before-fix",
+        devices="devices-v1",
+        continuation_schema="continuation-v1",
+        projection_schema="projection-v1",
+    )
+    current = SimpleNamespace(
+        profile_id="successor",
+        role="candidate",
+        implementation="implementation-after-fix",
+        image="image-v1",
+        runtime="runtime-after-fix",
+        devices="devices-v1",
+        continuation_schema="continuation-v1",
+        projection_schema="projection-v1",
+    )
+    base = SimpleNamespace(event_cursor=0)
+    registered = []
+
+    class Artifact:
+        metadata = {}
+        timeline_id = "timeline-v1"
+
+        def restore(self, profile, point):
+            assert profile is recorded and point.ordinal == 0
+            return base
+
+        def profiles(self):
+            return ((recorded, ReplayPoint(0, self.timeline_id)),)
+
+        def register_profile(self, profile, *, base_point, base_state):
+            registered.append((profile, base_point, base_state))
+
+        def require_profile(self, profile):
+            raise AssertionError("successor profile must be materialized")
+
+        def timeline_coordinate(self, point):
+            return ReplayPointCoordinate(point, "semantic-boundary-v1", {})
+
+    playback = SimpleNamespace(
+        artifact=Artifact(),
+        capture_profile=recorded,
+        profile=recorded,
+        adapter=SimpleNamespace(seek=lambda cursor: None),
+        select_profile=lambda profile: None,
+    )
+    monkeypatch.setattr(
+        player._RealReplayPlayback, "open", lambda path: playback,
+    )
+    monkeypatch.setattr(
+        player, "run_replay_headless",
+        lambda frontend, runtime, args, opened: 17,
+    )
+
+    runtime = SimpleNamespace(
+        dos=SimpleNamespace(console_input_fallback=0x011B),
+    )
+
+    class Fe:
+        def apply_replay_metadata(self, args, metadata):
+            pass
+
+        def apply_replay_state(self, restored_runtime, state):
+            assert restored_runtime is runtime and state is base
+
+        def replay_profile(self, args, restored_runtime):
+            assert restored_runtime is runtime
+            return current
+
+        def materialize_replay_profile_base(
+            self, args, restored_runtime, artifact, *, source_profile,
+            requested_profile, source_state,
+        ):
+            assert restored_runtime is runtime
+            assert source_profile is recorded
+            assert requested_profile is current
+            return source_state
+
+    args = SimpleNamespace(
+        play_replay="recording",
+        headless=True,
+        execution_plan=object(),
+    )
+    assert player.launch_real_mode(
+        Fe(), args,
+        create_runtime=lambda parsed: runtime,
+        load_snapshot_runtime=lambda parsed, path: runtime,
+        bind_execution_plan=lambda restored_runtime: None,
+    ) == 17
+    assert registered == [(current, ReplayPoint(0, "timeline-v1"), base)]
+    assert runtime.dos.console_input_fallback is None
+
+
+def test_replay_launch_uses_an_existing_requested_profile_base(monkeypatch):
+    recorded = SimpleNamespace(
+        profile_id="recorded", role="candidate", implementation="capture",
+        image="image", runtime="runtime", devices="capture-devices",
+        continuation_schema="continuation", projection_schema="projection",
+    )
+    current = SimpleNamespace(
+        profile_id="oracle", role="oracle", implementation="oracle",
+        image="image", runtime="runtime", devices="oracle-devices",
+        continuation_schema="continuation", projection_schema="projection",
+    )
+    capture_base = SimpleNamespace(event_cursor=0)
+    oracle_base = SimpleNamespace(event_cursor=3)
+
+    class Artifact:
+        metadata = {}
+        timeline_id = "timeline"
+
+        def profiles(self):
+            return ((recorded, 0), (current, 0))
+
+        def require_profile(self, profile):
+            assert profile is current
+
+        def restore(self, profile, point):
+            assert point.ordinal == 0
+            return oracle_base if profile is current else capture_base
+
+        def timeline_coordinate(self, point):
+            return ReplayPointCoordinate(point, "semantic-boundary-v1", {})
+
+    playback = SimpleNamespace(
+        artifact=Artifact(), capture_profile=recorded, profile=recorded,
+        adapter=SimpleNamespace(seek=lambda cursor: None),
+        select_profile=lambda profile: None,
+    )
+    monkeypatch.setattr(player._RealReplayPlayback, "open", lambda path: playback)
+    monkeypatch.setattr(player, "run_replay_headless", lambda *items: 23)
+    runtime = SimpleNamespace(dos=SimpleNamespace(console_input_fallback=1))
+
+    class Fe:
+        apply_replay_metadata = staticmethod(lambda args, metadata: None)
+        replay_profile = staticmethod(lambda args, rt: current)
+
+        @staticmethod
+        def apply_replay_state(rt, state):
+            assert state is oracle_base
+
+        @staticmethod
+        def materialize_replay_profile_base(*args, **kwargs):
+            raise AssertionError("an exact profile base must be restored directly")
+
+    args = SimpleNamespace(
+        play_replay="recording", headless=True, execution_plan=object(),
+        composition="oracle",
+    )
+    assert player.launch_real_mode(
+        Fe(), args, create_runtime=lambda args: runtime,
+        load_snapshot_runtime=lambda args, path: runtime,
+        bind_execution_plan=lambda rt: None,
+    ) == 23
+
+
 def test_standard_io_options_declare_plan_capabilities():
     fe = GameFrontend(ROOT)
     replay_args = _parse(fe, ["--play-replay", "replay"])
@@ -196,6 +382,28 @@ def test_replay_device_identity_includes_optional_device_topology():
     assert fe.replay_device_identity(args, detected) != fe.replay_device_identity(
         args, captured
     )
+
+
+def test_frontend_selects_the_replay_projection_schema(monkeypatch):
+    class Fe(GameFrontend):
+        def replay_projection_schema(self, args, rt):
+            return "game-semantic-v1"
+
+    monkeypatch.setattr(player, "execution_composition_digest", lambda plan: "plan")
+    fe = Fe(ROOT)
+    args = _parse(fe, [])
+    args.execution_plan = SimpleNamespace(
+        implementations=(SimpleNamespace(
+            origin=ImplementationOrigin.INTERPRETED,
+        ),),
+        configuration=SimpleNamespace(
+            selected_overrides=(), profile="development",
+        ),
+    )
+    runtime = SimpleNamespace(
+        dos=SimpleNamespace(pic=None, sound_blaster=None),
+    )
+    assert fe.replay_profile(args, runtime).projection_schema == "game-semantic-v1"
 
 
 class _StubCPU:
@@ -275,6 +483,60 @@ def test_frontend_can_declare_exe_free_implementation_for_same_player():
     }
 
 
+def test_detached_launch_warns_about_static_frontier_without_blocking(capsys):
+    class Fe(GameFrontend):
+        def execution_configuration(self, args):
+            return profile_configuration(
+                args.profile,
+                program_identity="test:detached-warning",
+                provider_preference=("generated",),
+                bootstrap_provider=NativeBootstrapProvider(
+                    "test-native", ("test state",),
+                    provider_digest="test-native-v1",
+                ),
+            )
+
+        def execution_coverage(self, args):
+            return ProgramCoverage(
+                roots=("root",),
+                reachable=frozenset({"root", "point:dispatch"}),
+                unresolved_edges=(
+                    "root --call_ind--> point:dispatch",
+                ),
+                evidence_identity="uncertain-test",
+            )
+
+        def execution_implementations(self, args):
+            return ImplementationCatalog((ImplementationEntry(
+                ImplementationDescriptor(
+                    "generated",
+                    frozenset({"root", "point:dispatch"}),
+                    ImplementationOrigin.GENERATED,
+                    implementation_digest="generated-v1",
+                ),
+            ),))
+
+        def launch(self, args, plan):
+            assert plan.configuration.execution_policy.fallback.value == "forbidden"
+            return 0
+
+    assert player.main(Fe(ROOT), ["--profile", "detached"]) == 0
+    error = capsys.readouterr().err
+    assert "static closure uncertainty" in error
+    assert "unknown indirect targets: 1" in error
+    assert "point:dispatch" not in error
+
+
+def test_release_cannot_override_strict_closure(capsys):
+    assert player.main(GameFrontend(ROOT), [
+        "--profile", "release", "--closure-policy", "permissive",
+        "--plan-only",
+    ]) == 2
+    assert "release profile requires strict static closure" in (
+        capsys.readouterr().err
+    )
+
+
 def test_plan_only_reports_without_runtime_construction(capsys):
     class Fe(GameFrontend):
         def create_runtime(self, args):
@@ -287,6 +549,20 @@ def test_plan_only_reports_without_runtime_construction(capsys):
     assert "execution profile: development" in output
     assert "original-exe detached: false" in output
     assert "plan digest:" in output
+
+
+def test_plan_only_uses_frontend_diagnostics_without_replanning(capsys):
+    class Fe(GameFrontend):
+        def format_execution_plan(self, args, plan):
+            return super().format_execution_plan(args, plan) + "\nproduct role: shell"
+
+        def create_runtime(self, args):
+            raise AssertionError("--plan-only must not construct a runtime")
+
+    assert player.main(
+        Fe(ROOT), ["--exe", str(Path(__file__)), "--plan-only"]
+    ) == 0
+    assert "product role: shell" in capsys.readouterr().out
 
 
 def test_run_headless_respects_frame_budget(capsys):
@@ -415,7 +691,7 @@ def test_selected_implementation_activator_is_the_only_binding_authority():
     frontend = Fe(ROOT)
     args = _parse(frontend, [])
     plan = frontend.resolve_execution_plan(args)
-    runtime = object()
+    runtime = SimpleNamespace()
     frontend.bind_execution_plan(runtime, plan)
     assert activated == [(runtime, ("frame",))]
 
@@ -461,7 +737,7 @@ def test_selected_implementation_never_silently_falls_back_on_wrong_backend():
     plan = frontend.resolve_execution_plan(_parse(frontend, []))
     with pytest.raises(RuntimeError, match="no adapter for carrier 'generated-cpuless'"):
         frontend.bind_execution_plan(
-            object(), plan, carrier_id=GENERATED_CPULESS_CARRIER
+            SimpleNamespace(), plan, carrier_id=GENERATED_CPULESS_CARRIER
         )
 
 
@@ -516,9 +792,33 @@ def test_selected_enhancement_activates_at_its_seam_without_owning_it():
     assert [(item.target, item.implementation_id) for item in plan.bindings] == [
         ("frame", "generated-frame"),
     ]
-    runtime = object()
+    runtime = SimpleNamespace()
     frontend.bind_execution_plan(runtime, plan)
     assert activated == [
         ("generated-frame", runtime, ("frame",)),
         ("wide-presenter", runtime, ("frame",)),
     ]
+
+
+def test_runtime_diagnostics_expose_bound_plan_and_region_lifecycle():
+    runtime = SimpleNamespace(
+        execution_plan=SimpleNamespace(
+            plan_digest="a" * 64,
+            report=SimpleNamespace(execution_carrier="interpreted-cpu"),
+        ),
+        execution_carrier_id="interpreted-cpu",
+    )
+    runtime.execution_regions = SimpleNamespace(
+        active_region_id="native-gameplay",
+        last_region_id="native-gameplay",
+        last_entry_id="start-level",
+        last_exit_id="",
+    )
+
+    lines = player._diagnostic_lines(runtime)
+
+    assert lines[0].startswith("execution: carrier=interpreted-cpu plan=")
+    assert lines[1] == (
+        "execution region: active=native-gameplay last=native-gameplay "
+        "entry=start-level exit=none"
+    )

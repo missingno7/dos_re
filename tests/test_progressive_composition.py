@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from dos_re.execution import (
     BackendAdapter,
+    ClosureFindingKind,
     EvidenceGrade,
+    ExecutionRegionContract,
     ExecutionPolicy,
     FeatureCatalog,
     FeatureCategory,
@@ -19,10 +22,19 @@ from dos_re.execution import (
     ImplementationDescriptor,
     ImplementationEntry,
     ImplementationOrigin,
+    NATIVE_STATE_CARRIER,
     OverrideCategory,
     ProgramCoverage,
     ProgramEdge,
     RecoveryLevel,
+    RegionAdapter,
+    RegionEntryPoint,
+    RegionExitVerificationContract,
+    RegionExitPoint,
+    RegionStateOwnership,
+    RegionVerificationContract,
+    VerificationProjectionContract,
+    VerificationRepresentation,
     bind_plan_implementations,
     plan_execution,
     profile_configuration,
@@ -32,6 +44,7 @@ from dos_re.materialized_plan import (
     load_materialized_plan,
     write_materialized_plan,
 )
+from dos_re.regions import RegionDispatcher, RegionProgress
 
 
 ROOT = "program:test"
@@ -56,6 +69,22 @@ COVERAGE = ProgramCoverage(
 
 def _semantic(value: int) -> int:
     return (value + 1) & 0xFFFF
+
+
+def _region_verification(exit_target: str) -> RegionVerificationContract:
+    interior = VerificationProjectionContract(
+        "test:region:interior", VerificationRepresentation.SEMANTIC_STATE,
+        "test:semantic/v1", required_fields=("state",),
+    )
+    seam = VerificationProjectionContract(
+        "test:region:exit", VerificationRepresentation.CONTINUATION_SEAM,
+        "test:semantic/v1", required_fields=("continuation",),
+        required_regions=("shared-memory",),
+    )
+    return RegionVerificationContract(
+        "test:region/v1", interior,
+        (RegionExitVerificationContract("complete", exit_target, seam),),
+    )
 
 
 def _provider(identifier: str, carrier: str, level: RecoveryLevel):
@@ -148,14 +177,20 @@ def test_same_authored_body_binds_through_two_carriers() -> None:
     assert interpreted.catalog.implementation("authored:b") is (
         vmless.catalog.implementation("authored:b")
     )
+    interpreted_runtime = SimpleNamespace()
+    vmless_runtime = SimpleNamespace()
     bind_plan_implementations(
-        object(), interpreted, carrier_id=INTERPRETED_CPU_CARRIER
+        interpreted_runtime, interpreted, carrier_id=INTERPRETED_CPU_CARRIER
     )
     bind_plan_implementations(
-        object(), vmless, carrier_id=GENERATED_VMLESS_CARRIER
+        vmless_runtime, vmless, carrier_id=GENERATED_VMLESS_CARRIER
     )
     assert interpreted_activations == [(INTERPRETED_CPU_CARRIER, (B,))]
     assert vmless_activations == [(GENERATED_VMLESS_CARRIER, (B,))]
+    assert interpreted_runtime.execution_plan is interpreted
+    assert interpreted_runtime.execution_carrier_id == INTERPRETED_CPU_CARRIER
+    assert vmless_runtime.execution_plan is vmless
+    assert vmless_runtime.execution_carrier_id == GENERATED_VMLESS_CARRIER
 
 
 def test_larger_provider_collapses_known_hook_boundaries() -> None:
@@ -268,4 +303,150 @@ def test_materialized_plan_contains_final_binding_graph_without_planner(tmp_path
     assert payload["implementations"]["authored:b"]["adapter"] == {
         "digest": "adapter-vmless-v1",
         "id": "authored:b/vmless",
+    }
+
+
+def test_long_lived_region_collapses_contextual_targets_and_materializes_handoffs(
+    tmp_path,
+) -> None:
+    region_id = "region:gameplay"
+    entry_target = "point:start-gameplay"
+    exit_target = "point:return-menu"
+    region_coverage = ProgramCoverage(
+        roots=(ROOT,),
+        reachable=frozenset({ROOT, A, B, region_id, entry_target, exit_target}),
+        unresolved_edges=(f"{A} --call--> {B}",),
+        evidence_identity="test-region-coverage-v1",
+        edges=(
+            ProgramEdge(A, entry_target, "region-entry", "manual"),
+            ProgramEdge(entry_target, region_id, "handoff", "manual"),
+            ProgramEdge(region_id, exit_target, "region-exit", "manual"),
+            ProgramEdge(exit_target, A, "continuation", "manual"),
+        ),
+    )
+    activated = []
+    inner_activations: list[tuple[str, tuple[str, ...]]] = []
+    inner = _authored(inner_activations)
+    contract = ExecutionRegionContract(
+        region_id=region_id,
+        carrier_id=NATIVE_STATE_CARRIER,
+        state_ownership=RegionStateOwnership.SHARED_DOS_MEMORY,
+        entries=(RegionEntryPoint("start", entry_target),),
+        exits=(RegionExitPoint("complete", exit_target),),
+        covered_targets=frozenset({A, B}),
+        replay_boundaries=frozenset({"game-tick"}),
+        state_inputs=("DOS memory",),
+        state_outputs=("DOS memory", "presentation"),
+        verification=_region_verification(exit_target),
+    )
+    island = ImplementationEntry(
+        ImplementationDescriptor(
+            implementation_id="authored:gameplay-region",
+            targets=frozenset({region_id, entry_target, exit_target}),
+            origin=ImplementationOrigin.AUTHORED,
+            category=OverrideCategory.FAITHFUL,
+            recovery_level=RecoveryLevel.AUTHORED_NATIVE,
+            evidence_grade=EvidenceGrade.REPLAY_CORPUS,
+            execution_carrier=NATIVE_STATE_CARRIER,
+            region_id=region_id,
+            region_contract=contract,
+            implementation_digest="authored-gameplay-region-v1",
+        ),
+        region_adapters=(RegionAdapter(
+            "authored:gameplay-region/vmless",
+            GENERATED_VMLESS_CARRIER,
+            NATIVE_STATE_CARRIER,
+            lambda runtime, binding: activated.append((runtime, binding)),
+            "region-adapter-v1",
+        ),),
+    )
+    config = profile_configuration(
+        "development",
+        program_identity=ROOT,
+        provider_preference=("baseline:vmless",),
+        selected_overrides=(
+            inner.descriptor.implementation_id,
+            island.descriptor.implementation_id,
+        ),
+    )
+    config = replace(
+        config,
+        execution_policy=replace(
+            config.execution_policy,
+            minimum_authored_evidence=EvidenceGrade.REPLAY_CORPUS,
+        ),
+    )
+    plan = plan_execution(
+        config,
+        region_coverage,
+        ImplementationCatalog((
+            ImplementationEntry(replace(
+                _provider(
+                    "baseline:vmless", GENERATED_VMLESS_CARRIER,
+                    RecoveryLevel.GENERATED_VMLESS,
+                ).descriptor,
+                targets=region_coverage.reachable,
+            )),
+            inner,
+            island,
+        )),
+    )
+
+    assert len(plan.regions) == 1
+    resolved = plan.regions[0]
+    assert resolved.verification is not None
+    assert resolved.verification.contract_id == "test:region/v1"
+    assert resolved.covered_targets == (A, B)
+    assert {item.target for item in resolved.suppressed_bindings} == {A, B}
+    assert plan.report.unresolved_edges == ()
+    assert plan.report.closure_findings[0].classification is (
+        ClosureFindingKind.REGION_COLLAPSED
+    )
+    runtime = SimpleNamespace()
+    bind_plan_implementations(
+        runtime, plan, carrier_id=GENERATED_VMLESS_CARRIER
+    )
+    assert activated == [(runtime, resolved)]
+    assert inner_activations == []
+
+    class Session:
+        def __init__(self):
+            self.steps = 0
+
+        def advance(self):
+            self.steps += 1
+            return (
+                RegionProgress.yielded("game-tick")
+                if self.steps == 1
+                else RegionProgress.exited("complete")
+            )
+
+    completed = []
+    dispatcher = RegionDispatcher()
+    dispatcher.enter(
+        resolved, "start", Session(), complete=completed.append,
+    )
+    assert dispatcher.advance() == RegionProgress.yielded("game-tick")
+    assert dispatcher.active
+    assert dispatcher.advance() == RegionProgress.exited("complete")
+    assert completed == [RegionExitPoint("complete", exit_target)]
+    assert not dispatcher.active
+
+    dispatcher.enter(
+        resolved, "start", Session(), complete=completed.append,
+    )
+    assert dispatcher.advance() == RegionProgress.yielded("game-tick")
+    dispatcher.reset()
+    assert not dispatcher.active
+    assert dispatcher.active_region_id == ""
+    assert dispatcher.last_region_id == ""
+    assert dispatcher.last_entry_id == ""
+    assert dispatcher.last_exit_id == ""
+
+    payload = load_materialized_plan(
+        write_materialized_plan(plan, tmp_path / "execution_plan.json")
+    )
+    assert payload["regions"][region_id]["adapter"] == {
+        "id": "authored:gameplay-region/vmless",
+        "digest": "region-adapter-v1",
     }

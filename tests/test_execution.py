@@ -9,9 +9,12 @@ from dos_re.execution import (
     BootstrapArtifact,
     BuildImageBootstrapProvider,
     BuildTarget,
+    ClosureFindingKind,
+    ClosurePolicy,
     CompositeBootstrapProvider,
     DependencyCapability,
     ExecutionPlanError,
+    FallbackPolicy,
     ImplementationCatalog,
     ImplementationDescriptor,
     ImplementationEntry,
@@ -250,6 +253,75 @@ def test_detached_accepts_mixed_non_exe_recovery_properties():
     assert plan.report.is_detached_from(DependencyCapability.ORIGINAL_EXE)
     assert plan.report.is_detached_from(DependencyCapability.INTERPRETER)
     assert not plan.report.package_ready  # detachment is not packaging
+
+
+def test_detached_permits_static_uncertainty_without_permitting_fallback():
+    point = "point:dynamic-dispatch-site"
+    uncertain = ProgramCoverage(
+        roots=(ROOT,),
+        reachable=frozenset({ROOT, point}),
+        unresolved_edges=(f"{ROOT} --call_ind--> {point}",),
+        evidence_identity="uncertain-v1",
+    )
+    plan = plan_execution(
+        profile_configuration("detached", program_identity=PROGRAM),
+        uncertain,
+        _catalog(_implementation("generated", (ROOT, point))),
+    )
+    assert plan.configuration.execution_policy.closure is ClosurePolicy.PERMISSIVE
+    assert plan.configuration.execution_policy.fallback is FallbackPolicy.FORBIDDEN
+    assert plan.report.unresolved_edges == uncertain.unresolved_edges
+    assert plan.report.closure_findings[0].classification is (
+        ClosureFindingKind.UNKNOWN_DYNAMIC_TARGET
+    )
+    warning = "\n".join(plan.report.closure_warning_lines())
+    assert "1 strict blocker" in warning
+    assert point not in warning
+    assert point in "\n".join(
+        plan.report.closure_warning_lines(verbose=True)
+    )
+
+
+def test_selected_generated_internal_target_is_not_a_closure_blocker():
+    point = "point:generated-resume"
+    uncertain = ProgramCoverage(
+        roots=(ROOT,),
+        reachable=frozenset({ROOT}),
+        unresolved_edges=(f"{ROOT} --call--> {point}",),
+        evidence_identity="generated-internal-v1",
+    )
+    plan = plan_execution(
+        profile_configuration("detached", program_identity=PROGRAM),
+        uncertain,
+        _catalog(_implementation("generated", (ROOT, point))),
+    )
+    assert plan.report.unresolved_edges == ()
+    assert [item.target for item in plan.bindings] == [ROOT]
+    assert plan.report.closure_findings[0].classification is (
+        ClosureFindingKind.SELECTED_IMPLEMENTATION_OWNED
+    )
+
+
+def test_release_strict_rejects_unknown_dynamic_target_before_startup():
+    point = "point:dynamic-dispatch-site"
+    uncertain = ProgramCoverage(
+        roots=(ROOT,),
+        reachable=frozenset({ROOT, point}),
+        unresolved_edges=(f"{ROOT} --call_ind--> {point}",),
+        evidence_identity="strict-uncertain-v1",
+    )
+    with pytest.raises(ExecutionPlanError) as caught:
+        plan_execution(
+            profile_configuration(
+                "release",
+                program_identity=PROGRAM,
+                build_target=BuildTarget("windows", "zip"),
+            ),
+            uncertain,
+            _catalog(_implementation("generated", (ROOT, point))),
+        )
+    assert caught.value.report.unresolved_edges == uncertain.unresolved_edges
+    assert "unresolved control-flow edges: 1" in str(caught.value)
 
 
 def test_release_rejects_development_only_service():

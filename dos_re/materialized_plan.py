@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from .execution import ExecutionPlan
 
 
-MATERIALIZED_PLAN_SCHEMA = "dos_re.execution-plan/v1"
+MATERIALIZED_PLAN_SCHEMA = "dos_re.execution-plan/v3"
 
 
 def materialized_plan_payload(plan: "ExecutionPlan") -> dict[str, Any]:
@@ -32,6 +32,8 @@ def materialized_plan_payload(plan: "ExecutionPlan") -> dict[str, Any]:
         "program_identity": plan.configuration.program_identity,
         "profile": plan.configuration.profile,
         "product_profile": plan.configuration.product_profile,
+        "closure_policy": plan.configuration.execution_policy.closure.value,
+        "fallback_policy": plan.configuration.execution_policy.fallback.value,
         "execution_carrier": carrier,
         "bootstrap_provider": plan.bootstrap_provider.provider_id,
         "bindings": {
@@ -62,6 +64,31 @@ def materialized_plan_payload(plan: "ExecutionPlan") -> dict[str, Any]:
                 ), None),
             }
             for implementation_id in selected_ids
+        },
+        "regions": {
+            item.region_id: {
+                "implementation": item.implementation_id,
+                "host_carrier": item.host_carrier_id,
+                "region_carrier": item.region_carrier_id,
+                "adapter": {
+                    "id": item.adapter_id,
+                    "digest": item.adapter_digest,
+                },
+                "state_ownership": item.state_ownership.value,
+                "entries": {
+                    entry.entry_id: entry.target for entry in item.entries
+                },
+                "exits": {
+                    exit.exit_id: exit.continuation for exit in item.exits
+                },
+                "covered_targets": list(item.covered_targets),
+                "suppressed_bindings": {
+                    binding.target: binding.implementation_id
+                    for binding in item.suppressed_bindings
+                },
+                "replay_boundaries": list(item.replay_boundaries),
+            }
+            for item in plan.regions
         },
         "features": {
             item.feature_id: {

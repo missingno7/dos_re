@@ -15,7 +15,14 @@ from dos_re.execution import (
     ImplementationOrigin,
     OverrideCategory,
 )
-from dos_re.identity import FunctionIdentity, ImageIdentity, ProgramIdentity, real_mode_address
+from dos_re.identity import (
+    ExecutionPointIdentity,
+    FunctionIdentity,
+    ImageIdentity,
+    ProgramIdentity,
+    RegionIdentity,
+    real_mode_address,
+)
 from dos_re.replay import (
     ContinuationState,
     ReplayExecutionIdentity,
@@ -38,6 +45,38 @@ ORACLE = ReplayExecutionIdentity(
 def function(offset: int) -> str:
     return str(FunctionIdentity(
         IMAGE, "real-mode", real_mode_address(0x1010, offset)))
+
+
+def test_product_coverage_traverses_declared_execution_regions(tmp_path):
+    root = str(RegionIdentity(PROGRAM, "program"))
+    gameplay = str(RegionIdentity(PROGRAM, "gameplay"))
+    entry = str(ExecutionPointIdentity(
+        IMAGE, "real-mode", real_mode_address(0x1010, 0x2317),
+    ))
+    continuation = str(ExecutionPointIdentity(
+        IMAGE, "real-mode", real_mode_address(0x1010, 0x20AD),
+    ))
+    atlas = ExecutionAtlas.create(tmp_path / "atlas", program=PROGRAM)
+    atlas.add_manual_facts(
+        "execution-region-fixture",
+        provenance={"source": "test execution graph"},
+        nodes=(
+            {"id": root, "kind": "region"},
+            {"id": gameplay, "kind": "region"},
+            {"id": entry, "kind": "execution-point"},
+            {"id": continuation, "kind": "execution-point"},
+        ),
+        edges=(
+            {"source": root, "target": entry, "kind": "region-entry"},
+            {"source": entry, "target": gameplay, "kind": "handoff"},
+            {"source": gameplay, "target": continuation, "kind": "region-exit"},
+        ),
+    )
+    atlas.set_product_roots("game", (root,))
+
+    coverage = atlas.coverage_for("game")
+
+    assert {root, entry, gameplay, continuation} <= coverage.reachable
 
 
 def write_ir(path):

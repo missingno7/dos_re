@@ -11,7 +11,7 @@ from .x86 import HaltExecution, UnsupportedInstruction, CF, ZF, IF, TF
 if TYPE_CHECKING:                       # type hints only -- not a runtime import
     from .cpu import CPU8086
 from .memory import EGA_APERTURE, EGA_PLANE_STRIDE, EGA_PLANE_WINDOW
-from .observable import CONSOLE_OUTPUT, PORT_WRITE, SOFTWARE_INTERRUPT
+from .observable import AUDIO_COMMAND, CONSOLE_OUTPUT, PORT_WRITE, SOFTWARE_INTERRUPT
 
 # Which device tracker owns which OUT port (see DOSMachine.port_write, which
 # routes a write to exactly one of them instead of offering it to all four).
@@ -903,8 +903,11 @@ class DOSMachine:
         if sink is not None:
             # Canonical audio effect: register/value, independent of whether a
             # machine backend reached it through two raw OUT instructions or a
-            # native backend emitted the semantic OPL write directly.
-            sink.record(PORT_WRITE, 0x0389, reg, value)
+            # native backend emitted the semantic OPL write directly.  It is
+            # intentionally not a generic port-write claim: a modern audio
+            # backend may reproduce this command stream without emulating OPL
+            # device scratch or bus setup.
+            sink.record(AUDIO_COMMAND, 1, reg, value)
         self.opl_registers[reg] = value
         self._notify_adlib(reg, value)
         if reg == 0x04:

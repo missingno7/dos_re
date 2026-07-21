@@ -153,6 +153,25 @@ def test_streamed_machine_point_digest_matches_materialized_projection(tmp_path)
     assert streamed == reference
 
 
+def test_replay_continuation_preserves_bounded_port_log_capacity(tmp_path):
+    _write_min_snapshot(tmp_path, steps=123)
+    rt = load_snapshot_headless(tmp_path, game_root=tmp_path)
+    rt.dos.port_log = [
+        ("out", 0x388, index & 0xFF, 8) for index in range(4096)
+    ]
+    expected_tail = rt.dos.port_log[-128:]
+    state = capture_runtime_continuation(rt, event_cursor=0)
+
+    rt.dos.port_log = []
+    apply_runtime_continuation(rt, state)
+
+    assert len(rt.dos.port_log) == 4096
+    assert rt.dos.port_log[-128:] == expected_tail
+    rt.dos.port_write(rt.cpu, 0x388, 0xFE, 8)
+    assert len(rt.dos.port_log) == 4096
+    assert rt.dos.port_log[-128:] == expected_tail
+
+
 def test_replay_continuation_detaches_host_save_directory(tmp_path):
     _write_min_snapshot(tmp_path, steps=123)
     rt = load_snapshot_headless(tmp_path, game_root=tmp_path)

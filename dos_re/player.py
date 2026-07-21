@@ -22,12 +22,14 @@ import functools
 import hashlib
 import inspect
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 from dos_re.dos import ConsoleInputWouldBlock
 from dos_re.execution import (
     BootstrapArtifact,
+    ClosurePolicy,
     DependencyCapability,
     ExeBootstrapProvider,
     ExecutionConfiguration,
@@ -58,6 +60,7 @@ from dos_re.replay_input import (
     scan_payload,
 )
 from dos_re.keyboard import KeyDispatcher, scancode_table
+from dos_re.runtime_miss import RuntimeExecutionFrontier
 from dos_re.x86 import HaltExecution, UnsupportedInstruction
 # The EXE loader is imported lazily inside default frontend methods. A detached
 # frontend can therefore construct its selected runtime without importing the
@@ -72,6 +75,7 @@ from dos_re.replay import (
     ReplayPointCoordinate,
     ReplayRecording,
     bisect_divergence,
+    projection_contract_diagnostics,
     verify_checkpointed,
     verify_interval,
 )
@@ -163,6 +167,7 @@ class _RealReplayPlayback:
         self, artifact: ReplayArtifact, profile: ReplayExecutionIdentity,
     ):
         self.artifact = artifact
+        self.capture_profile = profile
         self.profile = profile
         self.adapter = RealModeInputAdapter(artifact.events)
         meta = artifact.metadata
@@ -172,11 +177,11 @@ class _RealReplayPlayback:
     @classmethod
     def open(cls, path: str | Path):
         artifact = ReplayArtifact.open(path)
-        profile_id = str(artifact.metadata["recording_profile_id"])
-        profiles = {profile.profile_id: profile for profile, _ in artifact.profiles()}
-        if profile_id not in profiles:
-            raise ValueError(f"recording profile is absent from artifact: {profile_id!r}")
-        return cls(artifact, profiles[profile_id])
+        return cls(artifact, artifact.capture_profile())
+
+    def select_profile(self, profile: ReplayExecutionIdentity) -> None:
+        """Select the profile-local base/cache used by this playback run."""
+        self.profile = profile
 
     @property
     def events(self):
@@ -408,17 +413,45 @@ class GameFrontend:
 
     def resolve_execution_plan(self, args: argparse.Namespace) -> ExecutionPlan:
         """Resolve before boot so strict profiles cannot touch forbidden runtime."""
+        configuration = self.execution_configuration(args)
+        requested_closure = getattr(args, "closure_policy", None)
+        if requested_closure is not None:
+            closure = ClosurePolicy(requested_closure)
+            if args.profile == "release" and closure is not ClosurePolicy.STRICT:
+                raise ValueError(
+                    "the release profile requires strict static closure"
+                )
+            configuration = replace(
+                configuration,
+                execution_policy=replace(
+                    configuration.execution_policy,
+                    closure=closure,
+                ),
+            )
         return plan_execution(
-            self.execution_configuration(args),
+            configuration,
             self.execution_coverage(args),
             self.execution_implementations(args),
             self.execution_services(args),
             self.execution_features(args),
         )
 
+    def format_execution_plan(
+        self, args: argparse.Namespace, plan: ExecutionPlan,
+    ) -> str:
+        """Render the standard plan report.
+
+        A game may append product-role diagnostics, but this method must only
+        describe the already materialized plan.  It is not another selection
+        or fallback hook.
+        """
+        return format_execution_plan(
+            plan, verbose=bool(getattr(args, "verbose_plan", False)),
+        )
+
     def launch(self, args: argparse.Namespace, plan: ExecutionPlan) -> int:
         """Run the selected plan through this frontend's execution driver."""
-        return _launch_real_mode(self, args)
+        return launch_real_mode(self, args)
 
     def verification_drivers(
         self,
@@ -601,6 +634,11 @@ class GameFrontend:
         digest = hashlib.sha256(repr(topology).encode("utf-8")).hexdigest()
         return f"dos-re-real-mode-devices-v2:{digest}"
 
+    def replay_projection_schema(self, args: argparse.Namespace, rt) -> str:
+        """Canonical comparison schema selected by this frontend adapter."""
+        del args, rt
+        return "dos-re-complete-machine-v1"
+
     def replay_profile(
         self, args: argparse.Namespace, rt,
     ) -> ReplayExecutionIdentity:
@@ -624,7 +662,7 @@ class GameFrontend:
         runtime = _runtime_identity()
         devices = self.replay_device_identity(args, rt)
         continuation_schema = "dos-re-real-mode-continuation-v1"
-        projection_schema = "dos-re-complete-machine-v1"
+        projection_schema = self.replay_projection_schema(args, rt)
         key = hashlib.sha256(
             repr((
                 mode,
@@ -653,6 +691,41 @@ class GameFrontend:
 
     def apply_replay_state(self, rt, state) -> None:
         apply_runtime_continuation(rt, state)
+
+    def materialize_replay_profile_base(
+        self,
+        args: argparse.Namespace,
+        rt,
+        artifact: ReplayArtifact,
+        *,
+        source_profile: ReplayExecutionIdentity,
+        requested_profile: ReplayExecutionIdentity,
+        source_state,
+    ):
+        """Materialize point zero for a new profile-local continuation cache.
+
+        The immutable event stream and semantic timeline are portable across
+        behavior-preserving compositions.  Continuation state is not.  The
+        default adapter permits a successor implementation/runtime to reuse a
+        base only when its executable image, device topology, and continuation
+        schema are identical.  A project that can safely translate a base
+        between carriers or device selections must override this method and
+        return a complete state for ``requested_profile``; snapshot validation
+        remains strict after that state is registered in its own namespace.
+        """
+        del args, rt, artifact
+        protected = ("image", "devices", "continuation_schema")
+        differences = tuple(
+            field for field in protected
+            if getattr(source_profile, field) != getattr(requested_profile, field)
+        )
+        if differences:
+            raise ReplayError(
+                "replay event stream is portable, but no compatible base can "
+                f"be materialized for profile {requested_profile.profile_id!r}; "
+                "the capture base differs in " + ", ".join(differences)
+            )
+        return source_state
 
     # --- presentation ------------------------------------------------------------
 
@@ -700,6 +773,18 @@ def build_arg_parser(frontend: GameFrontend,
         "--plan-only",
         action="store_true",
         help="resolve and print the execution/detachment plan without booting",
+    )
+    mode.add_argument(
+        "--closure-policy",
+        choices=tuple(item.value for item in ClosurePolicy),
+        default=None,
+        help="override static closure handling; detached defaults to permissive "
+             "and release is always strict",
+    )
+    mode.add_argument(
+        "--verbose-plan",
+        action="store_true",
+        help="print complete static-frontier details instead of summaries",
     )
     mode.add_argument("--headless", action="store_true",
                       help="skip the live pygame viewer (default: viewer on)")
@@ -818,6 +903,22 @@ def _diagnostic_lines(rt) -> list[str]:
     compact DOS memory-allocator summary, and open file handles (useful when
     the failure is mid asset-load). "program halted" alone hides all of this."""
     lines = []
+    plan = getattr(rt, "execution_plan", None)
+    if plan is not None:
+        lines.append(
+            "execution: carrier="
+            f"{getattr(rt, 'execution_carrier_id', plan.report.execution_carrier)} "
+            f"plan={plan.plan_digest[:12]}"
+        )
+    dispatcher = getattr(rt, "execution_regions", None)
+    if dispatcher is not None and dispatcher.last_region_id:
+        active = dispatcher.active_region_id or "none"
+        last_exit = dispatcher.last_exit_id or "none"
+        lines.append(
+            f"execution region: active={active} "
+            f"last={dispatcher.last_region_id} "
+            f"entry={dispatcher.last_entry_id or 'none'} exit={last_exit}"
+        )
     dos = getattr(rt, "dos", None)
     if dos is None:
         return lines
@@ -856,6 +957,28 @@ def _step_frame(
     saves a resumable gap snapshot — not just unhandled exceptions. A bare
     "program halted"/"unsupported instruction" with no further context meant
     the only way to diagnose it was to reproduce it by hand from scratch."""
+    coordinate_value = (
+        replay_coordinate.value if replay_coordinate is not None else None
+    )
+    event_cursor = (
+        coordinate_value.get("event_cursor")
+        if isinstance(coordinate_value, dict) else None
+    )
+    timeline_position = (
+        coordinate_value.get("timeline_position", frame + 1)
+        if isinstance(coordinate_value, dict) else frame + 1
+    )
+    rt._dos_re_replay_context = {
+        "artifact": getattr(args, "play_replay", None),
+        "recording": getattr(args, "record_replay", None),
+        "replay_cursor": event_cursor,
+        "semantic_timeline_position": timeline_position,
+        "last_completed_boundary": frame,
+        "current_partially_executed_boundary": frame + 1,
+        "coordinate_schema": (
+            None if replay_coordinate is None else replay_coordinate.schema_id
+        ),
+    }
     try:
         if replay_coordinate is None:
             frontend.advance_frame(rt, args, frame)
@@ -863,6 +986,10 @@ def _step_frame(
             frontend.advance_replay_frame(
                 rt, args, frame, replay_coordinate)
     except ConsoleInputWouldBlock:
+        rt._dos_re_replay_context.update({
+            "last_completed_boundary": frame + 1,
+            "current_partially_executed_boundary": None,
+        })
         return "waiting for DOS key", True
     except HaltExecution:
         status = "program halted"
@@ -876,6 +1003,22 @@ def _step_frame(
             print(f"  {line}")
         _save_gap_snapshot(frontend, rt, status=status)
         return status, False
+    except RuntimeExecutionFrontier as exc:
+        import traceback
+        traceback.print_exc()
+        status = f"exception: {type(exc).__name__}: {exc}"
+        for line in _diagnostic_lines(rt):
+            print(f"  {line}")
+        if not getattr(rt, "_dos_re_last_recovery_frontier", None):
+            from dos_re.crash import save_recovery_frontier
+            out = _timestamp_dir(
+                frontend.artifacts_dir,
+                f"recovery_frontier_{frontend.name}",
+            )
+            save_recovery_frontier(rt, out, exc=exc)
+            rt._dos_re_last_recovery_frontier = str(out)
+            print(f"recovery frontier saved: {out}")
+        return status, False
     except Exception as exc:  # noqa: BLE001 — keep bring-up useful
         import traceback
         traceback.print_exc()
@@ -884,6 +1027,10 @@ def _step_frame(
             print(f"  {line}")
         _save_gap_snapshot(frontend, rt, status=status)
         return status, False
+    rt._dos_re_replay_context.update({
+        "last_completed_boundary": frame + 1,
+        "current_partially_executed_boundary": None,
+    })
     return None, True
 
 
@@ -1222,40 +1369,118 @@ def run_view(frontend: GameFrontend, rt, args,
     return _exit_report(rt, status=status, frames=frame_box["n"])
 
 
-def _launch_real_mode(frontend: GameFrontend, args: argparse.Namespace) -> int:
+def launch_real_mode(
+    frontend: GameFrontend,
+    args: argparse.Namespace,
+    *,
+    create_runtime=None,
+    load_snapshot_runtime=None,
+    bind_execution_plan=None,
+) -> int:
+    """Run one real-mode carrier through the canonical player lifecycle.
+
+    A selected carrier may provide its own runtime constructor and plan binder,
+    but it must not bypass this lifecycle.  Replay metadata is applied before
+    construction, the recording base is restored before execution, and viewer
+    versus headless dispatch remains owned here for every carrier.
+    """
+    create = create_runtime or frontend.create_runtime
+    load_snapshot = load_snapshot_runtime or frontend.load_snapshot_runtime
+    bind = bind_execution_plan or (
+        lambda runtime: frontend.bind_execution_plan(
+            runtime, args.execution_plan,
+        )
+    )
     if args.play_replay:
         playback = _RealReplayPlayback.open(args.play_replay)
         frontend.apply_replay_metadata(args, playback.artifact.metadata)
-        rt = frontend.create_runtime(args)
-        base = playback.artifact.restore(
-            playback.profile, ReplayPoint(0, playback.artifact.timeline_id))
-        frontend.apply_replay_state(rt, base)
-        frontend.bind_execution_plan(rt, args.execution_plan)
-        playback.adapter.seek(base.event_cursor)
+        rt = create(args)
+        bind(rt)
         current = frontend.replay_profile(args, rt)
-        for field in ("image", "runtime", "devices", "continuation_schema"):
-            if getattr(current, field) != getattr(playback.profile, field):
-                raise ValueError(
-                    f"replay {field} identity differs from the recorded base")
-        registered = {profile.profile_id for profile, _ in playback.artifact.profiles()}
-        if current.profile_id not in registered:
+        point_zero = ReplayPoint(0, playback.artifact.timeline_id)
+        registered = {
+            profile.profile_id: profile
+            for profile, _ in playback.artifact.profiles()
+        }
+        exact = registered.get(current.profile_id)
+        if exact is not None:
+            playback.artifact.require_profile(current)
+            base = playback.artifact.restore(current, point_zero)
+            base_status = "exact profile-local base"
+            rejected_reason = "none"
+        else:
+            source = playback.capture_profile
+            source_base = playback.artifact.restore(source, point_zero)
+            changed = tuple(
+                field for field in (
+                    "role", "implementation", "runtime", "devices",
+                    "continuation_schema", "projection_schema",
+                )
+                if getattr(source, field) != getattr(current, field)
+            )
+            rejected_reason = (
+                "capture cache belongs to another execution profile"
+                + (f" ({', '.join(changed)})" if changed else "")
+            )
+            base = frontend.materialize_replay_profile_base(
+                args,
+                rt,
+                playback.artifact,
+                source_profile=source,
+                requested_profile=current,
+                source_state=source_base,
+            )
             playback.artifact.register_profile(
                 current,
-                base_point=ReplayPoint(0, playback.artifact.timeline_id),
+                base_point=point_zero,
                 base_state=base,
             )
-        else:
-            playback.artifact.require_profile(current)
+            base_status = (
+                "materialized profile-local base from capture point zero"
+            )
+        frontend.apply_replay_state(rt, base)
+        playback.select_profile(current)
+        playback.adapter.seek(base.event_cursor)
+        coordinate = playback.artifact.timeline_coordinate(point_zero)
+        print("replay selection:")
+        print(
+            f"  recording profile: {playback.capture_profile.profile_id} "
+            f"({playback.capture_profile.role})"
+        )
+        print(
+            f"  requested playback profile: {current.profile_id} "
+            f"({current.role})"
+        )
+        print(
+            "  composition: "
+            f"{getattr(args, 'composition', 'default')}"
+        )
+        print(f"  selected base: {base_status}")
+        print(f"  rejected cache: {rejected_reason}")
+        print(
+            "  device identity: "
+            f"capture={playback.capture_profile.devices} "
+            f"requested={current.devices}"
+        )
+        print(
+            "  composition identity: "
+            f"capture={playback.capture_profile.implementation[:12]} "
+            f"requested={current.implementation[:12]}"
+        )
+        print(
+            "  timeline authority: "
+            f"{playback.artifact.timeline_id} / {coordinate.schema_id}"
+        )
         rt.dos.console_input_fallback = None
         if args.headless:
             return run_replay_headless(frontend, rt, args, playback)
         return run_view(frontend, rt, args, playback=playback)
 
     if args.snapshot:
-        rt = frontend.load_snapshot_runtime(args, args.snapshot)
+        rt = load_snapshot(args, args.snapshot)
     else:
-        rt = frontend.create_runtime(args)
-    frontend.bind_execution_plan(rt, args.execution_plan)
+        rt = create(args)
+    bind(rt)
     rt.dos.console_input_fallback = None
     if args.headless:
         return run_headless(frontend, rt, args)
@@ -1278,6 +1503,20 @@ def _run_differential_verification(
     start = ReplayPoint(args.verify_start, artifact.timeline_id)
     end = ReplayPoint(args.verify_end, artifact.timeline_id)
     oracle, candidate = frontend.verification_drivers(args, plan, artifact)
+
+    def report_endpoint_projection() -> None:
+        """Report the contract actually selected at the compared endpoint."""
+        left = getattr(oracle, "verification_projection_contract", None)
+        right = getattr(candidate, "verification_projection_contract", None)
+        left = left() if callable(left) else left
+        right = right() if callable(right) else right
+        if left is not None or right is not None:
+            if left != right:
+                print("verification projection: oracle/candidate contract mismatch")
+            elif left is not None:
+                print("verification endpoint projection:")
+                for line in projection_contract_diagnostics(left):
+                    print("  " + line)
     if args.bisect:
         points = tuple(
             ReplayPoint(ordinal, artifact.timeline_id)
@@ -1285,6 +1524,7 @@ def _run_differential_verification(
         )
         found = bisect_divergence(artifact, oracle, candidate, points)
         if found is None:
+            report_endpoint_projection()
             print(f"EQUIVALENT {start.ordinal}..{end.ordinal}")
             return 0
         before, after, result = found
@@ -1303,6 +1543,7 @@ def _run_differential_verification(
             "semantic+observable" if checked.observable_effects
             else "semantic-boundaries")
         if result.equivalent:
+            report_endpoint_projection()
             print(
                 f"EQUIVALENT {start.ordinal}..{end.ordinal} "
                 f"{result.comparison.oracle_digest} "
@@ -1320,12 +1561,14 @@ def _run_differential_verification(
     else:
         result = verify_interval(artifact, oracle, candidate, start, end)
         if result.equivalent:
+            report_endpoint_projection()
             print(
                 f"EQUIVALENT {start.ordinal}..{end.ordinal} "
                 f"{result.comparison.oracle_digest}"
             )
             return 0
         print(f"DIVERGENT {start.ordinal}..{end.ordinal}")
+    report_endpoint_projection()
     for difference in result.comparison.differences:
         print("  " + difference)
     return 1
@@ -1335,14 +1578,32 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
          description: str | None = None) -> int:
     """Resolve one canonical execution plan, then dispatch its frontend driver."""
     args = build_arg_parser(frontend, description).parse_args(argv)
+    if args.play_replay:
+        # Replay metadata can affect device topology, pacing and product
+        # configuration.  Restore it before planning or selecting a carrier so
+        # every launch path resolves the plan for the state it will replay.
+        artifact = ReplayArtifact.open(args.play_replay)
+        frontend.apply_replay_metadata(args, artifact.metadata)
     try:
         args.execution_plan = frontend.resolve_execution_plan(args)
     except (ExecutionPlanError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if args.plan_only:
-        print(format_execution_plan(args.execution_plan))
+        print(frontend.format_execution_plan(args, args.execution_plan))
         return 0
+    if args.profile == "detached":
+        warnings = args.execution_plan.report.closure_warning_lines(
+            verbose=args.verbose_plan,
+        )
+        if warnings:
+            print(
+                "warning: detached execution has static closure uncertainty; "
+                "runtime fallback remains forbidden",
+                file=sys.stderr,
+            )
+            for warning in warnings:
+                print(f"  - {warning}", file=sys.stderr)
     if args.execution_plan.configuration.verification_policy.mode == "differential":
         return _run_differential_verification(
             frontend, args, args.execution_plan

@@ -15,6 +15,13 @@ import json
 from pathlib import Path
 from typing import Callable, Iterable, Protocol
 
+from .verification_contract import (
+    RegionExitVerificationContract,
+    RegionVerificationContract,
+    VerificationProjectionContract,
+    VerificationRepresentation,
+    region_verification_payload,
+)
 
 class Requirement(str, Enum):
     """Whether an execution dependency is required, permitted, or forbidden."""
@@ -62,6 +69,21 @@ class CapabilityPolicy:
 class DynamicLoading(str, Enum):
     ALLOWED = "allowed"
     DECLARED_ONLY = "declared-only"
+    FORBIDDEN = "forbidden"
+
+
+class ClosurePolicy(str, Enum):
+    """How static uncertainty affects an otherwise executable plan."""
+
+    PERMISSIVE = "permissive"
+    OBSERVED = "observed"
+    STRICT = "strict"
+
+
+class FallbackPolicy(str, Enum):
+    """Whether execution may leave the selected implementation graph."""
+
+    ALLOWED = "allowed"
     FORBIDDEN = "forbidden"
 
 
@@ -119,6 +141,87 @@ class ImplementationContract:
     preservation: tuple[str, ...] = ()
 
 
+class RegionStateOwnership(str, Enum):
+    """Where authoritative state lives while an execution island is active."""
+
+    SHARED_DOS_MEMORY = "shared-dos-memory"
+    NATIVE_STATE = "native-state"
+    IMPORTED_NATIVE_STATE = "imported-native-state"
+
+
+@dataclass(frozen=True)
+class RegionEntryPoint:
+    """A stable original-program point which may enter an execution island."""
+
+    entry_id: str
+    target: str
+
+    def __post_init__(self) -> None:
+        if not self.entry_id or not self.target:
+            raise ValueError("region entry ID and target must not be empty")
+
+
+@dataclass(frozen=True)
+class RegionExitPoint:
+    """One named island outcome and its surrounding-program continuation."""
+
+    exit_id: str
+    continuation: str
+
+    def __post_init__(self) -> None:
+        if not self.exit_id or not self.continuation:
+            raise ValueError("region exit ID and continuation must not be empty")
+
+
+@dataclass(frozen=True)
+class ExecutionRegionContract:
+    """Long-lived ownership contract for a replaceable execution region.
+
+    ``covered_targets`` are contextual: their ordinary plan bindings remain
+    valid for calls made outside the island, but are dormant while this region
+    owns control.  This is what lets a large island collapse its internal hook
+    seams without incorrectly claiming every invocation of a shared function.
+    """
+
+    region_id: str
+    carrier_id: str
+    state_ownership: RegionStateOwnership
+    entries: tuple[RegionEntryPoint, ...]
+    exits: tuple[RegionExitPoint, ...]
+    covered_targets: frozenset[str] = frozenset()
+    replay_boundaries: frozenset[str] = frozenset()
+    state_inputs: tuple[str, ...] = ()
+    state_outputs: tuple[str, ...] = ()
+    verification: RegionVerificationContract | None = None
+
+    def __post_init__(self) -> None:
+        if not self.region_id or not self.carrier_id:
+            raise ValueError("region and carrier IDs must not be empty")
+        if not self.entries:
+            raise ValueError("execution regions require at least one entry")
+        if not self.exits:
+            raise ValueError("execution regions require at least one exit")
+        entry_ids = [item.entry_id for item in self.entries]
+        entry_targets = [item.target for item in self.entries]
+        exit_ids = [item.exit_id for item in self.exits]
+        if len(set(entry_ids)) != len(entry_ids):
+            raise ValueError("region entry IDs must be unique")
+        if len(set(entry_targets)) != len(entry_targets):
+            raise ValueError("region entry targets must be unique")
+        if len(set(exit_ids)) != len(exit_ids):
+            raise ValueError("region exit IDs must be unique")
+        if self.verification is not None:
+            declared = {item.exit_id: item.continuation for item in self.exits}
+            verified = {
+                item.exit_id: item.continuation
+                for item in self.verification.exits
+            }
+            if declared != verified:
+                raise ValueError(
+                    "region verification exits must exactly match region exits"
+                )
+
+
 class FeatureCategory(str, Enum):
     PRESENTATION = "presentation"
     BEHAVIORAL = "behavioral"
@@ -129,7 +232,8 @@ class FeatureCategory(str, Enum):
 class ExecutionPolicy:
     capabilities: tuple[CapabilityPolicy, ...] = ()
     dynamic_loading: DynamicLoading = DynamicLoading.ALLOWED
-    strict_coverage: bool = False
+    closure: ClosurePolicy = ClosurePolicy.PERMISSIVE
+    fallback: FallbackPolicy = FallbackPolicy.ALLOWED
     minimum_authored_evidence: EvidenceGrade = EvidenceGrade.NONE
 
     def __post_init__(self) -> None:
@@ -342,6 +446,30 @@ class ProgramEdge:
     evidence: str = ""
 
 
+class ClosureFindingKind(str, Enum):
+    """Resolved-plan interpretation of one uncertain Atlas transfer."""
+
+    REGION_COLLAPSED = "covered by selected native regions"
+    SELECTED_IMPLEMENTATION_OWNED = "owned by one selected implementation"
+    SELECTED_TARGET_AVAILABLE = (
+        "target available through a selected implementation"
+    )
+    UNKNOWN_DYNAMIC_TARGET = "unknown indirect targets"
+    PROBABLE_GAP = "probable genuine gaps"
+
+
+@dataclass(frozen=True)
+class ClosureFinding:
+    edge: str
+    source: str
+    target: str
+    kind: str
+    classification: ClosureFindingKind
+    blocking: bool
+    implementation_id: str = ""
+    region_id: str = ""
+
+
 @dataclass(frozen=True)
 class ImplementationDescriptor:
     implementation_id: str
@@ -360,6 +488,7 @@ class ImplementationDescriptor:
     execution_carrier: str = ""
     implementation_digest: str = ""
     region_id: str | None = None
+    region_contract: ExecutionRegionContract | None = None
 
     def __post_init__(self) -> None:
         if not self.implementation_id:
@@ -379,6 +508,34 @@ class ImplementationDescriptor:
                 "only region/program providers declare an execution carrier; "
                 "function implementations use carrier adapters"
             )
+        if self.region_contract is not None:
+            if self.region_id != self.region_contract.region_id:
+                raise ValueError(
+                    "implementation region ID must match its region contract"
+                )
+            if self.execution_carrier != self.region_contract.carrier_id:
+                raise ValueError(
+                    "implementation carrier must match its region contract"
+                )
+            attachment_targets = {
+                item.target for item in self.region_contract.entries
+            } | {
+                item.continuation for item in self.region_contract.exits
+            } | {self.region_contract.region_id}
+            if not attachment_targets <= self.targets:
+                raise ValueError(
+                    "region implementations must target their region, entries, "
+                    "and continuations"
+                )
+            if (
+                self.origin is ImplementationOrigin.AUTHORED
+                and self.category is OverrideCategory.FAITHFUL
+                and self.region_contract.verification is None
+            ):
+                raise ValueError(
+                    "faithful authored execution regions require an explicit "
+                    "verification contract"
+                )
         if self.category is OverrideCategory.INSTRUMENTATION \
                 and DependencyCapability.INSTRUMENTATION.value \
                 not in self.required_capabilities:
@@ -483,6 +640,25 @@ class BackendAdapter:
             raise ValueError("adapter digest must not be empty")
 
 
+@dataclass(frozen=True)
+class RegionAdapter:
+    """Bridge from a surrounding carrier into one long-lived region carrier."""
+
+    adapter_id: str
+    host_carrier_id: str
+    region_carrier_id: str
+    activate: Callable[[object, "ResolvedExecutionRegion"], None]
+    adapter_digest: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.adapter_id:
+            raise ValueError("region adapter ID must not be empty")
+        if not self.host_carrier_id or not self.region_carrier_id:
+            raise ValueError("region adapter carriers must not be empty")
+        if not self.adapter_digest:
+            raise ValueError("region adapter digest must not be empty")
+
+
 # Carrier IDs describe calling/state mechanics at the activation seam, not a
 # whole-game recovery level.
 INTERPRETED_CPU_CARRIER = "interpreted-cpu"
@@ -497,6 +673,7 @@ class ImplementationEntry:
     descriptor: ImplementationDescriptor
     implementation: Callable | None = None
     adapters: tuple[BackendAdapter, ...] = ()
+    region_adapters: tuple[RegionAdapter, ...] = ()
 
     def __post_init__(self) -> None:
         carrier_ids = [adapter.carrier_id for adapter in self.adapters]
@@ -507,6 +684,24 @@ class ImplementationEntry:
                 "more than one adapter for the same carrier")
         if len(set(adapter_ids)) != len(adapter_ids):
             raise ValueError("adapter IDs must be unique per implementation")
+        region_hosts = [adapter.host_carrier_id for adapter in self.region_adapters]
+        region_adapter_ids = [adapter.adapter_id for adapter in self.region_adapters]
+        if len(set(region_hosts)) != len(region_hosts):
+            raise ValueError(
+                "implementation has more than one region adapter for a host carrier"
+            )
+        if len(set(region_adapter_ids)) != len(region_adapter_ids):
+            raise ValueError("region adapter IDs must be unique per implementation")
+        contract = self.descriptor.region_contract
+        if self.region_adapters and contract is None:
+            raise ValueError("region adapters require an execution region contract")
+        if contract is not None and any(
+            adapter.region_carrier_id != contract.carrier_id
+            for adapter in self.region_adapters
+        ):
+            raise ValueError(
+                "region adapter carrier must match the execution region contract"
+            )
 
 
 @dataclass(frozen=True)
@@ -549,8 +744,49 @@ def bind_plan_implementations(
     per-target adapter here.  A selected function implementation without a
     bridge for ``carrier_id`` is a configuration error, never a silent fallback.
     """
+    previous_plan = getattr(runtime, "execution_plan", None)
+    previous_carrier = getattr(runtime, "execution_carrier_id", None)
+    if previous_plan is not None and previous_plan.plan_digest != plan.plan_digest:
+        raise RuntimeError(
+            "runtime is already bound to a different execution plan: "
+            f"{previous_plan.plan_digest[:12]} != {plan.plan_digest[:12]}"
+        )
+    if previous_carrier is not None and previous_carrier != carrier_id:
+        raise RuntimeError(
+            "runtime is already bound to a different execution carrier: "
+            f"{previous_carrier!r} != {carrier_id!r}"
+        )
+    runtime.execution_plan = plan
+    runtime.execution_carrier_id = carrier_id
+    if plan.configuration.execution_policy.fallback is FallbackPolicy.FORBIDDEN:
+        cpu = getattr(runtime, "cpu", None)
+        if cpu is not None and hasattr(cpu, "interp_forbidden"):
+            cpu.interp_forbidden = True
+            cpu.interp_frontier = None
+
+    for region in plan.regions:
+        entry = plan.catalog.entry(region.implementation_id)
+        adapter = next((
+            item for item in entry.region_adapters
+            if item.host_carrier_id == carrier_id
+            and item.adapter_id == region.adapter_id
+        ), None)
+        if adapter is None:
+            raise RuntimeError(
+                f"selected region {region.region_id!r} has no planned adapter "
+                f"for carrier {carrier_id!r}"
+            )
+        adapter.activate(runtime, region)
+
+    suppressed_bindings = {
+        (binding.target, binding.implementation_id)
+        for region in plan.regions
+        for binding in region.suppressed_bindings
+    }
     targets_by_implementation: dict[str, list[str]] = {}
     for binding in plan.bindings:
+        if (binding.target, binding.implementation_id) in suppressed_bindings:
+            continue
         targets_by_implementation.setdefault(binding.implementation_id, []).append(
             binding.target
         )
@@ -612,6 +848,25 @@ class RuntimeServiceCatalog:
 class PlanBinding:
     target: str
     implementation_id: str
+
+
+@dataclass(frozen=True)
+class ResolvedExecutionRegion:
+    """One selected island and the exact handoff bridge chosen by the planner."""
+
+    region_id: str
+    implementation_id: str
+    host_carrier_id: str
+    region_carrier_id: str
+    adapter_id: str
+    adapter_digest: str
+    state_ownership: RegionStateOwnership
+    entries: tuple[RegionEntryPoint, ...]
+    exits: tuple[RegionExitPoint, ...]
+    covered_targets: tuple[str, ...]
+    suppressed_bindings: tuple[PlanBinding, ...]
+    replay_boundaries: tuple[str, ...]
+    verification: RegionVerificationContract | None = None
 
 
 @dataclass(frozen=True)
@@ -684,6 +939,9 @@ class DetachmentReport:
     region_replacement_coverage: tuple[str, ...]
     unresolved: tuple[str, ...]
     unresolved_edges: tuple[str, ...]
+    closure_findings: tuple[ClosureFinding, ...]
+    closure_policy: ClosurePolicy
+    fallback_policy: FallbackPolicy
     required_services: tuple[str, ...]
     missing_services: tuple[str, ...]
     required_assets: tuple[str, ...]
@@ -705,6 +963,7 @@ class DetachmentReport:
     missing_bootstrap_artifacts: tuple[str, ...]
     bootstrap_profile_valid: bool
     enabled_features: tuple[str, ...]
+    selected_regions: tuple[ResolvedExecutionRegion, ...]
     package_ready: bool
 
     def requires(self, capability: str | DependencyCapability) -> bool:
@@ -717,12 +976,49 @@ class DetachmentReport:
                 return item.detached
         return name not in self.required_capabilities
 
-    def failure_lines(self) -> tuple[str, ...]:
+    def closure_counts(self) -> tuple[tuple[ClosureFindingKind, int], ...]:
+        counts = {
+            kind: sum(
+                item.classification is kind for item in self.closure_findings
+            )
+            for kind in ClosureFindingKind
+        }
+        return tuple((kind, count) for kind, count in counts.items() if count)
+
+    def closure_warning_lines(self, *, verbose: bool = False) -> tuple[str, ...]:
+        if not self.closure_findings:
+            return ()
+        lines = [
+            f"Atlas static frontier edges: {len(self.closure_findings)} "
+            f"({len(self.unresolved_edges)} strict blocker(s))"
+        ]
+        lines.extend(
+            f"{kind.value}: {count}"
+            for kind, count in self.closure_counts()
+        )
+        if verbose:
+            lines.extend(
+                f"[{item.classification.name.lower()}] {item.edge}"
+                for item in self.closure_findings
+            )
+        else:
+            lines.append("use --verbose-plan to list every frontier edge")
+        return tuple(lines)
+
+    def failure_lines(self, *, verbose: bool = False) -> tuple[str, ...]:
         lines: list[str] = []
         if self.unresolved:
             lines.append("unresolved implementations: " + ", ".join(self.unresolved))
         if self.unresolved_edges:
-            lines.append("unresolved control-flow edges: " + ", ".join(self.unresolved_edges))
+            lines.append(
+                f"unresolved control-flow edges: {len(self.unresolved_edges)} "
+                "strict closure blocker(s)"
+            )
+            if verbose:
+                lines.extend(
+                    "unresolved edge: " + item
+                    for item in self.unresolved_edges
+                )
         if self.missing_services:
             lines.append("missing runtime services: " + ", ".join(self.missing_services))
         if self.packaging_incompatible:
@@ -774,6 +1070,7 @@ class ExecutionPlan:
     bindings: tuple[PlanBinding, ...]
     implementations: tuple[ImplementationDescriptor, ...]
     features: tuple[FeatureDescriptor, ...]
+    regions: tuple[ResolvedExecutionRegion, ...]
     catalog: ImplementationCatalog
     services: tuple[RuntimeServiceDescriptor, ...]
     report: DetachmentReport
@@ -841,7 +1138,9 @@ class RuntimeCapabilityViolation(RuntimeError):
         )
 
 
-def format_execution_plan(plan: ExecutionPlan) -> str:
+def format_execution_plan(
+    plan: ExecutionPlan, *, verbose: bool = False,
+) -> str:
     """Stable, concise human report for ``play.py --plan-only`` and CI logs."""
     report = plan.report
     binding_counts: dict[str, int] = {}
@@ -855,6 +1154,8 @@ def format_execution_plan(plan: ExecutionPlan) -> str:
         f"plan digest: {plan.plan_digest}",
         f"bootstrap provider: {report.bootstrap_provider_id} ({report.bootstrap_kind})",
         f"execution carrier: {report.execution_carrier or 'unspecified'}",
+        f"closure policy: {report.closure_policy.value}",
+        f"fallback policy: {report.fallback_policy.value}",
         f"reachable identities: {len(report.reachable)}",
         f"bound identities: {len(report.bindings)}",
         f"active implementation boundaries: {len(report.active_boundaries)}",
@@ -866,6 +1167,12 @@ def format_execution_plan(plan: ExecutionPlan) -> str:
     if report.enabled_features:
         lines.append("features: " + ", ".join(report.enabled_features))
     lines.extend(
+        f"execution region: {item.region_id} via {item.adapter_id} "
+        f"({len(item.covered_targets)} contextual targets, "
+        f"{len(item.suppressed_bindings)} dormant inner bindings)"
+        for item in report.selected_regions
+    )
+    lines.extend(
         f"implementation: {implementation_id} ({count} identities)"
         for implementation_id, count in sorted(binding_counts.items())
     )
@@ -873,7 +1180,13 @@ def format_execution_plan(plan: ExecutionPlan) -> str:
         f"{item.capability} detached: {str(item.detached).lower()}"
         for item in report.detachment_milestones
     )
-    lines.extend(f"- {failure}" for failure in report.failure_lines())
+    lines.extend(
+        f"closure: {warning}"
+        for warning in report.closure_warning_lines(verbose=verbose)
+    )
+    lines.extend(
+        f"- {failure}" for failure in report.failure_lines(verbose=verbose)
+    )
     return "\n".join(lines)
 
 
@@ -981,7 +1294,8 @@ def profile_configuration(
             execution_policy=ExecutionPolicy(
                 capabilities=detached,
                 dynamic_loading=DynamicLoading.DECLARED_ONLY,
-                strict_coverage=True,
+                closure=ClosurePolicy.PERMISSIVE,
+                fallback=FallbackPolicy.FORBIDDEN,
             ),
         )
     if profile == "release":
@@ -990,7 +1304,8 @@ def profile_configuration(
             execution_policy=ExecutionPolicy(
                 capabilities=release,
                 dynamic_loading=DynamicLoading.FORBIDDEN,
-                strict_coverage=True,
+                closure=ClosurePolicy.STRICT,
+                fallback=FallbackPolicy.FORBIDDEN,
             ),
         )
     raise ValueError(
@@ -1028,6 +1343,18 @@ def _candidate_rejections(
             f"{policy.minimum_authored_evidence.name.lower()}"
         )
     if execution_carrier:
+        contract = implementation.region_contract
+        if contract is not None:
+            adapted = any(
+                adapter.host_carrier_id == execution_carrier
+                and adapter.region_carrier_id == contract.carrier_id
+                for adapter in entry.region_adapters
+            )
+            if not adapted:
+                reasons.append(
+                    f"no region adapter from carrier: {execution_carrier}"
+                )
+            return tuple(reasons)
         directly_owned = implementation.execution_carrier == execution_carrier
         adapted = any(
             adapter.carrier_id == execution_carrier for adapter in entry.adapters
@@ -1092,6 +1419,7 @@ def _plan_digest(
     services: tuple[RuntimeServiceDescriptor, ...],
     features: tuple[FeatureDescriptor, ...],
     execution_carrier: str,
+    regions: tuple[ResolvedExecutionRegion, ...],
 ) -> str:
     bootstrap = configuration.bootstrap_provider
     bootstrap_components = bootstrap.components()
@@ -1105,6 +1433,8 @@ def _plan_digest(
                 for item in configuration.execution_policy.capabilities
             ),
             "dynamic_loading": configuration.execution_policy.dynamic_loading.value,
+            "closure": configuration.execution_policy.closure.value,
+            "fallback": configuration.execution_policy.fallback.value,
             "minimum_authored_evidence": int(
                 configuration.execution_policy.minimum_authored_evidence
             ),
@@ -1163,6 +1493,26 @@ def _plan_digest(
             ],
         },
         "bindings": [[item.target, item.implementation_id] for item in bindings],
+        "regions": [
+            {
+                "id": item.region_id,
+                "implementation": item.implementation_id,
+                "host_carrier": item.host_carrier_id,
+                "region_carrier": item.region_carrier_id,
+                "adapter": item.adapter_id,
+                "adapter_digest": item.adapter_digest,
+                "state_ownership": item.state_ownership.value,
+                "covered_targets": list(item.covered_targets),
+                "verification": region_verification_payload(
+                    item.verification
+                ),
+                "suppressed_bindings": [
+                    [binding.target, binding.implementation_id]
+                    for binding in item.suppressed_bindings
+                ],
+            }
+            for item in regions
+        ],
         "implementations": [
             {
                 "id": item.implementation_id,
@@ -1185,6 +1535,29 @@ def _plan_digest(
                 ),
                 "execution_carrier": item.execution_carrier,
                 "region": item.region_id,
+                "region_contract": (
+                    None if item.region_contract is None else {
+                        "carrier": item.region_contract.carrier_id,
+                        "state_ownership": item.region_contract.state_ownership.value,
+                        "entries": [
+                            [entry.entry_id, entry.target]
+                            for entry in item.region_contract.entries
+                        ],
+                        "exits": [
+                            [exit.exit_id, exit.continuation]
+                            for exit in item.region_contract.exits
+                        ],
+                        "covered_targets": sorted(
+                            item.region_contract.covered_targets
+                        ),
+                        "replay_boundaries": sorted(
+                            item.region_contract.replay_boundaries
+                        ),
+                        "verification": region_verification_payload(
+                            item.region_contract.verification
+                        ),
+                    }
+                ),
             }
             for item in selected
         ],
@@ -1249,11 +1622,47 @@ def execution_composition_digest(plan: ExecutionPlan) -> str:
                     None if item.contract is None else item.contract.contract_id
                 ),
                 "region": item.region_id,
+                "region_contract": (
+                    None if item.region_contract is None else {
+                        "carrier": item.region_contract.carrier_id,
+                        "state_ownership": item.region_contract.state_ownership.value,
+                        "entries": [
+                            [entry.entry_id, entry.target]
+                            for entry in item.region_contract.entries
+                        ],
+                        "exits": [
+                            [exit.exit_id, exit.continuation]
+                            for exit in item.region_contract.exits
+                        ],
+                        "covered_targets": sorted(
+                            item.region_contract.covered_targets
+                        ),
+                        "verification": region_verification_payload(
+                            item.region_contract.verification
+                        ),
+                    }
+                ),
             }
             for item in sorted(
                 implementations.values(),
                 key=lambda value: value.implementation_id,
             )
+        ],
+        "regions": [
+            {
+                "id": item.region_id,
+                "implementation": item.implementation_id,
+                "host_carrier": item.host_carrier_id,
+                "region_carrier": item.region_carrier_id,
+                "adapter": item.adapter_id,
+                "adapter_digest": item.adapter_digest,
+                "state_ownership": item.state_ownership.value,
+                "covered_targets": list(item.covered_targets),
+                "verification": region_verification_payload(
+                    item.verification
+                ),
+            }
+            for item in plan.regions
         ],
         "services": [
             {
@@ -1342,6 +1751,101 @@ def _bootstrap_status(
         ))
     profile_valid = all(profile in item.valid_profiles for item in components)
     return components, tuple(statuses), tuple(missing), profile_valid
+
+
+def _split_unresolved_edge(edge: str) -> tuple[str, str, str]:
+    left, separator, target = edge.rpartition("-->")
+    if not separator:
+        return "", "unknown", edge.strip()
+    source, separator, kind = left.rpartition(" --")
+    if not separator:
+        return left.strip(), "unknown", target.strip()
+    return source.strip(), kind.strip(), target.strip()
+
+
+def _classify_closure_findings(
+    unresolved_edges: Iterable[str],
+    bindings: tuple[PlanBinding, ...],
+    selected: tuple[ImplementationDescriptor, ...],
+    regions: tuple[ResolvedExecutionRegion, ...],
+) -> tuple[ClosureFinding, ...]:
+    """Interpret Atlas uncertainty against the selected implementation graph.
+
+    The Atlas describes the original program.  A resolved plan may have
+    collapsed an edge inside a larger region, or selected a generated provider
+    that owns the target point even though static recovery did not infer a
+    function boundary there.  Those are useful diagnostics, not missing code.
+    Unknown indirect targets remain blockers because observations cannot prove
+    that their target set is exhaustive.
+    """
+    binding_by_target = {
+        item.target: item.implementation_id for item in bindings
+    }
+    descriptor_by_id = {
+        item.implementation_id: item for item in selected
+    }
+    region_members = {
+        region.region_id: (
+            set(region.covered_targets)
+            | set(descriptor_by_id[region.implementation_id].targets)
+        )
+        for region in regions
+    }
+    findings: list[ClosureFinding] = []
+    for edge in sorted(set(unresolved_edges)):
+        source, kind, target = _split_unresolved_edge(edge)
+        dynamic = "ind" in kind.casefold() or "dynamic" in kind.casefold()
+        source_implementation = binding_by_target.get(source, "")
+        target_implementation = binding_by_target.get(target, "")
+        if not target_implementation:
+            claiming = tuple(
+                item.implementation_id for item in selected
+                if target in item.targets
+            )
+            if source_implementation in claiming:
+                target_implementation = source_implementation
+            elif len(claiming) == 1:
+                target_implementation = claiming[0]
+        region_id = next((
+            identity for identity, members in region_members.items()
+            if source in members and target in members
+        ), "")
+        implementation_id = target_implementation or source_implementation
+        if dynamic:
+            classification = ClosureFindingKind.UNKNOWN_DYNAMIC_TARGET
+            blocking = True
+        elif region_id:
+            classification = ClosureFindingKind.REGION_COLLAPSED
+            blocking = False
+            implementation_id = next(
+                item.implementation_id for item in regions
+                if item.region_id == region_id
+            )
+        elif (
+            source_implementation
+            and source_implementation == target_implementation
+        ):
+            classification = (
+                ClosureFindingKind.SELECTED_IMPLEMENTATION_OWNED
+            )
+            blocking = False
+        elif target_implementation:
+            classification = ClosureFindingKind.SELECTED_TARGET_AVAILABLE
+            blocking = False
+        else:
+            classification = ClosureFindingKind.PROBABLE_GAP
+            blocking = True
+        findings.append(ClosureFinding(
+            edge=edge,
+            source=source,
+            target=target,
+            kind=kind,
+            classification=classification,
+            blocking=blocking,
+            implementation_id=implementation_id,
+            region_id=region_id,
+        ))
+    return tuple(findings)
 
 
 def plan_execution(
@@ -1555,6 +2059,74 @@ def plan_execution(
         selected_by_id[selected.implementation_id] = selected
 
     selected = tuple(sorted(selected_by_id.values(), key=lambda item: item.implementation_id))
+    binding_items = tuple(bindings)
+    selected_region_descriptors = tuple(
+        item for item in selected if item.region_contract is not None
+    )
+    covered_by_region: dict[str, str] = {}
+    resolved_regions: list[ResolvedExecutionRegion] = []
+    for descriptor in selected_region_descriptors:
+        contract = descriptor.region_contract
+        assert contract is not None
+        selected_targets = {
+            binding.target for binding in binding_items
+            if binding.implementation_id == descriptor.implementation_id
+        }
+        if not descriptor.targets <= selected_targets:
+            raise ValueError(
+                f"execution region {contract.region_id!r} was selected only "
+                "partially; region entry, exit, and identity targets must resolve "
+                "as one unit"
+            )
+        missing_covered = contract.covered_targets - coverage.reachable
+        if missing_covered:
+            raise ValueError(
+                f"execution region {contract.region_id!r} covers targets "
+                "outside conservative coverage: "
+                + ", ".join(sorted(missing_covered))
+            )
+        for target in contract.covered_targets:
+            previous = covered_by_region.setdefault(target, contract.region_id)
+            if previous != contract.region_id:
+                raise ValueError(
+                    f"selected execution regions {previous!r} and "
+                    f"{contract.region_id!r} overlap at {target!r}; nested "
+                    "region ownership must be declared explicitly"
+                )
+        entry = implementation_catalog.entry(descriptor.implementation_id)
+        adapter = next((
+            item for item in entry.region_adapters
+            if item.host_carrier_id == execution_carrier
+            and item.region_carrier_id == contract.carrier_id
+        ), None)
+        if adapter is None:
+            raise ValueError(
+                f"execution region {contract.region_id!r} has no adapter from "
+                f"carrier {execution_carrier!r}"
+            )
+        suppressed = tuple(
+            binding for binding in binding_items
+            if binding.target in contract.covered_targets
+            and binding.implementation_id != descriptor.implementation_id
+        )
+        resolved_regions.append(ResolvedExecutionRegion(
+            region_id=contract.region_id,
+            implementation_id=descriptor.implementation_id,
+            host_carrier_id=execution_carrier,
+            region_carrier_id=contract.carrier_id,
+            adapter_id=adapter.adapter_id,
+            adapter_digest=adapter.adapter_digest,
+            state_ownership=contract.state_ownership,
+            entries=contract.entries,
+            exits=contract.exits,
+            covered_targets=tuple(sorted(contract.covered_targets)),
+            suppressed_bindings=suppressed,
+            replay_boundaries=tuple(sorted(contract.replay_boundaries)),
+            verification=contract.verification,
+        ))
+    region_items = tuple(sorted(
+        resolved_regions, key=lambda item: item.region_id
+    ))
     missing_implementation_digests = tuple(
         item.implementation_id for item in selected
         if not item.implementation_digest
@@ -1823,9 +2395,22 @@ def plan_execution(
             carrier_id=execution_carrier,
             adapter_id="" if target_adapter is None else target_adapter.adapter_id,
         ))
+    closure_findings = _classify_closure_findings(
+        coverage.unresolved_edges,
+        binding_items,
+        selected,
+        region_items,
+    )
+    unresolved_edges = tuple(
+        item.edge for item in closure_findings if item.blocking
+    )
+    collapsed_edge_count += sum(
+        item.classification is ClosureFindingKind.REGION_COLLAPSED
+        for item in closure_findings
+    )
     package_ready = (
         not unresolved
-        and not coverage.unresolved_edges
+        and not unresolved_edges
         and not missing_services
         and not packaging_incompatible_items
         and bootstrap_profile_valid
@@ -1835,7 +2420,6 @@ def plan_execution(
         and not policy_forbidden_services
         and configuration.build_target is not None
     )
-    binding_items = tuple(bindings)
     report = DetachmentReport(
         reachable=tuple(sorted(coverage.reachable)),
         bindings=binding_items,
@@ -1847,7 +2431,10 @@ def plan_execution(
         faithful_override_coverage=faithful,
         region_replacement_coverage=regions,
         unresolved=tuple(unresolved),
-        unresolved_edges=tuple(sorted(coverage.unresolved_edges)),
+        unresolved_edges=unresolved_edges,
+        closure_findings=closure_findings,
+        closure_policy=configuration.execution_policy.closure,
+        fallback_policy=configuration.execution_policy.fallback,
         required_services=tuple(required_service_ids),
         missing_services=missing_services,
         required_assets=required_assets,
@@ -1875,6 +2462,7 @@ def plan_execution(
         missing_bootstrap_artifacts=missing_bootstrap_artifacts,
         bootstrap_profile_valid=bootstrap_profile_valid,
         enabled_features=tuple(item.feature_id for item in selected_features),
+        selected_regions=region_items,
         package_ready=package_ready,
     )
 
@@ -1887,7 +2475,10 @@ def plan_execution(
         or not bootstrap_profile_valid
         or bool(missing_bootstrap_artifacts)
         or bool(policy_forbidden_services)
-        or (policy.strict_coverage and bool(coverage.unresolved_edges))
+        or (
+            policy.closure is ClosurePolicy.STRICT
+            and bool(unresolved_edges)
+        )
         or (
             configuration.profile == "release"
             and bool(development_only_services)
@@ -1898,7 +2489,7 @@ def plan_execution(
 
     digest = _plan_digest(
         configuration, coverage, binding_items, selected, selected_services,
-        selected_features, execution_carrier,
+        selected_features, execution_carrier, region_items,
     )
     return ExecutionPlan(
         configuration=configuration,
@@ -1907,6 +2498,7 @@ def plan_execution(
         bindings=binding_items,
         implementations=selected,
         features=selected_features,
+        regions=region_items,
         catalog=implementation_catalog,
         services=selected_services,
         report=report,

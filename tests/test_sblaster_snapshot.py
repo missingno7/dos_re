@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dos_re.sblaster import DmaChannel, SoundBlaster  # noqa: E402
@@ -41,6 +43,7 @@ def _programmed_sb() -> SoundBlaster:
 
 def test_sound_blaster_round_trip_preserves_playback_state():
     sb = _programmed_sb()
+    sb._dma_requests = 7
     state = sb.snapshot_state()
     fresh = SoundBlaster()
     fresh.restore_state(state)
@@ -48,7 +51,14 @@ def test_sound_blaster_round_trip_preserves_playback_state():
     assert fresh.speaker_on is True
     assert fresh.dma_active is True
     assert fresh.channels[1].physical() == sb.channels[1].physical()
+    assert fresh._dma_requests == 7
     assert fresh.snapshot_state() == state
+
+
+def test_sound_blaster_rejects_continuation_from_another_mode():
+    state = SoundBlaster(detection_only=False).snapshot_state()
+    with pytest.raises(ValueError, match="continuation mode differs"):
+        SoundBlaster(detection_only=True).restore_state(state)
 
 
 def test_rearm_raises_block_irq_when_mid_stream():

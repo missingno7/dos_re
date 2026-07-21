@@ -584,13 +584,15 @@ class CPU8086:
                 # whole interpreted frontier instead of stopping at the first.
                 frontier.add((start_cs, start_ip))
             else:
-                raise RuntimeError(
-                    f"INTERPRETER FALLBACK FORBIDDEN: attempted to interpret an original "
-                    f"instruction at {start_cs:04X}:{start_ip:04X} -- no lifted "
-                    f"hook covers this address.  The candidate must never "
-                    f"fetch/decode/execute x86; register a resume entry, lift "
-                    f"the code, or record the recovery fact that explains this "
-                    f"address.")
+                from dos_re.runtime_miss import RuntimeExecutionFrontier
+                raise RuntimeExecutionFrontier(
+                    target_address=f"{start_cs:04X}:{start_ip:04X}",
+                    reason=(
+                        "no generated or authored dispatch owns this address; "
+                        "register a resume entry, emit the code, or record the "
+                        "recovery fact that maps it"
+                    ),
+                )
 
         seg_override: str | None = None
         rep: int | None = None
