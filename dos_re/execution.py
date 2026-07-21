@@ -9,7 +9,7 @@ runtime construction when a strict profile cannot be satisfied.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, IntEnum
 import hashlib
 import json
 from pathlib import Path
@@ -71,11 +71,58 @@ class ImplementationOrigin(str, Enum):
     AUTHORED = "authored"
 
 
+class RecoveryLevel(str, Enum):
+    """How an implementation realizes original program semantics.
+
+    Levels describe an individual implementation, never a whole-game mode.
+    A single plan may select implementations at every level below.
+    """
+
+    INTERPRETED = "interpreted"
+    GENERATED_VMLESS = "generated-vmless"
+    GENERATED_CPULESS = "generated-cpuless"
+    GENERATED_ABI = "generated-abi"
+    AUTHORED_NATIVE = "authored-native"
+
+
+class EvidenceGrade(IntEnum):
+    """Finite evidence attached to an implementation candidate.
+
+    ``REPLAY_CORPUS`` means the declared replay corpus passed; it deliberately
+    does not claim universal correctness.  Product policy chooses the minimum
+    acceptable grade and can relax it during development.
+    """
+
+    NONE = 0
+    FOCUSED = 1
+    REPLAY_CORPUS = 2
+    EXHAUSTIVE = 3
+
+
 class OverrideCategory(str, Enum):
     BASELINE = "baseline"
     FAITHFUL = "faithful"
     ENHANCEMENT = "enhancement"
     BEHAVIORAL = "behavioral"
+    INSTRUMENTATION = "instrumentation"
+
+
+@dataclass(frozen=True)
+class ImplementationContract:
+    """Backend-neutral contract shared by generated and authored candidates."""
+
+    contract_id: str
+    inputs: tuple[str, ...] = ()
+    outputs: tuple[str, ...] = ()
+    observable_effects: tuple[str, ...] = ()
+    state_authority: str = "continuation-state"
+    preservation: tuple[str, ...] = ()
+
+
+class FeatureCategory(str, Enum):
+    PRESENTATION = "presentation"
+    BEHAVIORAL = "behavioral"
+    INSTRUMENTATION = "instrumentation"
 
 
 @dataclass(frozen=True)
@@ -83,6 +130,7 @@ class ExecutionPolicy:
     capabilities: tuple[CapabilityPolicy, ...] = ()
     dynamic_loading: DynamicLoading = DynamicLoading.ALLOWED
     strict_coverage: bool = False
+    minimum_authored_evidence: EvidenceGrade = EvidenceGrade.NONE
 
     def __post_init__(self) -> None:
         names = [item.capability for item in self.capabilities]
@@ -249,9 +297,19 @@ class ExecutionConfiguration:
     verification_policy: VerificationPolicy = VerificationPolicy()
     provider_preference: tuple[str, ...] = ()
     selected_overrides: tuple[str, ...] = ()
+    enabled_features: tuple[str, ...] = ()
     product_services: frozenset[str] = frozenset()
     requested_capabilities: frozenset[str] = frozenset()
     build_target: BuildTarget | None = None
+
+    def __post_init__(self) -> None:
+        for label, values in (
+            ("provider preference", self.provider_preference),
+            ("selected overrides", self.selected_overrides),
+            ("enabled features", self.enabled_features),
+        ):
+            if len(set(values)) != len(values):
+                raise ValueError(f"{label} IDs must be unique")
 
 
 @dataclass(frozen=True)
@@ -262,6 +320,7 @@ class ProgramCoverage:
     reachable: frozenset[str]
     unresolved_edges: tuple[str, ...] = ()
     evidence_identity: str = ""
+    edges: tuple["ProgramEdge", ...] = ()
 
     def coverage_for(self, product_profile: str) -> "ProgramCoverage":
         return self
@@ -271,6 +330,16 @@ class CoverageSource(Protocol):
     """Backend-neutral coverage interface implemented by IR and Atlas adapters."""
 
     def coverage_for(self, product_profile: str) -> ProgramCoverage: ...
+
+
+@dataclass(frozen=True, order=True)
+class ProgramEdge:
+    """Known transfer used to expose or collapse implementation seams."""
+
+    source: str
+    target: str
+    kind: str = "control-flow"
+    evidence: str = ""
 
 
 @dataclass(frozen=True)
@@ -285,6 +354,10 @@ class ImplementationDescriptor:
     required_assets: frozenset[str] = frozenset()
     supported_platforms: frozenset[str] = frozenset()
     verification_evidence: frozenset[str] = frozenset()
+    recovery_level: RecoveryLevel | None = None
+    evidence_grade: EvidenceGrade = EvidenceGrade.NONE
+    contract: ImplementationContract | None = None
+    execution_carrier: str = ""
     implementation_digest: str = ""
     region_id: str | None = None
 
@@ -295,10 +368,84 @@ class ImplementationDescriptor:
             if self.category is OverrideCategory.BASELINE:
                 raise ValueError(
                     "authored implementations require faithful, enhancement, "
-                    "or behavioral category")
+                    "behavioral, or instrumentation category")
         elif self.category is not OverrideCategory.BASELINE:
             raise ValueError(
                 "interpreted and generated implementations use baseline category")
+        if self.contract is not None and not self.contract.contract_id:
+            raise ValueError("implementation contract ID must not be empty")
+        if self.execution_carrier and self.region_id is None:
+            raise ValueError(
+                "only region/program providers declare an execution carrier; "
+                "function implementations use carrier adapters"
+            )
+        if self.category is OverrideCategory.INSTRUMENTATION \
+                and DependencyCapability.INSTRUMENTATION.value \
+                not in self.required_capabilities:
+            raise ValueError(
+                "instrumentation implementations must declare the "
+                "instrumentation capability"
+            )
+
+
+@dataclass(frozen=True)
+class FeatureDescriptor:
+    """Optional product behavior, presentation, or instrumentation policy."""
+
+    feature_id: str
+    category: FeatureCategory
+    changes_authoritative_state: bool = False
+    replay_channel: str = ""
+    safe_boundaries: frozenset[str] = frozenset()
+    default_value: object = False
+    required_capabilities: frozenset[str] = frozenset()
+    required_services: frozenset[str] = frozenset()
+    required_assets: frozenset[str] = frozenset()
+    supported_platforms: frozenset[str] = frozenset()
+    feature_digest: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.feature_id:
+            raise ValueError("feature ID must not be empty")
+        if self.category is FeatureCategory.PRESENTATION \
+                and self.changes_authoritative_state:
+            raise ValueError(
+                "presentation features must not mutate authoritative state"
+            )
+        if self.category is FeatureCategory.BEHAVIORAL:
+            if not self.changes_authoritative_state:
+                raise ValueError(
+                    "behavioral features must declare authoritative-state change"
+                )
+            if not self.replay_channel:
+                raise ValueError(
+                    "behavioral features require a replay event channel"
+                )
+            if not self.safe_boundaries:
+                raise ValueError(
+                    "behavioral features require at least one safe boundary"
+                )
+        if self.category is FeatureCategory.INSTRUMENTATION \
+                and DependencyCapability.INSTRUMENTATION.value \
+                not in self.required_capabilities:
+            raise ValueError(
+                "instrumentation features must declare the instrumentation "
+                "capability"
+            )
+        try:
+            json.dumps(self.default_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("feature default value must be JSON-serializable") from exc
+
+
+@dataclass(frozen=True)
+class FeatureCatalog:
+    features: tuple[FeatureDescriptor, ...] = ()
+
+    def __post_init__(self) -> None:
+        identities = [item.feature_id for item in self.features]
+        if len(set(identities)) != len(identities):
+            raise ValueError("feature IDs must be unique")
 
 
 @dataclass(frozen=True)
@@ -322,19 +469,27 @@ class BackendAdapter:
     but it must not become a second implementation authority.
     """
 
-    backend_id: str
+    adapter_id: str
+    carrier_id: str
     activate: Callable[[object, tuple[str, ...]], None]
+    adapter_digest: str = ""
 
     def __post_init__(self) -> None:
-        if not self.backend_id:
-            raise ValueError("backend adapter ID must not be empty")
+        if not self.adapter_id:
+            raise ValueError("adapter ID must not be empty")
+        if not self.carrier_id:
+            raise ValueError("adapter carrier ID must not be empty")
+        if not self.adapter_digest:
+            raise ValueError("adapter digest must not be empty")
 
 
-# Backend IDs describe the carrier available at the activation seam, not a
-# whole-game recovery level.  A generated VMless graph still uses the CPU
-# carrier, while an ABI-recovered graph uses the CPUless call contract.
-CPU_MODEL_BACKEND = "cpu-model"
-CPULESS_BACKEND = "cpuless"
+# Carrier IDs describe calling/state mechanics at the activation seam, not a
+# whole-game recovery level.
+INTERPRETED_CPU_CARRIER = "interpreted-cpu"
+GENERATED_VMLESS_CARRIER = "generated-vmless-cpu"
+GENERATED_CPULESS_CARRIER = "generated-cpuless"
+DOS_MEMORY_CARRIER = "dos-memory"
+NATIVE_STATE_CARRIER = "native-state"
 
 
 @dataclass(frozen=True)
@@ -344,11 +499,14 @@ class ImplementationEntry:
     adapters: tuple[BackendAdapter, ...] = ()
 
     def __post_init__(self) -> None:
-        backend_ids = [adapter.backend_id for adapter in self.adapters]
-        if len(set(backend_ids)) != len(backend_ids):
+        carrier_ids = [adapter.carrier_id for adapter in self.adapters]
+        adapter_ids = [adapter.adapter_id for adapter in self.adapters]
+        if len(set(carrier_ids)) != len(carrier_ids):
             raise ValueError(
                 f"implementation {self.descriptor.implementation_id!r} has "
-                "more than one adapter for the same backend")
+                "more than one adapter for the same carrier")
+        if len(set(adapter_ids)) != len(adapter_ids):
+            raise ValueError("adapter IDs must be unique per implementation")
 
 
 @dataclass(frozen=True)
@@ -370,12 +528,18 @@ class ImplementationCatalog:
                 return entry.implementation
         raise KeyError(implementation_id)
 
+    def entry(self, implementation_id: str) -> ImplementationEntry:
+        for entry in self.entries:
+            if entry.descriptor.implementation_id == implementation_id:
+                return entry
+        raise KeyError(implementation_id)
+
 
 def bind_plan_implementations(
     runtime: object,
     plan: "ExecutionPlan",
     *,
-    backend_id: str,
+    carrier_id: str,
 ) -> None:
     """Install plan-selected backend bridges into an already-created runtime.
 
@@ -383,7 +547,7 @@ def bind_plan_implementations(
     binds the adapter that can cross the selected runtime's carrier.  Whole
     program providers own their own launch mechanics and consequently need no
     per-target adapter here.  A selected function implementation without a
-    bridge for ``backend_id`` is a configuration error, never a silent fallback.
+    bridge for ``carrier_id`` is a configuration error, never a silent fallback.
     """
     targets_by_implementation: dict[str, list[str]] = {}
     for binding in plan.bindings:
@@ -391,7 +555,10 @@ def bind_plan_implementations(
             binding.target
         )
     for descriptor in plan.implementations:
-        if descriptor.category is OverrideCategory.ENHANCEMENT:
+        if descriptor.category in {
+            OverrideCategory.ENHANCEMENT,
+            OverrideCategory.INSTRUMENTATION,
+        }:
             targets_by_implementation.setdefault(
                 descriptor.implementation_id, []
             ).extend(descriptor.targets)
@@ -405,7 +572,7 @@ def bind_plan_implementations(
     for implementation_id, targets in sorted(targets_by_implementation.items()):
         entry = entries[implementation_id]
         adapter = next(
-            (item for item in entry.adapters if item.backend_id == backend_id),
+            (item for item in entry.adapters if item.carrier_id == carrier_id),
             None,
         )
         if adapter is not None:
@@ -420,10 +587,10 @@ def bind_plan_implementations(
             # interpreted baseline uses the untouched bytes and has no bridge.
             continue
         if entry.adapters:
-            available = ", ".join(sorted(item.backend_id for item in entry.adapters))
+            available = ", ".join(sorted(item.carrier_id for item in entry.adapters))
             raise RuntimeError(
                 f"selected implementation {implementation_id!r} has no "
-                f"adapter for backend {backend_id!r} (available: {available})"
+                f"adapter for carrier {carrier_id!r} (available: {available})"
             )
         raise RuntimeError(
             f"selected implementation {implementation_id!r} has no backend "
@@ -445,6 +612,32 @@ class RuntimeServiceCatalog:
 class PlanBinding:
     target: str
     implementation_id: str
+
+
+@dataclass(frozen=True)
+class CandidateDecision:
+    implementation_id: str
+    selected: bool
+    rejection_reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TargetResolution:
+    target: str
+    candidates: tuple[CandidateDecision, ...]
+
+
+@dataclass(frozen=True)
+class ExecutionBoundary:
+    """A known program edge crossing selected implementation ownership."""
+
+    source: str
+    target: str
+    kind: str
+    source_implementation_id: str
+    target_implementation_id: str
+    carrier_id: str
+    adapter_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -482,6 +675,10 @@ class BootstrapArtifactStatus:
 class DetachmentReport:
     reachable: tuple[str, ...]
     bindings: tuple[PlanBinding, ...]
+    execution_carrier: str
+    target_resolutions: tuple[TargetResolution, ...]
+    active_boundaries: tuple[ExecutionBoundary, ...]
+    collapsed_edge_count: int
     generated_coverage: tuple[str, ...]
     faithful_override_coverage: tuple[str, ...]
     region_replacement_coverage: tuple[str, ...]
@@ -507,6 +704,7 @@ class DetachmentReport:
     bootstrap_artifacts: tuple[BootstrapArtifactStatus, ...]
     missing_bootstrap_artifacts: tuple[str, ...]
     bootstrap_profile_valid: bool
+    enabled_features: tuple[str, ...]
     package_ready: bool
 
     def requires(self, capability: str | DependencyCapability) -> bool:
@@ -575,6 +773,7 @@ class ExecutionPlan:
     coverage_identity: str
     bindings: tuple[PlanBinding, ...]
     implementations: tuple[ImplementationDescriptor, ...]
+    features: tuple[FeatureDescriptor, ...]
     catalog: ImplementationCatalog
     services: tuple[RuntimeServiceDescriptor, ...]
     report: DetachmentReport
@@ -655,12 +854,17 @@ def format_execution_plan(plan: ExecutionPlan) -> str:
         f"program: {plan.configuration.program_identity}",
         f"plan digest: {plan.plan_digest}",
         f"bootstrap provider: {report.bootstrap_provider_id} ({report.bootstrap_kind})",
+        f"execution carrier: {report.execution_carrier or 'unspecified'}",
         f"reachable identities: {len(report.reachable)}",
         f"bound identities: {len(report.bindings)}",
+        f"active implementation boundaries: {len(report.active_boundaries)}",
+        f"collapsed known edges: {report.collapsed_edge_count}",
         "required capabilities: "
         + (", ".join(report.required_capabilities) or "none"),
         f"package ready: {str(report.package_ready).lower()}",
     ]
+    if report.enabled_features:
+        lines.append("features: " + ", ".join(report.enabled_features))
     lines.extend(
         f"implementation: {implementation_id} ({count} identities)"
         for implementation_id, count in sorted(binding_counts.items())
@@ -680,6 +884,7 @@ def profile_configuration(
     product_profile: str = "default",
     provider_preference: Iterable[str] = (),
     selected_overrides: Iterable[str] = (),
+    enabled_features: Iterable[str] = (),
     product_services: Iterable[str] = (),
     requested_capabilities: Iterable[str] = (),
     bootstrap_provider: BootstrapProvider | None = None,
@@ -696,6 +901,7 @@ def profile_configuration(
         product_profile=product_profile,
         provider_preference=tuple(provider_preference),
         selected_overrides=tuple(selected_overrides),
+        enabled_features=tuple(enabled_features),
         product_services=frozenset(product_services),
         requested_capabilities=frozenset(requested_capabilities),
         bootstrap_provider=bootstrap_provider or default_bootstrap_provider(),
@@ -793,20 +999,44 @@ def profile_configuration(
     )
 
 
-def _compatible(
+def _candidate_rejections(
     implementation: ImplementationDescriptor,
+    entry: ImplementationEntry,
     policy: ExecutionPolicy,
     build_target: BuildTarget | None,
-) -> bool:
-    capability_compatible = not (
+    execution_carrier: str,
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    blocked = sorted(
         implementation.required_capabilities & policy.forbidden_capabilities
     )
-    target_compatible = (
-        build_target is None
-        or not implementation.supported_platforms
-        or build_target.platform in implementation.supported_platforms
-    )
-    return capability_compatible and target_compatible
+    if blocked:
+        reasons.append("forbidden capabilities: " + ", ".join(blocked))
+    if (
+        build_target is not None
+        and implementation.supported_platforms
+        and build_target.platform not in implementation.supported_platforms
+    ):
+        reasons.append(f"unsupported platform: {build_target.platform}")
+    if (
+        implementation.origin is ImplementationOrigin.AUTHORED
+        and implementation.evidence_grade < policy.minimum_authored_evidence
+    ):
+        reasons.append(
+            "insufficient evidence: "
+            f"{implementation.evidence_grade.name.lower()} < "
+            f"{policy.minimum_authored_evidence.name.lower()}"
+        )
+    if execution_carrier:
+        directly_owned = implementation.execution_carrier == execution_carrier
+        adapted = any(
+            adapter.carrier_id == execution_carrier for adapter in entry.adapters
+        )
+        # Descriptors without an intrinsic carrier are function/point bodies;
+        # they are executable only through an explicit adapter.
+        if not directly_owned and not adapted:
+            reasons.append(f"no adapter for carrier: {execution_carrier}")
+    return tuple(reasons)
 
 
 def _ordered_candidates(
@@ -822,12 +1052,46 @@ def _ordered_candidates(
     )
 
 
+def _execution_carrier(
+    coverage: ProgramCoverage,
+    implementations: tuple[ImplementationDescriptor, ...],
+    catalog: ImplementationCatalog,
+    preference: tuple[str, ...],
+    policy: ExecutionPolicy,
+    build_target: BuildTarget | None,
+) -> str:
+    """Resolve the carrier from the selected provider at every program root."""
+    carriers: set[str] = set()
+    for root in coverage.roots:
+        candidates = [
+            item for item in _ordered_candidates(root, implementations, preference)
+            if item.execution_carrier
+        ]
+        selected = next((
+            item for item in candidates
+            if not _candidate_rejections(
+                item, catalog.entry(item.implementation_id), policy,
+                build_target, "",
+            )
+        ), None)
+        if selected is not None:
+            carriers.add(selected.execution_carrier)
+    if len(carriers) > 1:
+        raise ValueError(
+            "program roots select incompatible execution carriers: "
+            + ", ".join(sorted(carriers))
+        )
+    return next(iter(carriers), "")
+
+
 def _plan_digest(
     configuration: ExecutionConfiguration,
     coverage: ProgramCoverage,
     bindings: tuple[PlanBinding, ...],
     selected: tuple[ImplementationDescriptor, ...],
     services: tuple[RuntimeServiceDescriptor, ...],
+    features: tuple[FeatureDescriptor, ...],
+    execution_carrier: str,
 ) -> str:
     bootstrap = configuration.bootstrap_provider
     bootstrap_components = bootstrap.components()
@@ -841,7 +1105,11 @@ def _plan_digest(
                 for item in configuration.execution_policy.capabilities
             ),
             "dynamic_loading": configuration.execution_policy.dynamic_loading.value,
+            "minimum_authored_evidence": int(
+                configuration.execution_policy.minimum_authored_evidence
+            ),
         },
+        "execution_carrier": execution_carrier,
         "product_services": sorted(configuration.product_services),
         "requested_capabilities": sorted(configuration.requested_capabilities),
         "bootstrap": {
@@ -879,6 +1147,7 @@ def _plan_digest(
             ],
         },
         "verification": configuration.verification_policy.mode,
+        "enabled_features": list(configuration.enabled_features),
         "build": (
             None if configuration.build_target is None else
             [configuration.build_target.platform, configuration.build_target.package_format]
@@ -888,6 +1157,10 @@ def _plan_digest(
             "roots": list(coverage.roots),
             "reachable": sorted(coverage.reachable),
             "unresolved_edges": list(coverage.unresolved_edges),
+            "edges": [
+                [item.source, item.target, item.kind, item.evidence]
+                for item in sorted(coverage.edges)
+            ],
         },
         "bindings": [[item.target, item.implementation_id] for item in bindings],
         "implementations": [
@@ -902,6 +1175,15 @@ def _plan_digest(
                 "assets": sorted(item.required_assets),
                 "platforms": sorted(item.supported_platforms),
                 "verification_evidence": sorted(item.verification_evidence),
+                "recovery_level": (
+                    None if item.recovery_level is None
+                    else item.recovery_level.value
+                ),
+                "evidence_grade": int(item.evidence_grade),
+                "contract": (
+                    None if item.contract is None else item.contract.contract_id
+                ),
+                "execution_carrier": item.execution_carrier,
                 "region": item.region_id,
             }
             for item in selected
@@ -917,6 +1199,17 @@ def _plan_digest(
                 "platforms": sorted(item.supported_platforms),
             }
             for item in services
+        ],
+        "features": [
+            {
+                "id": item.feature_id,
+                "digest": item.feature_digest,
+                "category": item.category.value,
+                "authoritative": item.changes_authoritative_state,
+                "replay_channel": item.replay_channel,
+                "safe_boundaries": sorted(item.safe_boundaries),
+            }
+            for item in features
         ],
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -938,6 +1231,7 @@ def execution_composition_digest(plan: ExecutionPlan) -> str:
         item.implementation_id: item for item in plan.implementations
     }
     payload = {
+        "execution_carrier": plan.report.execution_carrier,
         "bindings": sorted(
             (item.target, item.implementation_id) for item in plan.bindings
         ),
@@ -947,6 +1241,13 @@ def execution_composition_digest(plan: ExecutionPlan) -> str:
                 "digest": item.implementation_digest,
                 "origin": item.origin.value,
                 "category": item.category.value,
+                "recovery_level": (
+                    None if item.recovery_level is None
+                    else item.recovery_level.value
+                ),
+                "contract": (
+                    None if item.contract is None else item.contract.contract_id
+                ),
                 "region": item.region_id,
             }
             for item in sorted(
@@ -960,6 +1261,14 @@ def execution_composition_digest(plan: ExecutionPlan) -> str:
                 "digest": item.implementation_digest,
             }
             for item in sorted(plan.services, key=lambda value: value.service_id)
+        ],
+        "features": [
+            {
+                "id": item.feature_id,
+                "digest": item.feature_digest,
+                "category": item.category.value,
+            }
+            for item in sorted(plan.features, key=lambda value: value.feature_id)
         ],
     }
     encoded = json.dumps(
@@ -1040,6 +1349,7 @@ def plan_execution(
     coverage_source: CoverageSource,
     implementation_catalog: ImplementationCatalog,
     service_catalog: RuntimeServiceCatalog = RuntimeServiceCatalog(),
+    feature_catalog: FeatureCatalog = FeatureCatalog(),
 ) -> ExecutionPlan:
     """Resolve an immutable plan or fail a strict profile before execution."""
     (
@@ -1088,6 +1398,26 @@ def plan_execution(
         or item.implementation_id in configuration.selected_overrides
     )
     selected_override_set = set(configuration.selected_overrides)
+    feature_by_id = {
+        item.feature_id: item for item in feature_catalog.features
+    }
+    unknown_features = sorted(
+        set(configuration.enabled_features) - set(feature_by_id)
+    )
+    if unknown_features:
+        raise ValueError("unknown enabled features: " + ", ".join(unknown_features))
+    selected_features = tuple(
+        feature_by_id[feature_id]
+        for feature_id in configuration.enabled_features
+    )
+    missing_feature_digests = tuple(
+        item.feature_id for item in selected_features if not item.feature_digest
+    )
+    if missing_feature_digests:
+        raise ValueError(
+            "selected features require stable content digests: "
+            + ", ".join(missing_feature_digests)
+        )
     selected_authored = tuple(
         item for item in implementation_items
         if item.implementation_id in selected_override_set
@@ -1106,13 +1436,19 @@ def plan_execution(
                 "outside conservative coverage: "
                 + ", ".join(sorted(missing_targets))
             )
-    selected_enhancements = tuple(
+    selected_attachments = tuple(
         item for item in selected_authored
-        if item.category is OverrideCategory.ENHANCEMENT
+        if item.category in {
+            OverrideCategory.ENHANCEMENT,
+            OverrideCategory.INSTRUMENTATION,
+        }
     )
     authoritative_items = tuple(
         item for item in implementation_items
-        if item.category is not OverrideCategory.ENHANCEMENT
+        if item.category not in {
+            OverrideCategory.ENHANCEMENT,
+            OverrideCategory.INSTRUMENTATION,
+        }
     )
     for target in sorted(coverage.reachable):
         owners = [
@@ -1127,30 +1463,74 @@ def plan_execution(
     service_items = service_catalog.services
     service_by_id = {service.service_id: service for service in service_items}
 
+    selected_first = tuple(configuration.selected_overrides) + tuple(
+        item for item in configuration.provider_preference
+        if item not in configuration.selected_overrides
+    )
+    execution_carrier = _execution_carrier(
+        coverage,
+        authoritative_items,
+        implementation_catalog,
+        selected_first,
+        configuration.execution_policy,
+        configuration.build_target,
+    )
+    for attachment in selected_attachments:
+        reasons = _candidate_rejections(
+            attachment,
+            implementation_catalog.entry(attachment.implementation_id),
+            configuration.execution_policy,
+            configuration.build_target,
+            execution_carrier,
+        )
+        if reasons:
+            raise ValueError(
+                f"selected attachment {attachment.implementation_id!r} is "
+                "incompatible: " + "; ".join(reasons)
+            )
     bindings: list[PlanBinding] = []
+    target_resolutions: list[TargetResolution] = []
     selected_by_id: dict[str, ImplementationDescriptor] = {
-        item.implementation_id: item for item in selected_enhancements
+        item.implementation_id: item for item in selected_attachments
     }
     unresolved: list[str] = []
     blocked_capabilities: dict[str, set[str]] = {}
     packaging_incompatible: list[str] = []
     for target in sorted(coverage.reachable):
-        selected_first = tuple(configuration.selected_overrides) + tuple(
-            item for item in configuration.provider_preference
-            if item not in configuration.selected_overrides
-        )
         candidates = _ordered_candidates(
             target, authoritative_items, selected_first
         )
-        selected = next(
-            (candidate for candidate in candidates
-             if _compatible(
-                 candidate,
-                 configuration.execution_policy,
-                 configuration.build_target,
-             )),
-            None,
-        )
+        rejection_by_id = {
+            candidate.implementation_id: _candidate_rejections(
+                candidate,
+                implementation_catalog.entry(candidate.implementation_id),
+                configuration.execution_policy,
+                configuration.build_target,
+                execution_carrier,
+            )
+            for candidate in candidates
+        }
+        selected = next((
+            candidate for candidate in candidates
+            if not rejection_by_id[candidate.implementation_id]
+        ), None)
+        target_resolutions.append(TargetResolution(
+            target,
+            tuple(CandidateDecision(
+                candidate.implementation_id,
+                selected is not None
+                and candidate.implementation_id == selected.implementation_id,
+                rejection_by_id[candidate.implementation_id] or (
+                    ()
+                    if selected is None
+                    or candidate.implementation_id == selected.implementation_id
+                    else (
+                        "lower preference than selected: "
+                        + selected.implementation_id,
+                    )
+                ),
+            ) for candidate in candidates),
+        ))
         if selected is None:
             unresolved.append(target)
             for candidate in candidates:
@@ -1198,11 +1578,28 @@ def plan_execution(
             "faithful differential verification cannot select behavioral "
             f"modifications: {behavioral}"
         )
+    behavioral_features = tuple(
+        item for item in selected_features
+        if item.category is FeatureCategory.BEHAVIORAL
+    )
+    if (
+        configuration.verification_policy.mode == "differential"
+        and behavioral_features
+    ):
+        raise ValueError(
+            "faithful differential verification cannot enable behavioral "
+            "features: "
+            + ", ".join(item.feature_id for item in behavioral_features)
+        )
     required_service_set = (
         set(configuration.product_services)
         | set(bootstrap_services)
         | {
         service_id for item in selected for service_id in item.required_services
+        }
+        | {
+            service_id for item in selected_features
+            for service_id in item.required_services
         }
     )
     pending_services = list(required_service_set)
@@ -1245,6 +1642,11 @@ def plan_execution(
             for service in selected_services
             for asset in service.required_assets
         }
+        | {
+            asset
+            for item in selected_features
+            for asset in item.required_assets
+        }
     ))
     incompatible_services = tuple(sorted(
         f"service:{service.service_id}"
@@ -1254,7 +1656,13 @@ def plan_execution(
         and configuration.build_target.platform not in service.supported_platforms
     ))
     packaging_incompatible_items = tuple(sorted(
-        set(packaging_incompatible) | set(incompatible_services)
+        set(packaging_incompatible) | set(incompatible_services) | {
+            f"feature:{item.feature_id}"
+            for item in selected_features
+            if configuration.build_target is not None
+            and item.supported_platforms
+            and configuration.build_target.platform not in item.supported_platforms
+        }
     ))
     development_only_services = tuple(sorted(
         service.service_id for service in selected_services if not service.product_safe
@@ -1269,6 +1677,11 @@ def plan_execution(
         for capability in service.required_capabilities:
             capability_consumers.setdefault(capability, set()).add(
                 f"service:{service.service_id}"
+            )
+    for item in selected_features:
+        for capability in item.required_capabilities:
+            capability_consumers.setdefault(capability, set()).add(
+                f"feature:{item.feature_id}"
             )
     for capability in configuration.execution_policy.required_capabilities:
         capability_consumers.setdefault(capability, set()).add(
@@ -1297,6 +1710,11 @@ def plan_execution(
             capability
             for service in selected_services
             for capability in service.required_capabilities
+        }
+        | {
+            capability
+            for item in selected_features
+            for capability in item.required_capabilities
         }
     )
     forbidden_capability_set = (
@@ -1378,6 +1796,33 @@ def plan_execution(
     regions = tuple(sorted({
         item.region_id for item in selected if item.region_id is not None
     }))
+    binding_by_target = {
+        item.target: item.implementation_id for item in bindings
+    }
+    active_boundaries: list[ExecutionBoundary] = []
+    collapsed_edge_count = 0
+    for edge in sorted(set(coverage.edges)):
+        source_implementation = binding_by_target.get(edge.source)
+        target_implementation = binding_by_target.get(edge.target)
+        if source_implementation is None or target_implementation is None:
+            continue
+        if source_implementation == target_implementation:
+            collapsed_edge_count += 1
+            continue
+        target_entry = implementation_catalog.entry(target_implementation)
+        target_adapter = next((
+            item for item in target_entry.adapters
+            if item.carrier_id == execution_carrier
+        ), None)
+        active_boundaries.append(ExecutionBoundary(
+            source=edge.source,
+            target=edge.target,
+            kind=edge.kind,
+            source_implementation_id=source_implementation,
+            target_implementation_id=target_implementation,
+            carrier_id=execution_carrier,
+            adapter_id="" if target_adapter is None else target_adapter.adapter_id,
+        ))
     package_ready = (
         not unresolved
         and not coverage.unresolved_edges
@@ -1394,6 +1839,10 @@ def plan_execution(
     report = DetachmentReport(
         reachable=tuple(sorted(coverage.reachable)),
         bindings=binding_items,
+        execution_carrier=execution_carrier,
+        target_resolutions=tuple(target_resolutions),
+        active_boundaries=tuple(active_boundaries),
+        collapsed_edge_count=collapsed_edge_count,
         generated_coverage=generated,
         faithful_override_coverage=faithful,
         region_replacement_coverage=regions,
@@ -1425,6 +1874,7 @@ def plan_execution(
         bootstrap_artifacts=bootstrap_artifacts,
         missing_bootstrap_artifacts=missing_bootstrap_artifacts,
         bootstrap_profile_valid=bootstrap_profile_valid,
+        enabled_features=tuple(item.feature_id for item in selected_features),
         package_ready=package_ready,
     )
 
@@ -1447,7 +1897,8 @@ def plan_execution(
         raise ExecutionPlanError(configuration.profile, report)
 
     digest = _plan_digest(
-        configuration, coverage, binding_items, selected, selected_services
+        configuration, coverage, binding_items, selected, selected_services,
+        selected_features, execution_carrier,
     )
     return ExecutionPlan(
         configuration=configuration,
@@ -1455,6 +1906,7 @@ def plan_execution(
         coverage_identity=coverage.evidence_identity,
         bindings=binding_items,
         implementations=selected,
+        features=selected_features,
         catalog=implementation_catalog,
         services=selected_services,
         report=report,

@@ -17,8 +17,8 @@ import pytest
 from dos_re import player
 from dos_re.execution import (
     BackendAdapter,
-    CPU_MODEL_BACKEND,
-    CPULESS_BACKEND,
+    GENERATED_CPULESS_CARRIER,
+    INTERPRETED_CPU_CARRIER,
     DependencyCapability,
     NativeBootstrapProvider,
     ImplementationCatalog,
@@ -405,8 +405,10 @@ def test_selected_implementation_activator_is_the_only_binding_authority():
                 descriptor,
                 implementation=lambda: None,
                 adapters=(BackendAdapter(
-                    CPU_MODEL_BACKEND,
+                    "native-frame/interpreted",
+                    INTERPRETED_CPU_CARRIER,
                     lambda runtime, targets: activated.append((runtime, targets)),
+                    "native-frame-adapter-v1",
                 ),),
             ),))
 
@@ -447,13 +449,20 @@ def test_selected_implementation_never_silently_falls_back_on_wrong_backend():
             return ImplementationCatalog((ImplementationEntry(
                 descriptor,
                 implementation=lambda: None,
-                adapters=(BackendAdapter(CPU_MODEL_BACKEND, lambda *_: None),),
+                adapters=(BackendAdapter(
+                    "native-frame/interpreted",
+                    INTERPRETED_CPU_CARRIER,
+                    lambda *_: None,
+                    "native-frame-adapter-v1",
+                ),),
             ),))
 
     frontend = Fe(ROOT)
     plan = frontend.resolve_execution_plan(_parse(frontend, []))
-    with pytest.raises(RuntimeError, match="no adapter for backend 'cpuless'"):
-        frontend.bind_execution_plan(object(), plan, backend_id=CPULESS_BACKEND)
+    with pytest.raises(RuntimeError, match="no adapter for carrier 'generated-cpuless'"):
+        frontend.bind_execution_plan(
+            object(), plan, carrier_id=GENERATED_CPULESS_CARRIER
+        )
 
 
 def test_selected_enhancement_activates_at_its_seam_without_owning_it():
@@ -492,9 +501,11 @@ def test_selected_enhancement_activates_at_its_seam_without_owning_it():
                 entries.append(ImplementationEntry(
                     descriptor,
                     adapters=(BackendAdapter(
-                        CPU_MODEL_BACKEND,
+                        f"{implementation_id}/interpreted",
+                        INTERPRETED_CPU_CARRIER,
                         lambda runtime, targets, name=implementation_id:
                         activated.append((name, runtime, targets)),
+                        implementation_id + "-adapter-v1",
                     ),),
                 ))
             return ImplementationCatalog(tuple(entries))

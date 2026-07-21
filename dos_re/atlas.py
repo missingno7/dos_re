@@ -22,7 +22,12 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
-from .execution import ExecutionPlan, ImplementationCatalog, ProgramCoverage
+from .execution import (
+    ExecutionPlan,
+    ImplementationCatalog,
+    ProgramCoverage,
+    ProgramEdge,
+)
 from .identity import (
     BoundaryIdentity,
     ExecutionPointIdentity,
@@ -1091,8 +1096,25 @@ class ExecutionAtlas:
             f"{edge.source} --{edge.kind}--> {edge.target}"
             for edge in self.unresolved() if edge.source in reachable
         ))
+        program_edges = tuple(sorted({
+            ProgramEdge(
+                edge.source,
+                edge.target,
+                edge.kind,
+                ",".join(edge.evidence),
+            )
+            for edge in self.edges()
+            if edge.status in {"resolved", "observed"}
+            and edge.source in reachable
+            and edge.target in reachable
+        }))
         return ProgramCoverage(
-            roots, frozenset(reachable), unresolved, self.identity_digest)
+            roots,
+            frozenset(reachable),
+            unresolved,
+            self.identity_digest,
+            program_edges,
+        )
 
     def implementation_view(
         self, catalog: ImplementationCatalog, plan: ExecutionPlan | None = None,
@@ -1112,6 +1134,16 @@ class ExecutionAtlas:
                     "required_services": sorted(descriptor.required_services),
                     "required_assets": sorted(descriptor.required_assets),
                     "verification_evidence": sorted(descriptor.verification_evidence),
+                    "recovery_level": (
+                        None if descriptor.recovery_level is None
+                        else descriptor.recovery_level.value
+                    ),
+                    "evidence_grade": descriptor.evidence_grade.name.lower(),
+                    "contract": (
+                        None if descriptor.contract is None
+                        else descriptor.contract.contract_id
+                    ),
+                    "execution_carrier": descriptor.execution_carrier,
                     "implementation_digest": descriptor.implementation_digest,
                     "region_id": descriptor.region_id,
                 }

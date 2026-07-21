@@ -15,7 +15,7 @@ a game to use every component.
                     Execution Atlas projection
                     navigation / CoverageSource
                               |
-     ImplementationCatalog + RuntimeServiceCatalog + BootstrapProvider
+ ImplementationCatalog + FeatureCatalog + RuntimeServiceCatalog + BootstrapProvider
                               |
                     ExecutionConfiguration
                               |
@@ -39,7 +39,9 @@ Planning can also consume a conservative `ProgramCoverage` directly.
 | `lift/ir.py` | Recovery IR loading and re-elaboration |
 | `replay.py`, replay input adapters, snapshot modules | ReplayArtifact and backend-specific capture/apply mechanics |
 | `atlas.py` | Materialized evidence projection, graph queries, inverse replay index |
-| `execution.py` | Coverage, catalogs, configuration, bootstrap declarations, planning, detachment report |
+| `execution.py` | Coverage/edge model, catalogs, carriers/adapters, configuration, bootstrap declarations, planning, detachment report |
+| `features.py` | Plan-authorized, replayable product feature state at safe boundaries |
+| `materialized_plan.py` | Closed-world selected graph serialization for product builds |
 | `bootstrap_runtime.py` | Validation and consumption of planned bootstrap artifacts |
 | `player.py` | One launch and replay command interface |
 | `pm_backend.py` and port adapters | Backend construction and machine-specific I/O |
@@ -65,6 +67,8 @@ input, or diagnostic service does not own recovered program code.
 9. Verification compares selected plans without changing them.
 10. Bootstrap is declared and validated before runtime construction.
 11. Export includes only the exact file and dependency closure of its plan.
+12. Known cross-owner edges are explicit boundaries; same-owner edges are
+    collapsed, not hidden hooks.
 
 ## Backend boundary
 

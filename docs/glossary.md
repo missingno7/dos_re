@@ -19,18 +19,20 @@
 | **CachedBoundary** | Independently restorable continuation at a ReplayPoint, stored as metadata plus pages changed from the replay base. |
 | **ContinuationState** | Backend-specific complete state required for deterministic continuation, including devices, scheduling, timing, and event cursor. |
 | **CanonicalState** | Backend-neutral authoritative projection used when oracle and candidate representations differ. |
-| **ProgramCoverage** | Conservative roots, reachable identities, unresolved edges, and evidence identity supplied to planning. |
+| **ProgramCoverage** | Conservative roots, reachable identities, known resolved/observed transfers, unresolved edges, and evidence identity supplied to planning. |
 | **ImplementationCatalog** | Available interpreted, generated, authored, and region implementations. |
 | **Implementation property** | Per-implementation property such as interpreted, VMless, CPUless, ABI-recovered, DOS-memory-backed, memoryless, or native. |
 | **Override** | Authored implementation selected from the same catalog as generated and original implementations. |
-| **Hook** | Low-level CPU/runtime interception used by an adapter or service; not a general implementation registry. |
-| **ExecutionConfiguration** | Explicit composition, execution policy, verification policy, bootstrap, services, and build target. |
+| **Hook** | Temporary low-level interception at a selected cross-owner edge. It collapses when one implementation owns both endpoints; it is not a registry or permanent native architecture. |
+| **Execution carrier** | Calling and state mechanism surrounding a selected root provider, such as interpreted CPU, generated VMless CPU, generated CPUless, DOS memory, or native state. It is not a recovery level. |
+| **Backend adapter** | Stable bridge that marshals one semantic implementation contract through one execution carrier. |
+| **Feature** | Planned optional presentation, behavioral, or instrumentation policy. It does not own recovered program targets. |
+| **ExecutionConfiguration** | Explicit composition, execution policy, verification policy, bootstrap, features, services, and build target. |
 | **Policy profile** | Development, verification, detached, or release preset for allowed capabilities. It is not a recovery level. |
 | **ExecutionPlan** | Immutable implementation binding and dependency closure for one configuration and coverage identity. |
 | **DetachmentReport** | Explanation of coverage, unresolved frontiers, retained dependencies, bootstrap status, and package readiness. |
 | **BootstrapProvider** | Declared source of initial runtime state and its build/runtime artifacts and capabilities. |
 | **RuntimeService** | Selected host or framework facility that does not own recovered code. |
-| **Backend adapter** | Machine-specific construction, state translation, and implementation activation beneath the unified player. |
 | **Faithful replacement** | Authored implementation claiming equivalent authoritative behavior. |
 | **Non-authoritative enhancement** | Optional presentation or host integration that treats gameplay state as read-only. |
 | **Behavioral modification** | Explicit intentional authoritative divergence with its own scope and tests. |

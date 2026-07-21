@@ -33,12 +33,15 @@ from dos_re.execution import (
     ExecutionConfiguration,
     ExecutionPlan,
     ExecutionPlanError,
+    FeatureCatalog,
+    INTERPRETED_CPU_CARRIER,
     ImplementationCatalog,
     ImplementationDescriptor,
     ImplementationEntry,
     ImplementationOrigin,
     OverrideCategory,
     ProgramCoverage,
+    RecoveryLevel,
     RuntimeServiceCatalog,
     RuntimeServiceDescriptor,
     execution_composition_digest,
@@ -363,6 +366,9 @@ class GameFrontend:
             implementation_id="interpreted-original",
             targets=frozenset({root}),
             origin=ImplementationOrigin.INTERPRETED,
+            recovery_level=RecoveryLevel.INTERPRETED,
+            execution_carrier=INTERPRETED_CPU_CARRIER,
+            region_id=root,
             properties=frozenset({"cpu-backed", "dos-memory-backed"}),
             required_capabilities=frozenset({
                 DependencyCapability.ORIGINAL_EXE.value,
@@ -381,6 +387,9 @@ class GameFrontend:
     ) -> RuntimeServiceCatalog:
         return RuntimeServiceCatalog()
 
+    def execution_features(self, args: argparse.Namespace) -> FeatureCatalog:
+        return FeatureCatalog()
+
     def resolve_execution_plan(self, args: argparse.Namespace) -> ExecutionPlan:
         """Resolve before boot so strict profiles cannot touch forbidden runtime."""
         return plan_execution(
@@ -388,6 +397,7 @@ class GameFrontend:
             self.execution_coverage(args),
             self.execution_implementations(args),
             self.execution_services(args),
+            self.execution_features(args),
         )
 
     def launch(self, args: argparse.Namespace, plan: ExecutionPlan) -> int:
@@ -410,10 +420,10 @@ class GameFrontend:
         )
 
     def bind_execution_plan(self, runtime, plan: ExecutionPlan, *,
-                            backend_id: str = "cpu-model") -> None:
-        """Install selected providers through their declared backend activators."""
+                            carrier_id: str = "interpreted-cpu") -> None:
+        """Install selected providers through declared carrier adapters."""
         from dos_re.execution import bind_plan_implementations
-        bind_plan_implementations(runtime, plan, backend_id=backend_id)
+        bind_plan_implementations(runtime, plan, carrier_id=carrier_id)
 
     def default_save_dir(self, args: argparse.Namespace) -> Path:
         """Where the live product persists the game's own saved files (progress,

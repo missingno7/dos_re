@@ -81,9 +81,9 @@ and release profiles because its runtime closure requires the forbidden EXE.
 `ExecutionConfiguration` separates:
 
 - execution composition: product roots, provider preference, selected authored
-  implementations, and product services;
-- execution policy: capability requirements, dynamic-loading policy, and
-  coverage strictness;
+  implementations, enabled product features, and product services;
+- execution policy: capability requirements, finite authored-evidence floor,
+  dynamic-loading policy, and coverage strictness;
 - verification policy: oracle requirement and comparison mode;
 - build target: platform and package format.
 
@@ -104,7 +104,7 @@ the product-safe dos_re runtime when selected implementations still need them.
 ## Coverage and identities
 
 `ProgramCoverage` contains stable roots, conservative reachable identities,
-unresolved edges, and an evidence identity. It implements the `CoverageSource`
+known resolved/observed edges, unresolved edges, and an evidence identity. It implements the `CoverageSource`
 protocol directly. `ExecutionAtlas.coverage_for(product_profile)` implements
 the same protocol from normalized static and observed evidence without making
 the planner depend on Atlas storage.
@@ -119,13 +119,23 @@ navigation, but the Atlas is not a planner dependency or selection authority.
 implementations. Every descriptor declares:
 
 - stable implementation ID and covered function/region identities;
-- origin and override category;
-- recovery properties;
+- origin, override category, and per-candidate recovery level;
+- optional backend-neutral contract and finite evidence grade;
+- intrinsic execution carrier for a region/program provider;
 - required dependency capabilities;
 - required runtime services;
 - required asset identities and supported build platforms;
 - verification-evidence identities;
 - implementation digest and optional region identity.
+
+`BackendAdapter` declares a stable adapter identity, carrier, activation seam,
+and digest. A function candidate without an adapter for the selected root
+carrier is rejected with an explicit fallback reason. Carriers describe
+calling/state mechanics, not global recovery modes.
+
+`FeatureCatalog` separately declares optional presentation, behavioral, and
+instrumentation features. Behavioral features require replay channels and safe
+application boundaries; features never claim program coverage.
 
 `RuntimeServiceCatalog` is the only service authority. Services declare their
 transitive service dependencies, dependency capabilities, assets, supported
@@ -168,12 +178,18 @@ explicitly selected authored implementation
 An implementation whose direct capabilities violate policy is not compatible.
 After selection, the complete service and capability closure is validated.
 There is no dynamic fallback outside the immutable plan.
+`TargetResolution` retains the complete ordered candidate decision and every
+rejection reason, including capability, platform, evidence, and carrier
+incompatibility.
 
 ## Detachment report
 
 Every plan reports:
 
 - reachable identities and selected bindings;
+- the selected root carrier, complete candidate decisions, active cross-owner
+  implementation boundaries, and the number of known edges collapsed inside
+  one selected owner;
 - generated, faithful, and region-replacement coverage;
 - unresolved identities and control-flow edges;
 - required, missing, development-only, and policy-forbidden services;
@@ -233,6 +249,11 @@ The exporter:
    components;
 7. rejects runtime dynamic import/evaluation;
 8. stages, hashes, manifests, and atomically publishes exactly those files.
+
+Export also writes a plain `execution_plan.json` containing the final carrier,
+target bindings, selected implementation/adapter digests, features, services,
+and bootstrap provider. Product build code may statically bind this graph
+without importing the development planner.
 
 The manifest records the plan digest and required capability closure. Thus an
 EXE-detached artifact cannot receive the original EXE merely because a launch
