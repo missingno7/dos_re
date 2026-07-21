@@ -1757,6 +1757,15 @@ def _classify_closure_findings(
         dynamic = "ind" in kind.casefold() or "dynamic" in kind.casefold()
         source_implementation = binding_by_target.get(source, "")
         target_implementation = binding_by_target.get(target, "")
+        if not target_implementation:
+            claiming = tuple(
+                item.implementation_id for item in selected
+                if target in item.targets
+            )
+            if source_implementation in claiming:
+                target_implementation = source_implementation
+            elif len(claiming) == 1:
+                target_implementation = claiming[0]
         region_id = next((
             identity for identity, members in region_members.items()
             if source in members and target in members

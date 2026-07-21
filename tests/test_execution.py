@@ -286,7 +286,7 @@ def test_selected_generated_internal_target_is_not_a_closure_blocker():
     point = "point:generated-resume"
     uncertain = ProgramCoverage(
         roots=(ROOT,),
-        reachable=frozenset({ROOT, point}),
+        reachable=frozenset({ROOT}),
         unresolved_edges=(f"{ROOT} --call--> {point}",),
         evidence_identity="generated-internal-v1",
     )
@@ -296,6 +296,7 @@ def test_selected_generated_internal_target_is_not_a_closure_blocker():
         _catalog(_implementation("generated", (ROOT, point))),
     )
     assert plan.report.unresolved_edges == ()
+    assert [item.target for item in plan.bindings] == [ROOT]
     assert plan.report.closure_findings[0].classification is (
         ClosureFindingKind.SELECTED_IMPLEMENTATION_OWNED
     )
