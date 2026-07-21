@@ -403,6 +403,17 @@ def test_long_lived_region_collapses_contextual_targets_and_materializes_handoff
     assert completed == [RegionExitPoint("complete", exit_target)]
     assert not dispatcher.active
 
+    dispatcher.enter(
+        resolved, "start", Session(), complete=completed.append,
+    )
+    assert dispatcher.advance() == RegionProgress.yielded("game-tick")
+    dispatcher.reset()
+    assert not dispatcher.active
+    assert dispatcher.active_region_id == ""
+    assert dispatcher.last_region_id == ""
+    assert dispatcher.last_entry_id == ""
+    assert dispatcher.last_exit_id == ""
+
     payload = load_materialized_plan(
         write_materialized_plan(plan, tmp_path / "execution_plan.json")
     )

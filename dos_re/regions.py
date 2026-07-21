@@ -135,6 +135,19 @@ class RegionDispatcher:
         self._active = None
         return progress
 
+    def reset(self) -> None:
+        """Discard transient carrier/session objects before state restore.
+
+        A region whose contract uses shared machine state must materialize all
+        continuation data at its declared replay boundaries.  Restoring that
+        machine state then reconstructs a fresh session at the entry seam;
+        retaining the old Python session would mix two continuations.
+        """
+        self._active = None
+        self.last_region_id = ""
+        self.last_entry_id = ""
+        self.last_exit_id = ""
+
 
 def ensure_region_dispatcher(runtime: object) -> RegionDispatcher:
     dispatcher = getattr(runtime, "execution_regions", None)
@@ -144,4 +157,3 @@ def ensure_region_dispatcher(runtime: object) -> RegionDispatcher:
     if not isinstance(dispatcher, RegionDispatcher):
         raise TypeError("runtime.execution_regions is not a RegionDispatcher")
     return dispatcher
-
