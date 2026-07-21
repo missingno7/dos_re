@@ -13,6 +13,7 @@ documents are grouped by concern rather than recovery stage.
 | [Execution planning](execution_planner.md) | Composition, policy, bootstrap, dependency closure, release |
 | [Execution Atlas](execution_atlas.md) | Materialized evidence projection and navigation |
 | [Replay architecture](replay_architecture.md) | Deterministic replay, continuation state, cached boundaries |
+| [Verification contracts](verification_contracts.md) | Semantic state, complete continuations, and native-region return seams |
 | [Override architecture](override_architecture.md) | Generated and authored implementations |
 | [Progressive replacement](progressive_replacement.md) | Carriers, candidate fallback, product features, and hook-boundary collapse |
 | [Execution regions](execution_regions.md) | Long-lived ownership, handoff, contextual suppression, replay, and materialization |

@@ -98,18 +98,21 @@ such as a completed game tick or input wait. Guest-instruction coordinates can
 remain diagnostic metadata but are not a required contract for authored
 semantic code.
 
-Region verification uses the existing hierarchy:
+Region verification uses an explicit two-surface contract (see
+[`verification_contracts.md`](verification_contracts.md)):
 
 1. replay the original oracle to the declared entry;
 2. run the selected region across one or more semantic yields;
-3. compare observable interval evidence;
-4. compare full continuation state at a declared exit or checkpoint;
+3. compare the declared canonical semantic state and observable interval
+   evidence while the region owns control;
+4. compare the declared continuation seam at every exit into surrounding code;
 5. refine a failed interval to detailed point or instruction evidence.
 
-Shared-memory regions use backend-specific `ContinuationState` directly.
-Detached native-state regions additionally declare a canonical semantic-state
-projection. A finite green corpus is scoped evidence, not proof over inputs the
-corpus never exercised.
+Shared-memory regions commonly use complete continuation comparison at their
+external seams. Detached native-state regions declare canonical semantic state
+inside the island and reconstruct only the receiving continuation contract at
+an external seam. A finite green corpus is scoped evidence, not proof over
+inputs the corpus never exercised.
 
 ## Whole-program providers
 

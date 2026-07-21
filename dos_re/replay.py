@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
+from .execution import VerificationProjectionContract
 from .observable import (
     ObservableIntervalDigest,
     RollingEffectDigest,
@@ -304,6 +305,79 @@ class StateComparison:
     differences: tuple[str, ...]
     oracle_digest: str
     candidate_digest: str
+
+
+def projection_contract_diagnostics(
+    contract: VerificationProjectionContract,
+) -> tuple[str, ...]:
+    """Return the declared authority and intentional exclusions for reports."""
+
+    return (
+        f"projection: {contract.projection_id}",
+        f"representation: {contract.representation.value}",
+        f"schema: {contract.schema_id}",
+        "required fields: " + (", ".join(contract.required_fields) or "none"),
+        "required regions: " + (", ".join(contract.required_regions) or "none"),
+        "observable effects: " + (
+            ", ".join(contract.observable_effects) or "none"),
+        "excluded internal state: " + (
+            ", ".join(contract.excluded_internal_state) or "none"),
+    )
+
+
+def validate_projection_contract(
+    state: CanonicalState,
+    contract: VerificationProjectionContract,
+    *,
+    side: str,
+) -> tuple[str, ...]:
+    """Reject a shared omission from a declared canonical projection."""
+
+    state = state.normalized()
+    errors: list[str] = []
+    if state.schema_id != contract.schema_id:
+        errors.append(
+            f"{side} projection contract {contract.projection_id!r} requires "
+            f"schema {contract.schema_id!r}, got {state.schema_id!r}"
+        )
+    for path in contract.required_fields:
+        current: Any = state.fields
+        found = True
+        for part in path.split("."):
+            if not isinstance(current, Mapping) or part not in current:
+                found = False
+                break
+            current = current[part]
+        if not found:
+            errors.append(
+                f"{side} projection contract {contract.projection_id!r} "
+                f"omits required field {path!r}"
+            )
+    for name in contract.required_regions:
+        if name not in state.regions:
+            errors.append(
+                f"{side} projection contract {contract.projection_id!r} "
+                f"omits required region {name!r}"
+            )
+    return tuple(errors)
+
+
+def compare_projection_contract(
+    oracle: CanonicalState,
+    candidate: CanonicalState,
+    contract: VerificationProjectionContract,
+) -> StateComparison:
+    """Compare one declared common authority, never an implicit subset."""
+
+    errors = list(validate_projection_contract(oracle, contract, side="oracle"))
+    errors.extend(validate_projection_contract(
+        candidate, contract, side="candidate"))
+    if errors:
+        return StateComparison(
+            False, tuple(errors), oracle.normalized().digest,
+            candidate.normalized().digest,
+        )
+    return oracle.compare(candidate)
 
 
 @dataclass(frozen=True)
@@ -626,6 +700,7 @@ class ReplayDriver(Protocol):
     def restore(self, state: ContinuationState, point: ReplayPoint) -> None: ...
     def replay_to(self, artifact: "ReplayArtifact", point: ReplayPoint) -> None: ...
     def project(self) -> CanonicalState: ...
+    def verification_projection_contract(self) -> VerificationProjectionContract: ...
 
 
 @dataclass(frozen=True)
@@ -1708,7 +1783,8 @@ def verify_interval(
     _ordered_interval(start, end)
     oracle_restored, oracle_start = _position_and_project(artifact, oracle, start)
     candidate_restored, candidate_start = _position_and_project(artifact, candidate, start)
-    start_comparison = oracle_start.compare(candidate_start)
+    start_comparison = _compare_driver_projections(
+        oracle, candidate, oracle_start, candidate_start)
     if not start_comparison.equivalent:
         artifact.annotate(start, kind="invalid-interval-start", metadata={
             "oracle_profile": oracle.profile.profile_id,
@@ -1731,7 +1807,8 @@ def verify_interval(
         oracle.profile, oracle_restored, start, end, _project(oracle))
     candidate_run = IntervalRun(
         candidate.profile, candidate_restored, start, end, _project(candidate))
-    comparison = oracle_run.projection.compare(candidate_run.projection)
+    comparison = _compare_driver_projections(
+        oracle, candidate, oracle_run.projection, candidate_run.projection)
     result = VerificationResult(start, end, oracle_run, candidate_run, comparison)
     artifact.record_validation(result)
     if comparison.equivalent:
@@ -1824,7 +1901,8 @@ def verify_checkpointed(
     oracle_restored, oracle_start = _position_and_project(artifact, oracle, start)
     candidate_restored, candidate_start = _position_and_project(
         artifact, candidate, start)
-    start_comparison = oracle_start.compare(candidate_start)
+    start_comparison = _compare_driver_projections(
+        oracle, candidate, oracle_start, candidate_start)
     if not start_comparison.equivalent:
         raise ReplayError(
             "verification interval starts from non-equivalent oracle/candidate state: "
@@ -1881,7 +1959,8 @@ def verify_checkpointed(
         # only once at the requested final endpoint for retained diagnostics.
         oracle_projection = _project(oracle)
         candidate_projection = _project(candidate)
-        comparison = oracle_projection.compare(candidate_projection)
+        comparison = _compare_driver_projections(
+            oracle, candidate, oracle_projection, candidate_projection)
     else:
         oracle_projection = final_segment.oracle_projection
         candidate_projection = final_segment.candidate_projection
@@ -1892,11 +1971,14 @@ def verify_checkpointed(
             differences.insert(0, "semantic-point state digest differs")
         if not final_segment.effects_equivalent:
             differences.insert(0, "observable interval effect digest differs")
+        rich_comparison = _compare_driver_projections(
+            oracle, candidate, oracle_projection, candidate_projection)
         comparison = StateComparison(
             False,
-            tuple(differences or ("observed interval differs",)),
-            oracle_projection.digest,
-            candidate_projection.digest,
+            tuple(differences or rich_comparison.differences
+                  or ("observed interval differs",)),
+            rich_comparison.oracle_digest,
+            rich_comparison.candidate_digest,
         )
 
     oracle_run = IntervalRun(
@@ -1976,7 +2058,8 @@ def _observe_segment(
     if not boundary_equivalent or not effects_equivalent:
         oracle_projection = _project(oracle)
         candidate_projection = _project(candidate)
-        comparison = oracle_projection.compare(candidate_projection)
+        comparison = _compare_driver_projections(
+            oracle, candidate, oracle_projection, candidate_projection)
     else:
         comparison = StateComparison(
             True, (), oracle_endpoint_digest, candidate_endpoint_digest)
@@ -2149,7 +2232,63 @@ def _project(driver: ReplayDriver) -> CanonicalState:
     projection = driver.project().normalized()
     if projection.schema_id != driver.profile.projection_schema:
         raise ReplayError("driver projection schema does not match execution profile")
+    contract = _driver_projection_contract(driver)
+    if contract is not None:
+        errors = validate_projection_contract(
+            projection, contract, side=driver.profile.role)
+        if errors:
+            raise ReplayError("; ".join(errors))
     return projection
+
+
+def _driver_projection_contract(
+    driver: ReplayDriver,
+) -> VerificationProjectionContract | None:
+    declared = getattr(driver, "verification_projection_contract", None)
+    if declared is None:
+        return None
+    contract = declared() if callable(declared) else declared
+    if not isinstance(contract, VerificationProjectionContract):
+        raise ReplayError(
+            "replay driver verification projection contract is invalid"
+        )
+    if contract.schema_id != driver.profile.projection_schema:
+        raise ReplayError(
+            "verification projection contract schema does not match execution profile"
+        )
+    return contract
+
+
+def _compare_driver_projections(
+    oracle: ReplayDriver,
+    candidate: ReplayDriver,
+    oracle_projection: CanonicalState,
+    candidate_projection: CanonicalState,
+) -> StateComparison:
+    oracle_contract = _driver_projection_contract(oracle)
+    candidate_contract = _driver_projection_contract(candidate)
+    if oracle_contract is None and candidate_contract is None:
+        return oracle_projection.compare(candidate_projection)
+    if oracle_contract is None or candidate_contract is None:
+        return StateComparison(
+            False,
+            ("oracle and candidate did not declare the same verification projection contract",),
+            oracle_projection.digest,
+            candidate_projection.digest,
+        )
+    if oracle_contract != candidate_contract:
+        return StateComparison(
+            False,
+            (
+                "verification projection contract differs: "
+                f"oracle {oracle_contract.projection_id!r} != "
+                f"candidate {candidate_contract.projection_id!r}",
+            ),
+            oracle_projection.digest,
+            candidate_projection.digest,
+        )
+    return compare_projection_contract(
+        oracle_projection, candidate_projection, oracle_contract)
 
 
 def _point_digest(driver: ReplayDriver) -> str:

@@ -31,6 +31,7 @@ SEMANTIC_BOUNDARY = 6
 PRESENTATION = 7
 FILESYSTEM = 8
 CONSOLE_OUTPUT = 9
+AUDIO_COMMAND = 10
 
 _RECORD = struct.Struct("<I4xQQQQ")
 _BUFFER_SIZE = _RECORD.size * 1638  # 65,520 bytes; exact record multiple

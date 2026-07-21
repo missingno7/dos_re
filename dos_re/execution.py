@@ -122,6 +122,129 @@ class OverrideCategory(str, Enum):
     INSTRUMENTATION = "instrumentation"
 
 
+class VerificationRepresentation(str, Enum):
+    """The strongest representation a faithful claim compares at one seam.
+
+    This is intentionally about *evidence*, not recovery level.  A generated
+    implementation and an authored one may both use a complete continuation
+    contract at a guest seam; a native region may use semantic state while it
+    owns control and a continuation contract only when it returns to guest
+    code.
+    """
+
+    COMPLETE_CONTINUATION = "complete-continuation"
+    SEMANTIC_STATE = "semantic-state"
+    CONTINUATION_SEAM = "continuation-seam"
+
+
+@dataclass(frozen=True)
+class VerificationProjectionContract:
+    """A named, reviewable canonical projection used for one comparison.
+
+    ``required_fields`` use dotted paths inside ``CanonicalState.fields``;
+    ``required_regions`` name byte regions.  The verifier rejects a projection
+    that omits a declared requirement even if both sides omit it identically.
+    ``excluded_internal_state`` is deliberate diagnostic metadata: it records
+    which implementation-private details must not be mistaken for evidence.
+    """
+
+    projection_id: str
+    representation: VerificationRepresentation
+    schema_id: str
+    required_fields: tuple[str, ...] = ()
+    required_regions: tuple[str, ...] = ()
+    observable_effects: tuple[str, ...] = ()
+    excluded_internal_state: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.projection_id or not self.schema_id:
+            raise ValueError("verification projection ID and schema must not be empty")
+        for label, values in (
+            ("required field", self.required_fields),
+            ("required region", self.required_regions),
+            ("observable effect", self.observable_effects),
+            ("excluded internal state", self.excluded_internal_state),
+        ):
+            if any(not value for value in values) or len(set(values)) != len(values):
+                raise ValueError(f"verification {label}s must be non-empty and unique")
+        if set(self.required_fields) & set(self.excluded_internal_state):
+            raise ValueError(
+                "a verification field cannot be both required and excluded"
+            )
+
+
+@dataclass(frozen=True)
+class RegionExitVerificationContract:
+    """The externally observable contract when an island leaves its owner."""
+
+    exit_id: str
+    continuation: str
+    projection: VerificationProjectionContract
+
+    def __post_init__(self) -> None:
+        if not self.exit_id or not self.continuation:
+            raise ValueError("region exit verification needs an exit and continuation")
+        if self.projection.representation is not VerificationRepresentation.CONTINUATION_SEAM:
+            raise ValueError(
+                "region exit verification must use a continuation-seam projection"
+            )
+
+
+@dataclass(frozen=True)
+class RegionVerificationContract:
+    """Interior semantic evidence plus every declared external exit seam."""
+
+    contract_id: str
+    interior: VerificationProjectionContract
+    exits: tuple[RegionExitVerificationContract, ...]
+
+    def __post_init__(self) -> None:
+        if not self.contract_id:
+            raise ValueError("region verification contract ID must not be empty")
+        if self.interior.representation is VerificationRepresentation.CONTINUATION_SEAM:
+            raise ValueError("region interior cannot use a continuation-seam projection")
+        if not self.exits:
+            raise ValueError("region verification contract needs every exit seam")
+        exit_ids = [item.exit_id for item in self.exits]
+        if len(set(exit_ids)) != len(exit_ids):
+            raise ValueError("region exit verification IDs must be unique")
+
+
+def region_verification_payload(
+    contract: RegionVerificationContract | None,
+) -> dict[str, object] | None:
+    """Stable materialization for plans, exports, and verification reports."""
+
+    if contract is None:
+        return None
+
+    def projection(
+        item: VerificationProjectionContract,
+    ) -> dict[str, object]:
+        return {
+            "id": item.projection_id,
+            "representation": item.representation.value,
+            "schema": item.schema_id,
+            "required_fields": list(item.required_fields),
+            "required_regions": list(item.required_regions),
+            "observable_effects": list(item.observable_effects),
+            "excluded_internal_state": list(item.excluded_internal_state),
+        }
+
+    return {
+        "id": contract.contract_id,
+        "interior": projection(contract.interior),
+        "exits": [
+            {
+                "exit_id": item.exit_id,
+                "continuation": item.continuation,
+                "projection": projection(item.projection),
+            }
+            for item in contract.exits
+        ],
+    }
+
+
 @dataclass(frozen=True)
 class ImplementationContract:
     """Backend-neutral contract shared by generated and authored candidates."""
@@ -185,6 +308,7 @@ class ExecutionRegionContract:
     replay_boundaries: frozenset[str] = frozenset()
     state_inputs: tuple[str, ...] = ()
     state_outputs: tuple[str, ...] = ()
+    verification: RegionVerificationContract | None = None
 
     def __post_init__(self) -> None:
         if not self.region_id or not self.carrier_id:
@@ -202,6 +326,16 @@ class ExecutionRegionContract:
             raise ValueError("region entry targets must be unique")
         if len(set(exit_ids)) != len(exit_ids):
             raise ValueError("region exit IDs must be unique")
+        if self.verification is not None:
+            declared = {item.exit_id: item.continuation for item in self.exits}
+            verified = {
+                item.exit_id: item.continuation
+                for item in self.verification.exits
+            }
+            if declared != verified:
+                raise ValueError(
+                    "region verification exits must exactly match region exits"
+                )
 
 
 class FeatureCategory(str, Enum):
@@ -508,6 +642,15 @@ class ImplementationDescriptor:
                 raise ValueError(
                     "region implementations must target their region, entries, "
                     "and continuations"
+                )
+            if (
+                self.origin is ImplementationOrigin.AUTHORED
+                and self.category is OverrideCategory.FAITHFUL
+                and self.region_contract.verification is None
+            ):
+                raise ValueError(
+                    "faithful authored execution regions require an explicit "
+                    "verification contract"
                 )
         if self.category is OverrideCategory.INSTRUMENTATION \
                 and DependencyCapability.INSTRUMENTATION.value \
@@ -839,6 +982,7 @@ class ResolvedExecutionRegion:
     covered_targets: tuple[str, ...]
     suppressed_bindings: tuple[PlanBinding, ...]
     replay_boundaries: tuple[str, ...]
+    verification: RegionVerificationContract | None = None
 
 
 @dataclass(frozen=True)
@@ -1475,6 +1619,9 @@ def _plan_digest(
                 "adapter_digest": item.adapter_digest,
                 "state_ownership": item.state_ownership.value,
                 "covered_targets": list(item.covered_targets),
+                "verification": region_verification_payload(
+                    item.verification
+                ),
                 "suppressed_bindings": [
                     [binding.target, binding.implementation_id]
                     for binding in item.suppressed_bindings
@@ -1521,6 +1668,9 @@ def _plan_digest(
                         ),
                         "replay_boundaries": sorted(
                             item.region_contract.replay_boundaries
+                        ),
+                        "verification": region_verification_payload(
+                            item.region_contract.verification
                         ),
                     }
                 ),
@@ -1603,6 +1753,9 @@ def execution_composition_digest(plan: ExecutionPlan) -> str:
                         "covered_targets": sorted(
                             item.region_contract.covered_targets
                         ),
+                        "verification": region_verification_payload(
+                            item.region_contract.verification
+                        ),
                     }
                 ),
             }
@@ -1621,6 +1774,9 @@ def execution_composition_digest(plan: ExecutionPlan) -> str:
                 "adapter_digest": item.adapter_digest,
                 "state_ownership": item.state_ownership.value,
                 "covered_targets": list(item.covered_targets),
+                "verification": region_verification_payload(
+                    item.verification
+                ),
             }
             for item in plan.regions
         ],
@@ -2082,6 +2238,7 @@ def plan_execution(
             covered_targets=tuple(sorted(contract.covered_targets)),
             suppressed_bindings=suppressed,
             replay_boundaries=tuple(sorted(contract.replay_boundaries)),
+            verification=contract.verification,
         ))
     region_items = tuple(sorted(
         resolved_regions, key=lambda item: item.region_id

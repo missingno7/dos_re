@@ -29,8 +29,12 @@ from dos_re.execution import (
     RecoveryLevel,
     RegionAdapter,
     RegionEntryPoint,
+    RegionExitVerificationContract,
     RegionExitPoint,
     RegionStateOwnership,
+    RegionVerificationContract,
+    VerificationProjectionContract,
+    VerificationRepresentation,
     bind_plan_implementations,
     plan_execution,
     profile_configuration,
@@ -65,6 +69,22 @@ COVERAGE = ProgramCoverage(
 
 def _semantic(value: int) -> int:
     return (value + 1) & 0xFFFF
+
+
+def _region_verification(exit_target: str) -> RegionVerificationContract:
+    interior = VerificationProjectionContract(
+        "test:region:interior", VerificationRepresentation.SEMANTIC_STATE,
+        "test:semantic/v1", required_fields=("state",),
+    )
+    seam = VerificationProjectionContract(
+        "test:region:exit", VerificationRepresentation.CONTINUATION_SEAM,
+        "test:semantic/v1", required_fields=("continuation",),
+        required_regions=("shared-memory",),
+    )
+    return RegionVerificationContract(
+        "test:region/v1", interior,
+        (RegionExitVerificationContract("complete", exit_target, seam),),
+    )
 
 
 def _provider(identifier: str, carrier: str, level: RecoveryLevel):
@@ -317,6 +337,7 @@ def test_long_lived_region_collapses_contextual_targets_and_materializes_handoff
         replay_boundaries=frozenset({"game-tick"}),
         state_inputs=("DOS memory",),
         state_outputs=("DOS memory", "presentation"),
+        verification=_region_verification(exit_target),
     )
     island = ImplementationEntry(
         ImplementationDescriptor(
@@ -373,6 +394,8 @@ def test_long_lived_region_collapses_contextual_targets_and_materializes_handoff
 
     assert len(plan.regions) == 1
     resolved = plan.regions[0]
+    assert resolved.verification is not None
+    assert resolved.verification.contract_id == "test:region/v1"
     assert resolved.covered_targets == (A, B)
     assert {item.target for item in resolved.suppressed_bindings} == {A, B}
     assert plan.report.unresolved_edges == ()

@@ -101,11 +101,15 @@ Add `--bisect` to persist the first divergent transition. The frontend supplies
 the oracle and candidate `ReplayDriver` pair; `player.main` owns the command,
 stable points, comparison, and exit status.
 
-Verification compares complete continuation state when both sides share the
-machine representation, or the same `CanonicalState` schema when the candidate
-is detached or memoryless. A reproduction is always a boundary reference
-inside the original replay artifact; verification creates no secondary replay
-artifact.
+Verification compares complete continuation state while both sides share a
+guest carrier. A long-lived native region instead declares the strongest common
+canonical semantic projection while it owns control and an explicit
+continuation-seam projection when it returns to generated or interpreted code.
+The declaration lists required fields, byte regions, effects, and intentional
+exclusions; it is validated before equality can pass. See
+[`verification_contracts.md`](verification_contracts.md). A reproduction is
+always a boundary reference inside the original replay artifact; verification
+creates no secondary replay artifact.
 
 ## Verification is a scoped claim
 

@@ -75,6 +75,7 @@ from dos_re.replay import (
     ReplayPointCoordinate,
     ReplayRecording,
     bisect_divergence,
+    projection_contract_diagnostics,
     verify_checkpointed,
     verify_interval,
 )
@@ -1502,6 +1503,21 @@ def _run_differential_verification(
     start = ReplayPoint(args.verify_start, artifact.timeline_id)
     end = ReplayPoint(args.verify_end, artifact.timeline_id)
     oracle, candidate = frontend.verification_drivers(args, plan, artifact)
+    oracle_contract = getattr(oracle, "verification_projection_contract", None)
+    candidate_contract = getattr(candidate, "verification_projection_contract", None)
+    oracle_contract = (
+        oracle_contract() if callable(oracle_contract) else oracle_contract
+    )
+    candidate_contract = (
+        candidate_contract() if callable(candidate_contract) else candidate_contract
+    )
+    if oracle_contract is not None or candidate_contract is not None:
+        if oracle_contract != candidate_contract:
+            print("verification projection: oracle/candidate contract mismatch")
+        elif oracle_contract is not None:
+            print("verification projection:")
+            for line in projection_contract_diagnostics(oracle_contract):
+                print("  " + line)
     if args.bisect:
         points = tuple(
             ReplayPoint(ordinal, artifact.timeline_id)
