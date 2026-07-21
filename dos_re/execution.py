@@ -645,6 +645,11 @@ class RuntimeCapabilityViolation(RuntimeError):
 def format_execution_plan(plan: ExecutionPlan) -> str:
     """Stable, concise human report for ``play.py --plan-only`` and CI logs."""
     report = plan.report
+    binding_counts: dict[str, int] = {}
+    for binding in report.bindings:
+        binding_counts[binding.implementation_id] = (
+            binding_counts.get(binding.implementation_id, 0) + 1
+        )
     lines = [
         f"execution profile: {plan.configuration.profile}",
         f"program: {plan.configuration.program_identity}",
@@ -656,6 +661,10 @@ def format_execution_plan(plan: ExecutionPlan) -> str:
         + (", ".join(report.required_capabilities) or "none"),
         f"package ready: {str(report.package_ready).lower()}",
     ]
+    lines.extend(
+        f"implementation: {implementation_id} ({count} identities)"
+        for implementation_id, count in sorted(binding_counts.items())
+    )
     lines.extend(
         f"{item.capability} detached: {str(item.detached).lower()}"
         for item in report.detachment_milestones
