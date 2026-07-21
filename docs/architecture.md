@@ -38,6 +38,7 @@ Planning can also consume a conservative `ProgramCoverage` directly.
 | `identity.py` | Stable serialized identities |
 | `lift/ir.py` | Recovery IR loading and re-elaboration |
 | `replay.py`, replay input adapters, snapshot modules | ReplayArtifact and backend-specific capture/apply mechanics |
+| `verification_contract.py` | Backend-neutral comparison-surface declarations shared by replay and planning |
 | `atlas.py` | Materialized evidence projection, graph queries, inverse replay index |
 | `execution.py` | Coverage/edge model, catalogs, carriers/adapters, configuration, bootstrap declarations, planning, detachment report |
 | `regions.py` | Validated runtime handoff and semantic yielding for planned long-lived execution regions |
@@ -85,7 +86,8 @@ returns, timing, and control transfer for one backend.
 ## Dependency guards
 
 - `identity.py` must not import replay, Atlas, execution, player, or backends.
-- replay must not import Atlas or implementation selection;
+- replay must not import Atlas or implementation selection; replay and planning
+  may both import the metadata-only `verification_contract.py`;
 - Atlas must not import player or backend dispatch;
 - `execution.py` stays backend-neutral;
 - player and export consume plans but cannot create alternate selection

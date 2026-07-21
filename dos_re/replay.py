@@ -34,12 +34,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
-from .execution import VerificationProjectionContract
 from .observable import (
     ObservableIntervalDigest,
     RollingEffectDigest,
     SEMANTIC_BOUNDARY,
 )
+from .verification_contract import VerificationProjectionContract
 
 FORMAT_VERSION = 1
 DEFAULT_PAGE_SIZE = 4096
