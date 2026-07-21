@@ -60,6 +60,7 @@ from dos_re.replay_input import (
     scan_payload,
 )
 from dos_re.keyboard import KeyDispatcher, scancode_table
+from dos_re.runtime_miss import RuntimeExecutionFrontier
 from dos_re.x86 import HaltExecution, UnsupportedInstruction
 # The EXE loader is imported lazily inside default frontend methods. A detached
 # frontend can therefore construct its selected runtime without importing the
@@ -959,6 +960,22 @@ def _step_frame(
         for line in _diagnostic_lines(rt):
             print(f"  {line}")
         _save_gap_snapshot(frontend, rt, status=status)
+        return status, False
+    except RuntimeExecutionFrontier as exc:
+        import traceback
+        traceback.print_exc()
+        status = f"exception: {type(exc).__name__}: {exc}"
+        for line in _diagnostic_lines(rt):
+            print(f"  {line}")
+        if not getattr(rt, "_dos_re_last_recovery_frontier", None):
+            from dos_re.crash import save_recovery_frontier
+            out = _timestamp_dir(
+                frontend.artifacts_dir,
+                f"recovery_frontier_{frontend.name}",
+            )
+            save_recovery_frontier(rt, out, exc=exc)
+            rt._dos_re_last_recovery_frontier = str(out)
+            print(f"recovery frontier saved: {out}")
         return status, False
     except Exception as exc:  # noqa: BLE001 — keep bring-up useful
         import traceback
