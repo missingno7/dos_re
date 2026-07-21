@@ -64,14 +64,17 @@ class RealModeInputAdapter:
     def apply_to_runtime(
         self, ordinal: int, rt: Runtime, *,
         deliver: Callable[[Runtime, int], None] = _default_deliver,
+        event_handler: Callable[[ReplayEvent, Sequence[Runtime]], None] | None = None,
         single: bool = False,
     ) -> int:
         return self.apply_to_runtimes(
-            ordinal, (rt,), deliver=deliver, single=single)
+            ordinal, (rt,), deliver=deliver,
+            event_handler=event_handler, single=single)
 
     def apply_to_runtimes(
         self, ordinal: int, runtimes: Sequence[Runtime], *,
         deliver: Callable[[Runtime, int], None] = _default_deliver,
+        event_handler: Callable[[ReplayEvent, Sequence[Runtime]], None] | None = None,
         single: bool = False,
     ) -> int:
         """Apply due events, optionally one at a time for input-poll waits."""
@@ -92,6 +95,8 @@ class RealModeInputAdapter:
                 value = _integer_payload(event, "value") & 0xFFFF
                 for rt in runtimes:
                     rt.dos.key_queue.append(value)
+            elif event_handler is not None:
+                event_handler(event, runtimes)
             else:
                 raise ValueError(f"unsupported real-mode replay channel: {event.channel!r}")
             self._cursor += 1

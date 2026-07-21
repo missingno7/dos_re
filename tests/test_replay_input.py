@@ -93,3 +93,26 @@ def test_input_normalization_has_no_legacy_mouse_fields():
         "u": 0.25, "v": 0.75, "buttons": 2}
     assert bios_key_value_from_scancode(0x39, "") == 0x3920
     assert bios_key_value_from_scancode(0x3B, "") is None
+
+
+def test_project_event_channel_uses_explicit_adapter() -> None:
+    from dos_re.replay import ReplayEvent, ReplayPoint
+
+    event = ReplayEvent(
+        ReplayPoint(0, "real-frames-v1"),
+        0,
+        "game:features/v1",
+        {"feature_id": "game:practice", "value": True},
+    )
+    adapter = RealModeInputAdapter((event,))
+    rt = DummyRuntime()
+    applied = []
+
+    assert adapter.apply_to_runtime(
+        0,
+        rt,
+        event_handler=lambda replay_event, runtimes: applied.append(
+            (replay_event, runtimes)
+        ),
+    ) == 1
+    assert applied == [(event, (rt,))]

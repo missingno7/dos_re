@@ -134,6 +134,10 @@ class _RealReplayRecorder:
             self._last_mouse = sample
         return sample
 
+    def record_event(self, *, boundary: int, channel: str, payload) -> None:
+        """Record one project-normalized event in the authoritative stream."""
+        self.recording.add(self._ordinal(boundary), channel, payload)
+
     def mark(self, frontend, args, rt, *, boundary: int) -> None:
         ordinal = self._ordinal(boundary)
         schema_id, value = frontend.replay_point_coordinate(
@@ -185,9 +189,12 @@ class _RealReplayPlayback:
     def finished(self, boundary: int) -> bool:
         return int(boundary) >= self.end_point.ordinal
 
-    def apply_to_runtime(self, boundary, rt, *, deliver, single=False):
+    def apply_to_runtime(
+        self, boundary, rt, *, deliver, event_handler=None, single=False,
+    ):
         return self.adapter.apply_to_runtime(
-            boundary, rt, deliver=deliver, single=single)
+            boundary, rt, deliver=deliver,
+            event_handler=event_handler, single=single)
 
     def coordinate_after(self, boundary: int) -> ReplayPointCoordinate:
         return self.artifact.timeline_coordinate(ReplayPoint(
@@ -389,6 +396,15 @@ class GameFrontend:
 
     def execution_features(self, args: argparse.Namespace) -> FeatureCatalog:
         return FeatureCatalog()
+
+    def recording_started(self, rt, args, *, record_event) -> None:
+        """Queue project feature events once an artifact owns their stream."""
+
+    def apply_replay_event(self, rt, args, event) -> None:
+        """Apply a project-owned replay channel through its thin adapter."""
+        raise ValueError(
+            f"unsupported replay channel for {self.name}: {event.channel!r}"
+        )
 
     def resolve_execution_plan(self, args: argparse.Namespace) -> ExecutionPlan:
         """Resolve before boot so strict profiles cannot touch forbidden runtime."""
@@ -885,7 +901,14 @@ def run_replay_headless(frontend: GameFrontend, rt, args,
         if args.frames and frame >= args.frames:
             status = f"frame budget reached ({args.frames})"
             break
-        playback.apply_to_runtime(frame, rt, deliver=lambda r, sc: frontend.deliver_input(r, sc))
+        playback.apply_to_runtime(
+            frame,
+            rt,
+            deliver=lambda r, sc: frontend.deliver_input(r, sc),
+            event_handler=lambda event, _runtimes: frontend.apply_replay_event(
+                rt, args, event
+            ),
+        )
         new_status, keep_running = _step_frame(
             frontend, rt, args, frame,
             replay_coordinate=playback.coordinate_after(frame),
@@ -988,6 +1011,15 @@ def run_view(frontend: GameFrontend, rt, args,
             name=name, metadata=meta)
         out = rec.start(boundary=frame_box["n"])
         recorder["rec"] = rec
+        frontend.recording_started(
+            rt,
+            args,
+            record_event=lambda boundary, channel, payload: rec.record_event(
+                boundary=boundary,
+                channel=channel,
+                payload=payload,
+            ),
+        )
         mouse = "mouse" if meta["mouse_present"] else "no-mouse"
         print(f"recording replay [embedded base, {mouse}] -> {out}")
 
@@ -1142,8 +1174,13 @@ def run_view(frontend: GameFrontend, rt, args,
                             dispatcher.post_up(sc)
 
             if replaying:
-                playback.apply_to_runtime(frame_box["n"], rt,
-                                          deliver=lambda r, sc: frontend.deliver_input(r, sc))
+                playback.apply_to_runtime(
+                    frame_box["n"],
+                    rt,
+                    deliver=lambda r, sc: frontend.deliver_input(r, sc),
+                    event_handler=lambda event, _runtimes:
+                    frontend.apply_replay_event(rt, args, event),
+                )
             else:
                 dispatcher.pump()
                 sample_mouse_for_replay()
