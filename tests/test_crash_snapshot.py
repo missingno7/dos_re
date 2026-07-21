@@ -101,7 +101,8 @@ def test_crash_dir_does_not_read_the_clock(tmp_path: Path) -> None:
 def test_runtime_miss_writes_deterministic_recovery_frontier(
     tmp_path: Path,
 ) -> None:
-    rt = create_runtime(_tiny_exe(tmp_path), game_root=str(tmp_path))
+    exe = _tiny_exe(tmp_path)
+    rt = create_runtime(exe, game_root=str(tmp_path))
     target = "game:point:1010:1234"
     plan = plan_execution(
         profile_configuration("detached", program_identity="game:test"),
@@ -159,3 +160,8 @@ def test_runtime_miss_writes_deterministic_recovery_frontier(
         assert (out / "memory_1mb.bin").is_file()
         assert (out / "state.json").is_file()
     assert ids[0] == ids[1]
+    from dos_re.snapshot import load_snapshot
+    resumed = load_snapshot(
+        exe, tmp_path / "frontier-a", game_root=str(tmp_path),
+    )
+    assert (resumed.cpu.s.cs, resumed.cpu.s.ip) == (0x1010, 0x1234)
