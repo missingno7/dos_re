@@ -94,7 +94,7 @@ class _RealReplayRecorder:
             directory, timeline_id=timeline, profile=profile,
             base_state=base, metadata=metadata)
         schema_id, value = frontend.replay_point_coordinate(
-            rt, args, point_ordinal=0)
+            rt, args, point_ordinal=0, event_cursor=0)
         self.recording.mark(0, schema_id=schema_id, value=value)
         self.directory = directory
         self._args = args
@@ -134,7 +134,11 @@ class _RealReplayRecorder:
     def mark(self, frontend, args, rt, *, boundary: int) -> None:
         ordinal = self._ordinal(boundary)
         schema_id, value = frontend.replay_point_coordinate(
-            rt, args, point_ordinal=ordinal)
+            rt,
+            args,
+            point_ordinal=ordinal,
+            event_cursor=self.recording.event_count,
+        )
         self.recording.mark(
             ordinal, schema_id=schema_id, value=value)
 
@@ -456,13 +460,20 @@ class GameFrontend:
         rt.cpu.run(args.steps_per_frame)
 
     def replay_point_coordinate(
-        self, rt, args: argparse.Namespace, *, point_ordinal: int | None = None,
+        self,
+        rt,
+        args: argparse.Namespace,
+        *,
+        point_ordinal: int | None = None,
+        event_cursor: int,
     ) -> tuple[str, object]:
         """Return the exact coordinate of the current replay boundary.
 
         The default is the low-level guest-instruction fallback.  Games should
         override this with a semantic tick/present/input boundary and use the
         ordinal only as its sequence identity, never as a host dispatch count.
+        ``event_cursor`` is the exact immutable-input position at the point and
+        should be included in any frontend-defined diagnostic fallback.
         """
         return GUEST_INSTRUCTION_COORDINATE, int(rt.cpu.instruction_count)
 
