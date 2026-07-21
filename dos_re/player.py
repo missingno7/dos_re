@@ -158,6 +158,9 @@ class _RealReplayRecorder:
         self.mark(frontend, self._args, rt, boundary=boundary)
         state = frontend.capture_replay_state(
             rt, event_cursor=self.recording.event_count)
+        self.recording.metadata.update(
+            frontend.recording_finished(rt, self._args)
+        )
         self.recording.finish(end, end_state=state)
         return self.directory
 
@@ -281,6 +284,8 @@ class GameFrontend:
     default_scale = 3
     #: "adlib" turns on the observer-only OPL3 + PC-speaker sink in the viewer
     default_audio = "off"
+    #: Ports may extend this with explicit presentation-only backends.
+    audio_choices: tuple[str, ...] = ("adlib", "off")
     #: Ordered implementation providers. Import order never selects execution.
     default_provider_preference: tuple[str, ...] = ("interpreted-original",)
 
@@ -404,6 +409,15 @@ class GameFrontend:
 
     def recording_started(self, rt, args, *, record_event) -> None:
         """Queue project feature events once an artifact owns their stream."""
+
+    def recording_finished(self, rt, args: argparse.Namespace) -> dict[str, object]:
+        """Return derived, product-owned evidence for the ReplayArtifact.
+
+        Immutable events, profiles, and continuation boundaries remain owned by
+        ``ReplayArtifact``.  This hook is only for summaries that can be
+        rebuilt from the same recording, such as a game's lifecycle coverage.
+        """
+        return {}
 
     def apply_replay_event(self, rt, args, event) -> None:
         """Apply a project-owned replay channel through its thin adapter."""
@@ -574,6 +588,24 @@ class GameFrontend:
         from dos_re.framebuffer import decode_frame_default
 
         return decode_frame_default(rt)
+
+    def render_presentation_frame(
+        self,
+        rt,
+        args: argparse.Namespace,
+        *,
+        interpolation: float,
+    ):
+        """Return the frame presented to the host.
+
+        The default remains the decoded guest framebuffer.  A port may override
+        this at its explicitly declared presentation boundary to render a
+        semantic scene, interpolate *presentation-only* state, or use a modern
+        audio/video backend.  It must not advance or mutate authoritative game
+        state: simulation remains solely owned by :meth:`advance_frame`.
+        """
+        del args, interpolation
+        return self.decode_frame(rt)
 
     def deliver_input(self, rt, scancode: int) -> None:
         """Deliver one XT scancode to the game (override e.g. to bound ISR steps)."""
@@ -838,7 +870,12 @@ def build_arg_parser(frontend: GameFrontend,
 
     pace = p.add_argument_group("pacing")
     pace.add_argument("--present-hz", type=int, default=frontend.default_present_hz,
-                      help="viewer presents per second")
+                       help="viewer presents per second")
+    pace.add_argument(
+        "--simulation-hz", type=int, default=0,
+        help="authoritative semantic ticks per second (0 = present-hz); a lower "
+             "value permits presentation-only interpolation between fixed ticks",
+    )
     pace.add_argument("--steps-per-frame", type=int,
                       default=frontend.default_steps_per_frame,
                       help="VM instructions per displayed/simulated frame")
@@ -853,7 +890,7 @@ def build_arg_parser(frontend: GameFrontend,
     view.add_argument("--square-pixels", action="store_true",
                       help="par=1.0 instead of the DOS 4:3 look (par=1.2)")
     view.add_argument("--audio", default=frontend.default_audio,
-                      choices=("adlib", "off"),
+                      choices=frontend.audio_choices,
                       help="viewer audio: 'adlib' = observer-only OPL3 + PC-speaker "
                            "sink (never affects game state); 'off'")
 
@@ -910,6 +947,12 @@ def _diagnostic_lines(rt) -> list[str]:
             f"{getattr(rt, 'execution_carrier_id', plan.report.execution_carrier)} "
             f"plan={plan.plan_digest[:12]}"
         )
+    product_diagnostics = getattr(rt, "_dos_re_product_diagnostics", None)
+    if callable(product_diagnostics):
+        try:
+            lines.extend(str(item) for item in product_diagnostics())
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not mask a crash
+            lines.append(f"product diagnostics unavailable: {exc}")
     dispatcher = getattr(rt, "execution_regions", None)
     if dispatcher is not None and dispatcher.last_region_id:
         active = dispatcher.active_region_id or "none"
@@ -1133,7 +1176,10 @@ def run_view(frontend: GameFrontend, rt, args,
     rt.dos.mouse_present = playback.mouse_present_hint if replaying else True
 
     pygame.init()
-    first = np.asarray(frontend.decode_frame(rt), np.uint8)
+    first = np.asarray(
+        frontend.render_presentation_frame(rt, args, interpolation=1.0),
+        np.uint8,
+    )
     fh, fw = first.shape[:2]
     par = 1.0 if args.square_pixels else 1.2
     display = Display((fw * args.scale, int(fh * par) * args.scale),
@@ -1141,6 +1187,15 @@ def run_view(frontend: GameFrontend, rt, args,
     display.par = par
     scancodes = scancode_table(pygame)
     clock = pygame.time.Clock()
+    simulation_hz = int(getattr(args, "simulation_hz", 0) or args.present_hz)
+    if simulation_hz <= 0:
+        raise ValueError("--simulation-hz must be positive (or zero for --present-hz)")
+    simulation_period = 1.0 / simulation_hz
+    # Start with one tick due so a newly opened viewer presents a real game
+    # state immediately. Thereafter host presentation may run ahead of the
+    # fixed semantic timeline; the frontend receives only the fractional
+    # interpolation value and must never feed it into simulation.
+    simulation_accumulator = simulation_period
 
     frame_box = {"n": 0}
     recorder: dict[str, _RealReplayRecorder | None] = {"rec": None}
@@ -1320,36 +1375,50 @@ def run_view(frontend: GameFrontend, rt, args,
                             dispatcher.post_down(sc)
                             dispatcher.post_up(sc)
 
-            if replaying:
-                playback.apply_to_runtime(
-                    frame_box["n"],
-                    rt,
-                    deliver=lambda r, sc: frontend.deliver_input(r, sc),
-                    event_handler=lambda event, _runtimes:
-                    frontend.apply_replay_event(rt, args, event),
-                )
-            else:
-                dispatcher.pump()
-                sample_mouse_for_replay()
+            # Input is collected at host cadence but applied only when a fixed
+            # semantic tick is due. This keeps render rate, aspect ratio, and
+            # interpolation out of authoritative gameplay and replay timing.
+            if simulation_accumulator >= simulation_period:
+                if replaying:
+                    playback.apply_to_runtime(
+                        frame_box["n"],
+                        rt,
+                        deliver=lambda r, sc: frontend.deliver_input(r, sc),
+                        event_handler=lambda event, _runtimes:
+                        frontend.apply_replay_event(rt, args, event),
+                    )
+                else:
+                    dispatcher.pump()
+                    sample_mouse_for_replay()
 
-            new_status, keep_running = _step_frame(
-                frontend, rt, args, frame_box["n"],
-                replay_coordinate=(
-                    playback.coordinate_after(frame_box["n"])
-                    if replaying else None
-                ),
-            )
-            if new_status:
-                status = new_status
-            running = running and keep_running
-            rec = recorder["rec"]
-            if rec is not None and rec.active:
-                rec.mark(
-                    frontend, args, rt, boundary=frame_box["n"] + 1)
+                new_status, keep_running = _step_frame(
+                    frontend, rt, args, frame_box["n"],
+                    replay_coordinate=(
+                        playback.coordinate_after(frame_box["n"])
+                        if replaying else None
+                    ),
+                )
+                if new_status:
+                    status = new_status
+                running = running and keep_running
+                rec = recorder["rec"]
+                if rec is not None and rec.active:
+                    rec.mark(
+                        frontend, args, rt, boundary=frame_box["n"] + 1)
+                frame_box["n"] += 1
+                simulation_accumulator = max(
+                    0.0, simulation_accumulator - simulation_period,
+                )
 
             if audio is not None:
                 audio.pump()
-            rgb = np.asarray(frontend.decode_frame(rt), np.uint8)
+            interpolation = min(1.0, simulation_accumulator / simulation_period)
+            rgb = np.asarray(
+                frontend.render_presentation_frame(
+                    rt, args, interpolation=interpolation,
+                ),
+                np.uint8,
+            )
             last_rgb[0] = rgb
             display.draw_game(rgb)
             display.flip()
@@ -1359,8 +1428,14 @@ def run_view(frontend: GameFrontend, rt, args,
                 f"CS:IP={rt.cpu.s.cs:04X}:{rt.cpu.s.ip:04X}"
                 + (" | REC" if recorder["rec"] is not None else "")
             )
-            frame_box["n"] += 1
-            clock.tick(args.present_hz)
+            elapsed = clock.tick(args.present_hz) / 1000.0
+            # Do not produce a spiral of unbounded catch-up work after a host
+            # stall. The next viewer iteration takes the following tick; no
+            # interpolated value is ever committed to authoritative state.
+            simulation_accumulator = min(
+                simulation_period,
+                simulation_accumulator + elapsed,
+            )
     finally:
         stop_recording()
         pygame.quit()
