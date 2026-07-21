@@ -384,6 +384,28 @@ def test_replay_device_identity_includes_optional_device_topology():
     )
 
 
+def test_frontend_selects_the_replay_projection_schema(monkeypatch):
+    class Fe(GameFrontend):
+        def replay_projection_schema(self, args, rt):
+            return "game-semantic-v1"
+
+    monkeypatch.setattr(player, "execution_composition_digest", lambda plan: "plan")
+    fe = Fe(ROOT)
+    args = _parse(fe, [])
+    args.execution_plan = SimpleNamespace(
+        implementations=(SimpleNamespace(
+            origin=ImplementationOrigin.INTERPRETED,
+        ),),
+        configuration=SimpleNamespace(
+            selected_overrides=(), profile="development",
+        ),
+    )
+    runtime = SimpleNamespace(
+        dos=SimpleNamespace(pic=None, sound_blaster=None),
+    )
+    assert fe.replay_profile(args, runtime).projection_schema == "game-semantic-v1"
+
+
 class _StubCPU:
     def __init__(self):
         self.replacement_hooks = {}

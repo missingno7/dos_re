@@ -633,6 +633,11 @@ class GameFrontend:
         digest = hashlib.sha256(repr(topology).encode("utf-8")).hexdigest()
         return f"dos-re-real-mode-devices-v2:{digest}"
 
+    def replay_projection_schema(self, args: argparse.Namespace, rt) -> str:
+        """Canonical comparison schema selected by this frontend adapter."""
+        del args, rt
+        return "dos-re-complete-machine-v1"
+
     def replay_profile(
         self, args: argparse.Namespace, rt,
     ) -> ReplayExecutionIdentity:
@@ -656,7 +661,7 @@ class GameFrontend:
         runtime = _runtime_identity()
         devices = self.replay_device_identity(args, rt)
         continuation_schema = "dos-re-real-mode-continuation-v1"
-        projection_schema = "dos-re-complete-machine-v1"
+        projection_schema = self.replay_projection_schema(args, rt)
         key = hashlib.sha256(
             repr((
                 mode,
