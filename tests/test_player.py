@@ -275,6 +275,60 @@ def test_frontend_can_declare_exe_free_implementation_for_same_player():
     }
 
 
+def test_detached_launch_warns_about_static_frontier_without_blocking(capsys):
+    class Fe(GameFrontend):
+        def execution_configuration(self, args):
+            return profile_configuration(
+                args.profile,
+                program_identity="test:detached-warning",
+                provider_preference=("generated",),
+                bootstrap_provider=NativeBootstrapProvider(
+                    "test-native", ("test state",),
+                    provider_digest="test-native-v1",
+                ),
+            )
+
+        def execution_coverage(self, args):
+            return ProgramCoverage(
+                roots=("root",),
+                reachable=frozenset({"root", "point:dispatch"}),
+                unresolved_edges=(
+                    "root --call_ind--> point:dispatch",
+                ),
+                evidence_identity="uncertain-test",
+            )
+
+        def execution_implementations(self, args):
+            return ImplementationCatalog((ImplementationEntry(
+                ImplementationDescriptor(
+                    "generated",
+                    frozenset({"root", "point:dispatch"}),
+                    ImplementationOrigin.GENERATED,
+                    implementation_digest="generated-v1",
+                ),
+            ),))
+
+        def launch(self, args, plan):
+            assert plan.configuration.execution_policy.fallback.value == "forbidden"
+            return 0
+
+    assert player.main(Fe(ROOT), ["--profile", "detached"]) == 0
+    error = capsys.readouterr().err
+    assert "static closure uncertainty" in error
+    assert "unknown indirect targets: 1" in error
+    assert "point:dispatch" not in error
+
+
+def test_release_cannot_override_strict_closure(capsys):
+    assert player.main(GameFrontend(ROOT), [
+        "--profile", "release", "--closure-policy", "permissive",
+        "--plan-only",
+    ]) == 2
+    assert "release profile requires strict static closure" in (
+        capsys.readouterr().err
+    )
+
+
 def test_plan_only_reports_without_runtime_construction(capsys):
     class Fe(GameFrontend):
         def create_runtime(self, args):

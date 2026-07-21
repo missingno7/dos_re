@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from .execution import ExecutionPlan
 
 
-MATERIALIZED_PLAN_SCHEMA = "dos_re.execution-plan/v2"
+MATERIALIZED_PLAN_SCHEMA = "dos_re.execution-plan/v3"
 
 
 def materialized_plan_payload(plan: "ExecutionPlan") -> dict[str, Any]:
@@ -32,6 +32,8 @@ def materialized_plan_payload(plan: "ExecutionPlan") -> dict[str, Any]:
         "program_identity": plan.configuration.program_identity,
         "profile": plan.configuration.profile,
         "product_profile": plan.configuration.product_profile,
+        "closure_policy": plan.configuration.execution_policy.closure.value,
+        "fallback_policy": plan.configuration.execution_policy.fallback.value,
         "execution_carrier": carrier,
         "bootstrap_provider": plan.bootstrap_provider.provider_id,
         "bindings": {

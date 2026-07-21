@@ -83,7 +83,7 @@ and release profiles because its runtime closure requires the forbidden EXE.
 - execution composition: product roots, provider preference, selected authored
   implementations, enabled product features, and product services;
 - execution policy: capability requirements, finite authored-evidence floor,
-  dynamic-loading policy, and coverage strictness;
+  dynamic-loading policy, closure policy, and fallback policy;
 - verification policy: oracle requirement and comparison mode;
 - build target: platform and package format.
 
@@ -93,7 +93,7 @@ The standard profiles are:
 |---|---|---|
 | `development` | lower-level and development capabilities allowed | recovery work with an explicit interpreted frontier |
 | `verification` | oracle required; replay and diagnostics allowed | compare a candidate with the untouched oracle |
-| `detached` | EXE and interpreter forbidden; limited diagnostics allowed | prove non-EXE execution without claiming full release closure |
+| `detached` | EXE and interpreter forbidden; fallback forbidden; static closure permissive; limited diagnostics allowed | run the selected non-EXE graph and discover real frontiers |
 | `release` | EXE, interpreter, oracle, replay, snapshots, diagnostics, instrumentation, profiling, experimental overrides, and development tooling forbidden | build a closed-world product |
 
 Profiles do not make VMless, CPUless, ABI-recovered, DOS-memory-backed,
@@ -109,9 +109,21 @@ protocol directly. `ExecutionAtlas.coverage_for(product_profile)` implements
 the same protocol from normalized static and observed evidence without making
 the planner depend on Atlas storage.
 
-Unknown reachability is not absence. Detached and release planning reject
-unresolved edges. Atlas queries may join supplied plans and catalogs for
-navigation, but the Atlas is not a planner dependency or selection authority.
+Unknown reachability is not absence, but it is also not proof of a runtime
+miss. The planner classifies each uncertain Atlas edge against the resolved
+selected graph: a larger selected region may collapse it, or a generated
+provider may already own an internal target that static function recovery did
+not name. Unknown indirect targets and genuinely unowned targets remain strict
+closure blockers.
+
+The ordinary `detached` profile is permissive about those static blockers. It
+still forbids original-EXE use, original-code execution, and interpreter
+fallback. A runtime miss therefore stops exactly where the selected graph ends
+and becomes recovery evidence. `--closure-policy strict` applies the
+closed-world check to a detached development plan; `release` is always strict
+and cannot be weakened from the command line. Atlas queries may join supplied
+plans and catalogs for navigation, but the Atlas is not a planner dependency
+or selection authority.
 
 ## Implementations and services
 
@@ -191,7 +203,8 @@ Every plan reports:
   implementation boundaries, and the number of known edges collapsed inside
   one selected owner;
 - generated, faithful, and region-replacement coverage;
-- unresolved identities and control-flow edges;
+- unresolved identities, classified static closure findings, and strict
+  closure blockers;
 - required, missing, development-only, and policy-forbidden services;
 - every required capability and its implementation/service/policy consumers;
 - each selected function/region blocking further detachment and catalog
@@ -210,14 +223,23 @@ The milestones are absence proofs over the selected closure:
 - DOS-services-detached;
 - dos_re-runtime-detached.
 
-They do not have to become true together. Package readiness means complete
-coverage, a satisfiable policy, a product-safe service closure, and a build
-target. The selected policy decides which milestones the product must meet.
+They do not have to become true together. Runtime detachment only requires the
+forbidden dependencies and fallbacks to be absent. Package readiness separately
+means strict selected-graph closure, a satisfiable policy, a product-safe
+service closure, and a build target.
 
 `ExecutionPlan.require_capability(name, consumer=...)` is the runtime guard.
 It rejects a request outside the planned closure and names the caller,
 capability, and plan digest. Backend adapters, loaders, service factories, and
 fallback sites should call it at dependency acquisition boundaries.
+
+A forbidden runtime instruction fallback raises `RuntimeExecutionFrontier`.
+Detached carriers persist the complete continuation snapshot together with
+`recovery_frontier.json`: the stable source/target evidence, selected carrier
+and provider, active region, materialized execution plan, registers/call path,
+replay cursor and partially executed semantic boundary, recent Atlas path, and
+snapshot filenames. This is an observed recovery frontier, unlike a merely
+uncertain static edge, and can be resumed at the fault without cold replay.
 
 ## Verification is not production connectivity
 

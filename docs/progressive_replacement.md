@@ -90,7 +90,10 @@ ownership:
 - equal owner: the edge is internal and counted as collapsed;
 - different owner: the report emits an `ExecutionBoundary`, including the
   active carrier and target adapter identity;
-- unresolved transfer: detached and release policy still fail conservatively.
+- unresolved transfer: the selected graph classifies it as region-collapsed,
+  selected-provider-owned, target-available, unknown-dynamic, or a probable
+  gap. Detached development warns and fails only if execution reaches a real
+  miss; strict closure and release reject remaining blockers before startup.
 
 This makes collapse measurable. A leaf replacement creates seams around a
 small island. A subsystem provider claiming the verified contained targets

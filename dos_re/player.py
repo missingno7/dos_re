@@ -22,12 +22,14 @@ import functools
 import hashlib
 import inspect
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 from dos_re.dos import ConsoleInputWouldBlock
 from dos_re.execution import (
     BootstrapArtifact,
+    ClosurePolicy,
     DependencyCapability,
     ExeBootstrapProvider,
     ExecutionConfiguration,
@@ -408,8 +410,23 @@ class GameFrontend:
 
     def resolve_execution_plan(self, args: argparse.Namespace) -> ExecutionPlan:
         """Resolve before boot so strict profiles cannot touch forbidden runtime."""
+        configuration = self.execution_configuration(args)
+        requested_closure = getattr(args, "closure_policy", None)
+        if requested_closure is not None:
+            closure = ClosurePolicy(requested_closure)
+            if args.profile == "release" and closure is not ClosurePolicy.STRICT:
+                raise ValueError(
+                    "the release profile requires strict static closure"
+                )
+            configuration = replace(
+                configuration,
+                execution_policy=replace(
+                    configuration.execution_policy,
+                    closure=closure,
+                ),
+            )
         return plan_execution(
-            self.execution_configuration(args),
+            configuration,
             self.execution_coverage(args),
             self.execution_implementations(args),
             self.execution_services(args),
@@ -425,7 +442,9 @@ class GameFrontend:
         describe the already materialized plan.  It is not another selection
         or fallback hook.
         """
-        return format_execution_plan(plan)
+        return format_execution_plan(
+            plan, verbose=bool(getattr(args, "verbose_plan", False)),
+        )
 
     def launch(self, args: argparse.Namespace, plan: ExecutionPlan) -> int:
         """Run the selected plan through this frontend's execution driver."""
@@ -712,6 +731,18 @@ def build_arg_parser(frontend: GameFrontend,
         action="store_true",
         help="resolve and print the execution/detachment plan without booting",
     )
+    mode.add_argument(
+        "--closure-policy",
+        choices=tuple(item.value for item in ClosurePolicy),
+        default=None,
+        help="override static closure handling; detached defaults to permissive "
+             "and release is always strict",
+    )
+    mode.add_argument(
+        "--verbose-plan",
+        action="store_true",
+        help="print complete static-frontier details instead of summaries",
+    )
     mode.add_argument("--headless", action="store_true",
                       help="skip the live pygame viewer (default: viewer on)")
     mode.add_argument("--frames", type=int, default=0,
@@ -883,6 +914,28 @@ def _step_frame(
     saves a resumable gap snapshot — not just unhandled exceptions. A bare
     "program halted"/"unsupported instruction" with no further context meant
     the only way to diagnose it was to reproduce it by hand from scratch."""
+    coordinate_value = (
+        replay_coordinate.value if replay_coordinate is not None else None
+    )
+    event_cursor = (
+        coordinate_value.get("event_cursor")
+        if isinstance(coordinate_value, dict) else None
+    )
+    timeline_position = (
+        coordinate_value.get("timeline_position", frame + 1)
+        if isinstance(coordinate_value, dict) else frame + 1
+    )
+    rt._dos_re_replay_context = {
+        "artifact": getattr(args, "play_replay", None),
+        "recording": getattr(args, "record_replay", None),
+        "replay_cursor": event_cursor,
+        "semantic_timeline_position": timeline_position,
+        "last_completed_boundary": frame,
+        "current_partially_executed_boundary": frame + 1,
+        "coordinate_schema": (
+            None if replay_coordinate is None else replay_coordinate.schema_id
+        ),
+    }
     try:
         if replay_coordinate is None:
             frontend.advance_frame(rt, args, frame)
@@ -890,6 +943,10 @@ def _step_frame(
             frontend.advance_replay_frame(
                 rt, args, frame, replay_coordinate)
     except ConsoleInputWouldBlock:
+        rt._dos_re_replay_context.update({
+            "last_completed_boundary": frame + 1,
+            "current_partially_executed_boundary": None,
+        })
         return "waiting for DOS key", True
     except HaltExecution:
         status = "program halted"
@@ -911,6 +968,10 @@ def _step_frame(
             print(f"  {line}")
         _save_gap_snapshot(frontend, rt, status=status)
         return status, False
+    rt._dos_re_replay_context.update({
+        "last_completed_boundary": frame + 1,
+        "current_partially_executed_boundary": None,
+    })
     return None, True
 
 
@@ -1370,6 +1431,18 @@ def main(frontend: GameFrontend, argv: list[str] | None = None,
     if args.plan_only:
         print(frontend.format_execution_plan(args, args.execution_plan))
         return 0
+    if args.profile == "detached":
+        warnings = args.execution_plan.report.closure_warning_lines(
+            verbose=args.verbose_plan,
+        )
+        if warnings:
+            print(
+                "warning: detached execution has static closure uncertainty; "
+                "runtime fallback remains forbidden",
+                file=sys.stderr,
+            )
+            for warning in warnings:
+                print(f"  - {warning}", file=sys.stderr)
     if args.execution_plan.configuration.verification_policy.mode == "differential":
         return _run_differential_verification(
             frontend, args, args.execution_plan

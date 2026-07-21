@@ -15,7 +15,19 @@ import json
 import struct
 from pathlib import Path
 
-from dos_re.crash import crash_dir, save_crash
+import pytest
+
+from dos_re.crash import crash_dir, save_crash, save_recovery_frontier
+from dos_re.execution import (
+    ImplementationCatalog,
+    ImplementationDescriptor,
+    ImplementationEntry,
+    ImplementationOrigin,
+    ProgramCoverage,
+    plan_execution,
+    profile_configuration,
+)
+from dos_re.runtime_miss import RuntimeExecutionFrontier
 from dos_re.runtime import create_runtime
 
 
@@ -84,3 +96,66 @@ def test_crash_dir_does_not_read_the_clock(tmp_path: Path) -> None:
     pinnable."""
     assert crash_dir(tmp_path, "vmless", "20260717_161500").name == \
         "vmless_20260717_161500"
+
+
+def test_runtime_miss_writes_deterministic_recovery_frontier(
+    tmp_path: Path,
+) -> None:
+    rt = create_runtime(_tiny_exe(tmp_path), game_root=str(tmp_path))
+    target = "game:point:1010:1234"
+    plan = plan_execution(
+        profile_configuration("detached", program_identity="game:test"),
+        ProgramCoverage(
+            roots=(target,),
+            reachable=frozenset({target}),
+            evidence_identity="test-coverage",
+        ),
+        ImplementationCatalog((ImplementationEntry(
+            ImplementationDescriptor(
+                "generated-test",
+                frozenset({target}),
+                ImplementationOrigin.GENERATED,
+                implementation_digest="generated-test-v1",
+            ),
+        ),)),
+    )
+    rt.execution_plan = plan
+    rt.execution_carrier_id = "generated-test-carrier"
+    rt._dos_re_replay_context = {
+        "artifact": "replay-smoke",
+        "replay_cursor": 7,
+        "semantic_timeline_position": 19,
+        "last_completed_boundary": 18,
+        "current_partially_executed_boundary": 19,
+        "nearest_cached_boundary": 16,
+    }
+    rt.cpu.s.cs, rt.cpu.s.ip = 0x1010, 0x1234
+    rt.cpu.interp_forbidden = True
+    with pytest.raises(RuntimeExecutionFrontier) as caught:
+        rt.cpu.step()
+
+    ids = []
+    for name in ("frontier-a", "frontier-b"):
+        out = save_recovery_frontier(
+            rt,
+            tmp_path / name,
+            exc=caught.value,
+            source_identity="game:function:caller",
+            target_identity=target,
+            selected_provider="generated-test",
+            candidate_containing_identity="game:function:caller",
+            recent_atlas_path=("game:function:caller", target),
+        )
+        payload = json.loads(
+            (out / "recovery_frontier.json").read_text(encoding="utf-8")
+        )
+        ids.append(payload["frontier_id"])
+        assert payload["target_address"] == "1010:1234"
+        assert payload["target_identity"] == target
+        assert payload["active_execution_carrier"] == "generated-test-carrier"
+        assert payload["selected_provider"] == "generated-test"
+        assert payload["replay"]["nearest_cached_boundary"] == 16
+        assert payload["execution_plan"]["fallback_policy"] == "forbidden"
+        assert (out / "memory_1mb.bin").is_file()
+        assert (out / "state.json").is_file()
+    assert ids[0] == ids[1]

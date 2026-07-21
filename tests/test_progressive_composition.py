@@ -8,6 +8,7 @@ import pytest
 
 from dos_re.execution import (
     BackendAdapter,
+    ClosureFindingKind,
     EvidenceGrade,
     ExecutionRegionContract,
     ExecutionPolicy,
@@ -294,6 +295,7 @@ def test_long_lived_region_collapses_contextual_targets_and_materializes_handoff
     region_coverage = ProgramCoverage(
         roots=(ROOT,),
         reachable=frozenset({ROOT, A, B, region_id, entry_target, exit_target}),
+        unresolved_edges=(f"{A} --call--> {B}",),
         evidence_identity="test-region-coverage-v1",
         edges=(
             ProgramEdge(A, entry_target, "region-entry", "manual"),
@@ -373,6 +375,10 @@ def test_long_lived_region_collapses_contextual_targets_and_materializes_handoff
     resolved = plan.regions[0]
     assert resolved.covered_targets == (A, B)
     assert {item.target for item in resolved.suppressed_bindings} == {A, B}
+    assert plan.report.unresolved_edges == ()
+    assert plan.report.closure_findings[0].classification is (
+        ClosureFindingKind.REGION_COLLAPSED
+    )
     runtime = SimpleNamespace()
     bind_plan_implementations(
         runtime, plan, carrier_id=GENERATED_VMLESS_CARRIER

@@ -125,7 +125,7 @@ coverage can make that graph EXE-free before every region is authored native.
 
 ## Release materialization
 
-Materialized execution-plan schema `dos_re.execution-plan/v2` records the
+Materialized execution-plan schema `dos_re.execution-plan/v3` records the
 resolved region graph alongside function bindings, services, features, and
 bootstrap. It includes only selected adapter identities and digests. Release
 export therefore has enough information to generate static handoff tables or

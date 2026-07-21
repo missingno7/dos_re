@@ -29,8 +29,11 @@
 | **Feature** | Planned optional presentation, behavioral, or instrumentation policy. It does not own recovered program targets. |
 | **ExecutionConfiguration** | Explicit composition, execution policy, verification policy, bootstrap, features, services, and build target. |
 | **Policy profile** | Development, verification, detached, or release preset for allowed capabilities. It is not a recovery level. |
+| **Closure policy** | Permissive, observed-corpus, or strict handling of uncertainty in the resolved selected implementation graph. It does not control EXE detachment. |
+| **Fallback policy** | Whether runtime execution may leave the selected implementation graph. Detached and release execution forbid fallback. |
 | **ExecutionPlan** | Immutable implementation binding and dependency closure for one configuration and coverage identity. |
 | **DetachmentReport** | Explanation of coverage, unresolved frontiers, retained dependencies, bootstrap status, and package readiness. |
+| **Recovery frontier** | An actually reached missing runtime target, persisted with continuation state, execution plan, replay position, and Atlas path for direct repair and reproduction. |
 | **BootstrapProvider** | Declared source of initial runtime state and its build/runtime artifacts and capabilities. |
 | **RuntimeService** | Selected host or framework facility that does not own recovered code. |
 | **Faithful replacement** | Authored implementation claiming equivalent authoritative behavior. |

@@ -101,7 +101,11 @@ exits. The unified player executes that validated plan without fallback
 outside it. See [long-lived execution regions](docs/execution_regions.md).
 
 Development may retain the EXE, interpreter, oracle comparison, replay,
-instrumentation, and diagnostics. A release configuration is a closed world:
+instrumentation, and diagnostics. Detached development forbids the EXE,
+original-code execution, and interpreter fallback while allowing unresolved
+static edges to remain summarized warnings. If execution reaches an actually
+missing target, it fails loudly and saves a resumable recovery-frontier
+artifact. A release configuration is a closed world:
 unknown reachable transfers fail planning, forbidden dependencies are excluded,
 bootstrap artifacts are materialized before launch, and export packages only
 the selected closure plus a static `execution_plan.json`. A release launcher

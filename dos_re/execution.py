@@ -65,6 +65,21 @@ class DynamicLoading(str, Enum):
     FORBIDDEN = "forbidden"
 
 
+class ClosurePolicy(str, Enum):
+    """How static uncertainty affects an otherwise executable plan."""
+
+    PERMISSIVE = "permissive"
+    OBSERVED = "observed"
+    STRICT = "strict"
+
+
+class FallbackPolicy(str, Enum):
+    """Whether execution may leave the selected implementation graph."""
+
+    ALLOWED = "allowed"
+    FORBIDDEN = "forbidden"
+
+
 class ImplementationOrigin(str, Enum):
     INTERPRETED = "interpreted"
     GENERATED = "generated"
@@ -199,7 +214,8 @@ class FeatureCategory(str, Enum):
 class ExecutionPolicy:
     capabilities: tuple[CapabilityPolicy, ...] = ()
     dynamic_loading: DynamicLoading = DynamicLoading.ALLOWED
-    strict_coverage: bool = False
+    closure: ClosurePolicy = ClosurePolicy.PERMISSIVE
+    fallback: FallbackPolicy = FallbackPolicy.ALLOWED
     minimum_authored_evidence: EvidenceGrade = EvidenceGrade.NONE
 
     def __post_init__(self) -> None:
@@ -410,6 +426,30 @@ class ProgramEdge:
     target: str
     kind: str = "control-flow"
     evidence: str = ""
+
+
+class ClosureFindingKind(str, Enum):
+    """Resolved-plan interpretation of one uncertain Atlas transfer."""
+
+    REGION_COLLAPSED = "covered by selected native regions"
+    SELECTED_IMPLEMENTATION_OWNED = "owned by one selected implementation"
+    SELECTED_TARGET_AVAILABLE = (
+        "target available through a selected implementation"
+    )
+    UNKNOWN_DYNAMIC_TARGET = "unknown indirect targets"
+    PROBABLE_GAP = "probable genuine gaps"
+
+
+@dataclass(frozen=True)
+class ClosureFinding:
+    edge: str
+    source: str
+    target: str
+    kind: str
+    classification: ClosureFindingKind
+    blocking: bool
+    implementation_id: str = ""
+    region_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -691,6 +731,11 @@ def bind_plan_implementations(
         )
     runtime.execution_plan = plan
     runtime.execution_carrier_id = carrier_id
+    if plan.configuration.execution_policy.fallback is FallbackPolicy.FORBIDDEN:
+        cpu = getattr(runtime, "cpu", None)
+        if cpu is not None and hasattr(cpu, "interp_forbidden"):
+            cpu.interp_forbidden = True
+            cpu.interp_frontier = None
 
     for region in plan.regions:
         entry = plan.catalog.entry(region.implementation_id)
@@ -866,6 +911,9 @@ class DetachmentReport:
     region_replacement_coverage: tuple[str, ...]
     unresolved: tuple[str, ...]
     unresolved_edges: tuple[str, ...]
+    closure_findings: tuple[ClosureFinding, ...]
+    closure_policy: ClosurePolicy
+    fallback_policy: FallbackPolicy
     required_services: tuple[str, ...]
     missing_services: tuple[str, ...]
     required_assets: tuple[str, ...]
@@ -900,12 +948,49 @@ class DetachmentReport:
                 return item.detached
         return name not in self.required_capabilities
 
-    def failure_lines(self) -> tuple[str, ...]:
+    def closure_counts(self) -> tuple[tuple[ClosureFindingKind, int], ...]:
+        counts = {
+            kind: sum(
+                item.classification is kind for item in self.closure_findings
+            )
+            for kind in ClosureFindingKind
+        }
+        return tuple((kind, count) for kind, count in counts.items() if count)
+
+    def closure_warning_lines(self, *, verbose: bool = False) -> tuple[str, ...]:
+        if not self.closure_findings:
+            return ()
+        lines = [
+            f"Atlas static frontier edges: {len(self.closure_findings)} "
+            f"({len(self.unresolved_edges)} strict blocker(s))"
+        ]
+        lines.extend(
+            f"{kind.value}: {count}"
+            for kind, count in self.closure_counts()
+        )
+        if verbose:
+            lines.extend(
+                f"[{item.classification.name.lower()}] {item.edge}"
+                for item in self.closure_findings
+            )
+        else:
+            lines.append("use --verbose-plan to list every frontier edge")
+        return tuple(lines)
+
+    def failure_lines(self, *, verbose: bool = False) -> tuple[str, ...]:
         lines: list[str] = []
         if self.unresolved:
             lines.append("unresolved implementations: " + ", ".join(self.unresolved))
         if self.unresolved_edges:
-            lines.append("unresolved control-flow edges: " + ", ".join(self.unresolved_edges))
+            lines.append(
+                f"unresolved control-flow edges: {len(self.unresolved_edges)} "
+                "strict closure blocker(s)"
+            )
+            if verbose:
+                lines.extend(
+                    "unresolved edge: " + item
+                    for item in self.unresolved_edges
+                )
         if self.missing_services:
             lines.append("missing runtime services: " + ", ".join(self.missing_services))
         if self.packaging_incompatible:
@@ -1025,7 +1110,9 @@ class RuntimeCapabilityViolation(RuntimeError):
         )
 
 
-def format_execution_plan(plan: ExecutionPlan) -> str:
+def format_execution_plan(
+    plan: ExecutionPlan, *, verbose: bool = False,
+) -> str:
     """Stable, concise human report for ``play.py --plan-only`` and CI logs."""
     report = plan.report
     binding_counts: dict[str, int] = {}
@@ -1039,6 +1126,8 @@ def format_execution_plan(plan: ExecutionPlan) -> str:
         f"plan digest: {plan.plan_digest}",
         f"bootstrap provider: {report.bootstrap_provider_id} ({report.bootstrap_kind})",
         f"execution carrier: {report.execution_carrier or 'unspecified'}",
+        f"closure policy: {report.closure_policy.value}",
+        f"fallback policy: {report.fallback_policy.value}",
         f"reachable identities: {len(report.reachable)}",
         f"bound identities: {len(report.bindings)}",
         f"active implementation boundaries: {len(report.active_boundaries)}",
@@ -1063,7 +1152,13 @@ def format_execution_plan(plan: ExecutionPlan) -> str:
         f"{item.capability} detached: {str(item.detached).lower()}"
         for item in report.detachment_milestones
     )
-    lines.extend(f"- {failure}" for failure in report.failure_lines())
+    lines.extend(
+        f"closure: {warning}"
+        for warning in report.closure_warning_lines(verbose=verbose)
+    )
+    lines.extend(
+        f"- {failure}" for failure in report.failure_lines(verbose=verbose)
+    )
     return "\n".join(lines)
 
 
@@ -1171,7 +1266,8 @@ def profile_configuration(
             execution_policy=ExecutionPolicy(
                 capabilities=detached,
                 dynamic_loading=DynamicLoading.DECLARED_ONLY,
-                strict_coverage=True,
+                closure=ClosurePolicy.PERMISSIVE,
+                fallback=FallbackPolicy.FORBIDDEN,
             ),
         )
     if profile == "release":
@@ -1180,7 +1276,8 @@ def profile_configuration(
             execution_policy=ExecutionPolicy(
                 capabilities=release,
                 dynamic_loading=DynamicLoading.FORBIDDEN,
-                strict_coverage=True,
+                closure=ClosurePolicy.STRICT,
+                fallback=FallbackPolicy.FORBIDDEN,
             ),
         )
     raise ValueError(
@@ -1308,6 +1405,8 @@ def _plan_digest(
                 for item in configuration.execution_policy.capabilities
             ),
             "dynamic_loading": configuration.execution_policy.dynamic_loading.value,
+            "closure": configuration.execution_policy.closure.value,
+            "fallback": configuration.execution_policy.fallback.value,
             "minimum_authored_evidence": int(
                 configuration.execution_policy.minimum_authored_evidence
             ),
@@ -1612,6 +1711,92 @@ def _bootstrap_status(
         ))
     profile_valid = all(profile in item.valid_profiles for item in components)
     return components, tuple(statuses), tuple(missing), profile_valid
+
+
+def _split_unresolved_edge(edge: str) -> tuple[str, str, str]:
+    left, separator, target = edge.rpartition("-->")
+    if not separator:
+        return "", "unknown", edge.strip()
+    source, separator, kind = left.rpartition(" --")
+    if not separator:
+        return left.strip(), "unknown", target.strip()
+    return source.strip(), kind.strip(), target.strip()
+
+
+def _classify_closure_findings(
+    unresolved_edges: Iterable[str],
+    bindings: tuple[PlanBinding, ...],
+    selected: tuple[ImplementationDescriptor, ...],
+    regions: tuple[ResolvedExecutionRegion, ...],
+) -> tuple[ClosureFinding, ...]:
+    """Interpret Atlas uncertainty against the selected implementation graph.
+
+    The Atlas describes the original program.  A resolved plan may have
+    collapsed an edge inside a larger region, or selected a generated provider
+    that owns the target point even though static recovery did not infer a
+    function boundary there.  Those are useful diagnostics, not missing code.
+    Unknown indirect targets remain blockers because observations cannot prove
+    that their target set is exhaustive.
+    """
+    binding_by_target = {
+        item.target: item.implementation_id for item in bindings
+    }
+    descriptor_by_id = {
+        item.implementation_id: item for item in selected
+    }
+    region_members = {
+        region.region_id: (
+            set(region.covered_targets)
+            | set(descriptor_by_id[region.implementation_id].targets)
+        )
+        for region in regions
+    }
+    findings: list[ClosureFinding] = []
+    for edge in sorted(set(unresolved_edges)):
+        source, kind, target = _split_unresolved_edge(edge)
+        dynamic = "ind" in kind.casefold() or "dynamic" in kind.casefold()
+        source_implementation = binding_by_target.get(source, "")
+        target_implementation = binding_by_target.get(target, "")
+        region_id = next((
+            identity for identity, members in region_members.items()
+            if source in members and target in members
+        ), "")
+        implementation_id = target_implementation or source_implementation
+        if dynamic:
+            classification = ClosureFindingKind.UNKNOWN_DYNAMIC_TARGET
+            blocking = True
+        elif region_id:
+            classification = ClosureFindingKind.REGION_COLLAPSED
+            blocking = False
+            implementation_id = next(
+                item.implementation_id for item in regions
+                if item.region_id == region_id
+            )
+        elif (
+            source_implementation
+            and source_implementation == target_implementation
+        ):
+            classification = (
+                ClosureFindingKind.SELECTED_IMPLEMENTATION_OWNED
+            )
+            blocking = False
+        elif target_implementation:
+            classification = ClosureFindingKind.SELECTED_TARGET_AVAILABLE
+            blocking = False
+        else:
+            classification = ClosureFindingKind.PROBABLE_GAP
+            blocking = True
+        findings.append(ClosureFinding(
+            edge=edge,
+            source=source,
+            target=target,
+            kind=kind,
+            classification=classification,
+            blocking=blocking,
+            implementation_id=implementation_id,
+            region_id=region_id,
+        ))
+    return tuple(findings)
 
 
 def plan_execution(
@@ -2160,9 +2345,22 @@ def plan_execution(
             carrier_id=execution_carrier,
             adapter_id="" if target_adapter is None else target_adapter.adapter_id,
         ))
+    closure_findings = _classify_closure_findings(
+        coverage.unresolved_edges,
+        binding_items,
+        selected,
+        region_items,
+    )
+    unresolved_edges = tuple(
+        item.edge for item in closure_findings if item.blocking
+    )
+    collapsed_edge_count += sum(
+        item.classification is ClosureFindingKind.REGION_COLLAPSED
+        for item in closure_findings
+    )
     package_ready = (
         not unresolved
-        and not coverage.unresolved_edges
+        and not unresolved_edges
         and not missing_services
         and not packaging_incompatible_items
         and bootstrap_profile_valid
@@ -2183,7 +2381,10 @@ def plan_execution(
         faithful_override_coverage=faithful,
         region_replacement_coverage=regions,
         unresolved=tuple(unresolved),
-        unresolved_edges=tuple(sorted(coverage.unresolved_edges)),
+        unresolved_edges=unresolved_edges,
+        closure_findings=closure_findings,
+        closure_policy=configuration.execution_policy.closure,
+        fallback_policy=configuration.execution_policy.fallback,
         required_services=tuple(required_service_ids),
         missing_services=missing_services,
         required_assets=required_assets,
@@ -2224,7 +2425,10 @@ def plan_execution(
         or not bootstrap_profile_valid
         or bool(missing_bootstrap_artifacts)
         or bool(policy_forbidden_services)
-        or (policy.strict_coverage and bool(coverage.unresolved_edges))
+        or (
+            policy.closure is ClosurePolicy.STRICT
+            and bool(unresolved_edges)
+        )
         or (
             configuration.profile == "release"
             and bool(development_only_services)
