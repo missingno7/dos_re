@@ -8,6 +8,7 @@ import pytest
 from dos_re.execution import (
     BackendAdapter,
     EvidenceGrade,
+    ExecutionRegionContract,
     ExecutionPolicy,
     FeatureCatalog,
     FeatureCategory,
@@ -19,10 +20,15 @@ from dos_re.execution import (
     ImplementationDescriptor,
     ImplementationEntry,
     ImplementationOrigin,
+    NATIVE_STATE_CARRIER,
     OverrideCategory,
     ProgramCoverage,
     ProgramEdge,
     RecoveryLevel,
+    RegionAdapter,
+    RegionEntryPoint,
+    RegionExitPoint,
+    RegionStateOwnership,
     bind_plan_implementations,
     plan_execution,
     profile_configuration,
@@ -32,6 +38,7 @@ from dos_re.materialized_plan import (
     load_materialized_plan,
     write_materialized_plan,
 )
+from dos_re.regions import RegionDispatcher, RegionProgress
 
 
 ROOT = "program:test"
@@ -268,4 +275,124 @@ def test_materialized_plan_contains_final_binding_graph_without_planner(tmp_path
     assert payload["implementations"]["authored:b"]["adapter"] == {
         "digest": "adapter-vmless-v1",
         "id": "authored:b/vmless",
+    }
+
+
+def test_long_lived_region_collapses_contextual_targets_and_materializes_handoffs(
+    tmp_path,
+) -> None:
+    region_id = "region:gameplay"
+    entry_target = "point:start-gameplay"
+    exit_target = "point:return-menu"
+    region_coverage = ProgramCoverage(
+        roots=(ROOT,),
+        reachable=frozenset({ROOT, A, B, region_id, entry_target, exit_target}),
+        evidence_identity="test-region-coverage-v1",
+        edges=(
+            ProgramEdge(A, entry_target, "region-entry", "manual"),
+            ProgramEdge(entry_target, region_id, "handoff", "manual"),
+            ProgramEdge(region_id, exit_target, "region-exit", "manual"),
+            ProgramEdge(exit_target, A, "continuation", "manual"),
+        ),
+    )
+    activated = []
+    contract = ExecutionRegionContract(
+        region_id=region_id,
+        carrier_id=NATIVE_STATE_CARRIER,
+        state_ownership=RegionStateOwnership.SHARED_DOS_MEMORY,
+        entries=(RegionEntryPoint("start", entry_target),),
+        exits=(RegionExitPoint("complete", exit_target),),
+        covered_targets=frozenset({A, B}),
+        replay_boundaries=frozenset({"game-tick"}),
+        state_inputs=("DOS memory",),
+        state_outputs=("DOS memory", "presentation"),
+    )
+    island = ImplementationEntry(
+        ImplementationDescriptor(
+            implementation_id="authored:gameplay-region",
+            targets=frozenset({region_id, entry_target, exit_target}),
+            origin=ImplementationOrigin.AUTHORED,
+            category=OverrideCategory.FAITHFUL,
+            recovery_level=RecoveryLevel.AUTHORED_NATIVE,
+            evidence_grade=EvidenceGrade.REPLAY_CORPUS,
+            execution_carrier=NATIVE_STATE_CARRIER,
+            region_id=region_id,
+            region_contract=contract,
+            implementation_digest="authored-gameplay-region-v1",
+        ),
+        region_adapters=(RegionAdapter(
+            "authored:gameplay-region/vmless",
+            GENERATED_VMLESS_CARRIER,
+            NATIVE_STATE_CARRIER,
+            lambda runtime, binding: activated.append((runtime, binding)),
+            "region-adapter-v1",
+        ),),
+    )
+    config = profile_configuration(
+        "development",
+        program_identity=ROOT,
+        provider_preference=("baseline:vmless",),
+        selected_overrides=(island.descriptor.implementation_id,),
+    )
+    config = replace(
+        config,
+        execution_policy=replace(
+            config.execution_policy,
+            minimum_authored_evidence=EvidenceGrade.REPLAY_CORPUS,
+        ),
+    )
+    plan = plan_execution(
+        config,
+        region_coverage,
+        ImplementationCatalog((
+            ImplementationEntry(replace(
+                _provider(
+                    "baseline:vmless", GENERATED_VMLESS_CARRIER,
+                    RecoveryLevel.GENERATED_VMLESS,
+                ).descriptor,
+                targets=region_coverage.reachable,
+            )),
+            island,
+        )),
+    )
+
+    assert len(plan.regions) == 1
+    resolved = plan.regions[0]
+    assert resolved.covered_targets == (A, B)
+    assert {item.target for item in resolved.suppressed_bindings} == {A, B}
+    runtime = object()
+    bind_plan_implementations(
+        runtime, plan, carrier_id=GENERATED_VMLESS_CARRIER
+    )
+    assert activated == [(runtime, resolved)]
+
+    class Session:
+        def __init__(self):
+            self.steps = 0
+
+        def advance(self):
+            self.steps += 1
+            return (
+                RegionProgress.yielded("game-tick")
+                if self.steps == 1
+                else RegionProgress.exited("complete")
+            )
+
+    completed = []
+    dispatcher = RegionDispatcher()
+    dispatcher.enter(
+        resolved, "start", Session(), complete=completed.append,
+    )
+    assert dispatcher.advance() == RegionProgress.yielded("game-tick")
+    assert dispatcher.active
+    assert dispatcher.advance() == RegionProgress.exited("complete")
+    assert completed == [RegionExitPoint("complete", exit_target)]
+    assert not dispatcher.active
+
+    payload = load_materialized_plan(
+        write_materialized_plan(plan, tmp_path / "execution_plan.json")
+    )
+    assert payload["regions"][region_id]["adapter"] == {
+        "id": "authored:gameplay-region/vmless",
+        "digest": "region-adapter-v1",
     }
