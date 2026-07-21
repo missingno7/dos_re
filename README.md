@@ -95,8 +95,10 @@ services, and build target. The planner binds one implementation to each
 reachable identity, chooses one root execution carrier, computes the dependency
 closure, and reports every known cross-owner boundary. A hook is only the
 adapter at such a boundary; selecting a larger provider for both endpoints
-collapses it. The unified player executes that validated plan without fallback
-outside it.
+collapses it. A long-lived execution region can own an entire subsystem across
+semantic replay ticks, leaving adapters only at its declared entries and
+exits. The unified player executes that validated plan without fallback
+outside it. See [long-lived execution regions](docs/execution_regions.md).
 
 Development may retain the EXE, interpreter, oracle comparison, replay,
 instrumentation, and diagnostics. A release configuration is a closed world:

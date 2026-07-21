@@ -15,6 +15,7 @@ documents are grouped by concern rather than recovery stage.
 | [Replay architecture](replay_architecture.md) | Deterministic replay, continuation state, cached boundaries |
 | [Override architecture](override_architecture.md) | Generated and authored implementations |
 | [Progressive replacement](progressive_replacement.md) | Carriers, candidate fallback, product features, and hook-boundary collapse |
+| [Execution regions](execution_regions.md) | Long-lived ownership, handoff, contextual suppression, replay, and materialization |
 
 ## Optional mechanism references
 

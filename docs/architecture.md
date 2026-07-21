@@ -40,6 +40,7 @@ Planning can also consume a conservative `ProgramCoverage` directly.
 | `replay.py`, replay input adapters, snapshot modules | ReplayArtifact and backend-specific capture/apply mechanics |
 | `atlas.py` | Materialized evidence projection, graph queries, inverse replay index |
 | `execution.py` | Coverage/edge model, catalogs, carriers/adapters, configuration, bootstrap declarations, planning, detachment report |
+| `regions.py` | Validated runtime handoff and semantic yielding for planned long-lived execution regions |
 | `features.py` | Plan-authorized, replayable product feature state at safe boundaries |
 | `materialized_plan.py` | Closed-world selected graph serialization for product builds |
 | `bootstrap_runtime.py` | Validation and consumption of planned bootstrap artifacts |
