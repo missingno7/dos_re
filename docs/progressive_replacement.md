@@ -167,3 +167,32 @@ provider must remain the fallback when authored bodies are disabled, and its
 plan report must expose the mixed ownership/boundary graph. The historical
 `pre2_port` is evidence for the desired destination—large native islands,
 native state ownership, and product features—not an implementation to copy.
+
+## Remaining milestones
+
+This workstream establishes the general authorities; it does not label dormant
+native code as production-ready.
+
+1. **Current framework:** carrier-aware candidate selection, finite evidence
+   policy, edge-derived boundary reporting, replayable feature state, and
+   closed-world plan materialization are implemented in dos_re.
+2. **Current SkyRoads pilot:** authored faithful bodies bind through interpreted
+   and generated-VMless carriers; the VMless provider is the clean fallback;
+   the Atlas drives a measurable seam graph; one behavioral feature round-trips
+   through the replay adapter.
+3. **Generated CPUless binding:** emit or materialize stable internal call
+   bindings so authored ABI candidates can replace targets inside a generated
+   whole-program graph without dynamic planner imports.
+4. **Larger subsystem providers:** promote only evidenced native assemblies,
+   declare their contained identities and external contracts, and watch their
+   internal boundaries collapse in the same report.
+5. **State ownership:** add DOS-memory and native-state adapters for those same
+   bodies, then detach CPU, DOS memory, DOS services, and dos_re independently
+   as the selected dependency closure permits.
+6. **Product surface:** drive presentation enhancements and behavioral options
+   from the common feature controller/overlay contract, with authoritative
+   writes restricted to declared behavioral features.
+7. **Standalone product:** consume the materialized plan to generate static
+   bindings, package only the selected graph, pass the hermetic corpus, and
+   finally remove dos_re from the product closure. dos_re remains the recovery
+   workbench and oracle environment.
