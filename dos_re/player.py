@@ -33,12 +33,15 @@ from dos_re.execution import (
     ExecutionConfiguration,
     ExecutionPlan,
     ExecutionPlanError,
+    FeatureCatalog,
+    INTERPRETED_CPU_CARRIER,
     ImplementationCatalog,
     ImplementationDescriptor,
     ImplementationEntry,
     ImplementationOrigin,
     OverrideCategory,
     ProgramCoverage,
+    RecoveryLevel,
     RuntimeServiceCatalog,
     RuntimeServiceDescriptor,
     execution_composition_digest,
@@ -131,6 +134,10 @@ class _RealReplayRecorder:
             self._last_mouse = sample
         return sample
 
+    def record_event(self, *, boundary: int, channel: str, payload) -> None:
+        """Record one project-normalized event in the authoritative stream."""
+        self.recording.add(self._ordinal(boundary), channel, payload)
+
     def mark(self, frontend, args, rt, *, boundary: int) -> None:
         ordinal = self._ordinal(boundary)
         schema_id, value = frontend.replay_point_coordinate(
@@ -182,9 +189,12 @@ class _RealReplayPlayback:
     def finished(self, boundary: int) -> bool:
         return int(boundary) >= self.end_point.ordinal
 
-    def apply_to_runtime(self, boundary, rt, *, deliver, single=False):
+    def apply_to_runtime(
+        self, boundary, rt, *, deliver, event_handler=None, single=False,
+    ):
         return self.adapter.apply_to_runtime(
-            boundary, rt, deliver=deliver, single=single)
+            boundary, rt, deliver=deliver,
+            event_handler=event_handler, single=single)
 
     def coordinate_after(self, boundary: int) -> ReplayPointCoordinate:
         return self.artifact.timeline_coordinate(ReplayPoint(
@@ -363,6 +373,9 @@ class GameFrontend:
             implementation_id="interpreted-original",
             targets=frozenset({root}),
             origin=ImplementationOrigin.INTERPRETED,
+            recovery_level=RecoveryLevel.INTERPRETED,
+            execution_carrier=INTERPRETED_CPU_CARRIER,
+            region_id=root,
             properties=frozenset({"cpu-backed", "dos-memory-backed"}),
             required_capabilities=frozenset({
                 DependencyCapability.ORIGINAL_EXE.value,
@@ -381,6 +394,18 @@ class GameFrontend:
     ) -> RuntimeServiceCatalog:
         return RuntimeServiceCatalog()
 
+    def execution_features(self, args: argparse.Namespace) -> FeatureCatalog:
+        return FeatureCatalog()
+
+    def recording_started(self, rt, args, *, record_event) -> None:
+        """Queue project feature events once an artifact owns their stream."""
+
+    def apply_replay_event(self, rt, args, event) -> None:
+        """Apply a project-owned replay channel through its thin adapter."""
+        raise ValueError(
+            f"unsupported replay channel for {self.name}: {event.channel!r}"
+        )
+
     def resolve_execution_plan(self, args: argparse.Namespace) -> ExecutionPlan:
         """Resolve before boot so strict profiles cannot touch forbidden runtime."""
         return plan_execution(
@@ -388,6 +413,7 @@ class GameFrontend:
             self.execution_coverage(args),
             self.execution_implementations(args),
             self.execution_services(args),
+            self.execution_features(args),
         )
 
     def launch(self, args: argparse.Namespace, plan: ExecutionPlan) -> int:
@@ -410,10 +436,10 @@ class GameFrontend:
         )
 
     def bind_execution_plan(self, runtime, plan: ExecutionPlan, *,
-                            backend_id: str = "cpu-model") -> None:
-        """Install selected providers through their declared backend activators."""
+                            carrier_id: str = "interpreted-cpu") -> None:
+        """Install selected providers through declared carrier adapters."""
         from dos_re.execution import bind_plan_implementations
-        bind_plan_implementations(runtime, plan, backend_id=backend_id)
+        bind_plan_implementations(runtime, plan, carrier_id=carrier_id)
 
     def default_save_dir(self, args: argparse.Namespace) -> Path:
         """Where the live product persists the game's own saved files (progress,
@@ -875,7 +901,14 @@ def run_replay_headless(frontend: GameFrontend, rt, args,
         if args.frames and frame >= args.frames:
             status = f"frame budget reached ({args.frames})"
             break
-        playback.apply_to_runtime(frame, rt, deliver=lambda r, sc: frontend.deliver_input(r, sc))
+        playback.apply_to_runtime(
+            frame,
+            rt,
+            deliver=lambda r, sc: frontend.deliver_input(r, sc),
+            event_handler=lambda event, _runtimes: frontend.apply_replay_event(
+                rt, args, event
+            ),
+        )
         new_status, keep_running = _step_frame(
             frontend, rt, args, frame,
             replay_coordinate=playback.coordinate_after(frame),
@@ -978,6 +1011,15 @@ def run_view(frontend: GameFrontend, rt, args,
             name=name, metadata=meta)
         out = rec.start(boundary=frame_box["n"])
         recorder["rec"] = rec
+        frontend.recording_started(
+            rt,
+            args,
+            record_event=lambda boundary, channel, payload: rec.record_event(
+                boundary=boundary,
+                channel=channel,
+                payload=payload,
+            ),
+        )
         mouse = "mouse" if meta["mouse_present"] else "no-mouse"
         print(f"recording replay [embedded base, {mouse}] -> {out}")
 
@@ -1132,8 +1174,13 @@ def run_view(frontend: GameFrontend, rt, args,
                             dispatcher.post_up(sc)
 
             if replaying:
-                playback.apply_to_runtime(frame_box["n"], rt,
-                                          deliver=lambda r, sc: frontend.deliver_input(r, sc))
+                playback.apply_to_runtime(
+                    frame_box["n"],
+                    rt,
+                    deliver=lambda r, sc: frontend.deliver_input(r, sc),
+                    event_handler=lambda event, _runtimes:
+                    frontend.apply_replay_event(rt, args, event),
+                )
             else:
                 dispatcher.pump()
                 sample_mouse_for_replay()

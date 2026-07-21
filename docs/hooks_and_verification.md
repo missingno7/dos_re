@@ -21,8 +21,10 @@ ImplementationEntry(
     ),
     implementation=sqz_decode,
     adapters=(BackendAdapter(
-        CPU_MODEL_BACKEND,
+        "sqz_decode/interpreted-cpu/v1",
+        INTERPRETED_CPU_CARRIER,
         real_mode_sqz_adapter,
+        "...adapter digest...",
     ),),
 )
 ```
@@ -30,12 +32,17 @@ ImplementationEntry(
 Authored entries are inactive unless selected by
 `ExecutionConfiguration.selected_overrides`. The planner chooses one owner for
 each reachable target. `GameFrontend.bind_execution_plan` invokes only the
-adapter for the runtime's declared carrier in that resolved plan. A selected
+adapter for the plan's declared root carrier. A selected
 implementation with no adapter for that carrier fails loudly; it never falls
 back to another implementation.
 
 There is no global hook registry, import-time selection, environment selection,
 or player flag which installs program behavior.
+
+The plan also projects known coverage edges into `ExecutionBoundary` records.
+The boundary disappears automatically when a later region implementation owns
+both endpoints; see
+[`progressive_replacement.md`](progressive_replacement.md).
 
 ## The CPU-backed adapter
 

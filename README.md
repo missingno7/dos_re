@@ -90,16 +90,20 @@ function the replay visits is correct for inputs the corpus has never exercised.
 ## Execution and release
 
 `ImplementationCatalog` is the available implementation inventory.
-`ExecutionConfiguration` selects composition, policy, bootstrap, services, and
-build target. `ExecutionPlanner` binds one implementation to each reachable
-identity and computes the dependency closure. The unified player executes that
-validated plan through a backend adapter without fallback outside it.
+`ExecutionConfiguration` selects composition, policy, bootstrap, features,
+services, and build target. The planner binds one implementation to each
+reachable identity, chooses one root execution carrier, computes the dependency
+closure, and reports every known cross-owner boundary. A hook is only the
+adapter at such a boundary; selecting a larger provider for both endpoints
+collapses it. The unified player executes that validated plan without fallback
+outside it.
 
 Development may retain the EXE, interpreter, oracle comparison, replay,
 instrumentation, and diagnostics. A release configuration is a closed world:
 unknown reachable transfers fail planning, forbidden dependencies are excluded,
 bootstrap artifacts are materialized before launch, and export packages only
-the selected closure.
+the selected closure plus a static `execution_plan.json`. A release launcher
+does not import the planner and choose implementations again.
 
 EXE-detached, CPU-model-detached, DOS-memory-detached, and dos_re-runtime-
 detached are independent properties of a selection. None is the universal

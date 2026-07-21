@@ -17,6 +17,7 @@ from .execution import (
     DependencyCapability,
     ExecutionPlan,
 )
+from .materialized_plan import load_materialized_plan, write_materialized_plan
 
 
 IMPORT_CAPABILITIES = {
@@ -52,6 +53,7 @@ class ExportManifest:
     target: str
     launcher: str
     bootstrap_provider_id: str
+    materialized_plan: str
     bootstrap_artifacts: tuple[tuple[str, str], ...]
     required_capabilities: tuple[str, ...]
     files: tuple[tuple[str, str], ...]
@@ -61,7 +63,8 @@ class ExportError(RuntimeError):
     pass
 
 
-RELEASE_MANIFEST_SCHEMA = "dos_re_release/v2"
+RELEASE_MANIFEST_SCHEMA = "dos_re_release/v3"
+MATERIALIZED_PLAN_PATH = "execution_plan.json"
 
 
 def _runtime_nodes(tree: ast.AST):
@@ -259,7 +262,7 @@ def export_release(
         launcher,
         generated_destinations=tuple(
             item.runtime_path for item in generated_bootstrap
-        ),
+        ) + (MATERIALIZED_PLAN_PATH,),
     )
 
     destination = Path(destination)
@@ -300,6 +303,13 @@ def export_release(
                     "does not match its declared hash"
                 )
             hashes.append((Path(artifact.runtime_path).as_posix(), digest))
+        materialized_plan = write_materialized_plan(
+            plan, staging / MATERIALIZED_PLAN_PATH
+        )
+        hashes.append((
+            MATERIALIZED_PLAN_PATH,
+            hashlib.sha256(materialized_plan.read_bytes()).hexdigest(),
+        ))
         expected_bootstrap_hashes = {
             Path(item.runtime_path).as_posix(): item.expected_sha256
             for item in bootstrap_artifacts
@@ -323,6 +333,7 @@ def export_release(
             ),
             launcher=Path(launcher).as_posix(),
             bootstrap_provider_id=plan.bootstrap_provider.provider_id,
+            materialized_plan=MATERIALIZED_PLAN_PATH,
             bootstrap_artifacts=tuple(sorted(
                 (
                     artifact.artifact_id,
@@ -340,6 +351,7 @@ def export_release(
                 "target": manifest.target,
                 "launcher": manifest.launcher,
                 "bootstrap_provider": manifest.bootstrap_provider_id,
+                "materialized_plan": manifest.materialized_plan,
                 "bootstrap_artifacts": dict(manifest.bootstrap_artifacts),
                 "required_capabilities": list(manifest.required_capabilities),
                 "files": dict(manifest.files),
@@ -392,6 +404,17 @@ def verify_release_artifact(
         digest = hashlib.sha256((artifact / relative).read_bytes()).hexdigest()
         if digest != expected_digest:
             raise ExportError(f"release file hash mismatch: {relative}")
+    materialized_path = payload.get("materialized_plan")
+    if not isinstance(materialized_path, str) or not materialized_path:
+        raise ExportError("release manifest has no materialized execution plan")
+    try:
+        materialized = load_materialized_plan(artifact / materialized_path)
+    except (OSError, ValueError) as exc:
+        raise ExportError("cannot read materialized execution plan") from exc
+    if materialized.get("plan_digest") != payload.get("plan_digest"):
+        raise ExportError(
+            "materialized execution plan does not match release plan digest"
+        )
     if not command:
         raise ExportError("hermetic execution command must not be empty")
     environment = {

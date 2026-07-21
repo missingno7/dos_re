@@ -30,14 +30,16 @@ ImplementationEntry
     stable targets / region
     interpreted | generated | authored
     baseline | faithful | enhancement | behavioral
-    implementation properties
+    per-candidate recovery level and finite evidence grade
+    backend-neutral implementation contract
+    intrinsic carrier for region/program providers
     dependency-capability requirements
     runtime-service requirements
     required assets / supported build platforms
     verification evidence
     implementation digest
   implementation       semantic callable when applicable
-  activate             backend binding adapter
+  adapters             explicit carrier bridges with stable IDs/digests
 ```
 
 There is no global authored registry, import-time registration, environment
@@ -69,7 +71,7 @@ function signature: recovered ABIs and state models differ between programs.
 The descriptor declares dependencies and evidence; the project tests the
 body's recovered contract.
 
-The `activate` callable is backend-specific. It maps stable targets and the
+Each adapter's `activate` callable is carrier-specific. It maps stable targets and the
 recovered contract to registers, stack, memory, arguments, returns, timing,
 and control flow. The semantic implementation is not duplicated across
 interpreted, generated VMless, generated CPUless, or ABI-recovered callers.
@@ -131,6 +133,12 @@ Large region replacements use the same catalog. Their descriptor must name
 contained stable identities, externally reachable edges, state ownership,
 services, and verification evidence. A descriptive claim such as “most of
 gameplay” is not coverage.
+
+Known Atlas/coverage transfers expose the active seams between selected owners.
+When a larger implementation owns both endpoints, that edge is reported as
+collapsed and no adapter is installed there. Hooks therefore shrink with the
+implementation graph instead of becoming the native product's architecture.
+See [`progressive_replacement.md`](progressive_replacement.md).
 
 ## Verification and replay identity
 
