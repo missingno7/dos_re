@@ -1,8 +1,9 @@
 """Resolve the concrete target of a NEAR indirect transfer from live CPU state.
 
 Near indirect jmp/call sites -- jump tables, computed function pointers, dispatch
-stubs -- are unresolvable statically, but when a program runs, every target each
-site takes is observable for free.  A capture probe traps such a site at its
+stubs -- are in general unresolvable statically (one bounded compiler idiom IS
+statically readable -- see :func:`static_switch_targets`), but when a program
+runs, every target each site takes is observable for free.  A capture probe traps such a site at its
 instruction boundary and calls :func:`resolve_near_indirect_target` to record the
 target the interpreter is about to take, building ``{site: [targets]}``
 evidence. A CPUless implementation may use that evidence only when every
@@ -96,6 +97,123 @@ def resolve_far_indirect_target(state, mem, inst) -> "str | None":
     tip = mem.rw(segval, off) & 0xFFFF
     tcs = mem.rw(segval, (off + 2) & 0xFFFF) & 0xFFFF
     return f"{tcs:04X}:{tip:04X}"
+
+
+# ---------------------------------------------------------------------------
+# STATIC SWITCH TABLES: the one indirect-jump idiom that IS statically readable
+# ---------------------------------------------------------------------------
+#
+# A 16-bit C compiler (MSC et al.) lowers a dense `switch` into a BOUNDED,
+# CS-RELATIVE jump table:
+#
+#     cmp  ax, N          ; the index bound -- part of the emitted code
+#     jbe  dispatch       ; (or `ja default` -- either polarity)
+#     jmp  default
+#   dispatch:
+#     shl  ax, 1          ; scale index to a word offset
+#     xchg bx, ax         ; (or `mov bx, ax`)
+#     jmp  word cs:[bx+TABLE]
+#
+# Everything needed to enumerate the arms is in the image: the bound N is an
+# immediate, the table lives at CS:TABLE in the SAME read-only code segment,
+# and the guarded index range is exactly 0..N.  Reading words TABLE..TABLE+2N
+# yields the complete arm set -- static evidence of the same rank as a direct
+# call target, not a guess.  :func:`static_switch_targets` recognizes exactly
+# this idiom and refuses everything else (`None`): an unbounded table, a
+# DS-relative table, or any unexpected instruction between the guard and the
+# jump leaves the site an honest dynamic frontier for the observed-evidence
+# channel above.
+
+#: instructions permitted between the bound guard and the table jump: the
+#: index scaling (`shl ax,1` / `shl bx,1`), the index move (`xchg bx,ax` /
+#: `mov bx,ax`), and the fall-through `jmp default` of the jbe polarity.
+def _is_scale_or_default_jmp(inst) -> bool:
+    if inst.kind == "jmp":
+        return True
+    if inst.op == 0x93:                                   # xchg bx, ax
+        return True
+    if inst.op == 0xD1 and inst.modrm in (0xE0, 0xE3):    # shl ax,1 / shl bx,1
+        return True
+    if inst.op == 0x8B and inst.modrm == 0xD8:            # mov bx, ax
+        return True
+    return False
+
+
+def static_switch_targets(scan, site_ip: int, fetch,
+                          *, max_entries: int = 1024):
+    """Statically read the arm set of a bounded, cs-relative switch jump table.
+
+    ``scan`` is a :class:`~dos_re.lift.cfg.FunctionScan` containing the
+    ``jmp_ind`` at ``site_ip``; ``fetch(off) -> int`` is the code-byte
+    authority for the site's segment (irgen's own fetch).  Returns
+    ``(table_off, entry_count, arms)`` -- ``arms`` the table words in index
+    order, duplicates preserved -- or ``None`` whenever the site is not
+    PROVABLY this idiom.  Refuse-on-doubt: ``None`` never means "no targets",
+    it means "not statically readable"; the site stays a dynamic frontier.
+
+    ``max_entries`` is a misparse guard, not a coverage cap: a bound immediate
+    beyond it refuses the whole site (loudly ``None``) rather than reading a
+    garbage table.
+    """
+    site = scan.insts.get(site_ip)
+    if site is None or site.kind != "jmp_ind" or site.modrm is None:
+        return None
+    # `jmp word cs:[bx+disp]` only: reg field /4 (near jmp), rm 7 ([bx+disp]),
+    # an explicit CS override (the table must live in THIS code segment).
+    if site.reg != 4 or site.mod == 3 or site.rm != 7:
+        return None
+    if site.seg_override != "cs" or site.disp is None:
+        return None
+    table = site.disp & 0xFFFF
+
+    # Walk linearly backwards to the bound guard; every instruction between it
+    # and the jump must be part of the dispatch idiom.  The `shl` BETWEEN the
+    # guard and the jump is load-bearing: it proves the compared index was
+    # UNSCALED, i.e. the bound counts table ENTRIES.  A site that scales
+    # before the compare (`shr ax,3; cmp ax,N; ja; jmp cs:[bx+T]` -- N is a
+    # BYTE offset there) must refuse, or the read walks past the real table.
+    order = sorted(ip for ip in scan.insts if ip < site_ip)
+    guard = None
+    saw_scale = False
+    for ip in reversed(order[-8:]):
+        inst = scan.insts[ip]
+        if inst.kind == "jcc" and inst.op in (0x76, 0x77):
+            guard = inst
+            break
+        if inst.op == 0xD1 and inst.modrm in (0xE0, 0xE3):
+            saw_scale = True
+        if not _is_scale_or_default_jmp(inst):
+            return None
+    if guard is None or guard.target is None or not saw_scale:
+        return None
+    # Polarity: `jbe` enters the dispatch tail (its target lands between the
+    # guard and the jump); `ja` skips it (its target lands elsewhere).
+    enters_tail = guard.ip < guard.target <= site_ip
+    if (guard.op == 0x76) != enters_tail:
+        return None
+
+    # The bound: `cmp ax, imm` immediately before the guard.
+    idx = order.index(guard.ip)
+    if idx == 0:
+        return None
+    cmp_inst = scan.insts[order[idx - 1]]
+    if cmp_inst.op == 0x3D and cmp_inst.imm is not None:
+        bound = cmp_inst.imm & 0xFFFF
+    elif cmp_inst.op == 0x83 and cmp_inst.modrm == 0xF8 \
+            and cmp_inst.imm is not None and not cmp_inst.imm & 0x80:
+        bound = cmp_inst.imm & 0x7F
+    else:
+        return None
+
+    count = bound + 1
+    if count > max_entries:
+        return None
+    arms = tuple(fetch((table + 2 * i) & 0xFFFF)
+                 | (fetch((table + 2 * i + 1) & 0xFFFF) << 8)
+                 for i in range(count))
+    if any(arm == 0 for arm in arms):
+        return None            # offset 0 is no plausible arm -- likely misread
+    return table, count, arms
 
 
 # ---------------------------------------------------------------------------

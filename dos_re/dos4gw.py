@@ -111,6 +111,44 @@ class VGASequencer:
                         self.planes[2][off], self.planes[3][off]]
         return self.planes[self.read_map & 3][off]
 
+    def bulk_copy(self, src_off: int, dst_off: int, n: int) -> None:
+        """Copy ``n`` consecutive aperture bytes src->dst in one slice op.
+
+        Byte-exact equivalent of ``for i: write(dst+i, read(src+i))`` under
+        the modelled modes — write mode 1 copies each masked plane from
+        itself (the latch pipeline), write mode 0 fans the read-map plane out
+        to the masked planes — including the final latch state.  Falls back
+        to the per-byte path when ranges overlap (sequential semantics) or
+        leave the 64 KB plane, so behavior can never diverge silently."""
+        if n <= 0:
+            return
+        end = max(src_off, dst_off) + n
+        overlap = not (src_off + n <= dst_off or dst_off + n <= src_off)
+        if end > 0x10000 or (overlap and src_off != dst_off):
+            for i in range(n):                    # sequential fallback
+                self.write(dst_off + i, self.read(src_off + i))
+            return
+        wm = self.write_mode
+        m = self.map_mask
+        if wm == 1:
+            for p in range(4):
+                if m & (1 << p):
+                    self.planes[p][dst_off:dst_off + n] = \
+                        self.planes[p][src_off:src_off + n]
+        else:
+            if wm != 0:
+                raise UnsupportedVGAOperation(f"VGA write mode {wm} not modelled")
+            if self.bit_mask != 0xFF:
+                raise UnsupportedVGAOperation(
+                    f"VGA bit mask {self.bit_mask:02X}h not modelled")
+            data = self.planes[self.read_map & 3][src_off:src_off + n]
+            for p in range(4):
+                if m & (1 << p):
+                    self.planes[p][dst_off:dst_off + n] = data
+        last = src_off + n - 1
+        self.latches = [self.planes[0][last], self.planes[1][last],
+                        self.planes[2][last], self.planes[3][last]]
+
     def geometry(self) -> tuple[int, int]:
         """(width, height) in pixels, derived from the programmed CRTC.
 
@@ -365,7 +403,23 @@ class DOS4GWHost:
             if self._cpu.instruction_count >= self._timer_next:
                 self._timer_next += t
                 self.pic.raise_irq(0)
-        return self.pic.acknowledge()
+        irq = self.pic.acknowledge()
+        if irq is not None:
+            vec = 0x08 + irq if irq < 8 else 0x70 + irq - 8
+            handler = self.pm_vectors.get(vec)
+            # An unhooked hardware IRQ resolves to the bare IRET stub
+            # (seed_low_memory's F000:FF53) — either absent from pm_vectors or
+            # explicitly restored to it by a driver.  On real DPMI the default
+            # reflects to the real-mode handler, which sends EOI; our stub only
+            # IRETs, so EOI it here or the 8259 in-service bit is orphaned and,
+            # by the one-in-service rule, blocks every later IRQ.  (Observed on
+            # KE: a leftover Sound Blaster detection-block IRQ lands after the
+            # driver restores the default IRQ7 vector -> music plays one block
+            # then dies.)  Delivering to the stub would be a no-op anyway.
+            if handler is None or (handler[1] & 0xFFFFF) == 0xFFF53:
+                self.pic.eoi()
+                return None
+        return irq
 
     def set_mouse_norm(self, u: float, v: float, buttons: int | None = None) -> None:
         """Update the mouse from window-relative coordinates (0.0..1.0).

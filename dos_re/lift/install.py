@@ -70,6 +70,71 @@ def resolve_links(loaded: dict[str, object], emit_dir, naming=None) -> int:
     return resolved
 
 
+def resolve_links32(loaded: dict[str, object], emit_dir) -> int:
+    """Second pass of the two-pass 32-bit (flat protected-mode) graph load.
+
+    The PM mirror of :func:`resolve_links`: a linked module carries a
+    module-level ``LINKS = {"0xEIP": None}`` table (flat linear entry
+    addresses, the ``lift_<hex>`` stem convention), and each linked CALL site
+    passes ``LINKS["0xEIP"]`` to ``call_linked32`` at call time.  This pass
+    fills the tables with the callees' lifted functions, loading sibling
+    modules from ``emit_dir`` as needed — transitively.  Loud on a missing
+    callee module: a linked caller whose callee is not on disk is a pipeline
+    error, never something to skip silently."""
+    emit_dir = Path(emit_dir)
+    pending = list(loaded.values())
+    resolved = 0
+    while pending:
+        mod = pending.pop()
+        links = getattr(mod, "LINKS", None)
+        if not links:
+            continue
+        for entry in sorted(links):
+            name = f"lift_{int(entry, 16):x}"
+            callee = loaded.get(name)
+            if callee is None:
+                path = emit_dir / f"{name}.py"
+                if not path.is_file():
+                    raise FileNotFoundError(
+                        f"linked callee {entry} of {getattr(mod, '__name__', '?')}: "
+                        f"module {path} is missing")
+                callee = _load_module(path)
+                loaded[name] = callee
+                pending.append(callee)          # it may carry links of its own
+            links[entry] = getattr(callee, name)
+            resolved += 1
+    return resolved
+
+
+def activate_generated_graph32(cpu, emit_dir) -> dict[int, str]:
+    """Bind every module of one selected 32-bit generated graph.
+
+    The flat protected-mode mirror of :func:`activate_generated_graph`:
+    modules are ``lift_<hex>.py`` (flat linear entry address), hooks key by
+    flat EIP int.  Two-pass (load, resolve links, register); loud on a missing
+    linked callee.  This is a CPU-backend activator, not a composition policy
+    — the owning :class:`~dos_re.execution.ImplementationEntry` describes the
+    graph and the immutable plan must select it before this runs."""
+    emit_dir = Path(emit_dir)
+    installed: dict[int, str] = {}
+    for path in sorted(emit_dir.glob("lift_*.py")):
+        stem = path.stem                       # lift_1222d1
+        try:
+            entry = int(stem[len("lift_"):], 16)
+        except ValueError:                     # not the address pattern
+            continue
+        installed[entry] = path.name
+    loaded: dict[str, object] = {}
+    for entry, module in sorted(installed.items()):
+        loaded[module[:-3]] = _load_module(emit_dir / module)
+    resolve_links32(loaded, emit_dir)
+    for entry, module in sorted(installed.items()):
+        name = module[:-3]
+        cpu.replacement_hooks[entry] = getattr(loaded[name], name)
+        cpu.hook_names[entry] = name
+    return installed
+
+
 def activate_generated_graph(cpu, emit_dir) -> dict[tuple[int, int], str]:
     """Bind every module in one already-selected generated graph.
 
