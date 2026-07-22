@@ -2568,9 +2568,29 @@ def emit_recovered(scan, abi, key: str, *, callees=None, far_callees=None,
             and i.far_target not in stub_targets})
         - {name})    # direct self-recursion: the module-level name suffices
     if used_names:
+        # Internal callees bind through the corpus override registry
+        # (_dyncall.CALLEE_OVERRIDES), not a hard import: the ExecutionPlan's
+        # bind step populates the registry with selected AUTHORED overrides
+        # BEFORE any corpus module is imported (binding precedes execution),
+        # so one selected implementation owns each address WITHOUT
+        # regenerating the corpus per composition.  The static import stays
+        # as the generated default -- no dynamic loading enters the release
+        # closure, and an empty registry reproduces the old behaviour
+        # exactly.  If _dyncall is absent (a body exec'd standalone, outside
+        # a corpus package), the callee binds directly to the generated body
+        # -- identical to the pre-registry emission.
         A("")
         for cname in used_names:
-            A(f"from {recovered_import_base}.{cname} import {cname}")
+            A(f"from {recovered_import_base}.{cname} import "
+              f"{cname} as _gen_{cname}")
+        A("")
+        A("try:")
+        A(f"    from {recovered_import_base}._dyncall import resolve_callee "
+          f"as _resolve_callee")
+        A("except ImportError:")
+        A("    def _resolve_callee(_name, _default): return _default")
+        for cname in used_names:
+            A(f"{cname} = _resolve_callee('{cname}', _gen_{cname})")
     # _ivec (HANDLERS dispatch) serves game-vectored INTs and the FF /5 memory-
     # vector chain -- NOT the de-SMC'd external far chain (that is plat.chain_
     # interrupt, no recovered handler), so it must not force the _ivec import.
@@ -3272,6 +3292,25 @@ def far_dispatch_witness(site, seg, off, regs, base):
     return UnknownFarDispatchTarget(site, seg, off, regs, base)
 
 
+#: recovered name ('func_ssss_iiii') -> callable.  The EXECUTION PLAN's bind
+#: step populates this with the selected AUTHORED overrides BEFORE any corpus
+#: module is imported (binding precedes execution); empty reproduces the
+#: generated corpus exactly.  This is the runtime half of
+#: ``impl = overrides.get(addr, generated[addr])``: the module-level callee
+#: bindings AND the dynamic-dispatch path both resolve through it, so ONE
+#: selected implementation owns each address without regenerating the corpus
+#: per composition.  An override must honour the address's recovered contract
+#: (same body ABI); the differential verifiers are the proof, as for every
+#: implementation.
+CALLEE_OVERRIDES = {}
+
+
+def resolve_callee(name, default):
+    """Bind one internal callee at module-import time: the plan's selected
+    override if present, else the statically imported generated body."""
+    return CALLEE_OVERRIDES.get(name, default)
+
+
 _cache = {}
 
 
@@ -3282,7 +3321,9 @@ def _exec(table, kind, key, mem, plat, base, regs):
     fn = _cache.get((kind, key))
     if fn is None:
         modname, fname, entry_ip, inputs, needs_plat, df_livein, fl_livein = ent
-        f = getattr(importlib.import_module(modname), fname)
+        f = CALLEE_OVERRIDES.get(fname)
+        if f is None:
+            f = getattr(importlib.import_module(modname), fname)
 
         def fn(mem, plat, base, regs, _f=f, _e=entry_ip, _ins=inputs,
                _np=needs_plat, _dfl=df_livein, _fl=fl_livein):
