@@ -480,6 +480,17 @@ def _emit_instruction(inst: Inst32, out: list[str]) -> bool:
             out.append(f"cpu._string(0x{op:02X}, {rep})")
             return True
 
+        # --- x87 ESC (D8-DF) -> CPU386 fpu primitives -------------------------
+        if 0xD8 <= op <= 0xDF:
+            if inst.mod == 3:
+                out.append(f"cpu._fpu_reg(0x{op:X}, {inst.reg}, {inst.rm}, 0x{inst.modrm:X})")
+            else:
+                if inst.adsize != 4:
+                    return False
+                out.append(f"_o = {_addr_expr(inst)}")
+                out.append(f"cpu._fpu_mem(0x{op:X}, {inst.reg}, _o)")
+            return True
+
         # --- two-byte natives ---------------------------------------------------
         if op in (0x0FB6, 0x0FB7, 0x0FBE, 0x0FBF):     # movzx/movsx
             srcsz = 1 if op in (0x0FB6, 0x0FBE) else 2

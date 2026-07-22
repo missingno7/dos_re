@@ -196,6 +196,21 @@ def test_les_lds_enter_lsl_movcr_lift_native_and_verify():
     assert verifier.total_verified == 2
 
 
+def test_x87_lifts_native_and_verify():
+    """x87 (D8-DF) emits native calls to CPU386's fpu primitives (no
+    interp_one32) and matches the oracle -- the last interpreter dependency."""
+    # fld1; fld1; fadd st0,st1; fstp dword [0x3004]; ret
+    func = bytes.fromhex("D9E8" "D9E8" "D8C1" "D91D04300000" "C3")
+    rt = build_rt(func)
+    src = lift_and_install(rt)
+    assert "interp_one32(cpu, 0x" not in src            # fully native
+    assert "cpu._fpu_reg" in src and "cpu._fpu_mem" in src
+    verifier = install_pm_hook_verifier(rt)
+    run_to_halt(rt)
+    assert verifier.total_verified == 2
+    assert rt.mem.r32(DATA + 4) == 0x40000000           # float32 2.0
+
+
 def test_signature_tripwire():
     from dos_re.lift.runtime32 import LiftRuntimeError
     rt = build_rt(STRAIGHT)
