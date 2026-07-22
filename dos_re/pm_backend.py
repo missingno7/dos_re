@@ -427,8 +427,16 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
         if replay_profile is None:
             raise ValueError("PM recording requires an execution profile")
         dos.set_sound_clock(deterministic=True)
-        bundle = (Path(record_replay) if record_replay else
-                  artifacts / "replays" / f"replay_{int(now * 1000)}")
+        # A bare name (no path separator, not absolute) records under
+        # artifacts/replays/ -- the same place F11/auto recordings and every
+        # other replay live (and which .gitignore already covers) -- instead
+        # of cluttering the current working directory.
+        if record_replay:
+            rr = Path(record_replay)
+            bundle = (rr if rr.is_absolute() or len(rr.parts) > 1
+                      else artifacts / "replays" / rr)
+        else:
+            bundle = artifacts / "replays" / f"replay_{int(now * 1000)}"
         recording = ReplayRecording(
             bundle,
             timeline_id=f"protected-mode-frame-boundaries:{frame_tick_addr:#x}:v1",
