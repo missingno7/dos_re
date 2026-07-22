@@ -147,8 +147,11 @@ _T[0xC0] = (True, 1, SEQ, "grp2")
 _T[0xC1] = (True, 1, SEQ, "grp2")
 _T[0xC2] = (False, 2, RET, "ret")
 _T[0xC3] = (False, 0, RET, "ret")
+_T[0xC4] = (True, 0, SEQ, "les")       # load far pointer -> ES:r32
+_T[0xC5] = (True, 0, SEQ, "lds")       # load far pointer -> DS:r32
 _T[0xC6] = (True, 1, SEQ, "mov")
 _T[0xC7] = (True, "v", SEQ, "mov")
+_T[0xC8] = (False, 3, SEQ, "enter")    # iw alloc + ib level
 _T[0xC9] = (False, 0, SEQ, "leave")
 _T[0xCC] = (False, 0, INT, "int3")
 _T[0xCD] = (False, 1, INT, "int")
@@ -184,6 +187,7 @@ for op in range(0x70, 0x80):
 # Two-byte (0F xx) table.
 _T2: dict[int, tuple[bool, object, str, str]] = {}
 _T2[0x01] = (True, 0, SEQ, "grp7")
+_T2[0x03] = (True, 0, SEQ, "lsl")      # load segment limit
 _T2[0x20] = (True, 0, SEQ, "mov cr")
 _T2[0x22] = (True, 0, SEQ, "mov cr")
 _T2[0x31] = (False, 0, SEQ, "rdtsc")

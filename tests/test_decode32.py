@@ -93,3 +93,30 @@ def test_movzx_and_shld():
 def test_jmp_short():
     i = dec("EB 47", ip=0x26520)
     assert (i.kind, i.target) == (JMP, 0x26569)
+
+
+def test_les_lds_enter_lsl_shape():
+    # les esi,[0x2000] / lds esi,[0x2000] (modrm 35 = mod0 reg6 rm5 -> disp32)
+    assert (dec("C4 35 00 20 00 00").length, dec("C4 35 00 20 00 00").mnemonic) == (6, "les")
+    assert (dec("C5 35 00 20 00 00").length, dec("C5 35 00 20 00 00").mnemonic) == (6, "lds")
+    assert (dec("C8 A8 00 00").length, dec("C8 A8 00 00").mnemonic) == (4, "enter")
+    assert (dec("0F 03 C0").length, dec("0F 03 C0").mnemonic) == (3, "lsl")
+    for h in ("C4 35 00 20 00 00", "C5 35 00 20 00 00", "C8 A8 00 00", "0F 03 C0"):
+        assert dec(h).kind == SEQ
+
+
+def test_new_pm_ops_length_matches_interpreter():
+    """The decode-vs-interpreter contract: decode32's length is exactly what
+    CPU386 consumes.  A wrong length silently corrupts every later instruction,
+    so it is checked against the oracle itself for the ops just added."""
+    from dos_re.cpu386 import CPU386, FlatMemory
+    for h in ("C4 35 00 20 00 00",     # les esi,[0x2000]
+              "C5 35 00 20 00 00",     # lds esi,[0x2000]
+              "C8 04 00 00",           # enter 4,0
+              "0F 03 C0"):             # lsl eax,eax
+        blob = bytes.fromhex(h.replace(" ", ""))
+        mem = FlatMemory(size=0x8000)
+        mem.load(0x1000, blob)
+        cpu = CPU386(mem, eip=0x1000, esp=0x4000)
+        cpu.step()
+        assert cpu.eip - 0x1000 == decode32(mem.data.__getitem__, 0x1000).length, h

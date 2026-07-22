@@ -6,7 +6,7 @@ protected-mode interpreter.
 """
 from __future__ import annotations
 
-from dos_re.cpu386 import CPU386, FlatMemory, EAX, EBX, ECX, EDX, ESP
+from dos_re.cpu386 import CPU386, FlatMemory, EAX, EBX, ECX, EDX, ESP, EBP, ESI
 from dos_re.dos4gw import VGASequencer
 from dos_re.cpu import CF, ZF, SF, HaltExecution
 
@@ -27,6 +27,35 @@ def run_blob(blob: bytes, *, max_steps: int = 1000, setup=None):
     except HaltExecution:
         pass
     return cpu, mem
+
+
+def test_enter_level0_makes_a_frame():
+    # mov ebp,0xAAAA ; enter 4,0  -> push ebp; ebp=esp; esp-=4
+    cpu, mem = run_blob(bytes.fromhex("BDAAAA0000 C804000000".replace(" ", "")))
+    assert mem.r32(STACK - 4) == 0xAAAA        # old ebp pushed
+    assert cpu.r[EBP] == STACK - 4             # ebp = esp after the push
+    assert cpu.r[ESP] == STACK - 8             # then esp -= alloc(4)
+
+
+def test_les_loads_offset_and_selector():
+    # les esi,[0x2000]: esi <- [0x2000], es <- [0x2004]
+    def setup(cpu, mem):
+        mem.w32(0x2000, 0x12345678)
+        mem.w32(0x2004, 0x0047)
+    cpu, _ = run_blob(bytes.fromhex("C435 00200000".replace(" ", "")), setup=setup)
+    assert cpu.r[ESI] == 0x12345678
+    assert cpu.seg["es"] == 0x47
+
+
+def test_lsl_flat_limit_and_registered_limit():
+    # lsl eax,eax with a flat selector -> 4 GB limit, ZF set
+    cpu, _ = run_blob(bytes.fromhex("B847000000 0F03C0".replace(" ", "")))
+    assert cpu.r[EAX] == 0xFFFFFFFF
+    assert cpu.get_flag(ZF)
+    # a host-registered DOS-memory selector limit wins (0x47 & 0xFFFC = 0x44)
+    cpu, _ = run_blob(bytes.fromhex("B847000000 0F03C0".replace(" ", "")),
+                      setup=lambda c, m: c.selector_limits.__setitem__(0x44, 0x9FF))
+    assert cpu.r[EAX] == 0x9FF
 
 
 def test_mov_alu_32bit():
