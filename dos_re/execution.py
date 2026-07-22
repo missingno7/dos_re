@@ -778,15 +778,17 @@ def bind_plan_implementations(
             )
         adapter.activate(runtime, region)
 
-    suppressed_bindings = {
-        (binding.target, binding.implementation_id)
-        for region in plan.regions
-        for binding in region.suppressed_bindings
-    }
     targets_by_implementation: dict[str, list[str]] = {}
     for binding in plan.bindings:
-        if (binding.target, binding.implementation_id) in suppressed_bindings:
-            continue
+        # A region suppresses an inner binding only while its dispatcher owns
+        # that execution context.  The same stable function can still be
+        # called by the surrounding generated/interpreted shell before entry
+        # or after exit, so its carrier adapter must remain installed there.
+        # Long-lived native regions bypass the host CPU dispatcher while
+        # active; installing the adapter cannot recreate a collapsed seam
+        # inside them.  Treating contextual suppression as global previously
+        # disabled SkyRoads' verified raster hooks during level-start/restart
+        # transitions and made those one-frame shell calls fully generated.
         targets_by_implementation.setdefault(binding.implementation_id, []).append(
             binding.target
         )

@@ -913,6 +913,9 @@ class ReplayArtifact:
         self.directory = Path(directory)
         self.path = self.directory / MANIFEST
         self._manifest = manifest
+        self._timeline_coordinates_raw: object | None = None
+        self._timeline_coordinates_cache: tuple[ReplayPointCoordinate, ...] = ()
+        self._timeline_coordinate_index: dict[int, ReplayPointCoordinate] = {}
 
     @classmethod
     def create(
@@ -1020,10 +1023,26 @@ class ReplayArtifact:
 
     @property
     def timeline_coordinates(self) -> tuple[ReplayPointCoordinate, ...]:
-        return tuple(
-            ReplayPointCoordinate.from_json(raw)
-            for raw in self._manifest.get("timeline_coordinates", ())
-        )
+        raw = self._manifest.get("timeline_coordinates", ())
+        # Coordinates are immutable timeline authority. Derived-cache/profile
+        # mutations may reload the manifest, so key this parsed view to the raw
+        # container identity instead of assuming the manifest object never
+        # changes. Normal playback then parses O(points) once rather than once
+        # per point (which made a full replay O(points**2)).
+        if raw is not self._timeline_coordinates_raw:
+            parsed = tuple(
+                ReplayPointCoordinate.from_json(item) for item in raw
+            )
+            index = {
+                coordinate.point.ordinal: coordinate
+                for coordinate in parsed
+            }
+            if len(index) != len(parsed):
+                raise ReplayError("duplicate timeline coordinate ordinal")
+            self._timeline_coordinates_raw = raw
+            self._timeline_coordinates_cache = parsed
+            self._timeline_coordinate_index = index
+        return self._timeline_coordinates_cache
 
     @property
     def timeline_coordinates_sha256(self) -> str:
@@ -1035,14 +1054,14 @@ class ReplayArtifact:
 
     def timeline_coordinate(self, point: ReplayPoint) -> ReplayPointCoordinate:
         self._point(point)
-        matches = [
-            coordinate for coordinate in self.timeline_coordinates
-            if coordinate.point == point
-        ]
-        if len(matches) != 1:
+        # Populate/refresh the index before lookup. Timeline identity was
+        # checked above, so an ordinal is the unique key within this artifact.
+        self.timeline_coordinates
+        coordinate = self._timeline_coordinate_index.get(point.ordinal)
+        if coordinate is None:
             raise ReplayError(
                 f"timeline point {point.ordinal} has no exact stop coordinate")
-        return matches[0]
+        return coordinate
 
     def set_timeline_coordinates(
         self,

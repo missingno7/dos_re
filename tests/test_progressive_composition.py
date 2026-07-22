@@ -407,7 +407,9 @@ def test_long_lived_region_collapses_contextual_targets_and_materializes_handoff
         runtime, plan, carrier_id=GENERATED_VMLESS_CARRIER
     )
     assert activated == [(runtime, resolved)]
-    assert inner_activations == []
+    # The region contextually owns A/B while active, but B's selected adapter
+    # remains available to surrounding carrier code outside the region.
+    assert inner_activations == [(GENERATED_VMLESS_CARRIER, (B,))]
 
     class Session:
         def __init__(self):

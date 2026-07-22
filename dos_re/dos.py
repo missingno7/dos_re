@@ -41,6 +41,38 @@ def _dac8(v6: int) -> int:
     return (v << 2) | (v >> 4)
 
 
+def _observable_interrupt_arguments(cpu: "CPU8086", num: int) -> tuple[int, int, int, int]:
+    """Project a software interrupt onto the inputs its service consumes.
+
+    This is an observable call contract, not a snapshot of whatever happened
+    to be left in guest registers.  Carrier-equivalent implementations are
+    allowed to use different scratch values.  Hashing those unused values
+    produced false replay divergences even when the DOS service and resulting
+    continuation state were identical.
+
+    Unknown services retain the conservative full-register projection.  The
+    explicitly normalized cases below are DOS memory-management services
+    whose consumed inputs are unambiguous in both DOS and our implementation.
+    """
+    number = num & 0xFF
+    ax = cpu.s.ax & 0xFFFF
+    bx = cpu.s.bx & 0xFFFF
+    if number == 0x21:
+        ah = (ax >> 8) & 0xFF
+        if ah == 0x48:  # allocate: BX paragraphs
+            return number, ax, bx, 0
+        if ah == 0x49:  # free: ES segment
+            return number, ax, cpu.s.es & 0xFFFF, 0
+        if ah == 0x4A:  # resize: ES segment, BX paragraphs
+            return number, ax, ((cpu.s.es & 0xFFFF) << 16) | bx, 0
+    return (
+        number,
+        ax,
+        (bx << 16) | (cpu.s.cx & 0xFFFF),
+        ((cpu.s.dx & 0xFFFF) << 16) | (cpu.s.si & 0xFFFF),
+    )
+
+
 # US-layout PC/XT set-1 scancode -> (unshifted, shifted) ASCII, for the BIOS
 # INT 09h keyboard translation (DOSMachine.bios_int9_keyboard).  Only keys the
 # BIOS puts in its type-ahead buffer as ASCII appear here.
@@ -1123,16 +1155,9 @@ class DOSMachine:
     def interrupt(self, cpu: CPU8086, num: int) -> None:
         sink = self.observable_effect_sink
         if sink is not None:
-            # Four input words are enough to distinguish DOS/BIOS service
-            # selection and its ordinary arguments without coupling the
-            # semantic stream to CS:IP or guest instruction timing.
-            sink.record(
-                SOFTWARE_INTERRUPT,
-                num & 0xFF,
-                cpu.s.ax & 0xFFFF,
-                ((cpu.s.bx & 0xFFFF) << 16) | (cpu.s.cx & 0xFFFF),
-                ((cpu.s.dx & 0xFFFF) << 16) | (cpu.s.si & 0xFFFF),
-            )
+            sink.record(SOFTWARE_INTERRUPT, *_observable_interrupt_arguments(
+                cpu, num,
+            ))
         if num == 0x20:
             cpu.halted = True
             raise HaltExecution()

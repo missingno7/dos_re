@@ -22,6 +22,7 @@ import functools
 import hashlib
 import inspect
 import sys
+import time
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -260,6 +261,17 @@ def _runtime_identity() -> str:
     return _source_tree_identity(Path(__file__).parent)
 
 
+def _accumulate_fixed_step_time(
+    accumulator: float,
+    elapsed: float,
+    period: float,
+) -> float:
+    """Add host time without losing phase or building an unbounded backlog."""
+    if period <= 0.0:
+        raise ValueError("fixed-step period must be positive")
+    return min(period * 2.0, accumulator + max(0.0, elapsed))
+
+
 class GameFrontend:
     """Per-game adapter for the canonical player. Subclass and override.
 
@@ -281,6 +293,10 @@ class GameFrontend:
     default_steps_per_frame = 40_000
     default_timer_irqs_per_frame = 0
     default_present_hz = 60
+    # ``None`` keeps the generic runner's historical one-clock default. Games
+    # whose semantic clock is derived from guest hardware should declare it
+    # explicitly so changing host presentation cannot change game speed.
+    default_simulation_hz: int | None = None
     default_scale = 3
     #: "adlib" turns on the observer-only OPL3 + PC-speaker sink in the viewer
     default_audio = "off"
@@ -884,9 +900,11 @@ def build_arg_parser(frontend: GameFrontend,
     pace.add_argument("--present-hz", type=int, default=frontend.default_present_hz,
                        help="viewer presents per second")
     pace.add_argument(
-        "--simulation-hz", type=int, default=0,
-        help="authoritative semantic ticks per second (0 = present-hz); a lower "
-             "value permits presentation-only interpolation between fixed ticks",
+        "--simulation-hz", type=int,
+        default=(frontend.default_simulation_hz or 0),
+        help="authoritative semantic ticks per second (0 = present-hz for "
+             "frontends without a declared game clock); a lower value permits "
+             "presentation-only interpolation between fixed ticks",
     )
     pace.add_argument("--steps-per-frame", type=int,
                       default=frontend.default_steps_per_frame,
@@ -903,8 +921,8 @@ def build_arg_parser(frontend: GameFrontend,
                       help="par=1.0 instead of the DOS 4:3 look (par=1.2)")
     view.add_argument("--audio", default=frontend.default_audio,
                       choices=frontend.audio_choices,
-                      help="viewer audio: 'adlib' = observer-only OPL3 + PC-speaker "
-                           "sink (never affects game state); 'off'")
+                      help="viewer audio backend selected by the game frontend; "
+                           "all host sinks are observer-only and never affect game state")
 
     save = p.add_argument_group("persistence")
     save.add_argument("--save-dir", default=None,
@@ -1212,6 +1230,12 @@ def run_view(frontend: GameFrontend, rt, args,
     # fixed semantic timeline; the frontend receives only the fractional
     # interpolation value and must never feed it into simulation.
     simulation_accumulator = simulation_period
+    # pygame.Clock.tick() reports whole milliseconds. At common pairings such
+    # as 60 Hz presentation / 30 Hz simulation, two nominal 16 ms reports add
+    # to only 32 ms and incorrectly defer the 33.333 ms semantic tick until a
+    # third host frame. Use Clock only to limit presentation; measure actual
+    # elapsed time with the monotonic high-resolution host clock.
+    last_host_time = time.perf_counter()
 
     frame_box = {"n": 0}
     recorder: dict[str, _RealReplayRecorder | None] = {"rec": None}
@@ -1304,6 +1328,10 @@ def run_view(frontend: GameFrontend, rt, args,
         rgb = last_rgb[0]
         if rgb is None:
             return
+        if gpu_presenter is not None:
+            capture = getattr(gpu_presenter, "capture_rgb", None)
+            if capture is not None:
+                rgb = capture(display)
         h, w = rgb.shape[0], rgb.shape[1]
         surf = pygame.image.frombuffer(np.ascontiguousarray(rgb).tobytes(), (w, h), "RGB")
         out = frontend.artifacts_dir / f"shot_{frontend.name}_{datetime.now():%Y%m%d_%H%M%S}.png"
@@ -1463,13 +1491,20 @@ def run_view(frontend: GameFrontend, rt, args,
                 f"CS:IP={rt.cpu.s.cs:04X}:{rt.cpu.s.ip:04X}"
                 + (" | REC" if recorder["rec"] is not None else "")
             )
-            elapsed = clock.tick(args.present_hz) / 1000.0
-            # Do not produce a spiral of unbounded catch-up work after a host
-            # stall. The next viewer iteration takes the following tick; no
-            # interpolated value is ever committed to authoritative state.
-            simulation_accumulator = min(
+            clock.tick(args.present_hz)
+            host_time = time.perf_counter()
+            elapsed = max(0.0, host_time - last_host_time)
+            last_host_time = host_time
+            # Preserve the fractional phase beyond one due tick. Capping at
+            # exactly one period discards (for example) ~15 ms every time three
+            # 60 Hz presents cross a 30 Hz boundary and silently slows the game.
+            # Two periods still bound a host stall to one queued follow-up tick,
+            # so there is no unbounded catch-up spiral and no interpolated value
+            # is ever committed to authoritative state.
+            simulation_accumulator = _accumulate_fixed_step_time(
+                simulation_accumulator,
+                elapsed,
                 simulation_period,
-                simulation_accumulator + elapsed,
             )
     finally:
         stop_recording()

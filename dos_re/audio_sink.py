@@ -59,6 +59,12 @@ def load_opl3():
 class AdlibSpeakerSink:
     """Render the VM's AdLib register stream + PC-speaker state to the host."""
 
+    # pygame's Channel owns one playing sound plus one queued sound.  Keep the
+    # timing policy explicit so a frontend can select a measured host-jitter
+    # budget without replacing the observer or coupling it to present_hz.
+    QUEUE_CHUNK_S = 0.040
+    START_LEAD_S = 0.100
+
     def __init__(self, pygame, rt, present_hz: int) -> None:
         import numpy as np
 
@@ -89,8 +95,8 @@ class AdlibSpeakerSink:
         #        in the channel: one playing, one queued).  Fixed in TIME.
         self._gen = self._rate / float(max(1, present_hz))
         self._gen_frac = 0.0
-        self._chunk = max(256, int(self._rate * 0.040))   # 40ms -> ~80ms live
-        self._lead = int(self._rate * 0.10)
+        self._chunk = max(256, int(self._rate * self.QUEUE_CHUNK_S))
+        self._lead = max(self._chunk, int(self._rate * self.START_LEAD_S))
         self._buf = np.zeros((0, self._channels), dtype=np.int16)
         self._started = False
         if pygame.mixer.get_num_channels() < 2:

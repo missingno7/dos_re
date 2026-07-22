@@ -157,6 +157,29 @@ def test_vga_dac_palette_roundtrip_for_pre2_probe():
     assert dos.port_read(cpu, 0x03C9, 8) == 0x34
 
 
+def test_observable_dos_allocation_ignores_unused_scratch_registers():
+    from dos_re.observable import RollingEffectDigest
+
+    def observed(dx: int, si: int, bx: int = 0x30):
+        mem = Memory()
+        cpu = CPU8086(
+            mem,
+            CPUState(
+                ax=0x4800, bx=bx, dx=dx, si=si,
+                cs=0x1000, ds=0x1000, es=0x1000,
+                ss=0x1000, sp=0xFFFE,
+            ),
+        )
+        dos = DOSMachine(root=Path('.'))
+        sink = RollingEffectDigest()
+        dos.observable_effect_sink = sink
+        dos.interrupt(cpu, 0x21)
+        return sink.finish()
+
+    assert observed(0x001E, 1) == observed(0, 1)
+    assert observed(0, 1, bx=0x30) != observed(0, 1, bx=0x31)
+
+
 def test_ega_latch_rotate_or_write_mode_for_pre2_vga_probe():
     mem = Memory()
     cpu = CPU8086(mem, CPUState(cs=0x1000, ds=0x1000, es=0x1000, ss=0x1000, sp=0xFFFE))

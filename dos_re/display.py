@@ -60,6 +60,12 @@ class Display:
 
     # --- geometry -------------------------------------------------------------------------------------
     def get_size(self):
+        if self.opengl:
+            # On pygame-ce/SDL, resizing an OPENGL window updates the native
+            # drawable immediately while the legacy display Surface may retain
+            # its creation size. Using Surface.get_size() therefore leaves a
+            # stale viewport after every user resize.
+            return tuple(pygame.display.get_window_size())
         return tuple(self.window.size) if self.gpu else self.screen.get_size()
 
     def letterbox(self, fw: int, fh: int) -> "pygame.Rect":

@@ -36,6 +36,23 @@ class _FakeDisplay(Display):
         return self._size
 
 
+def test_opengl_size_uses_the_live_window_not_the_stale_display_surface(
+    monkeypatch,
+):
+    display = object.__new__(Display)
+    display.opengl = True
+    monkeypatch.setattr(
+        "dos_re.display.pygame.display.get_window_size", lambda: (1280, 720),
+    )
+    # pygame-ce can leave the OPENGL display Surface at its creation size
+    # after SDL has already resized the native window.
+    display.screen = type("StaleSurface", (), {
+        "get_size": lambda self: (640, 480),
+    })()
+
+    assert display.get_size() == (1280, 720)
+
+
 def _drawn(win, frame):
     d = _FakeDisplay(win)
     d._last_rect = d.letterbox(*frame)
