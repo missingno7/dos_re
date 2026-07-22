@@ -365,7 +365,23 @@ class DOS4GWHost:
             if self._cpu.instruction_count >= self._timer_next:
                 self._timer_next += t
                 self.pic.raise_irq(0)
-        return self.pic.acknowledge()
+        irq = self.pic.acknowledge()
+        if irq is not None:
+            vec = 0x08 + irq if irq < 8 else 0x70 + irq - 8
+            handler = self.pm_vectors.get(vec)
+            # An unhooked hardware IRQ resolves to the bare IRET stub
+            # (seed_low_memory's F000:FF53) — either absent from pm_vectors or
+            # explicitly restored to it by a driver.  On real DPMI the default
+            # reflects to the real-mode handler, which sends EOI; our stub only
+            # IRETs, so EOI it here or the 8259 in-service bit is orphaned and,
+            # by the one-in-service rule, blocks every later IRQ.  (Observed on
+            # KE: a leftover Sound Blaster detection-block IRQ lands after the
+            # driver restores the default IRQ7 vector -> music plays one block
+            # then dies.)  Delivering to the stub would be a no-op anyway.
+            if handler is None or (handler[1] & 0xFFFFF) == 0xFFF53:
+                self.pic.eoi()
+                return None
+        return irq
 
     def set_mouse_norm(self, u: float, v: float, buttons: int | None = None) -> None:
         """Update the mouse from window-relative coordinates (0.0..1.0).

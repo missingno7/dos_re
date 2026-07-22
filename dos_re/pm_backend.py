@@ -412,15 +412,20 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     clock = FrameClock(cpu, frame_tick_addr, on_frame) if frame_tick_addr else None
 
     def _start_recording(now: float) -> None:
-        """Begin a ReplayArtifact from the current (deterministic) machine state.
+        """Begin a ReplayArtifact from the current machine state.
 
-        The viewer runs the SB on the instruction-count clock, so the captured
-        base and its block-IRQ timeline replay identically."""
+        Flip the SB to the deterministic instruction-count clock first: the
+        casual viewer paces audio by wall time, but a recording made on that
+        clock can't be replayed (its block-IRQ timeline diverges).  The captured
+        base then carries the re-based block state, so replay continues it
+        identically.  (Auto-record from --record-replay is already on this clock,
+        so the flip is a no-op there.)"""
         if clock is None:
             print("replay recording needs a frame_tick_addr (adapter)")
             return
         if replay_profile is None:
             raise ValueError("PM recording requires an execution profile")
+        dos.set_sound_clock(deterministic=True)
         bundle = (Path(record_replay) if record_replay else
                   artifacts / "replays" / f"replay_{int(now * 1000)}")
         recording = ReplayRecording(
@@ -441,6 +446,7 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
         print(f"replay recording STOPPED -> {rec['dir']} "
               f"({total_frames} frames, {recording.event_count} events)")
         rec["recording"] = None
+        dos.set_sound_clock(deterministic=False)  # back to live wall-clock audio
 
     # Pacing.  With an adapter frame clock we run the game with DETERMINISTIC
     # retrace (the vsync wait exits in ~2 reads instead of spinning thousands
@@ -795,29 +801,37 @@ def run_headless(rt, *, steps: int, png: str = "", boot_keys=()) -> int:
 
 
 def _configure_sound(dos, sound_blaster, *, deterministic: bool):
-    """Set up the emulated Sound Blaster for a run — always on the DETERMINISTIC
-    instruction-count clock (``instruction_count / EMULATED_IPS``).
+    """Set up the emulated Sound Blaster for a run.
 
-    The block-complete IRQ's firing point steers the whole execution: its ISR
-    runs mid-frame, and where it lands changes the instruction stream the game
-    sees.  Pacing it by EMULATED time keeps every block IRQ at a consistent
-    point in the game's own execution, so its DMA/IRQ state machine stays in
-    sync AND replays reproduce byte-identically.  At EMULATED_IPS the stream
-    plays ~real time under the viewer's frame pacing.
+    DETERMINISM CONTRACT.  The block-complete IRQ's firing point steers the
+    whole execution (its ISR runs mid-frame; where it lands changes the
+    instruction stream the game sees).  Every reproducible path — recording a
+    replay, replaying one, headless verify — keeps the SB on the DETERMINISTIC
+    instruction-count clock (``instruction_count / EMULATED_IPS``,
+    auto-serviced by ``pending_irq``), so the IRQ fires at the same emulated
+    instant every run and a recorded replay reproduces byte-identically.
 
-    A wall-clock retarget (the old "smoother casual viewer" path) is NOT safe:
-    a wall-timed block IRQ lands at a nondeterministic instruction, and on some
-    landings the game's ISR services the SB but returns without EOI — orphaning
-    the PIC in-service bit so, by the one-in-service rule, every later block IRQ
-    is blocked and audio dies after a single block.  Instruction-count pacing
-    avoids that entirely, so it is the only path now.
+    ONLY the casual live viewer (not recording) retargets to WALL-clock pacing:
+    a real DMA block plays its samples in real time, so wall pacing keeps music
+    at true pitch even when the game idles (a menu runs far fewer instructions
+    than EMULATED_IPS per second, so instruction-count pacing there would starve
+    the stream).  Wall pacing is explicitly NOT reproducible, hence viewer-only.
+    It is safe now that an unhooked hardware IRQ is EOI'd (``dos.pending_irq``):
+    a wall-timed block IRQ that lands on the driver's restored default vector no
+    longer wedges the PIC's in-service latch.
 
     On a resumed snapshot the host already carries the SB restored mid-stream on
-    that clock, so this leaves an existing device alone."""
+    the instruction-count clock, so the deterministic paths leave it alone."""
     base, irq, dma = sound_blaster
-    if dos.sound_blaster is None:
-        dos.attach_sound_blaster(base=base, irq=irq, dma=dma)  # clock=None => instruction-count
-    return dos.sound_blaster
+    if dos.sound_blaster is not None:
+        if not deterministic:                # casual viewer: wall-clock pacing
+            dos.sound_blaster.clock = time.monotonic
+            dos.sound_blaster.anchor_cadence = True
+        return dos.sound_blaster             # else keep the instruction-count clock
+    return dos.attach_sound_blaster(
+        base=base, irq=irq, dma=dma,
+        clock=None if deterministic else time.monotonic,   # None => instruction-count
+        anchor_cadence=not deterministic)
 
 
 class PMFrontend(GameFrontend):
