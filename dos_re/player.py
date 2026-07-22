@@ -798,7 +798,9 @@ class GameFrontend:
         observer-only OPL3 + PC-speaker sink (never affects game state; replays
         replay identically with audio on or off).  Ports with another audio
         architecture (e.g. digital SB-DMA) override this; the returned object
-        just needs a ``pump()`` method called once per presented frame."""
+        needs a ``pump()`` method called once per presented frame. It may also
+        expose ``service_host()`` for long semantic-boundary seeks and
+        ``close()`` for orderly worker/device shutdown; both are optional."""
         if args.audio != "adlib":
             return None
         from dos_re.audio_sink import AdlibSpeakerSink
@@ -1358,6 +1360,10 @@ def run_view(frontend: GameFrontend, rt, args,
 
     def service_host_during_semantic_seek() -> None:
         pygame.event.pump()
+        if audio is not None:
+            service_audio = getattr(audio, "service_host", None)
+            if service_audio is not None:
+                service_audio()
 
     rt._dos_re_host_yield = service_host_during_semantic_seek
 
@@ -1508,6 +1514,10 @@ def run_view(frontend: GameFrontend, rt, args,
             )
     finally:
         stop_recording()
+        if audio is not None:
+            close_audio = getattr(audio, "close", None)
+            if close_audio is not None:
+                close_audio()
         if gpu_presenter is not None:
             gpu_presenter.close()
         if previous_host_yield is _missing_host_yield:
