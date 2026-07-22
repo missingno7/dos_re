@@ -182,6 +182,14 @@ class CPU386:
         # the program installed via the DOS/4GW host's AH=25).  None on the
         # deterministic default path, same contract as CPU8086.pending_irq.
         self.pending_irq = None
+        # Called with the IRQ number when an acknowledged hardware interrupt has
+        # no installed handler.  A real PIC has set the in-service bit by the
+        # time the CPU vectors; the BIOS unexpected-interrupt stub still sends
+        # EOI, so without this the orphaned in-service bit would wedge the PIC
+        # (one-in-service rule) and block every later IRQ — e.g. a Sound
+        # Blaster whose block-complete IRQ arrives while its vector is briefly
+        # uninstalled would play exactly one block and then go silent.
+        self.irq_eoi = None
         self.idt: dict[int, tuple[int, int]] = {}
         # Replacement hooks, keyed by flat linear EIP (the PM analogue of
         # CPU8086's (cs, ip) keys).  Same dispatch contract: when the next
@@ -470,7 +478,12 @@ class CPU386:
                 irq = self.pending_irq()
                 if irq is not None:
                     # Master PIC base 08h, slave 70h — DOS/4GW's mapping.
-                    self.deliver_interrupt(0x08 + irq if irq < 8 else 0x70 + irq - 8)
+                    vec = 0x08 + irq if irq < 8 else 0x70 + irq - 8
+                    if not self.deliver_interrupt(vec) and self.irq_eoi is not None:
+                        # No handler installed: the acknowledge already marked
+                        # the IRQ in service, so EOI it (as the BIOS stub would)
+                        # or the in-service bit wedges the PIC forever.
+                        self.irq_eoi(irq)
         start = self.eip
         hooks = self.replacement_hooks
         if hooks and start in hooks:
