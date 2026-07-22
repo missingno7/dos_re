@@ -33,41 +33,34 @@ class PMRuntime:
     mem: "object"            # dos_re.cpu386.FlatMemory
 
 
-def create_pm_runtime(exe_path: str | Path, *, game_root: str | Path | None = None,
-                      command_tail: bytes | str = b"", ram_bytes: int = 16 * 1024 * 1024):
-    """Load an MZ+LE executable into a flat 386 protected-mode runtime.
+def create_pm_runtime_from_image(
+    *, mem_size: int, game_root: str | Path, heap_base: int,
+    free_bytes: int, command_tail: bytes | str = b""):
+    """Build a :class:`PMRuntime` shell with NO executable file.
 
-    Maps the LE image into a :class:`FlatMemory` at its own linear addresses,
-    seeds the entry point/stack from the LE header, and attaches a
-    :class:`DOS4GWHost` for INT 21h/31h/10h/33h.  Game knowledge (which EXE,
-    command tail) stays in the adapter; this is the game-agnostic wiring.
+    The EXE-free analogue of :func:`create_pm_runtime` (the PM mirror of
+    ``runtime_core.create_runtime_from_image``): it wires a flat 386 core to a
+    :class:`DOS4GWHost` and nothing more -- ``image`` is ``None`` and nothing
+    here parses an LE binary.  The caller materializes the machine into it (a
+    generated boot image / a restored PM snapshot via
+    ``pm_snapshot.apply_pm_state``, which overwrites ``mem.data`` and every
+    CPU/DOS field wholesale), so EIP/ESP start at 0 and are set by that restore.
+
+    This is the load path a VM-independent (detached-from-KE.EXE) runtime uses:
+    a captured snapshot carries the full memory image + all device state, so the
+    game runs identically without ever re-reading the executable (proven: the
+    reconstructed run is byte-identical to the EXE-loaded one).
     """
-    from .le import load_le
     from .cpu386 import CPU386, FlatMemory
     from .dos4gw import DOS4GWHost, seed_low_memory
 
     if isinstance(command_tail, str):
         command_tail = command_tail.encode("ascii")
-    exe_path = Path(exe_path)
-    # Rebase the image above 1 MB like the real DOS/4G loader: the low
-    # megabyte stays 1:1 (real-mode DOS memory, VGA at A0000h) and the C
-    # runtime's sbrk can grow the heap above the image without ever crawling
-    # into the VGA aperture (observed: KE's heap free-list reached A0000h and
-    # was shredded by planar writes when loaded at the link base).
-    image = load_le(exe_path, rebase=0x100000)
-    mem = FlatMemory(size=ram_bytes)
+    mem = FlatMemory(size=mem_size)
     seed_low_memory(mem)   # 1:1-mapped real-mode IVT + BIOS data area
-    # Place the loaded objects at their own flat linear addresses.
-    mem.data[image.mem_base:image.mem_base + len(image.mem)] = image.mem
-    cpu = CPU386(mem, eip=image.entry_linear, esp=image.stack_linear)
-    root = Path(game_root) if game_root else exe_path.parent
-    image_top = max(obj.end for obj in image.objects)
-    heap_base = (image_top + 0xFFFF) & ~0xFFFF        # 64K-align above the image
-    # Report a period-plausible 4 MB of free extended memory (KE's box asks
-    # for 2 MB minimum), regardless of the backing store's actual size.
-    dos = DOS4GWHost(mem, root, command_tail=command_tail,
-                     heap_base=heap_base,
-                     free_bytes=min(4 * 1024 * 1024, ram_bytes - heap_base - 0x10000))
+    cpu = CPU386(mem, eip=0, esp=0)   # set by the caller's image/snapshot restore
+    dos = DOS4GWHost(mem, Path(game_root), command_tail=command_tail,
+                     heap_base=heap_base, free_bytes=free_bytes)
     cpu.interrupt_handler = dos.interrupt
     cpu.port_reader = dos.port_read
     cpu.port_writer = dos.port_write
@@ -79,7 +72,46 @@ def create_pm_runtime(exe_path: str | Path, *, game_root: str | Path | None = No
     # uninstalled vector can't wedge the PIC's in-service latch.
     cpu.irq_eoi = lambda _irq: dos.pic.eoi()
     dos._cpu = cpu
-    return PMRuntime(image=image, cpu=cpu, dos=dos, mem=mem)
+    return PMRuntime(image=None, cpu=cpu, dos=dos, mem=mem)
+
+
+def create_pm_runtime(exe_path: str | Path, *, game_root: str | Path | None = None,
+                      command_tail: bytes | str = b"", ram_bytes: int = 16 * 1024 * 1024):
+    """Load an MZ+LE executable into a flat 386 protected-mode runtime.
+
+    Maps the LE image into a :class:`FlatMemory` at its own linear addresses,
+    seeds the entry point/stack from the LE header, and attaches a
+    :class:`DOS4GWHost` for INT 21h/31h/10h/33h.  Game knowledge (which EXE,
+    command tail) stays in the adapter; this is the game-agnostic wiring.  The
+    shell is built by :func:`create_pm_runtime_from_image`; this adds the one
+    thing that reads KE.EXE -- ``load_le`` -- so the EXE-free path shares every
+    other wiring detail.
+    """
+    from .le import load_le
+    from .cpu386 import ESP
+
+    exe_path = Path(exe_path)
+    # Rebase the image above 1 MB like the real DOS/4G loader: the low
+    # megabyte stays 1:1 (real-mode DOS memory, VGA at A0000h) and the C
+    # runtime's sbrk can grow the heap above the image without ever crawling
+    # into the VGA aperture (observed: KE's heap free-list reached A0000h and
+    # was shredded by planar writes when loaded at the link base).
+    image = load_le(exe_path, rebase=0x100000)
+    root = Path(game_root) if game_root else exe_path.parent
+    image_top = max(obj.end for obj in image.objects)
+    heap_base = (image_top + 0xFFFF) & ~0xFFFF        # 64K-align above the image
+    # Report a period-plausible 4 MB of free extended memory (KE's box asks
+    # for 2 MB minimum), regardless of the backing store's actual size.
+    rt = create_pm_runtime_from_image(
+        mem_size=ram_bytes, game_root=root, command_tail=command_tail,
+        heap_base=heap_base,
+        free_bytes=min(4 * 1024 * 1024, ram_bytes - heap_base - 0x10000))
+    # Place the loaded objects at their own flat linear addresses, and seed the
+    # entry point/stack from the LE header (the EXE-specific state).
+    rt.mem.data[image.mem_base:image.mem_base + len(image.mem)] = image.mem
+    rt.cpu.eip = image.entry_linear
+    rt.cpu.r[ESP] = image.stack_linear
+    return PMRuntime(image=image, cpu=rt.cpu, dos=rt.dos, mem=rt.mem)
 
 
 def create_runtime(
