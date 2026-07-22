@@ -31,6 +31,13 @@ No port replay, Atlas corpus, executable, or production profile was present in
 this framework checkout. Findings marked conditional need a replay/profile from
 an actual port before implementation.
 
+### Follow-up status
+
+The replay-coordinate cache was merged into `main` after this audit. The PM
+bulk-string path was also corrected to fall back for unsafe forward RAM overlap,
+with new MOVSB/MOVSD regression coverage. The guarded AH=3F bulk-write and the
+larger conditional experiments remain proposals.
+
 ## 2. Confirmed hot-path issues
 
 ### A. Replay coordinate lookup is accidentally quadratic
@@ -51,9 +58,8 @@ an actual port before implementation.
   is replaced.
 - **Risk:** low. Keep timeline identity validation and reject missing or
   duplicate ordinals. Do not make a cache mutation into replay authority.
-- **Status:** the local uncommitted `dos_re/replay.py` change implements this
-  boundary and `tests/test_replay.py` asserts that 640 lookups parse 64 records
-  exactly once.
+- **Status:** merged after this audit; `tests/test_replay.py` asserts that 640
+  lookups parse 64 records exactly once.
 
 ### B. PM bulk `REP MOVS` breaks overlapping-copy semantics
 
@@ -253,23 +259,22 @@ vector = np.flatnonzero(np.any(
 | Text RGB 80×25 | 29.05 ms | N/A | 4.67 ms LUT/broadcast prototype | Strong when live |
 | Page scan 16 MiB | 144.05 ms | N/A | 8.12 ms | Strong for large caches |
 
-## Local branch assessment
+## Local branch assessment (completed)
 
-The current branch `feature/presentation-frame-pipeline` is not stale:
+The former `feature/presentation-frame-pipeline` branch was not stale:
 
 - Its three committed changes cleanly form a presentation feature series:
   fixed simulation/presentation clocks, host responsiveness during replay
   seeks, and an optional product GPU presenter. They belong in the framework
   because they keep presentation explicitly non-authoritative and do not add a
   parallel execution-selection authority.
-- Merge those commits as a reviewed feature branch, not as part of a replay or
-  interpreter performance fix. The most important remaining review area is an
+- Its commits were merged as a reviewed feature branch, separate from the
+  replay and interpreter fixes. The most important remaining review area is an
   interactive/replay integration test for fixed-tick input timing; the current
   unit tests cover parser defaults and accumulator phase.
-- The uncommitted `replay.py` coordinate cache is a separate, high-value merge
-  candidate and should be committed independently. The uncommitted
-  `player.py` accumulator refinement and its tests belong with the fixed-tick
-  commit after reviewing the host-time policy.
+- The formerly uncommitted `replay.py` coordinate cache was committed and
+  merged independently. The `player.py` accumulator refinement and its tests
+  were merged with the fixed-tick presentation work.
 
 The branch's focused suite passed: 57 passed, 2 skipped before the expanded
 CPU/frame/replay set above. No user changes were discarded or altered.

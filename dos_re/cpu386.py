@@ -1318,28 +1318,30 @@ class CPU386:
             if dst_planar and wm not in (0, 1):
                 return False
 
+        # Same-aperture copies must retain element-order semantics when the
+        # ranges overlap.  VGASequencer.bulk_copy owns both the bulk and the
+        # sequential fallback, including latch state, so do not rebuild its
+        # plane rules here.
+        if movs and src_planar and dst_planar:
+            vga.bulk_copy(src - 0xA0000, dst - 0xA0000, n)
+            r[6] = (r[6] + n) & 0xFFFFFFFF
+            r[7] = (r[7] + n) & 0xFFFFFFFF
+            r[1] = 0
+            return True
+
+        # REP MOVS executes a read and write for each element.  A forward
+        # overlapping RAM destination can therefore become the next source
+        # element; a snapshot/slice copy would incorrectly have memmove
+        # semantics.  Let _string's per-unit loop model that case exactly.
+        if movs and not src_planar and not dst_planar and src < dst < src + n:
+            return False
+
         # ---- gather source bytes -------------------------------------------
         if movs:
             if src_planar:
                 off = src - 0xA0000
                 if off + n > 0x10000:
                     return False
-                if dst_planar and vga.write_mode == 1:
-                    # write-mode-1 block copy: latched plane-to-plane, CPU data
-                    # ignored.  Copy each enabled plane's slice; the latches end
-                    # holding the LAST source byte per plane.
-                    doff = dst - 0xA0000
-                    if doff + n > 0x10000:
-                        return False
-                    m = vga.map_mask
-                    for pi in range(4):
-                        if m & (1 << pi):
-                            vga.planes[pi][doff:doff + n] = vga.planes[pi][off:off + n]
-                    vga.latches = [vga.planes[pi][off + n - 1] for pi in range(4)]
-                    r[6] = (r[6] + n) & 0xFFFFFFFF
-                    r[7] = (r[7] + n) & 0xFFFFFFFF
-                    r[1] = 0
-                    return True
                 data = bytes(vga.planes[vga.read_map & 3][off:off + n])
                 vga.latches = [vga.planes[pi][off + n - 1] for pi in range(4)]
             else:

@@ -265,6 +265,39 @@ def test_bulk_string_equals_per_unit_loop(kw):
     assert _digest(fast_cpu, fast_mem, fast_vga) == _digest(slow_cpu, slow_mem, slow_vga)
 
 
+@pytest.mark.parametrize("op, count", [(0xA4, 5), (0xA5, 3)])
+def test_bulk_movs_falls_back_for_forward_overlapping_ram(op, count):
+    """REP MOVS is ordered read-then-write, not a memmove snapshot copy."""
+    fast_cpu, fast_mem, fast_vga = _string_state(7, op=op, count=count)
+    slow_cpu, slow_mem, slow_vga = _string_state(7, op=op, count=count)
+    for cpu in (fast_cpu, slow_cpu):
+        cpu.r[7] = cpu.r[6] + 1
+    slow_cpu._bulk_string = lambda *a: False
+    for cpu in (fast_cpu, slow_cpu):
+        try:
+            cpu.run(10_000)
+        except HaltExecution:
+            pass
+    assert _digest(fast_cpu, fast_mem, fast_vga) == _digest(slow_cpu, slow_mem, slow_vga)
+
+
+@pytest.mark.parametrize("wm", [0, 1])
+def test_bulk_movs_planar_overlap_preserves_latch_pipeline(wm):
+    fast_cpu, fast_mem, fast_vga = _string_state(
+        7, planar_src=True, planar_dst=True, wm=wm, op=0xA4, count=37)
+    slow_cpu, slow_mem, slow_vga = _string_state(
+        7, planar_src=True, planar_dst=True, wm=wm, op=0xA4, count=37)
+    for cpu in (fast_cpu, slow_cpu):
+        cpu.r[7] = cpu.r[6] + 1
+    slow_cpu._bulk_string = lambda *a: False
+    for cpu in (fast_cpu, slow_cpu):
+        try:
+            cpu.run(10_000)
+        except HaltExecution:
+            pass
+    assert _digest(fast_cpu, fast_mem, fast_vga) == _digest(slow_cpu, slow_mem, slow_vga)
+
+
 def test_render_numpy_matches_scalar():
     """The numpy render fast path must be byte-identical to the scalar loop."""
     import dos_re.dos4gw as m
