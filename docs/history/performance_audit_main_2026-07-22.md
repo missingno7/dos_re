@@ -278,3 +278,17 @@ The former `feature/presentation-frame-pipeline` branch was not stale:
 
 The branch's focused suite passed: 57 passed, 2 skipped before the expanded
 CPU/frame/replay set above. No user changes were discarded or altered.
+
+## Follow-up on merged main
+
+The first safe DOS I/O improvement from the audit is now implemented.  INT 21h
+AH=3F delegates its destination write to `Memory.write_external_block()`.  That
+memory-owned operation performs one slice assignment only for contiguous,
+unwatched conventional RAM.  It deliberately falls back to exact repeated
+`wb()` writes for selector mappings, 16-bit offset or 20-bit physical wrapping,
+the BIOS ROM, planar EGA, and write watchers.
+
+On the same PyPy runtime, a 64 KiB ordinary-RAM destination write measured
+**0.046 ms** through the guarded bulk path versus **2.115 ms** through scalar
+`wb()` calls (**46.1x**).  Focused semantic and integration tests passed
+(67 tests), together with the repository lint and undefined-name checks.

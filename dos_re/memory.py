@@ -305,6 +305,38 @@ class Memory:
         else:
             self.data[a] = v
 
+    def write_external_block(self, seg: int, off: int,
+                             payload: bytes | bytearray | memoryview) -> None:
+        """Store externally-owned bytes with the same semantics as repeated ``wb``.
+
+        DOS reads often transfer a whole file buffer into conventional RAM.  A
+        direct slice assignment is substantially cheaper than dispatching one
+        ``wb`` call per byte, but is only sound for a contiguous, ordinary
+        real-mode RAM range.  Selector translation, offset/address wrapping,
+        ROM, planar EGA, and write watchers all retain the precise scalar path.
+        ``payload`` must not alias ``self.data``; file handles satisfy that
+        contract.
+        """
+        n = len(payload)
+        if not n:
+            return
+        offset = off & 0xFFFF
+        addr = linear(seg, offset)
+        ega_limit = EGA_CPU_APERTURE + EGA_PLANE_WINDOW
+        if (
+            self.sel_base is None
+            and not self.write_watchers
+            and offset + n <= 0x10000
+            and addr + n <= CPU_MEM_SIZE
+            and addr + n <= BIOS_ROM_BASE
+            and addr + n <= len(self.data)
+            and (not self.ega_planar or addr >= ega_limit or addr + n <= EGA_CPU_APERTURE)
+        ):
+            self.data[addr:addr + n] = payload
+            return
+        for index, value in enumerate(payload):
+            self.wb(seg, (offset + index) & 0xFFFF, value)
+
     def ww(self, seg: int, off: int, value: int) -> None:
         sb = self.sel_base
         if sb is not None:

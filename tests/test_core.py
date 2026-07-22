@@ -694,6 +694,66 @@ def test_selector_translation_lifts_1mb_ceiling():
     assert mem._xlat(0x1003, 0x0020) == mem._xlat(0x1000, 0x0020)
 
 
+def _scalar_external_write(mem: Memory, seg: int, off: int, payload: bytes) -> None:
+    for index, value in enumerate(payload):
+        mem.wb(seg, (off + index) & 0xFFFF, value)
+
+
+def test_external_block_write_uses_direct_path_for_conventional_ram(monkeypatch):
+    mem = Memory()
+
+    def unexpected_byte_write(*_args):
+        raise AssertionError("ordinary RAM block write fell back to wb")
+
+    monkeypatch.setattr(mem, "wb", unexpected_byte_write)
+    mem.write_external_block(0x2000, 0x0100, b"DOS read block")
+
+    assert bytes(mem.data[0x20100:0x2010E]) == b"DOS read block"
+
+
+@pytest.mark.parametrize(
+    ("kind", "seg", "off", "payload"),
+    [
+        ("offset_wrap", 0x2000, 0xFFFE, b"abcd"),
+        ("physical_wrap", 0xFFFF, 0x000E, b"abcd"),
+        ("bios_rom", 0xEFFF, 0x000F, b"abcd"),
+        ("planar", 0xA000, 0x0010, b"abcd"),
+        ("selector", 0x1000, 0x0010, b"abcd"),
+    ],
+)
+def test_external_block_write_preserves_special_memory_semantics(
+        kind: str, seg: int, off: int, payload: bytes) -> None:
+    kwargs = {"size": 0x200000, "sel_base": {0x1000: 0x150000}} if kind == "selector" else {}
+    actual = Memory(**kwargs)
+    expected = Memory(**kwargs)
+    if kind == "planar":
+        for mem in (actual, expected):
+            mem.ega_planar = True
+            mem.ega_map_mask = 0x05
+
+    actual.write_external_block(seg, off, payload)
+    _scalar_external_write(expected, seg, off, payload)
+
+    assert actual.data == expected.data
+    assert actual.ega_latches == expected.ega_latches
+
+
+def test_external_block_write_notifies_watchers_byte_by_byte():
+    actual, expected = Memory(), Memory()
+    actual_events: list[tuple[int, bytes, bytes]] = []
+    expected_events: list[tuple[int, bytes, bytes]] = []
+    actual.write_watchers.append(
+        lambda addr, old, new: actual_events.append((addr, old, new)))
+    expected.write_watchers.append(
+        lambda addr, old, new: expected_events.append((addr, old, new)))
+
+    actual.write_external_block(0x2000, 0x0100, b"watch")
+    _scalar_external_write(expected, 0x2000, 0x0100, b"watch")
+
+    assert actual.data == expected.data
+    assert actual_events == expected_events
+
+
 def test_cmc_toggles_carry():
     from dos_re.cpu import CF
     # STC; CMC -> CF cleared; CMC -> CF set again.
