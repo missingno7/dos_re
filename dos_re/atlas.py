@@ -149,6 +149,28 @@ def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+#: identity-key structural markers -> materialized node kind, for endpoints
+#: that exist ONLY as observed-transfer evidence.  The serialized identity
+#: grammar (dos_re.identity) is authoritative; defaulting everything to
+#: execution-point would type a runtime-only BOUNDARY (an API transition a
+#: replay observed) as program code and leak it into coverage.
+_IDENTITY_KIND_MARKERS = (
+    (":boundary:", "boundary"),
+    (":function:", "function"),
+    (":runtime-slot:", "runtime-code-slot"),
+    (":region:", "region"),
+)
+
+
+def _identity_kind(identity: str) -> str:
+    for marker, kind in _IDENTITY_KIND_MARKERS:
+        if marker in identity:
+            if kind == "runtime-code-slot" and ":variant:" in identity:
+                return "runtime-code-variant"
+            return kind
+    return "execution-point"
+
+
 def _source_digest(value: Mapping[str, Any]) -> str:
     clean = dict(value)
     clean.pop("source_digest", None)
@@ -872,7 +894,7 @@ class ExecutionAtlas:
         for edge in edge_map.values():
             for endpoint in (edge["source"], edge["target"]):
                 nodes.setdefault(endpoint, {
-                    "id": endpoint, "kind": "execution-point",
+                    "id": endpoint, "kind": _identity_kind(endpoint),
                     "label": endpoint, "metadata": {"observed_only": True},
                     "evidence": list(edge["evidence"]),
                 })
@@ -880,6 +902,9 @@ class ExecutionAtlas:
             _materialize_claims(node)
         for edge in edge_map.values():
             _materialize_claims(edge)
+        # (observed-only node kinds derive from the identity grammar via
+        # _identity_kind — a runtime-only BOUNDARY endpoint synthesized as an
+        # execution point would leak into coverage as program code.)
         graph = {
             "format_version": ATLAS_FORMAT_VERSION,
             "program_id": str(self.program),

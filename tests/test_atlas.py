@@ -17,6 +17,7 @@ from dos_re.execution import (
 )
 from dos_re.identity import (
     ExecutionPointIdentity,
+    BoundaryIdentity,
     FunctionIdentity,
     ImageIdentity,
     ProgramIdentity,
@@ -115,6 +116,44 @@ def test_coverage_follows_observed_transfers_out_of_contained_points(tmp_path):
 
     assert site in coverage.reachable          # interior point of the root
     assert arm in coverage.reachable           # via the OBSERVED dispatch edge
+
+
+def test_observed_only_endpoints_take_their_kind_from_the_identity(tmp_path):
+    """An endpoint that exists ONLY as observed-transfer evidence gets its
+    node kind from the identity grammar.  A runtime-only BOUNDARY (an API
+    transition observed during replay — e.g. a GetProcAddress-minted thunk)
+    typed as an execution point would pass the coverage traversal filter and
+    leak into reachable as program code demanding an implementation (found
+    by the first Win16 port's detached planning)."""
+    entry = function(0x0100)
+    site = str(ExecutionPointIdentity(
+        IMAGE, "real-mode", real_mode_address(0x1010, 0x0155)))
+    api = str(BoundaryIdentity(PROGRAM, "platform-effect",
+                               "proc:MMSYSTEM.mciSendCommand"))
+    atlas = ExecutionAtlas.create(tmp_path / "atlas", program=PROGRAM)
+    atlas.add_manual_facts(
+        "observed-boundary-fixture",
+        provenance={"source": "test"},
+        nodes=(
+            {"id": entry, "kind": "function"},
+            {"id": site, "kind": "execution-point"},
+        ),
+        edges=(
+            {"source": entry, "target": site, "kind": "contains",
+             "status": "containment"},
+            # The api endpoint has NO node record anywhere — it exists only
+            # as this observed edge's target, like a replay-minted thunk.
+            {"source": site, "target": api, "kind": "call_ind",
+             "status": "observed", "observation_count": 2},
+        ),
+    )
+    atlas.set_product_roots("game", (entry,))
+
+    kinds = {node.identity: node.kind for node in atlas.nodes()}
+    assert kinds[api] == "boundary"
+    coverage = atlas.coverage_for("game")
+    assert site in coverage.reachable
+    assert api not in coverage.reachable       # an OS transition, not code
 
 
 def write_ir(path):
