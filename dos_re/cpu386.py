@@ -1014,12 +1014,18 @@ class CPU386:
     # ---- grp3 (test/not/neg/mul/imul/div/idiv) -----------------------------
     def _grp3(self, op):
         sz = 1 if op == 0xF6 else self._opsize
+        reg, is_reg, val = self._modrm()
+        imm = self._fetch_imm(sz) if reg in (0, 1) else 0
+        self._grp3_op(reg, is_reg, val, sz, imm)
+
+    def _grp3_op(self, reg, is_reg, val, sz, imm):
+        """Operand-explicit grp3 -- shared by the interpreter and lifted code so
+        both compute identically (``imm`` is the test immediate, reg /0 /1)."""
         bits = sz * 8
         mask = (1 << bits) - 1
-        reg, is_reg, val = self._modrm()
         v = self._rm_read(is_reg, val, sz)
         if reg in (0, 1):   # test imm
-            self._flags_logic(v & self._fetch_imm(sz), bits)
+            self._flags_logic(v & imm, bits)
         elif reg == 2:      # not
             self._rm_write(is_reg, val, sz, ~v & mask)
         elif reg == 3:      # neg

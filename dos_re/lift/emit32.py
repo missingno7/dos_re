@@ -341,6 +341,39 @@ def _emit_instruction(inst: Inst32, out: list[str]) -> bool:
                        f"{sz * 8}) if cpu.port_writer else None")
             return True
 
+        # --- grp3 (test/not/neg/mul/imul/div/idiv) -> CPU386 primitive ---------
+        if op in (0xF6, 0xF7):
+            sz = 1 if op == 0xF6 else osz
+            imm = (inst.imm or 0) if inst.reg in (0, 1) else 0
+            if inst.mod == 3:
+                out.append(f"cpu._grp3_op({inst.reg}, True, {inst.rm}, {sz}, 0x{imm:X})")
+            else:
+                if inst.adsize != 4:
+                    return False
+                out.append(f"_o = {_addr_expr(inst)}")
+                out.append(f"cpu._grp3_op({inst.reg}, False, _o, {sz}, 0x{imm:X})")
+            return True
+
+        # --- imul (two/three-operand) -> CPU386 _imul_store --------------------
+        if op in (0x69, 0x6B, 0x0FAF):
+            _hi = 1 << bits
+            _sbit = 1 << (bits - 1)
+
+            def _signed(expr: str) -> str:
+                return f"(({expr}) - 0x{_hi:X} if ({expr}) & 0x{_sbit:X} else ({expr}))"
+
+            if op == 0x0FAF:                     # imul r, r/m
+                rm = _rm_operand(inst, osz, out)
+                out.append(f"_a = {_signed(_reg_read(inst.reg, osz))}")
+                out.append(f"_b = {_signed(rm.read())}")
+                out.append(f"cpu._imul_store({inst.reg}, {osz}, _a, _b)")
+            else:                                # imul r, r/m, imm
+                rm = _rm_operand(inst, osz, out)
+                imm = _sx(inst.imm, 8 if op == 0x6B else bits)
+                out.append(f"_a = {_signed(rm.read())}")
+                out.append(f"cpu._imul_store({inst.reg}, {osz}, _a, {imm})")
+            return True
+
         # --- shifts: delegate to the interpreter's own _shift ------------------
         if op in (0xC0, 0xC1, 0xD0, 0xD1, 0xD2, 0xD3):
             sz = 1 if op in (0xC0, 0xD0, 0xD2) else osz
