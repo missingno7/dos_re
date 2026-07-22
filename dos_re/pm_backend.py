@@ -353,7 +353,8 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                artifacts_dir: str | Path = "artifacts",
                frame_tick_addr: int | None = None,
                record_replay: str | None = None,
-               replay_profile: ReplayExecutionIdentity | None = None) -> int:
+               replay_profile: ReplayExecutionIdentity | None = None,
+               present_hz: int = 70) -> int:
     import pygame
     from .pm_replay_input import FrameClock, FramePaced, KEY_CHANNEL, key_payload
 
@@ -456,7 +457,14 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     paced = clock is not None
     if paced:
         dos.time_source = None
-    period = 1 / 70.0
+    # LOGICAL frame pacing.  KE-era games advance all game logic per frame
+    # (frame-locked timers), so present_hz IS the game speed: 70 is the
+    # original vsync rate; a higher value runs the game genuinely faster
+    # (every frame is really produced — this engine's per-frame cost scales
+    # with moving sprites, not with rate).  True high-refresh presentation of
+    # unchanged game speed would need logic/presentation decoupling, which no
+    # frame-locked original supports.
+    period = 1 / float(present_hz or 70)
     MAX_CATCHUP = 2                 # frames advanced per present — bounded so a
                                     # slow game degrades smoothly (1-2 frames /
                                     # present) instead of bursting dozens at once
@@ -838,6 +846,8 @@ class PMFrontend(GameFrontend):
     """Protected-mode execution driver for the canonical player pipeline."""
 
     default_steps_per_frame = 20_000_000
+    #: The original VGA vsync rate — the frame-locked logic rate (= game speed).
+    default_present_hz = 70
 
     def __init__(
         self,
@@ -897,4 +907,5 @@ class PMFrontend(GameFrontend):
             frame_tick_addr=self.frame_tick_addr,
             record_replay=args.record_replay,
             replay_profile=profile,
+            present_hz=getattr(args, "present_hz", 70) or 70,
         )
