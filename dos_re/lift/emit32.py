@@ -423,6 +423,7 @@ def emit_function32(scan: FunctionScan32, name: str, *, signature: bytes,
                     min_iterations: int | None = None,
                     link_map: dict[int, str] | None = None,
                     boundary_heads: frozenset = frozenset(),
+                    detect_spin: bool = False,
                     link_imports: tuple[str, ...] = ()) -> str:
     """Return the source of a module defining the lifted hook ``name``.
 
@@ -507,6 +508,8 @@ def emit_function32(scan: FunctionScan32, name: str, *, signature: bytes,
     A("from dos_re.lift.runtime32 import (LiftRuntimeError, call_linked32,")
     A("                                   check_signature, emulate_call32,")
     A("                                   emulate_int32, interp_one32)")
+    if detect_spin:
+        A("from dos_re.lift.runtime32 import stuck_error")
     A("")
     A(f"ENTRY = 0x{scan.entry:X}")
     A(f"SIGNATURE = bytes.fromhex({signature.hex()!r})")
@@ -516,16 +519,19 @@ def emit_function32(scan: FunctionScan32, name: str, *, signature: bytes,
     # BLOCK_ADDRS / RESUME_ENTRIES are emitted only under boundary observation,
     # so a head-less module stays byte-for-byte what the pre-boundary emitter
     # produced (the committed graphs' reproducibility --check depends on it).
-    if resume_points:
+    if resume_points or detect_spin:
         A("#: dispatch block -> its leader address (re-entry + diagnosis)")
         A("BLOCK_ADDRS = {"
           + ", ".join(f"{bi}: 0x{body[0].ip:X}" for bi, body in enumerate(blocks))
           + "}")
+    if resume_points:
         entries = ", ".join(f'"0x{rp:X}": {bb_of[rp]}'
                             for rp in sorted(resume_points))
         A("#: re-entry points (boundary head + its successor); the graph")
         A("#: activator registers a re-entry hook at each. address -> block.")
         A(f"RESUME_ENTRIES = {{{entries}}}")
+    if detect_spin:
+        A("PROGRESS_SAMPLE = 0xFFFF  # sample state every 64K dispatches")
     A("")
     A("")
     entry_bb = bb_of[scan.entry]
@@ -545,7 +551,22 @@ def emit_function32(scan: FunctionScan32, name: str, *, signature: bytes,
         A("    cpu.instruction_count -= 1  # step() counts the hook as 1")
     if not resume_points:
         A(f"    bb = {entry_bb}")
+    if detect_spin:
+        # No-progress detector (emit.py mirror): a lifted body runs
+        # synchronously, so a loop that returns to the SAME block with IDENTICAL
+        # registers is provably waiting on something that cannot change inside
+        # it -- an environment wait.  Name the head instead of guessing.
+        A("    _last_snap = None")
     A("    for _guard in range(MAX_ITERATIONS):")
+    if detect_spin:
+        A("        if not _guard & PROGRESS_SAMPLE:")
+        A("            _snap = (bb, r[0], r[1], r[2], r[3], r[4], r[5], r[6],")
+        A("                     r[7], cpu.eflags)")
+        A("            if _snap == _last_snap:")
+        A("                raise stuck_error(__name__, cpu, bb, BLOCK_ADDRS,")
+        A("                                  iterations=_guard,")
+        A("                                  no_progress=PROGRESS_SAMPLE + 1)")
+        A("            _last_snap = _snap")
 
     ind = " " * 12
     for bi, body in enumerate(blocks):
@@ -617,8 +638,12 @@ def emit_function32(scan: FunctionScan32, name: str, *, signature: bytes,
                 raise EmitUnsupported(
                     f"block at 0x{body[0].ip:X} falls out of the region")
             A(f"{ind}bb = {bb_of[fall]}")
-    A("    raise LiftRuntimeError(")
-    A(f"        {name!r} + ' exceeded MAX_ITERATIONS (unbounded internal loop -- "
-      f"likely an environment wait; hook it by hand)')")
+    if detect_spin:
+        A("    raise stuck_error(__name__, cpu, bb, BLOCK_ADDRS,")
+        A("                      iterations=MAX_ITERATIONS, no_progress=0)")
+    else:
+        A("    raise LiftRuntimeError(")
+        A(f"        {name!r} + ' exceeded MAX_ITERATIONS (unbounded internal loop -- "
+          f"likely an environment wait; hook it by hand)')")
     A("")
     return "\n".join(L)

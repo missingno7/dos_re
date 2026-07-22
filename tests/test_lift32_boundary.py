@@ -97,6 +97,39 @@ def test_boundary_offers_the_head_and_can_park():
     assert cpu.eip == SUCC
 
 
+def test_detect_spin_names_the_stuck_head():
+    """The no-progress detector proves a spin (same block + identical registers)
+    and names the head to declare, instead of a blind MAX_ITERATIONS guess."""
+    from dos_re.lift.runtime32 import LiftStuck
+    mem = FlatMemory(size=0x10000)
+    mem.load(FUNC, SPIN)
+    scan = scan_function32(mem.data.__getitem__, FUNC)
+    # Enough iterations for two matching samples past the first (the entry
+    # sample is taken before the cmp sets ZF, so convergence needs a 3rd).
+    src = emit_function32(scan, "spin", signature=bytes(mem.data[FUNC:FUNC + 8]),
+                          detect_spin=True, min_iterations=0x30000)
+    mod = types.ModuleType("spin")
+    exec(compile(src, "spin.py", "exec"), mod.__dict__)
+
+    cpu = _cpu()                            # [0x3000]==eax=5 -> the jz spins
+    with pytest.raises(LiftStuck) as ei:
+        mod.spin(cpu)
+    assert "no progress" in str(ei.value)
+    assert f"0x{FUNC:X}" in str(ei.value)   # names the poll head (0x2000)
+
+
+def test_detect_spin_off_is_byte_identical():
+    """detect_spin defaults off and adds nothing then (the committed graphs'
+    reproducibility depends on it)."""
+    mem = FlatMemory(size=0x10000)
+    mem.load(FUNC, SPIN)
+    scan = scan_function32(mem.data.__getitem__, FUNC)
+    sig = bytes(mem.data[FUNC:FUNC + 8])
+    base = emit_function32(scan, "spin", signature=sig)
+    assert emit_function32(scan, "spin", signature=sig, detect_spin=False) == base
+    assert "stuck_error" not in base and "PROGRESS_SAMPLE" not in base
+
+
 def test_activate_registers_resume_hooks(tmp_path):
     """The graph activator installs a re-entry hook at every RESUME_ENTRIES
     address, so a parked body resumes inside the lifted code."""

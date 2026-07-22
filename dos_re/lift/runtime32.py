@@ -24,6 +24,50 @@ class LiftRuntimeError(RuntimeError):
     """A lifted hook's VM delegation did not terminate as expected."""
 
 
+class LiftStuck(LiftRuntimeError):
+    """A lifted body is spinning: same block, identical registers, no progress.
+
+    A subclass of :class:`LiftRuntimeError` so existing ``except`` sites still
+    catch it -- but it names WHERE (the flat EIP the address to declare as a
+    boundary head) and PROVES no progress, instead of the old MAX_ITERATIONS
+    guess.  The flat mirror of :class:`dos_re.lift.runtime.LiftStuck`."""
+
+
+def stuck_error(name, cpu, bb, block_addrs, *, iterations, no_progress):
+    """Diagnose a non-terminating lifted body: WHERE it spins, whether it is
+    provably making no progress, and the state there.
+
+    A lifted function runs synchronously -- nothing external happens inside it
+    -- so a loop waiting for the world (an IRQ to flip a flag) waits forever.
+    The no-progress detector proves that by returning to the SAME block with
+    IDENTICAL registers; the address it names is the one to declare as a
+    ``boundary_head`` so the body can park and resume instead."""
+    eip = block_addrs.get(bb) if block_addrs else None
+    where = f"0x{eip:X}" if eip is not None else f"block {bb}"
+    r = cpu.r
+    nl = chr(10)
+    if no_progress:
+        head = (f"{name}: STUCK at {where} -- no progress." + nl +
+                f"  The dispatcher returned to the SAME block with IDENTICAL "
+                f"registers after {no_progress:,} iterations: nothing it reads "
+                f"is changing, so it cannot exit on its own. Declare {where} a "
+                f"boundary head so the body parks (lets an IRQ run) and resumes.")
+    else:
+        head = (f"{name}: ran {iterations:,} iterations without returning "
+                f"(guard limit), currently at {where}." + nl +
+                f"  Registers WERE still changing -- this may be a genuinely "
+                f"long loop; raise min_iterations rather than declare a head.")
+    iff = "1" if cpu.eflags & 0x200 else "0"
+    regs = (f"  state: eax={r[0]:08X} ebx={r[3]:08X} ecx={r[1]:08X} "
+            f"edx={r[2]:08X} esi={r[6]:08X} edi={r[7]:08X} ebp={r[5]:08X} "
+            f"esp={r[4]:08X} eflags={cpu.eflags:08X} IF={iff}")
+    if not (cpu.eflags & 0x200):
+        regs += (nl + "  NOTE: IF=0 -- interrupts are DISABLED here, so no ISR "
+                 "can run even if delivered; if the loop waits on a value an ISR "
+                 "updates, that contradiction is the real bug.")
+    return LiftStuck(head + nl + regs + nl)
+
+
 def check_signature(cpu, entry: int, signature: bytes, name: str) -> None:
     if bytes(cpu.mem.data[entry:entry + len(signature)]) != signature:
         raise LiftRuntimeError(
