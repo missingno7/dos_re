@@ -111,6 +111,44 @@ class VGASequencer:
                         self.planes[2][off], self.planes[3][off]]
         return self.planes[self.read_map & 3][off]
 
+    def bulk_copy(self, src_off: int, dst_off: int, n: int) -> None:
+        """Copy ``n`` consecutive aperture bytes src->dst in one slice op.
+
+        Byte-exact equivalent of ``for i: write(dst+i, read(src+i))`` under
+        the modelled modes — write mode 1 copies each masked plane from
+        itself (the latch pipeline), write mode 0 fans the read-map plane out
+        to the masked planes — including the final latch state.  Falls back
+        to the per-byte path when ranges overlap (sequential semantics) or
+        leave the 64 KB plane, so behavior can never diverge silently."""
+        if n <= 0:
+            return
+        end = max(src_off, dst_off) + n
+        overlap = not (src_off + n <= dst_off or dst_off + n <= src_off)
+        if end > 0x10000 or (overlap and src_off != dst_off):
+            for i in range(n):                    # sequential fallback
+                self.write(dst_off + i, self.read(src_off + i))
+            return
+        wm = self.write_mode
+        m = self.map_mask
+        if wm == 1:
+            for p in range(4):
+                if m & (1 << p):
+                    self.planes[p][dst_off:dst_off + n] = \
+                        self.planes[p][src_off:src_off + n]
+        else:
+            if wm != 0:
+                raise UnsupportedVGAOperation(f"VGA write mode {wm} not modelled")
+            if self.bit_mask != 0xFF:
+                raise UnsupportedVGAOperation(
+                    f"VGA bit mask {self.bit_mask:02X}h not modelled")
+            data = self.planes[self.read_map & 3][src_off:src_off + n]
+            for p in range(4):
+                if m & (1 << p):
+                    self.planes[p][dst_off:dst_off + n] = data
+        last = src_off + n - 1
+        self.latches = [self.planes[0][last], self.planes[1][last],
+                        self.planes[2][last], self.planes[3][last]]
+
     def geometry(self) -> tuple[int, int]:
         """(width, height) in pixels, derived from the programmed CRTC.
 
