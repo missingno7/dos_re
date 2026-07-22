@@ -583,7 +583,25 @@ def _translate(inst, lines, flag_written, cs=0x1010):
             body.append(f"mem.{'ww' if wide else 'wb'}(es, di, {rd})")
             body.append("si = (si + _d) & 0xFFFF")
             body.append("di = (di + _d) & 0xFFFF")
-        if rep:
+        if rep and op in (0xAA, 0xAB, 0xA4, 0xA5):
+            if op in (0xAA, 0xAB):
+                pattern = ("bytes((ax & 0xFF,))" if not wide else
+                           "bytes((ax & 0xFF, (ax >> 8) & 0xFF))")
+                bulk = f"mem.try_forward_bulk_fill(es, di, {pattern}, cx)"
+            else:
+                bulk = (f"mem.try_forward_bulk_copy({src_seg}, si, es, di, "
+                        f"cx * {w})")
+            lines.append(f"if not df and cx > 8 and {bulk}:")
+            if op in (0xA4, 0xA5):
+                lines.append(f"    si = (si + cx * {w}) & 0xFFFF")
+            lines.append(f"    di = (di + cx * {w}) & 0xFFFF")
+            lines.append("    cx = 0")
+            lines.append("else:")
+            lines.append("    while cx:")
+            for ln in body:
+                lines.append("        " + ln)
+            lines.append("        cx = (cx - 1) & 0xFFFF")
+        elif rep:
             lines.append("while cx:")
             for ln in body:
                 lines.append("    " + ln)

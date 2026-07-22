@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .memory import (
-    BIOS_ROM_BASE,
     EGA_CPU_APERTURE,
     EGA_PLANE_WINDOW,
     Memory,
@@ -1520,6 +1519,8 @@ class CPU8086:
             raise RuntimeError(f"REP count too large: {count}")
 
         # --- bulk fast path for REP MOVS / REP STOS -------------------------
+        # Memory owns this guard so interpreted and generated execution share
+        # one decision about when slice semantics are exact.
         # A 32KB frame blit is one Python slice operation instead of 16k
         # element iterations.  Guarded so it is BYTE-EXACT equal to the loop:
         # real mode only, DF=0, no write watchers, no 16-bit offset wrap, no
@@ -1531,38 +1532,25 @@ class CPU8086:
         # flags, so the end state is just CX=0 and advanced SI/DI.
         # (F2 is intentionally accepted: REPNE only means "check ZF" for
         # CMPS/SCAS; for MOVS/STOS this loop treats it identically to F3.)
-        if rep is not None and count > 8 and op in (0xA4, 0xA5, 0xAA, 0xAB):
-            mem = self.mem
-            if mem.sel_base is None and delta > 0 and not mem.write_watchers:
-                n = count * width
-                di = s.di & 0xFFFF
-                dst = (((s.es & 0xFFFF) << 4) + di) & 0xFFFFF
-                dst_ok = (di + n <= 0x10000 and dst + n <= 0x100000
-                          and dst + n <= BIOS_ROM_BASE
-                          and (not mem.ega_planar
-                               or dst + n <= EGA_CPU_APERTURE or dst >= _EGA_WINDOW_END))
-                if dst_ok and op in (0xAA, 0xAB):        # rep stos
-                    if width == 1:
-                        mem.data[dst:dst + n] = bytes((s.ax & 0xFF,)) * count
-                    else:
-                        mem.data[dst:dst + n] = bytes((s.ax & 0xFF, (s.ax >> 8) & 0xFF)) * count
-                    s.di = (di + n) & 0xFFFF
+        if rep is not None and count > 8 and delta > 0:
+            n = count * width
+            if op in (0xAA, 0xAB):                    # rep stos
+                pattern = (bytes((s.ax & 0xFF,)) if width == 1 else
+                           bytes((s.ax & 0xFF, (s.ax >> 8) & 0xFF)))
+                if self.mem.try_forward_bulk_fill(s.es, s.di, pattern, count):
+                    s.di = (s.di + n) & 0xFFFF
                     s.cx = 0
-                    return ("rep " if rep else "") + ("stosb" if width == 1 else "stosw") + f" ; {count}"
-                if dst_ok and op in (0xA4, 0xA5):        # rep movs
-                    si = s.si & 0xFFFF
-                    src_seg = getattr(s, seg_override or "ds") & 0xFFFF
-                    src = ((src_seg << 4) + si) & 0xFFFFF
-                    src_ok = (si + n <= 0x10000 and src + n <= 0x100000
-                              and (not mem.ega_planar
-                                   or src + n <= EGA_CPU_APERTURE or src >= _EGA_WINDOW_END))
-                    overlap_repeats = src < dst < src + n
-                    if src_ok and not overlap_repeats:
-                        mem.data[dst:dst + n] = mem.data[src:src + n]
-                        s.si = (si + n) & 0xFFFF
-                        s.di = (di + n) & 0xFFFF
-                        s.cx = 0
-                        return ("rep " if rep else "") + ("movsb" if width == 1 else "movsw") + f" ; {count}"
+                    return ("rep " + ("stosb" if width == 1 else "stosw")
+                            + f" ; {count}")
+            elif op in (0xA4, 0xA5):                  # rep movs
+                src_seg = getattr(s, seg_override or "ds")
+                if self.mem.try_forward_bulk_copy(
+                        src_seg, s.si, s.es, s.di, n):
+                    s.si = (s.si + n) & 0xFFFF
+                    s.di = (s.di + n) & 0xFFFF
+                    s.cx = 0
+                    return ("rep " + ("movsb" if width == 1 else "movsw")
+                            + f" ; {count}")
 
         done = 0
         while count > 0:

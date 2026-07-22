@@ -292,3 +292,12 @@ On the same PyPy runtime, a 64 KiB ordinary-RAM destination write measured
 **0.046 ms** through the guarded bulk path versus **2.115 ms** through scalar
 `wb()` calls (**46.1x**).  Focused semantic and integration tests passed
 (67 tests), together with the repository lint and undefined-name checks.
+
+The CPUless REP-string follow-up is also implemented.  `Memory` now owns the
+guarded forward bulk-fill and bulk-copy decision used by both `CPU8086` and
+generated CPUless MOVS/STOS bodies.  Offset/physical wrapping, ROM writes,
+planar EGA, selector mappings, write watchers, and forward-overlap repetition
+all remain on the scalar path.  Generated 32 KiB REP MOVSW measured **0.045
+ms** through the shared bulk boundary versus **0.073 ms** scalar (**1.6x**) on
+the same PyPy runtime; the focused interpreter/generator suite passed 155
+tests, including the special-destination refusal cases.

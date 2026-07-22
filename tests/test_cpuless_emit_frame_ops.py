@@ -45,6 +45,62 @@ def _run_interp(code: bytes, regs: dict, mem: Memory, ss: int):
     return cpu.s
 
 
+def test_rep_movs_stos_bulk_generation_matches_scalar_interpreter() -> None:
+    cases = (
+        (bytes.fromhex("f3a4"), 0xA4, 1, "try_forward_bulk_copy"),
+        (bytes.fromhex("f3a5"), 0xA5, 2, "try_forward_bulk_copy"),
+        (bytes.fromhex("f3aa"), 0xAA, 1, "try_forward_bulk_fill"),
+        (bytes.fromhex("f3ab"), 0xAB, 2, "try_forward_bulk_fill"),
+    )
+    for code, op, width, helper in cases:
+        fast_mem, scalar_mem = Memory(), Memory()
+        source = bytes((index * 29 + 7) & 0xFF for index in range(74))
+        for mem in (fast_mem, scalar_mem):
+            mem.load(0x2000, 0x0100, source)
+        ns = {
+            "mem": fast_mem, "df": False, "ax": 0xBEEF, "cx": 37,
+            "si": 0x0100, "di": 0x0200, "ds": 0x2000, "es": 0x3000,
+        }
+        emitted = "\n".join(_emit(code))
+        assert helper in emitted
+        exec(emitted, {}, ns)
+
+        setattr(scalar_mem, helper, lambda *_args: False)
+        state = CPUState(
+            ax=0xBEEF, cx=37, si=0x0100, di=0x0200,
+            ds=0x2000, es=0x3000, flags=0x0202)
+        scalar = CPU8086(scalar_mem, state)
+        scalar.string_op(op, 0xF3)
+
+        assert ns["cx"] == scalar.s.cx == 0
+        assert ns["si"] == scalar.s.si
+        assert ns["di"] == scalar.s.di
+        assert fast_mem.data == scalar_mem.data
+        assert ns["di"] == (0x0200 + 37 * width) & 0xFFFF
+
+
+def test_cpuless_rep_movsb_preserves_forward_overlap_order() -> None:
+    code = bytes.fromhex("f3a4")
+    fast_mem, scalar_mem = Memory(), Memory()
+    source = bytes(range(32))
+    for mem in (fast_mem, scalar_mem):
+        mem.load(0x2000, 0x0100, source)
+    ns = {
+        "mem": fast_mem, "df": False, "ax": 0, "cx": 16,
+        "si": 0x0100, "di": 0x0101, "ds": 0x2000, "es": 0x2000,
+    }
+    exec("\n".join(_emit(code)), {}, ns)
+
+    state = CPUState(
+        cx=16, si=0x0100, di=0x0101,
+        ds=0x2000, es=0x2000, flags=0x0202)
+    scalar = CPU8086(scalar_mem, state)
+    scalar.string_op(0xA4, 0xF3)
+
+    assert fast_mem.data == scalar_mem.data
+    assert fast_mem.block(0x2000, 0x0100, 17) == bytes(17)
+
+
 def _check(code: bytes, regs: dict, compare_regs, *, ss=0x3000):
     m1, m2 = Memory(), Memory()
     ns = _run_emitted(code, regs, m1, ss)

@@ -777,6 +777,76 @@ def test_external_block_write_notifies_watchers_byte_by_byte():
     assert actual_events == expected_events
 
 
+def test_forward_bulk_fill_and_copy_match_scalar_string_order():
+    fast_fill, slow_fill = Memory(), Memory()
+    assert fast_fill.try_forward_bulk_fill(
+        0x3000, 0x0200, b"\xEF\xBE", 37)
+    for index in range(37):
+        slow_fill.ww(0x3000, 0x0200 + index * 2, 0xBEEF)
+    assert fast_fill.data == slow_fill.data
+
+    fast_copy, slow_copy = Memory(), Memory()
+    source = bytes((index * 29 + 7) & 0xFF for index in range(74))
+    for mem in (fast_copy, slow_copy):
+        mem.load(0x2000, 0x0100, source)
+    assert fast_copy.try_forward_bulk_copy(
+        0x2000, 0x0100, 0x3000, 0x0200, len(source))
+    for index in range(0, len(source), 2):
+        slow_copy.ww(0x3000, 0x0200 + index,
+                     slow_copy.rw(0x2000, 0x0100 + index))
+    assert fast_copy.data == slow_copy.data
+
+
+@pytest.mark.parametrize(
+    ("kind", "src_seg", "src_off", "dst_seg", "dst_off", "n"),
+    [
+        ("overlap", 0x2000, 0x0100, 0x2000, 0x0101, 32),
+        ("offset_wrap", 0x2000, 0xFFF0, 0x3000, 0x0200, 32),
+        ("physical_wrap", 0xFFFF, 0x0000, 0x3000, 0x0200, 32),
+        ("rom_destination", 0x2000, 0x0100, 0xEFFF, 0x000F, 32),
+        ("planar_source", 0xA000, 0x0100, 0x3000, 0x0200, 32),
+        ("planar_destination", 0x2000, 0x0100, 0xA000, 0x0200, 32),
+        ("selector", 0x1000, 0x0100, 0x2000, 0x0200, 32),
+        ("watcher", 0x2000, 0x0100, 0x3000, 0x0200, 32),
+    ],
+)
+def test_forward_bulk_copy_refuses_ranges_needing_scalar_semantics(
+        kind: str, src_seg: int, src_off: int,
+        dst_seg: int, dst_off: int, n: int) -> None:
+    kwargs = {"size": 0x200000, "sel_base": {0x1000: 0x150000}} \
+        if kind == "selector" else {}
+    mem = Memory(**kwargs)
+    if kind.startswith("planar"):
+        mem.ega_planar = True
+    if kind == "watcher":
+        mem.write_watchers.append(lambda *_args: None)
+    before = bytes(mem.data)
+
+    assert not mem.try_forward_bulk_copy(
+        src_seg, src_off, dst_seg, dst_off, n)
+    assert bytes(mem.data) == before
+
+
+def test_forward_bulk_fill_refuses_special_destination_semantics():
+    watched = Memory()
+    watched.write_watchers.append(lambda *_args: None)
+    assert not watched.try_forward_bulk_fill(
+        0x3000, 0x0200, b"\xEF\xBE", 37)
+
+    planar = Memory()
+    planar.ega_planar = True
+    assert not planar.try_forward_bulk_fill(
+        0xA000, 0x0200, b"\xEF\xBE", 37)
+
+    selector = Memory(size=0x200000, sel_base={0x1000: 0x150000})
+    assert not selector.try_forward_bulk_fill(
+        0x1000, 0x0200, b"\xEF\xBE", 37)
+
+    rom = Memory()
+    assert not rom.try_forward_bulk_fill(
+        0xEFFF, 0x000F, b"\xEF\xBE", 37)
+
+
 def test_cmc_toggles_carry():
     from dos_re.cpu import CF
     # STC; CMC -> CF cleared; CMC -> CF set again.

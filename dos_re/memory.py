@@ -320,22 +320,76 @@ class Memory:
         n = len(payload)
         if not n:
             return
-        offset = off & 0xFFFF
-        addr = linear(seg, offset)
-        ega_limit = EGA_CPU_APERTURE + EGA_PLANE_WINDOW
-        if (
-            self.sel_base is None
-            and not self.write_watchers
-            and offset + n <= 0x10000
-            and addr + n <= CPU_MEM_SIZE
-            and addr + n <= BIOS_ROM_BASE
-            and addr + n <= len(self.data)
-            and (not self.ega_planar or addr >= ega_limit or addr + n <= EGA_CPU_APERTURE)
-        ):
+        addr = self._ordinary_real_mode_range(seg, off, n, writable=True)
+        if self.sel_base is None and not self.write_watchers and addr is not None:
             self.data[addr:addr + n] = payload
             return
+        offset = off & 0xFFFF
         for index, value in enumerate(payload):
             self.wb(seg, (offset + index) & 0xFFFF, value)
+
+    def _ordinary_real_mode_range(self, seg: int, off: int, n: int, *,
+                                  writable: bool) -> int | None:
+        """Return a direct-slice address, or None when byte semantics matter."""
+        if n < 0:
+            raise ValueError("memory range length must be non-negative")
+        offset = off & 0xFFFF
+        addr = linear(seg, offset)
+        if offset + n > 0x10000 or addr + n > CPU_MEM_SIZE \
+                or addr + n > len(self.data):
+            return None
+        if writable and addr + n > BIOS_ROM_BASE:
+            return None
+        ega_limit = EGA_CPU_APERTURE + EGA_PLANE_WINDOW
+        if self.ega_planar and addr < ega_limit and addr + n > EGA_CPU_APERTURE:
+            return None
+        return addr
+
+    def try_forward_bulk_fill(self, seg: int, off: int, pattern: bytes,
+                              count: int) -> bool:
+        """Try an exact forward REP-style fill of ordinary real-mode RAM.
+
+        False means the caller must retain its scalar operation order because
+        selector translation, wrapping, ROM, planar EGA, or write watchers are
+        involved. True includes a zero-count no-op.
+        """
+        if count < 0:
+            raise ValueError("bulk fill count must be non-negative")
+        if not pattern:
+            raise ValueError("bulk fill pattern must not be empty")
+        n = len(pattern) * count
+        if not n:
+            return True
+        if self.sel_base is not None or self.write_watchers:
+            return False
+        addr = self._ordinary_real_mode_range(seg, off, n, writable=True)
+        if addr is None:
+            return False
+        self.data[addr:addr + n] = pattern * count
+        return True
+
+    def try_forward_bulk_copy(self, src_seg: int, src_off: int,
+                              dst_seg: int, dst_off: int, n: int) -> bool:
+        """Try an exact forward REP-style copy of ordinary real-mode RAM.
+
+        The forward-overlap case deliberately returns False: repeated MOVS
+        reads bytes written by earlier elements, whereas a slice snapshots the
+        source and would incorrectly behave like memmove.
+        """
+        if n < 0:
+            raise ValueError("bulk copy length must be non-negative")
+        if not n:
+            return True
+        if self.sel_base is not None or self.write_watchers:
+            return False
+        src = self._ordinary_real_mode_range(
+            src_seg, src_off, n, writable=False)
+        dst = self._ordinary_real_mode_range(
+            dst_seg, dst_off, n, writable=True)
+        if src is None or dst is None or src < dst < src + n:
+            return False
+        self.data[dst:dst + n] = self.data[src:src + n]
+        return True
 
     def ww(self, seg: int, off: int, value: int) -> None:
         sb = self.sel_base
