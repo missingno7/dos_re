@@ -190,6 +190,29 @@ def load_pm_snapshot(exe_path: str | Path, directory: str | Path, *,
     return rt
 
 
+def load_snapshot_headless(directory: str | Path, *, game_root: str | Path):
+    """Restore a PM snapshot into an EXE-FREE runtime -- no executable needed.
+
+    The detached load path (PM mirror of ``snapshot_runtime.load_snapshot_headless``):
+    reconstructs the runtime through :func:`runtime.create_pm_runtime_from_image`
+    (``image=None``, no ``load_le``) and fills it from the snapshot's full memory
+    image + device state.  ``apply_pm_state`` overwrites ``mem.data`` and the DOS
+    heap/allocator fields wholesale, so the constructor's heap placeholders never
+    survive; the game resumes identically without the original binary (proven
+    byte-identical to an EXE-loaded resume -- see ``test_pm_detached``)."""
+    from .runtime import create_pm_runtime_from_image
+
+    d = Path(directory)
+    state = json.loads((d / STATE_FILE).read_text())
+    rt = create_pm_runtime_from_image(
+        mem_size=state["mem_size"], game_root=game_root,
+        heap_base=0x200000, free_bytes=0x10000)   # overwritten by apply_pm_state
+    apply_pm_state(rt, state,
+                   zlib.decompress((d / MEM_FILE).read_bytes()),
+                   zlib.decompress((d / PLANES_FILE).read_bytes()))
+    return rt
+
+
 def clone_pm_runtime(rt):
     """A fresh, fully independent PMRuntime with identical state.
 

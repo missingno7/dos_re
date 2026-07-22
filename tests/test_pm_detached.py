@@ -8,7 +8,8 @@ re-reading the binary.  Game-free by construction -- synthetic code only.
 from __future__ import annotations
 
 from dos_re.runtime import create_pm_runtime_from_image
-from dos_re.pm_snapshot import capture_pm_state, apply_pm_state
+from dos_re.pm_snapshot import (capture_pm_state, apply_pm_state,
+                                save_pm_snapshot, load_snapshot_headless)
 from dos_re.cpu import HaltExecution
 
 
@@ -53,3 +54,23 @@ def test_snapshot_restores_into_a_fresh_exe_free_shell():
     assert tuple(b.cpu.r) == tuple(a.cpu.r)
     assert bytes(b.mem.data) == bytes(a.mem.data)
     assert b.cpu.instruction_count == a.cpu.instruction_count
+
+
+def test_load_snapshot_headless_round_trips(tmp_path):
+    """save_pm_snapshot -> load_snapshot_headless reconstructs an EXE-free
+    runtime that continues byte-for-byte -- the detached save/load path."""
+    a = _shell()
+    a.mem.load(0x2000, bytes.fromhex("B80A000000" "40" "A300100000" "EBF9"))
+    a.cpu.eip = 0x2000
+    a.cpu.run(40)
+    save_pm_snapshot(a, tmp_path / "snap")
+
+    b = load_snapshot_headless(tmp_path / "snap", game_root=".")
+    assert b.image is None                         # no executable was read
+    assert (b.cpu.eip, tuple(b.cpu.r)) == (a.cpu.eip, tuple(a.cpu.r))
+    assert bytes(b.mem.data) == bytes(a.mem.data)
+
+    a.cpu.run(50)
+    b.cpu.run(50)                                  # continues identically
+    assert bytes(a.mem.data) == bytes(b.mem.data)
+    assert a.cpu.eip == b.cpu.eip
