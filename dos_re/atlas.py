@@ -1079,6 +1079,15 @@ class ExecutionAtlas:
                         "region",
                     }:
                 outgoing.setdefault(edge.source, []).append(edge.target)
+            elif edge.status == "containment" \
+                    and node_kinds.get(edge.target) == "execution-point":
+                # Entering a function reaches its interior execution points,
+                # and an OBSERVED transfer out of an interior point (a
+                # replay-resolved dispatch site) extends coverage from there.
+                # Containment must therefore participate in the traversal —
+                # a post-hoc union would leave observed site->target edges
+                # permanently unable to extend conservative reachability.
+                outgoing.setdefault(edge.source, []).append(edge.target)
         reachable: set[str] = set()
         queue = deque(roots)
         while queue:
@@ -1087,12 +1096,6 @@ class ExecutionAtlas:
                 continue
             reachable.add(current)
             queue.extend(sorted(outgoing.get(current, ())))
-        contained_points = {
-            edge.target for edge in self.edges()
-            if edge.status == "containment" and edge.source in reachable
-            and node_kinds.get(edge.target) == "execution-point"
-        }
-        reachable.update(contained_points)
         unresolved = tuple(sorted(
             f"{edge.source} --{edge.kind}--> {edge.target}"
             for edge in self.unresolved() if edge.source in reachable

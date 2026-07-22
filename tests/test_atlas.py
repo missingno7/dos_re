@@ -79,6 +79,44 @@ def test_product_coverage_traverses_declared_execution_regions(tmp_path):
     assert {root, entry, gameplay, continuation} <= coverage.reachable
 
 
+def test_coverage_follows_observed_transfers_out_of_contained_points(tmp_path):
+    """An OBSERVED transfer from an execution point INSIDE a reachable
+    function (a replay-resolved indirect-dispatch site) must extend
+    conservative coverage.  Containment therefore participates in the
+    traversal itself: a post-hoc contained-point union leaves such edges
+    permanently unable to reach their targets (found by the first Win16
+    port, where message-pump arms are reachable only through observed
+    dispatch edges)."""
+    entry = function(0x0100)
+    site = str(ExecutionPointIdentity(
+        IMAGE, "real-mode", real_mode_address(0x1010, 0x0155)))
+    arm = function(0x0300)
+    atlas = ExecutionAtlas.create(tmp_path / "atlas", program=PROGRAM)
+    atlas.add_manual_facts(
+        "observed-dispatch-fixture",
+        provenance={"source": "test dispatch graph"},
+        nodes=(
+            {"id": entry, "kind": "function"},
+            {"id": site, "kind": "execution-point"},
+            {"id": arm, "kind": "function"},
+        ),
+        edges=(
+            {"source": entry, "target": site, "kind": "call_ind",
+             "status": "unresolved"},
+            {"source": entry, "target": site, "kind": "contains",
+             "status": "containment"},
+            {"source": site, "target": arm, "kind": "call_ind",
+             "status": "observed", "observation_count": 3},
+        ),
+    )
+    atlas.set_product_roots("game", (entry,))
+
+    coverage = atlas.coverage_for("game")
+
+    assert site in coverage.reachable          # interior point of the root
+    assert arm in coverage.reachable           # via the OBSERVED dispatch edge
+
+
 def write_ir(path):
     document = {
         "ir_version": 0,
