@@ -75,6 +75,9 @@ def create_pm_runtime(exe_path: str | Path, *, game_root: str | Path | None = No
     # dict as the CPU's IDT makes them the hardware-IRQ entry points too.
     cpu.idt = dos.pm_vectors
     cpu.pending_irq = dos.pending_irq
+    # EOI an acknowledged IRQ the program has no handler for, so a briefly
+    # uninstalled vector can't wedge the PIC's in-service latch.
+    cpu.irq_eoi = lambda _irq: dos.pic.eoi()
     dos._cpu = cpu
     return PMRuntime(image=image, cpu=cpu, dos=dos, mem=mem)
 

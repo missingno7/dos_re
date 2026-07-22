@@ -761,3 +761,30 @@ def test_selected_authored_override_must_attach_within_coverage():
 
     with pytest.raises(ValueError, match="outside conservative coverage"):
         plan_execution(config, COVERAGE, _catalog(authored, baseline))
+
+
+def test_authored_inventory_may_exceed_coverage_when_something_attaches():
+    """An authored corpus legitimately covers targets beyond one product
+    profile's conservative coverage (a growing hand-recovered inventory);
+    the surplus simply goes unbound.  Only an override attaching to NOTHING
+    reachable is a configuration error (the test above)."""
+    authored = _implementation(
+        "handwritten",
+        (ROOT, "function:not-yet-reachable"),
+        origin=ImplementationOrigin.AUTHORED,
+        category=OverrideCategory.FAITHFUL,
+    )
+    baseline = _implementation("generated", (ROOT, CALLEE))
+    plan = plan_execution(
+        profile_configuration(
+            "detached",
+            program_identity=PROGRAM,
+            selected_overrides=("handwritten",),
+        ),
+        COVERAGE,
+        _catalog(authored, baseline),
+    )
+    bindings = {item.target: item.implementation_id for item in plan.bindings}
+    assert bindings[ROOT] == "handwritten"
+    assert "function:not-yet-reachable" not in bindings
+    assert plan.report.faithful_override_coverage == (ROOT,)

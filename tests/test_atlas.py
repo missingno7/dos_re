@@ -17,6 +17,7 @@ from dos_re.execution import (
 )
 from dos_re.identity import (
     ExecutionPointIdentity,
+    BoundaryIdentity,
     FunctionIdentity,
     ImageIdentity,
     ProgramIdentity,
@@ -77,6 +78,82 @@ def test_product_coverage_traverses_declared_execution_regions(tmp_path):
     coverage = atlas.coverage_for("game")
 
     assert {root, entry, gameplay, continuation} <= coverage.reachable
+
+
+def test_coverage_follows_observed_transfers_out_of_contained_points(tmp_path):
+    """An OBSERVED transfer from an execution point INSIDE a reachable
+    function (a replay-resolved indirect-dispatch site) must extend
+    conservative coverage.  Containment therefore participates in the
+    traversal itself: a post-hoc contained-point union leaves such edges
+    permanently unable to reach their targets (found by the first Win16
+    port, where message-pump arms are reachable only through observed
+    dispatch edges)."""
+    entry = function(0x0100)
+    site = str(ExecutionPointIdentity(
+        IMAGE, "real-mode", real_mode_address(0x1010, 0x0155)))
+    arm = function(0x0300)
+    atlas = ExecutionAtlas.create(tmp_path / "atlas", program=PROGRAM)
+    atlas.add_manual_facts(
+        "observed-dispatch-fixture",
+        provenance={"source": "test dispatch graph"},
+        nodes=(
+            {"id": entry, "kind": "function"},
+            {"id": site, "kind": "execution-point"},
+            {"id": arm, "kind": "function"},
+        ),
+        edges=(
+            {"source": entry, "target": site, "kind": "call_ind",
+             "status": "unresolved"},
+            {"source": entry, "target": site, "kind": "contains",
+             "status": "containment"},
+            {"source": site, "target": arm, "kind": "call_ind",
+             "status": "observed", "observation_count": 3},
+        ),
+    )
+    atlas.set_product_roots("game", (entry,))
+
+    coverage = atlas.coverage_for("game")
+
+    assert site in coverage.reachable          # interior point of the root
+    assert arm in coverage.reachable           # via the OBSERVED dispatch edge
+
+
+def test_observed_only_endpoints_take_their_kind_from_the_identity(tmp_path):
+    """An endpoint that exists ONLY as observed-transfer evidence gets its
+    node kind from the identity grammar.  A runtime-only BOUNDARY (an API
+    transition observed during replay — e.g. a GetProcAddress-minted thunk)
+    typed as an execution point would pass the coverage traversal filter and
+    leak into reachable as program code demanding an implementation (found
+    by the first Win16 port's detached planning)."""
+    entry = function(0x0100)
+    site = str(ExecutionPointIdentity(
+        IMAGE, "real-mode", real_mode_address(0x1010, 0x0155)))
+    api = str(BoundaryIdentity(PROGRAM, "platform-effect",
+                               "proc:MMSYSTEM.mciSendCommand"))
+    atlas = ExecutionAtlas.create(tmp_path / "atlas", program=PROGRAM)
+    atlas.add_manual_facts(
+        "observed-boundary-fixture",
+        provenance={"source": "test"},
+        nodes=(
+            {"id": entry, "kind": "function"},
+            {"id": site, "kind": "execution-point"},
+        ),
+        edges=(
+            {"source": entry, "target": site, "kind": "contains",
+             "status": "containment"},
+            # The api endpoint has NO node record anywhere — it exists only
+            # as this observed edge's target, like a replay-minted thunk.
+            {"source": site, "target": api, "kind": "call_ind",
+             "status": "observed", "observation_count": 2},
+        ),
+    )
+    atlas.set_product_roots("game", (entry,))
+
+    kinds = {node.identity: node.kind for node in atlas.nodes()}
+    assert kinds[api] == "boundary"
+    coverage = atlas.coverage_for("game")
+    assert site in coverage.reachable
+    assert api not in coverage.reachable       # an OS transition, not code
 
 
 def write_ir(path):

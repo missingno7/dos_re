@@ -411,6 +411,43 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
 
     clock = FrameClock(cpu, frame_tick_addr, on_frame) if frame_tick_addr else None
 
+    def _start_recording(now: float) -> None:
+        """Begin a ReplayArtifact from the current machine state.
+
+        Flip the SB to the deterministic instruction-count clock first: the
+        casual viewer paces audio by wall time, but a recording made on that
+        clock can't be replayed (its block-IRQ timeline diverges).  The captured
+        base then carries the re-based block state, so replay continues it
+        identically.  (Auto-record from --record-replay is already on this clock,
+        so the flip is a no-op there.)"""
+        if clock is None:
+            print("replay recording needs a frame_tick_addr (adapter)")
+            return
+        if replay_profile is None:
+            raise ValueError("PM recording requires an execution profile")
+        dos.set_sound_clock(deterministic=True)
+        bundle = (Path(record_replay) if record_replay else
+                  artifacts / "replays" / f"replay_{int(now * 1000)}")
+        recording = ReplayRecording(
+            bundle,
+            timeline_id=f"protected-mode-frame-boundaries:{frame_tick_addr:#x}:v1",
+            profile=replay_profile,
+            base_state=capture_pm_continuation(rt, event_cursor=0),
+            metadata={"frame_tick_addr": int(frame_tick_addr), "mouse_present": True},
+        )
+        rec.update(recording=recording, dir=bundle, start=clock.frame, last_mouse=None)
+        print(f"replay recording STARTED -> {bundle} (F11 to stop; auto-saved on exit)")
+
+    def _stop_recording() -> None:
+        recording = rec["recording"]
+        total_frames = clock.frame - rec["start"]
+        end_state = capture_pm_continuation(rt, event_cursor=recording.event_count)
+        recording.finish(total_frames, end_state=end_state)
+        print(f"replay recording STOPPED -> {rec['dir']} "
+              f"({total_frames} frames, {recording.event_count} events)")
+        rec["recording"] = None
+        dos.set_sound_clock(deterministic=False)  # back to live wall-clock audio
+
     # Pacing.  With an adapter frame clock we run the game with DETERMINISTIC
     # retrace (the vsync wait exits in ~2 reads instead of spinning thousands
     # of emulated 3DAh reads per frame) and throttle to 70 logical frames/sec
@@ -516,6 +553,10 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
         return True
 
     waiting_console = False
+    # --record-replay NAME records the WHOLE session from cold start: begin now
+    # (F11 still toggles for an ad-hoc recording that starts mid-play).
+    if record_replay and clock is not None:
+        _start_recording(time.monotonic())
     next_present = time.monotonic()
     running = True
     while running:
@@ -549,45 +590,10 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                     print(f"snapshot -> {out}")
                     continue
                 if make and name == "f11":
-                    if clock is None:
-                        print("replay recording needs a frame_tick_addr (adapter)")
-                    elif rec["recording"] is None:
-                        # Flip the SB to the deterministic instruction-count
-                        # clock BEFORE snapshotting: the casual viewer paces
-                        # audio by wall time, but a recording made on that clock
-                        # can't be replayed (its block-IRQ timeline diverges).
-                        # The snapshot then captures the re-based block state, so
-                        # replay continues it identically.
-                        dos.set_sound_clock(deterministic=True)
-                        bundle = (Path(record_replay) if record_replay else
-                                  artifacts / "replays" / f"replay_{int(now * 1000)}")
-                        if replay_profile is None:
-                            raise ValueError("PM recording requires an execution profile")
-                        recording = ReplayRecording(
-                            bundle,
-                            timeline_id=f"protected-mode-frame-boundaries:{frame_tick_addr:#x}:v1",
-                            profile=replay_profile,
-                            base_state=capture_pm_continuation(rt, event_cursor=0),
-                            metadata={
-                                "frame_tick_addr": int(frame_tick_addr),
-                                "mouse_present": True,
-                            },
-                        )
-                        rec.update(recording=recording, dir=bundle, start=clock.frame,
-                                   last_mouse=None)
-                        print(f"replay recording STARTED -> {bundle} "
-                              f"(embedded base; F11 again to stop)")
+                    if rec["recording"] is None:
+                        _start_recording(now)
                     else:
-                        recording = rec["recording"]
-                        total_frames = clock.frame - rec["start"]
-                        end_state = capture_pm_continuation(
-                            rt, event_cursor=recording.event_count)
-                        recording.finish(total_frames, end_state=end_state)
-                        print(f"replay recording STOPPED -> {rec['dir']} "
-                              f"({total_frames} frames, "
-                              f"{recording.event_count} events)")
-                        rec["recording"] = None
-                        dos.set_sound_clock(deterministic=False)  # back to live audio
+                        _stop_recording()
                     continue
                 if name in ("f10", "f11", "f12"):
                     continue          # viewer hotkeys — never game input (the
@@ -799,17 +805,23 @@ def _configure_sound(dos, sound_blaster, *, deterministic: bool):
 
     DETERMINISM CONTRACT.  The block-complete IRQ's firing point steers the
     whole execution (its ISR runs mid-frame; where it lands changes the
-    instruction stream the game sees — enough to make a replay playback diverge, or
-    even crash).  So every reproducible path — recording a replay, replaying one,
-    headless verify — keeps the SB on the DETERMINISTIC instruction-count clock
-    (``instruction_count / EMULATED_IPS``, auto-serviced by ``pending_irq``), so
-    the IRQ fires at the same emulated instant every run.  A replay recorded on
-    this clock replays byte-identically on it.  ONLY the casual live viewer
-    (not recording) retargets to wall-clock pacing — smoother audio when the
-    interpreter keeps up, but explicitly NOT reproducible.
+    instruction stream the game sees).  Every reproducible path — recording a
+    replay, replaying one, headless verify — keeps the SB on the DETERMINISTIC
+    instruction-count clock (``instruction_count / EMULATED_IPS``,
+    auto-serviced by ``pending_irq``), so the IRQ fires at the same emulated
+    instant every run and a recorded replay reproduces byte-identically.
+
+    ONLY the casual live viewer (not recording) retargets to WALL-clock pacing:
+    a real DMA block plays its samples in real time, so wall pacing keeps music
+    at true pitch even when the game idles (a menu runs far fewer instructions
+    than EMULATED_IPS per second, so instruction-count pacing there would starve
+    the stream).  Wall pacing is explicitly NOT reproducible, hence viewer-only.
+    It is safe now that an unhooked hardware IRQ is EOI'd (``dos.pending_irq``):
+    a wall-timed block IRQ that lands on the driver's restored default vector no
+    longer wedges the PIC's in-service latch.
 
     On a resumed snapshot the host already carries the SB restored mid-stream on
-    that instruction-count clock, so the deterministic paths leave it alone."""
+    the instruction-count clock, so the deterministic paths leave it alone."""
     base, irq, dma = sound_blaster
     if dos.sound_blaster is not None:
         if not deterministic:                # casual viewer: wall-clock pacing

@@ -1933,12 +1933,17 @@ def plan_execution(
                 f"selected override {override.implementation_id!r} requires "
                 "an attachment target"
             )
-        missing_targets = override.targets - coverage.reachable
-        if missing_targets:
+        if not override.targets & coverage.reachable:
+            # An authored inventory may legitimately exceed one product
+            # profile's conservative coverage (a growing hand-recovered
+            # corpus covers functions no single replay closure reaches);
+            # only the surplus goes unbound.  What stays an error is a
+            # selection that attaches to NOTHING reachable — a typo'd
+            # target set or the wrong coverage, never a useful plan.
             raise ValueError(
                 f"selected override {override.implementation_id!r} targets "
                 "outside conservative coverage: "
-                + ", ".join(sorted(missing_targets))
+                + ", ".join(sorted(override.targets - coverage.reachable))
             )
     selected_attachments = tuple(
         item for item in selected_authored
