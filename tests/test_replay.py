@@ -85,6 +85,36 @@ def test_timeline_coordinates_are_hashed_immutable_stop_contract(tmp_path):
         )
 
 
+def test_timeline_coordinate_lookup_parses_once_and_indexes_by_ordinal(
+    tmp_path, monkeypatch,
+):
+    coordinates = tuple(
+        ReplayPointCoordinate(point(i), "semantic-tick-v1", i * 3)
+        for i in range(64)
+    )
+    artifact = ReplayArtifact.create(
+        tmp_path / "indexed-coordinates",
+        timeline_id=TIMELINE,
+        events=(),
+        coordinates=coordinates,
+    )
+    original = ReplayPointCoordinate.from_json
+    calls = {"count": 0}
+
+    def counted(raw):
+        calls["count"] += 1
+        return original(raw)
+
+    monkeypatch.setattr(
+        ReplayPointCoordinate, "from_json", staticmethod(counted),
+    )
+    for _ in range(10):
+        for ordinal in range(64):
+            assert artifact.timeline_coordinate(point(ordinal)).value == ordinal * 3
+
+    assert calls["count"] == 64
+
+
 def test_coordinate_less_artifact_can_be_materialized_once(tmp_path):
     artifact = make_artifact(tmp_path)
     coordinates = [

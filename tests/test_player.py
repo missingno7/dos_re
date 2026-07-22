@@ -87,11 +87,28 @@ def test_standard_cli_defaults():
     assert args.steps_per_frame == GameFrontend.default_steps_per_frame
     assert args.timer_irqs_per_frame == GameFrontend.default_timer_irqs_per_frame
     assert args.present_hz == GameFrontend.default_present_hz
+    assert args.simulation_hz == 0
     assert args.snapshot is None and args.save_snapshot is None
     assert args.dos_args == ""
     assert args.verify_mode == "checkpointed"
     assert args.verify_checkpoint_span == 64
     assert args.verify_observables is False
+
+
+@pytest.mark.parametrize("presentation_hz", [30, 50, 60, 90])
+def test_fixed_step_accumulator_preserves_30_hz_phase(presentation_hz):
+    period = 1.0 / 30.0
+    accumulator = period
+    ticks = 0
+    for _ in range(presentation_hz * 10):
+        if accumulator >= period:
+            ticks += 1
+            accumulator = max(0.0, accumulator - period)
+        accumulator = player._accumulate_fixed_step_time(
+            accumulator, 1.0 / presentation_hz, period,
+        )
+
+    assert ticks == 300
 
 
 def test_replay_frame_stops_on_guest_coordinate_not_dispatch_count():
@@ -128,6 +145,7 @@ def test_frontend_defaults_flow_into_parser():
         default_steps_per_frame = 123
         default_timer_irqs_per_frame = 2
         default_present_hz = 70
+        default_simulation_hz = 35
 
         def add_arguments(self, parser):
             parser.add_argument("--tiny-extra", action="store_true")
@@ -137,6 +155,7 @@ def test_frontend_defaults_flow_into_parser():
     assert args.steps_per_frame == 123
     assert args.timer_irqs_per_frame == 2
     assert args.present_hz == 70
+    assert args.simulation_hz == 35
     assert args.tiny_extra is True
 
 
