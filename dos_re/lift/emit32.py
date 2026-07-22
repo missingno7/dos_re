@@ -303,6 +303,44 @@ def _emit_instruction(inst: Inst32, out: list[str]) -> bool:
             out.append(f"cpu.push({rm.read()}, {osz})")
             return True
 
+        # --- leave / pushad / popad (mirror CPU386 exactly) --------------------
+        if op == 0xC9:      # leave: esp = ebp ; ebp = pop
+            out.append("r[4] = r[5]")
+            out.extend(_Operand(True, osz, reg_idx=5).write(f"cpu.pop({osz})"))
+            return True
+        if op == 0x60:      # pushad
+            out.append(f"cpu._pusha({osz})")
+            return True
+        if op == 0x61:      # popad
+            out.append(f"cpu._popa({osz})")
+            return True
+
+        # --- flag ops ----------------------------------------------------------
+        if op == 0xF5:      # cmc
+            out.append("cpu.eflags ^= CF")
+            return True
+        if 0xF8 <= op <= 0xFD:      # clc/stc/cli/sti/cld/std
+            _flag, _val = {0xF8: ("CF", False), 0xF9: ("CF", True),
+                           0xFA: ("IF", False), 0xFB: ("IF", True),
+                           0xFC: ("DF", False), 0xFD: ("DF", True)}[op]
+            out.append(f"cpu.set_flag({_flag}, {_val})")
+            return True
+
+        # --- port I/O (in/out) -------------------------------------------------
+        if op in (0xE4, 0xE5, 0xEC, 0xED):      # in
+            sz = 1 if op in (0xE4, 0xEC) else osz
+            port = f"0x{inst.imm:X}" if op in (0xE4, 0xE5) else "(r[2] & 0xFFFF)"
+            out.append(f"_v = cpu.port_reader(cpu, {port}, {sz * 8}) "
+                       f"if cpu.port_reader else 0")
+            out.extend(_Operand(True, sz, reg_idx=0).write("_v"))
+            return True
+        if op in (0xE6, 0xE7, 0xEE, 0xEF):      # out
+            sz = 1 if op in (0xE6, 0xEE) else osz
+            port = f"0x{inst.imm:X}" if op in (0xE6, 0xE7) else "(r[2] & 0xFFFF)"
+            out.append(f"cpu.port_writer(cpu, {port}, {_reg_read(0, sz)}, "
+                       f"{sz * 8}) if cpu.port_writer else None")
+            return True
+
         # --- shifts: delegate to the interpreter's own _shift ------------------
         if op in (0xC0, 0xC1, 0xD0, 0xD1, 0xD2, 0xD3):
             sz = 1 if op in (0xC0, 0xD0, 0xD2) else osz
@@ -504,7 +542,7 @@ def emit_function32(scan: FunctionScan32, name: str, *, signature: bytes,
     A('"""')
     A("from __future__ import annotations")
     A("")
-    A("from dos_re.cpu import CF, ZF")
+    A("from dos_re.cpu import CF, DF, IF, ZF")
     A("from dos_re.lift.runtime32 import (LiftRuntimeError, call_linked32,")
     A("                                   check_signature, emulate_call32,")
     A("                                   emulate_int32, interp_one32)")

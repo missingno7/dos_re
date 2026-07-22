@@ -110,6 +110,25 @@ def test_fallback_lines_still_verify():
     assert rt.mem.r32(DATA + 4) == 0              # 0.0f bits
 
 
+def test_leave_flags_pushad_popad_lift_native_and_verify():
+    """leave / pushad / popad / stc-cmc-cld are emitted natively (no interp_one32
+    fallback) and survive the strict differential verifier -- part of removing
+    the interpreter dependency for a detached build."""
+    # push ebp; mov ebp,esp; sub esp,8; mov eax,[0x3000]; inc eax;
+    # pushad; stc; cmc; cld; popad; mov [0x3004],eax; leave; ret
+    func = bytes.fromhex(
+        "55" "89E5" "83EC08" "A100300000" "40" "60" "F9F5FC" "61"
+        "A304300000" "C9" "C3")
+    rt = build_rt(func)
+    src = lift_and_install(rt)
+    assert "interp_one32(cpu, 0x" not in src            # no fallback: fully native
+    assert "cpu._pusha" in src and "cpu._popa" in src
+    verifier = install_pm_hook_verifier(rt)
+    run_to_halt(rt)
+    assert verifier.total_verified == 2
+    assert rt.mem.r32(DATA + 4) == 8                     # 7 + 1
+
+
 def test_signature_tripwire():
     from dos_re.lift.runtime32 import LiftRuntimeError
     rt = build_rt(STRAIGHT)
