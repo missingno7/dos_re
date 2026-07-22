@@ -267,8 +267,34 @@ class HookVerifier:
         self.counts: dict[Addr, int] = {}
         self.total_verified = 0
         self.skipped: set[Addr] = set()
+        self._active = False
 
     def verify(self, cpu: CPU8086, key: Addr, handler: Callable[[CPU8086], None], name: str) -> None:
+        if self._active:
+            # RE-ENTRANCY GUARD (see PMHookVerifier for the full rationale).  A
+            # verified hook's own execution may dispatch nested hooks (a linked
+            # generated graph routes each linked child back through the verifier
+            # via call_installed_hook_like_near_call).  This verifier clones the
+            # whole runtime twice per call and runs the oracle to the
+            # continuation -- the outermost oracle already reproduces the nested
+            # subtree, so re-verifying each child would nest O(call-depth)
+            # full-runtime clones (fatal on a deeply linked graph).  Execute the
+            # child; the ancestor's oracle covers it.
+            try:
+                handler(cpu)
+            finally:
+                if cpu.coverage_telemetry is not None:
+                    cpu.coverage_telemetry.record_hook_unverified(key, name)
+            return
+        self._active = True
+        try:
+            self._verify_dispatch(cpu, key, handler, name)
+        finally:
+            self._active = False
+
+    def _verify_dispatch(
+        self, cpu: CPU8086, key: Addr, handler: Callable[[CPU8086], None], name: str,
+    ) -> None:
         if not self._should_verify(key):
             try:
                 handler(cpu)

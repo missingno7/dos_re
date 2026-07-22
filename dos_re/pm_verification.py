@@ -57,8 +57,34 @@ class PMHookVerifier:
         self.config = config or PMHookVerifierConfig()
         self.total_verified = 0
         self.calls_per_hook: dict[int, int] = {}
+        self._active = False
 
     def __call__(self, cpu, key: int, handler: Callable, name: str) -> None:
+        if self._active:
+            # RE-ENTRANCY GUARD.  A verified hook's own execution (``handler``
+            # below) may make linked calls into other hooks (a lifted graph's
+            # ``call_linked32`` routes each linked child back through the
+            # verifier to keep it a visible boundary).  But this verifier CLONES
+            # THE ENTIRE RUNTIME twice per call and runs the original ASM to the
+            # continuation -- and that outermost oracle run already reproduces
+            # the WHOLE subtree the parent executes.  Re-verifying each nested
+            # child would nest O(call-depth) full-runtime clones and re-runs;
+            # on a deeply linked graph (KE: 705 linked sites) that is quadratic
+            # slowdown at best and a fatal OOM/stack blow-up at worst (the crash
+            # that first looked like an unsafe control transfer -- it was not,
+            # the graph runs clean without the verifier).  The child is covered
+            # by the ancestor's oracle; just execute it.
+            handler(cpu)
+            if cpu.coverage_telemetry is not None:
+                cpu.coverage_telemetry.record_hook_unverified(key, name)
+            return
+        self._active = True
+        try:
+            self._verify(cpu, key, handler, name)
+        finally:
+            self._active = False
+
+    def _verify(self, cpu, key: int, handler: Callable, name: str) -> None:
         cfg = self.config
         call_no = self.total_verified + 1
         pre_rt = clone_pm_runtime(self.rt)

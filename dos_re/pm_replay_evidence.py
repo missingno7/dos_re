@@ -49,6 +49,14 @@ from .verification_contract import (
     VerificationRepresentation,
 )
 
+
+class ReplayStalled(RuntimeError):
+    """A replay's frame clock stopped advancing — it diverged from the record.
+
+    Raised loud instead of spinning forever (the frame-parked-transition and
+    non-collapsible-pause failure modes).  Names the stall frame and EIP so the
+    divergence can be diagnosed and the artifact excluded from the corpus."""
+
 #: The complete-machine projection every PM profile declares.
 PM_PROJECTION_CONTRACT = VerificationProjectionContract(
     projection_id="dos-re-pm-complete-machine",
@@ -137,16 +145,32 @@ class PMReplayDriver:
                 artifact.events, event_cursor=self._event_cursor)
         cpu = self.runtime.cpu
         clock = self._clock
+        # PROGRESS GUARD.  A frame that does not tick within this many
+        # instructions is parked forever, not merely slow: the record's worst
+        # legitimate frame (a level-transition sound wait on the instruction
+        # clock) is tens of millions of instructions, so a full chunk with no
+        # frame advance means the replay has DIVERGED from the recording and the
+        # game is waiting on state that will never arrive (e.g. a real-time pause
+        # that cannot collapse to zero, or a nondeterministic device wait).  Fail
+        # loud with the stall point instead of spinning forever.
+        STALL_BUDGET = 200_000_000
         while clock.frame < point.ordinal and not cpu.halted:
+            before = clock.frame
             clock.stop_at = point.ordinal
             try:
-                cpu.run(200_000_000)
+                cpu.run(STALL_BUDGET)
             except FramePaced:
                 break
+            if clock.frame == before:
+                raise ReplayStalled(
+                    f"replay stalled at frame {clock.frame} (eip=0x{cpu.eip:X}): "
+                    f"the frame clock did not advance in {STALL_BUDGET:,} "
+                    f"instructions -- the replay diverged from the recording "
+                    f"(a non-collapsible pause or a nondeterministic wait)")
         self._ordinal = clock.frame
-        if self._ordinal != point.ordinal:
-            raise RuntimeError(
-                f"replay stalled at frame {self._ordinal} before "
+        if self._ordinal != point.ordinal and not cpu.halted:
+            raise ReplayStalled(
+                f"replay reached frame {self._ordinal} before target "
                 f"{point.ordinal} (halted={cpu.halted})")
 
     def capture(self) -> ContinuationState:
