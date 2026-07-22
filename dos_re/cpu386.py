@@ -209,6 +209,9 @@ class CPU386:
         # collection (replay function visits, transfer observation) hangs
         # here; None keeps the per-step cost to one attribute test.
         self.entry_probes: dict[int, Any] | None = None
+        #: Flat EIP of the most recently dispatched replacement hook (crash
+        #: attribution for generated graphs; see the hook dispatch in step()).
+        self.last_hook: int | None = None
         # Decode scratch reset each instruction.
         self._opsize = 4
         self._adsize = 4
@@ -502,6 +505,10 @@ class CPU386:
         if hooks and start in hooks:
             handler = hooks[start]
             name = self.hook_names.get(start, "replacement")
+            # Last hook that dispatched — attributes a later wild-jump/undecodable
+            # crash (a lifted routine set a bad transfer target) to its culprit;
+            # a plain attribute store, no cost to code that never reads it.
+            self.last_hook = start
             if self.hook_verifier is not None and start not in self.hook_verifier_passthrough:
                 self.hook_verifier(self, start, handler, name)
             else:
