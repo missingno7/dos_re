@@ -130,8 +130,21 @@ def activate_generated_graph32(cpu, emit_dir) -> dict[int, str]:
     resolve_links32(loaded, emit_dir)
     for entry, module in sorted(installed.items()):
         name = module[:-3]
-        cpu.replacement_hooks[entry] = getattr(loaded[name], name)
+        fn = getattr(loaded[name], name)
+        cpu.replacement_hooks[entry] = fn
         cpu.hook_names[entry] = name
+        # RESUME ENTRIES (boundary parks / INT re-entry, the flat mirror of
+        # activate_generated_graph): register a re-entry hook at each exported
+        # interior address so a parked body resumes INSIDE the lifted code
+        # (fn(cpu, bb)) rather than falling through to the interpreter.
+        for rkey, bb in getattr(loaded[name], "RESUME_ENTRIES", {}).items():
+            r_ip = int(rkey, 16)
+
+            def _resume(cpu2, _fn=fn, _bb=bb):
+                _fn(cpu2, _bb)
+
+            cpu.replacement_hooks[r_ip] = _resume
+            cpu.hook_names[r_ip] = f"{name}_resume_{r_ip:x}"
     return installed
 
 

@@ -212,6 +212,14 @@ class CPU386:
         #: Flat EIP of the most recently dispatched replacement hook (crash
         #: attribution for generated graphs; see the hook dispatch in step()).
         self.last_hook: int | None = None
+        #: Boundary-park observer (the flat mirror of CPU8086.boundary_hook).  A
+        #: lifted body calls ``cpu.boundary_hook(cpu, head_eip, resume_eip)``
+        #: after a declared spin/wait head; None (the default) means "no
+        #: observer -- continue running the lifted body".  A host that wants a
+        #: park sets it: the hook re-points EIP at ``resume_eip`` and raises, so
+        #: the interpreter can make progress (service the IRQ the wait needs)
+        #: and later re-enter the body at the RESUME_ENTRIES block.
+        self.boundary_hook = None
         # Decode scratch reset each instruction.
         self._opsize = 4
         self._adsize = 4

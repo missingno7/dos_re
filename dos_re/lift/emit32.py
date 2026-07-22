@@ -422,6 +422,7 @@ def emit_function32(scan: FunctionScan32, name: str, *, signature: bytes,
                     count_instructions: bool = False,
                     min_iterations: int | None = None,
                     link_map: dict[int, str] | None = None,
+                    boundary_heads: frozenset = frozenset(),
                     link_imports: tuple[str, ...] = ()) -> str:
     """Return the source of a module defining the lifted hook ``name``.
 
@@ -436,9 +437,41 @@ def emit_function32(scan: FunctionScan32, name: str, *, signature: bytes,
     ``LINKS = {"0xEIP": None}`` table that the graph activator's
     ``resolve_links32`` fills at install time; emitted modules load flat via
     ``spec_from_file_location``, so relative imports are unavailable).
+
+    ``boundary_heads`` is the flat mirror of ``emit.py``'s boundary observers:
+    each declared spin/wait head EIP gets an emitted
+    ``cpu.boundary_hook(cpu, head_eip, resume_eip)`` call after its instruction,
+    and both the head and its successor become RESUME ENTRIES — block leaders
+    exported in ``RESUME_ENTRIES`` so the graph activator can register a
+    re-entry hook there.  A host that parks (the hook re-points EIP and raises)
+    then resumes INSIDE the lifted body via ``fn(cpu, bb)`` — an environment
+    wait that only an IRQ can exit runs interpreted for its spin and lifted for
+    the rest, instead of being excluded whole.  The function grows an optional
+    ``bb`` parameter (the starting block) for that re-entry.
     """
     link_map = link_map or {}
-    leaders = scan.block_leaders()
+    # BOUNDARY OBSERVERS: a declared head becomes a block leader and gets an
+    # observer after its instruction; the head AND its successor are exported as
+    # resume entries (a park leaves EIP on the successor, but a snapshot / an
+    # IRET can land the machine back ON the head mid-spin -- see emit.py and
+    # test_lift_boundary_resume).  The head must be a non-transfer instruction
+    # with an in-region successor, or a park there could not resume.
+    heads = frozenset(h for h in boundary_heads if h in scan.insts)
+    resume_points: set[int] = set()
+    forced = set(scan.block_leaders())
+    for h in sorted(heads):
+        hi = scan.insts[h]
+        if hi.kind not in (SEQ, CALL, CALL_IND, INT):
+            raise EmitUnsupported(
+                f"boundary head 0x{h:X} is a control transfer ({hi.kind}); "
+                f"register the head at a sequential instruction of the wait loop")
+        if hi.next_ip not in scan.insts:
+            raise EmitUnsupported(
+                f"boundary head 0x{h:X} has no in-region successor -- a park "
+                f"there could not resume in host code")
+        forced.update((h, hi.next_ip))
+        resume_points.update((h, hi.next_ip))
+    leaders = sorted(forced)
     bb_of = {ip: i for i, ip in enumerate(leaders)}
     leader_set = set(leaders)
 
@@ -480,17 +513,38 @@ def emit_function32(scan: FunctionScan32, name: str, *, signature: bytes,
     A(f"MAX_ITERATIONS = {max(min_iterations or 10_000, len(scan.insts) * 5_000)}")
     for extra in link_imports:
         A(extra)
+    # BLOCK_ADDRS / RESUME_ENTRIES are emitted only under boundary observation,
+    # so a head-less module stays byte-for-byte what the pre-boundary emitter
+    # produced (the committed graphs' reproducibility --check depends on it).
+    if resume_points:
+        A("#: dispatch block -> its leader address (re-entry + diagnosis)")
+        A("BLOCK_ADDRS = {"
+          + ", ".join(f"{bi}: 0x{body[0].ip:X}" for bi, body in enumerate(blocks))
+          + "}")
+        entries = ", ".join(f'"0x{rp:X}": {bb_of[rp]}'
+                            for rp in sorted(resume_points))
+        A("#: re-entry points (boundary head + its successor); the graph")
+        A("#: activator registers a re-entry hook at each. address -> block.")
+        A(f"RESUME_ENTRIES = {{{entries}}}")
     A("")
     A("")
-    A(f"def {name}(cpu):")
+    entry_bb = bb_of[scan.entry]
+    # Entry block, not index 0: leaders are address-sorted and a region can
+    # contain branch targets below the entry (see emit.py — same fix).  With
+    # boundary observation the entry block is the default of a ``bb`` re-entry
+    # parameter (a park resumes by calling fn(cpu, resume_bb)); without it the
+    # signature is unchanged and bb is a plain local.
+    if resume_points:
+        A(f"def {name}(cpu, bb={entry_bb}):")
+    else:
+        A(f"def {name}(cpu):")
     A(f'    """Lifted replacement for flat 0x{scan.entry:X}."""')
     A(f"    check_signature(cpu, ENTRY, SIGNATURE, {name!r})")
     A("    r, mem, sb = cpu.r, cpu.mem, cpu.sbase")
     if count_instructions:
         A("    cpu.instruction_count -= 1  # step() counts the hook as 1")
-    # Entry block, not index 0: leaders are address-sorted and a region can
-    # contain branch targets below the entry (see emit.py — same fix).
-    A(f"    bb = {bb_of[scan.entry]}")
+    if not resume_points:
+        A(f"    bb = {entry_bb}")
     A("    for _guard in range(MAX_ITERATIONS):")
 
     ind = " " * 12
@@ -537,6 +591,18 @@ def emit_function32(scan: FunctionScan32, name: str, *, signature: bytes,
                 term = inst
                 native += 1
                 break
+            if inst.ip in heads:
+                # Boundary observer, mirroring emit.py: flush the native count
+                # BEFORE the event so a park (the hook raises) never loses the
+                # instructions already executed, then offer the boundary.  The
+                # host's hook re-points EIP at the successor and raises to park;
+                # None (the default) just continues the lifted body.
+                if count_instructions and native:
+                    lines.append(f"cpu.instruction_count += {native}")
+                    native = 0
+                lines.append("if cpu.boundary_hook is not None:")
+                lines.append(f"    cpu.boundary_hook(cpu, 0x{inst.ip:X}, "
+                             f"0x{inst.next_ip:X})")
 
         if count_instructions and native:
             lines.append(f"cpu.instruction_count += {native}")
