@@ -420,8 +420,24 @@ def _terminator_lines(inst: Inst32, bb_of: dict[int, int], out: list[str],
 
 def emit_function32(scan: FunctionScan32, name: str, *, signature: bytes,
                     count_instructions: bool = False,
-                    min_iterations: int | None = None) -> str:
-    """Return the source of a module defining the lifted hook ``name``."""
+                    min_iterations: int | None = None,
+                    link_map: dict[int, str] | None = None,
+                    link_imports: tuple[str, ...] = ()) -> str:
+    """Return the source of a module defining the lifted hook ``name``.
+
+    ``link_map`` is the generated-call linker seam (the 32-bit mirror of
+    ``emit.py``): a ``{near_call_target_eip: python_callable_expr}`` map.  A
+    direct near CALL to a mapped target emits ``call_linked32(cpu, target,
+    <callee>, ret_ip)`` instead of ``emulate_call32`` — original CALL/RET
+    stack semantics, no interpreter in the path, and the child remains a
+    verifier-visible boundary in the hybrid.  Only all-near-RET-exit callees
+    are safe to link (the link pass enforces this).  ``link_imports`` lines
+    are appended to the module header verbatim (e.g. a module-level
+    ``LINKS = {"0xEIP": None}`` table that the graph activator's
+    ``resolve_links32`` fills at install time; emitted modules load flat via
+    ``spec_from_file_location``, so relative imports are unavailable).
+    """
+    link_map = link_map or {}
     leaders = scan.block_leaders()
     bb_of = {ip: i for i, ip in enumerate(leaders)}
     leader_set = set(leaders)
@@ -455,12 +471,15 @@ def emit_function32(scan: FunctionScan32, name: str, *, signature: bytes,
     A("from __future__ import annotations")
     A("")
     A("from dos_re.cpu import CF, ZF")
-    A("from dos_re.lift.runtime32 import (LiftRuntimeError, check_signature,")
-    A("                                   emulate_call32, emulate_int32, interp_one32)")
+    A("from dos_re.lift.runtime32 import (LiftRuntimeError, call_linked32,")
+    A("                                   check_signature, emulate_call32,")
+    A("                                   emulate_int32, interp_one32)")
     A("")
     A(f"ENTRY = 0x{scan.entry:X}")
     A(f"SIGNATURE = bytes.fromhex({signature.hex()!r})")
     A(f"MAX_ITERATIONS = {max(min_iterations or 10_000, len(scan.insts) * 5_000)}")
+    for extra in link_imports:
+        A(extra)
     A("")
     A("")
     A(f"def {name}(cpu):")
@@ -495,7 +514,11 @@ def emit_function32(scan: FunctionScan32, name: str, *, signature: bytes,
                     lines.append(f"interp_one32(cpu, 0x{inst.ip:X})"
                                  f"  # (interpreter fallback)")
             elif inst.kind == CALL:
-                lines.append(f"emulate_call32(cpu, 0x{inst.target:X}, 0x{inst.next_ip:X})")
+                if inst.target in link_map:
+                    lines.append(f"call_linked32(cpu, 0x{inst.target:X}, "
+                                 f"{link_map[inst.target]}, 0x{inst.next_ip:X})")
+                else:
+                    lines.append(f"emulate_call32(cpu, 0x{inst.target:X}, 0x{inst.next_ip:X})")
                 native += 1
             elif inst.kind == CALL_IND:
                 if inst.mod == 3:
