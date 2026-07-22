@@ -159,6 +159,11 @@ class CPU386:
         # ``sbase`` caches the resolved base per segment register so the hot
         # path pays one attribute read + add, not a dict probe per access.
         self.selector_bases: dict[int, int] = {}
+        #: selector (RPL masked) -> segment byte limit, for LSL.  Flat LE
+        #: selectors span the full 4 GB (the .get default below); a DPMI
+        #: DOS-memory selector's real limit is registered here by the host when
+        #: it is known.  No full descriptor model -- LSL is the only consumer.
+        self.selector_limits: dict[int, int] = {}
         self.sbase = {"es": 0, "cs": 0, "ss": 0, "ds": 0, "fs": 0, "gs": 0}
         self.halted = False
         self.instruction_count = 0
@@ -767,6 +772,26 @@ class CPU386:
             self.r[ESP] = self.r[EBP]
             self.set_reg(EBP, osz, self.pop(osz))
             return
+        if op == 0xC8:  # enter alloc16, level8 (make stack frame)
+            alloc = self._fetch16()
+            level = self._fetch8() & 0x1F
+            if level:                       # nested frames: Pascal-only, never C
+                raise UnsupportedInstruction(
+                    f"ENTER nesting level {level} not implemented at "
+                    f"0x{(self.eip - 4) & 0xFFFFFFFF:X}")
+            self.push(self.reg(EBP, osz), osz)                  # push ebp
+            self.set_reg(EBP, osz, self.r[ESP])                 # ebp = esp
+            self.r[ESP] = (self.r[ESP] - alloc) & 0xFFFFFFFF    # esp -= alloc
+            return
+        if op in (0xC4, 0xC5):  # les / lds  r32, m16:32 (load far pointer)
+            reg, is_reg, val = self._modrm()
+            if is_reg:                      # a register source is an invalid encoding
+                raise UnsupportedInstruction(
+                    f"LES/LDS with a register operand at 0x{self.eip:X}")
+            self.set_reg(reg, osz, self.mem.read(val, osz))          # offset
+            self.set_seg("es" if op == 0xC4 else "ds",
+                         self.mem.read((val + osz) & 0xFFFFFFFF, 2))  # selector
+            return
 
         if op == 0xCC:  # int3
             self._interrupt(3)
@@ -1172,6 +1197,17 @@ class CPU386:
             return
         if op2 == 0x01:              # SGDT/SIDT/SMSW/... group
             self._grp7()
+            return
+        if op2 == 0x03:              # lsl r32, r/m16 (load segment limit)
+            reg, is_reg, val = self._modrm()
+            sel = self._rm_read(is_reg, val, 2) & 0xFFFF
+            # Flat DOS/4GW: no descriptor tables.  LE selectors span 4 GB; a
+            # DPMI DOS-memory selector's real limit, when the host registered
+            # it, wins.  The descriptor is always accessible here -> ZF=1 (the
+            # LSL failure path cannot arise in the flat model).
+            self.set_reg(reg, osz,
+                         self.selector_limits.get(sel & 0xFFFC, 0xFFFFFFFF))
+            self.set_flag(ZF, True)
             return
         if op2 in (0x20, 0x22):      # mov reg,crN / mov crN,reg
             modrm = self._fetch8()
