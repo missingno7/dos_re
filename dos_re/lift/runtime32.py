@@ -78,6 +78,18 @@ def call_linked32(cpu, target: int, default_callee, ret_ip: int) -> None:
     (the link pass enforces this); tail-jump / IRET callees stay
     ``emulate_call32``.
     """
+    # Depth guard: a linked call is a DIRECT Python call into the callee, so a
+    # cycle (a stack-switching coroutine primitive whose computed ret re-enters
+    # the graph, a mutual recursion the static link pass cannot see) would blow
+    # the C stack and kill the process with no catchable error.  Bound it well
+    # above any real call depth and raise loud instead -- the pipeline attributes
+    # this to the offending function and excludes it from the safe graph.
+    depth = getattr(cpu, "_lift_link_depth", 0) + 1
+    if depth > 512:
+        raise LiftRuntimeError(
+            f"linked call to 0x{target:X} exceeded max link depth "
+            f"(runaway recursion -- a stack-switch/computed-transfer routine "
+            f"is not safe to lift-and-link)")
     handler = cpu.replacement_hooks.get(target, default_callee)
     name = cpu.hook_names.get(target, getattr(handler, "__name__", "linked"))
     cpu.push(ret_ip & 0xFFFFFFFF, 4)
@@ -88,12 +100,16 @@ def call_linked32(cpu, target: int, default_callee, ret_ip: int) -> None:
     # pacing, replay identity) drifts between linked and unlinked graphs.
     cpu.instruction_count += 1
     verifier = getattr(cpu, "hook_verifier", None)
-    if (verifier is not None
-            and getattr(cpu, "hook_verifier_verify_nested_calls", True)
-            and target not in getattr(cpu, "hook_verifier_passthrough", set())):
-        verifier(cpu, target, handler, name)
-    else:
-        handler(cpu)
+    cpu._lift_link_depth = depth
+    try:
+        if (verifier is not None
+                and getattr(cpu, "hook_verifier_verify_nested_calls", True)
+                and target not in getattr(cpu, "hook_verifier_passthrough", set())):
+            verifier(cpu, target, handler, name)
+        else:
+            handler(cpu)
+    finally:
+        cpu._lift_link_depth = depth - 1
     if cpu.eip != (ret_ip & 0xFFFFFFFF):
         raise LiftRuntimeError(
             f"linked call to 0x{target:X} did not return to 0x{ret_ip:X} "

@@ -215,12 +215,22 @@ def main(argv=None) -> int:
         emit_graph()
         if not args.verify:
             return 0
-        # Verify rounds: an environment-wait loop (vsync/timer/key poll whose
-        # exit only IRQ servicing can satisfy) surfaces as MAX_ITERATIONS; each
-        # round excludes it, re-emits, reboots, and goes deeper -- building the
-        # port's wait-function inventory (the hand-recovery worklist).
+        # CONVERGE ON THE MAXIMAL SAFE GRAPH.  Under the differential verifier
+        # a lifted function that isn't safe to lift as-is surfaces one of three
+        # ways; --auto-exclude-waits N runs up to N re-emit/reboot rounds,
+        # excluding the culprit each time and going deeper:
+        #   * MAX_ITERATIONS (LiftRuntimeError): an environment-wait loop whose
+        #     exit only IRQ servicing satisfies -- names itself.
+        #   * DIVERGENCE (PMHookVerifyDivergence): a composed routine whose
+        #     transient scratch/dead regs differ -- metadata names the hook.
+        #   * a wild jump / undecodable crash: a routine set a bad transfer
+        #     target (stack-switching coroutine primitives) -- attributed to
+        #     cpu.last_hook, the routine that was dispatching.
+        # The excluded set IS the "keep interpreted / hand-recover" inventory.
         from dos_re.lift.runtime32 import LiftRuntimeError
-        found_waits: list[int] = []
+        excluded_waits: list[int] = []
+        excluded_diverged: list[int] = []
+        excluded_crashed: list[int] = []
         for round_no in range(max(1, args.auto_exclude_waits + 1)):
             if round_no:
                 emit_graph()
@@ -229,30 +239,51 @@ def main(argv=None) -> int:
             print(f"round {round_no}: activated {len(installed)} functions; "
                   f"running {args.steps} steps under the differential verifier")
             verifier = install_pm_hook_verifier(rt)
+            culprit = None
             try:
                 rt.cpu.run(args.steps)
-            except PMHookVerifyDivergence as exc:
-                print(f"DIVERGED: {exc}")
-                return 1
             except HaltExecution:
                 pass
+            except PMHookVerifyDivergence as exc:
+                hook = exc.metadata.get("hook")
+                culprit = (int(hook, 16), excluded_diverged, "diverges") \
+                    if hook and round_no < args.auto_exclude_waits else None
+                if culprit is None:
+                    print(f"DIVERGED: {exc}")
+                    return 1
             except LiftRuntimeError as exc:
-                m = _re.match(r"lift_([0-9a-f]+) ", str(exc))
+                m = _re.match(r"lift_([0-9a-f]+) .*MAX_ITERATIONS", str(exc))
+                last = getattr(rt.cpu, "last_hook", None)
                 if m and round_no < args.auto_exclude_waits:
-                    wait_entry = int(m.group(1), 16)
-                    excluded.add(wait_entry)
-                    found_waits.append(wait_entry)
-                    print(f"round {round_no}: environment wait at "
-                          f"0x{wait_entry:X} -- excluded, restarting")
-                    continue
-                print(f"stopped: {exc} at eip=0x{rt.cpu.eip:X}")
+                    culprit = (int(m.group(1), 16), excluded_waits, "environment wait")
+                elif last is not None and round_no < args.auto_exclude_waits:
+                    # depth guard / bad-return -- the running lifted routine
+                    culprit = (last, excluded_crashed,
+                               "runaway link/computed-transfer at")
+                if culprit is None:
+                    print(f"stopped: {exc} at eip=0x{rt.cpu.eip:X}")
             except Exception as exc:  # noqa: BLE001 -- fail-loud frontier is a result too
-                print(f"stopped: {type(exc).__name__}: {exc} at eip=0x{rt.cpu.eip:X}")
+                last = getattr(rt.cpu, "last_hook", None)
+                culprit = (last, excluded_crashed,
+                           f"crash ({type(exc).__name__}) after") \
+                    if last is not None and round_no < args.auto_exclude_waits else None
+                if culprit is None:
+                    print(f"stopped: {type(exc).__name__}: {exc} at eip=0x{rt.cpu.eip:X}")
+            if culprit is not None:
+                entry, bucket, why = culprit
+                excluded.add(entry)
+                bucket.append(entry)
+                print(f"round {round_no}: 0x{entry:X} {why} -- excluded, restarting")
+                continue
             report(installed, verifier, rt.cpu)
             break
-        if found_waits:
-            print("environment-wait inventory (hand-recovery worklist): "
-                  + ", ".join(f"0x{e:X}" for e in found_waits))
+        for label, entries in (("environment-wait", excluded_waits),
+                               ("composed/divergent", excluded_diverged),
+                               ("crash-inducing (stack-switch/computed-transfer)",
+                                excluded_crashed)):
+            if entries:
+                print(f"{label} inventory (keep interpreted / hand-recover): "
+                      + ", ".join(f"0x{e:X}" for e in entries))
         return 0
 
     emit_dir = Path(args.emit_dir) if args.emit_dir else None

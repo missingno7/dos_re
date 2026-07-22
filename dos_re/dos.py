@@ -1371,8 +1371,8 @@ class DOSMachine:
                 cpu.set_flag(CF, True)
                 return
             n = min(cpu.s.cx, len(h.data) - h.pos)
-            for i in range(n):
-                cpu.mem.wb(cpu.s.ds, (cpu.s.dx + i) & 0xFFFF, h.data[h.pos + i])
+            cpu.mem.write_external_block(
+                cpu.s.ds, cpu.s.dx, memoryview(h.data)[h.pos:h.pos + n])
             h.pos += n
             cpu.s.ax = n
             cpu.set_flag(CF, False)

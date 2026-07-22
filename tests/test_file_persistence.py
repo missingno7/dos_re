@@ -20,6 +20,7 @@ from dos_re.dos import DOSMachine
 class _Mem:
     def __init__(self) -> None:
         self.b = bytearray(0x200000)
+        self.external_write_sizes: list[int] = []
 
     def _lin(self, seg: int, off: int) -> int:
         return ((seg << 4) + off) & 0x1FFFFF
@@ -29,6 +30,12 @@ class _Mem:
 
     def wb(self, seg: int, off: int, v: int) -> None:
         self.b[self._lin(seg, off)] = v & 0xFF
+
+    def write_external_block(self, seg: int, off: int,
+                             payload: bytes | bytearray | memoryview) -> None:
+        self.external_write_sizes.append(len(payload))
+        for i, value in enumerate(payload):
+            self.wb(seg, (off + i) & 0xFFFF, value)
 
     def block(self, seg: int, off: int, n: int) -> bytes:
         base = self._lin(seg, off)
@@ -108,6 +115,14 @@ def test_default_drops_writes_on_close_so_a_reopen_reads_the_pristine_file(game_
     got = _open_read(dos, cpu, "SKYROADS.CFG", 66)
     assert got is not None and got[6] == 0 and got[8] == 0   # pristine, not the write
     assert (game_dir / "SKYROADS.CFG").read_bytes()[6] == 0   # disk untouched too
+
+
+def test_read_delegates_destination_write_to_memory_owner(game_dir: Path) -> None:
+    dos, cpu = DOSMachine(root=game_dir), _Cpu()
+    got = _open_read(dos, cpu, "SKYROADS.CFG", 66)
+
+    assert got is not None and len(got) == 66
+    assert cpu.mem.external_write_sizes == [66]
 
 
 def test_overlay_reads_back_own_write_only_when_persistence_is_on(game_dir: Path, tmp_path: Path) -> None:

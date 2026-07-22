@@ -490,6 +490,13 @@ class ExecutionAtlas:
                             "evidence": [source_id],
                         })
                     if kind in {"call_ind", "jmp_ind"}:
+                        # A statically-read switch table (irgen's
+                        # ``static_targets`` annotation) resolves the site:
+                        # the site->arm edges are static evidence of the same
+                        # rank as direct call targets.  Without it the site
+                        # stays an unresolved dynamic frontier.
+                        static_targets = tuple(
+                            instruction.get("static_targets", ()))
                         site = point_id(
                             int(target_source.split(":")[0], 16),
                             int(str(instruction["ip"]), 16))
@@ -506,8 +513,15 @@ class ExecutionAtlas:
                         })
                         edges.append({
                             "source": source, "target": site, "kind": kind,
-                            "status": "unresolved", "observation_count": 0,
-                            "metadata": {"instruction": instruction["ip"]},
+                            "status": ("resolved" if static_targets
+                                       else "unresolved"),
+                            "observation_count": 0,
+                            "metadata": (
+                                {"instruction": instruction["ip"],
+                                 "resolution": "static-switch-table",
+                                 "table": str(instruction.get("static_table"))}
+                                if static_targets
+                                else {"instruction": instruction["ip"]}),
                             "evidence": [source_id],
                         })
                         edges.append({
@@ -516,6 +530,9 @@ class ExecutionAtlas:
                             "observation_count": 0, "metadata": {},
                             "evidence": [source_id],
                         })
+                        for arm in static_targets:
+                            add_transfer(site, str(arm), kind,
+                                         detail="static-switch-table")
                     target = instruction.get("target")
                     if kind in {"jmp", "jcc"} and target is not None:
                         candidate = (
