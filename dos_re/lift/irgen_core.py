@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Callable
 
 from .cfg import FunctionScan, scan_function
+from .dispatch import static_switch_targets
 
 IR_VERSION = 0
 
@@ -108,6 +109,18 @@ def function_record(scan: FunctionScan, cs: int, ip: int,
                 # control flow — a re-entry point into THIS function's block
                 # dispatcher (shares its recovered blocks, not a new function).
                 rec["dispatch_entry"] = True
+            if inst.kind == "jmp_ind":
+                # A bounded, cs-relative switch table is STATIC evidence: the
+                # bound is an immediate and the table lives in this read-only
+                # code segment, so the complete arm set is readable from the
+                # image (dos_re.lift.dispatch.static_switch_targets).  Sites
+                # that do not provably match stay a dynamic frontier.
+                hit = static_switch_targets(scan, inst.ip, fetch)
+                if hit is not None:
+                    table, _count, arms = hit
+                    rec["static_table"] = f"{table:04X}"
+                    rec["static_targets"] = sorted(
+                        {f"{arm:04X}" for arm in arms})
             insts.append(rec)
             if inst.kind != "seq" and inst.kind not in ("call", "call_far",
                                                         "call_ind", "int"):
