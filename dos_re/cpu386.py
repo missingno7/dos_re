@@ -200,6 +200,15 @@ class CPU386:
         self.hook_names: dict[int, str] = {}
         self.hook_verifier = None
         self.hook_verifier_passthrough: set[int] = set()
+        # Observation seam: {flat EIP: callable(cpu)} fired BEFORE the
+        # instruction (or hook) at that address executes.  Unlike a
+        # replacement hook it never replaces execution, never counts an
+        # instruction, and never re-enters the IRQ poll — so observing an
+        # execution cannot perturb it (virtual time and IRQ delivery points
+        # stay identical with probes installed or absent).  Evidence
+        # collection (replay function visits, transfer observation) hangs
+        # here; None keeps the per-step cost to one attribute test.
+        self.entry_probes: dict[int, Any] | None = None
         # Decode scratch reset each instruction.
         self._opsize = 4
         self._adsize = 4
@@ -485,6 +494,10 @@ class CPU386:
                         # or the in-service bit wedges the PIC forever.
                         self.irq_eoi(irq)
         start = self.eip
+        if self.entry_probes is not None:
+            probe = self.entry_probes.get(start)
+            if probe is not None:
+                probe(self)
         hooks = self.replacement_hooks
         if hooks and start in hooks:
             handler = hooks[start]
