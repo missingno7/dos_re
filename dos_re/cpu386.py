@@ -1270,11 +1270,14 @@ class CPU386:
         osz = self._opsize
         reg, is_reg, val = self._modrm()
         if imm:
-            sub = reg  # reg field selects op for grp8
+            kind = {4: "bt", 5: "bts", 6: "btr", 7: "btc"}[reg]  # grp8 /reg
             bit = self._fetch8()
-            kind = {4: "bt", 5: "bts", 6: "btr", 7: "btc"}[sub]
         else:
             bit = self.reg(reg, osz)
+        self._bit_op_do(kind, is_reg, val, osz, bit)
+
+    def _bit_op_do(self, kind, is_reg, val, osz, bit):
+        """Operand-explicit bt/bts/btr/btc -- shared by _exec and lifted code."""
         if is_reg:
             bits = osz * 8
             b = bit % bits
@@ -1305,11 +1308,14 @@ class CPU386:
 
     def _shldrd(self, op2):
         osz = self._opsize
-        bits = osz * 8
-        left = op2 in (0xA4, 0xA5)
         reg, is_reg, val = self._modrm()
         src = self.reg(reg, osz)
         cnt = (self._fetch8() if op2 in (0xA4, 0xAC) else self.reg(ECX, 1)) & 0x1F
+        self._shldrd_do(op2 in (0xA4, 0xA5), is_reg, val, src, cnt, osz)
+
+    def _shldrd_do(self, left, is_reg, val, src, cnt, osz):
+        """Operand-explicit shld/shrd -- shared by _exec and lifted code."""
+        bits = osz * 8
         if cnt == 0:
             return
         dst = self._rm_read(is_reg, val, osz)

@@ -147,6 +147,39 @@ def test_grp3_and_imul_lift_native_and_verify():
     assert rt.mem.r32(DATA + 4) == 7                     # (3*4*5)//7 = 8; -8; ~ = 7
 
 
+def test_bit_shift_ops_lift_native_and_verify():
+    """bt/bts/btr (+grp8) / shld / shrd / bsf / sahf / wait emit natively (CPU386
+    _bit_op_do / _shldrd_do primitives, no interp_one32) and match the oracle."""
+    # mov eax,0x1200; mov ecx,4; bt eax,ecx; bts eax,ecx; btr eax,9;
+    # shld eax,ecx,3; shrd eax,ecx,1; bsf edx,eax; sahf; wait; mov [0x3004],eax; ret
+    func = bytes.fromhex(
+        "B800120000" "B904000000" "0FA3C8" "0FABC8" "0FBAF009"
+        "0FA4C803" "0FACC801" "0FBCD0" "9E" "9B" "A304300000" "C3")
+    rt = build_rt(func)
+    src = lift_and_install(rt)
+    assert "interp_one32(cpu, 0x" not in src            # fully native
+    assert "cpu._bit_op_do" in src and "cpu._shldrd_do" in src
+    verifier = install_pm_hook_verifier(rt)
+    run_to_halt(rt)
+    assert verifier.total_verified == 2                 # lifted == interpreted oracle
+
+
+def test_segment_ops_lift_native_and_verify():
+    """push/pop es/ds/fs + mov sreg emit natively (cpu.seg / cpu.set_seg, no
+    interp_one32) and match the interpreted oracle."""
+    # push ds; push es; mov eax,ds; mov es,ax; pop es; pop ds; push fs; pop fs;
+    # mov [0x3004],eax; ret
+    func = bytes.fromhex("1E" "06" "8CD8" "8EC0" "07" "1F" "0FA0" "0FA1"
+                         "A304300000" "C3")
+    rt = build_rt(func)
+    src = lift_and_install(rt)
+    assert "interp_one32(cpu, 0x" not in src            # fully native
+    assert "cpu.set_seg" in src and "cpu.seg[" in src
+    verifier = install_pm_hook_verifier(rt)
+    run_to_halt(rt)
+    assert verifier.total_verified == 2
+
+
 def test_signature_tripwire():
     from dos_re.lift.runtime32 import LiftRuntimeError
     rt = build_rt(STRAIGHT)

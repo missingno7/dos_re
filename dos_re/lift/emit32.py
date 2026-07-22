@@ -33,6 +33,13 @@ class EmitUnsupported(Exception):
     pass
 
 
+#: segment index -> name, and the push/pop-segment opcode map (mirror CPU386).
+_SEG32 = ("es", "cs", "ss", "ds", "fs", "gs")
+_SEG_PUSHPOP32 = {0x06: ("es", True), 0x07: ("es", False), 0x0E: ("cs", True),
+                  0x16: ("ss", True), 0x17: ("ss", False), 0x1E: ("ds", True),
+                  0x1F: ("ds", False)}
+
+
 def _sx(value: int, bits: int) -> int:
     sign = 1 << (bits - 1)
     return (value & (sign - 1)) - (value & sign)
@@ -326,6 +333,44 @@ def _emit_instruction(inst: Inst32, out: list[str]) -> bool:
             out.append(f"cpu.set_flag({_flag}, {_val})")
             return True
 
+        # --- wait / sahf / lahf ------------------------------------------------
+        if op == 0x9B:      # fwait/wait -- no-op in a scalar model
+            out.append("pass  # fwait")
+            return True
+        if op == 0x9E:      # sahf: AH -> SF/ZF/AF/PF/CF
+            out.append("cpu.eflags = (cpu.eflags & ~0xD5) "
+                       "| (((r[0] >> 8) & 0xFF) & 0xD5) | 0x0002")
+            return True
+        if op == 0x9F:      # lahf: AH = flags low byte
+            out.extend(_Operand(True, 1, reg_idx=4).write("(cpu.eflags & 0xD5) | 0x0002"))
+            return True
+
+        # --- segment register moves / push / pop -------------------------------
+        if op in _SEG_PUSHPOP32:
+            sname, is_push = _SEG_PUSHPOP32[op]
+            if is_push:
+                out.append(f'cpu.push(cpu.seg["{sname}"], {osz})')
+            else:
+                out.append(f'cpu.set_seg("{sname}", cpu.pop({osz}))')
+            return True
+        if op in (0x8C, 0x8E) and inst.reg > 5:     # invalid segment field
+            return False
+        if op == 0x8C:      # mov r/m16, sreg
+            rm = _rm_operand(inst, 2, out)
+            out.extend(rm.write(f'cpu.seg["{_SEG32[inst.reg]}"]'))
+            return True
+        if op == 0x8E:      # mov sreg, r/m16
+            rm = _rm_operand(inst, 2, out)
+            out.append(f'cpu.set_seg("{_SEG32[inst.reg]}", {rm.read()})')
+            return True
+        if op in (0x0FA0, 0x0FA1, 0x0FA8, 0x0FA9):  # push/pop fs/gs
+            sname = "fs" if op in (0x0FA0, 0x0FA1) else "gs"
+            if op in (0x0FA0, 0x0FA8):
+                out.append(f'cpu.push(cpu.seg["{sname}"], {osz})')
+            else:
+                out.append(f'cpu.set_seg("{sname}", cpu.pop({osz}))')
+            return True
+
         # --- port I/O (in/out) -------------------------------------------------
         if op in (0xE4, 0xE5, 0xEC, 0xED):      # in
             sz = 1 if op in (0xE4, 0xEC) else osz
@@ -432,6 +477,53 @@ def _emit_instruction(inst: Inst32, out: list[str]) -> bool:
         if 0x0F90 <= op <= 0x0F9F:                     # setcc
             rm = _rm_operand(inst, 1, out)
             out.extend(rm.write(f"1 if cpu._cond(0x{op & 0xF:X}) else 0"))
+            return True
+        if op in (0x0FA3, 0x0FAB, 0x0FB3, 0x0FBB):     # bt/bts/btr/btc r/m, reg
+            kind = {0x0FA3: "bt", 0x0FAB: "bts", 0x0FB3: "btr", 0x0FBB: "btc"}[op]
+            bit = _reg_read(inst.reg, osz)
+            if inst.mod == 3:
+                out.append(f"cpu._bit_op_do({kind!r}, True, {inst.rm}, {osz}, {bit})")
+            else:
+                if inst.adsize != 4:
+                    return False
+                out.append(f"_o = {_addr_expr(inst)}")
+                out.append(f"cpu._bit_op_do({kind!r}, False, _o, {osz}, {bit})")
+            return True
+        if op == 0x0FBA:                               # grp8: bt/bts/btr/btc r/m, imm8
+            kind = {4: "bt", 5: "bts", 6: "btr", 7: "btc"}.get(inst.reg)
+            if kind is None:
+                return False
+            if inst.mod == 3:
+                out.append(f"cpu._bit_op_do({kind!r}, True, {inst.rm}, {osz}, 0x{inst.imm:X})")
+            else:
+                if inst.adsize != 4:
+                    return False
+                out.append(f"_o = {_addr_expr(inst)}")
+                out.append(f"cpu._bit_op_do({kind!r}, False, _o, {osz}, 0x{inst.imm:X})")
+            return True
+        if op in (0x0FA4, 0x0FA5, 0x0FAC, 0x0FAD):     # shld/shrd
+            left = op in (0x0FA4, 0x0FA5)
+            src = _reg_read(inst.reg, osz)
+            cnt = f"(0x{inst.imm:X} & 0x1F)" if op in (0x0FA4, 0x0FAC) else "(r[1] & 0x1F)"
+            if inst.mod == 3:
+                out.append(f"cpu._shldrd_do({left}, True, {inst.rm}, {src}, {cnt}, {osz})")
+            else:
+                if inst.adsize != 4:
+                    return False
+                out.append(f"_o = {_addr_expr(inst)}")
+                out.append(f"cpu._shldrd_do({left}, False, _o, {src}, {cnt}, {osz})")
+            return True
+        if op in (0x0FBC, 0x0FBD):                     # bsf / bsr
+            rm = _rm_operand(inst, osz, out)
+            _i = ("(_src & -_src).bit_length() - 1" if op == 0x0FBC
+                  else "_src.bit_length() - 1")
+            out.append(f"_src = {rm.read()}")
+            out.append("if _src == 0:")
+            out.append("    cpu.set_flag(ZF, True)")
+            out.append("else:")
+            out.append("    cpu.set_flag(ZF, False)")
+            out.append(f"    _bi = {_i}")
+            out.append("    " + _reg_write(inst.reg, osz, "_bi"))
             return True
 
         return False
