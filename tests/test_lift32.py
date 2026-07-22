@@ -180,6 +180,22 @@ def test_segment_ops_lift_native_and_verify():
     assert verifier.total_verified == 2
 
 
+def test_les_lds_enter_lsl_movcr_lift_native_and_verify():
+    """enter / les / lds / lsl / mov cr emit natively (no interp_one32) and match
+    the oracle -- leaving only x87 as an interpreter dependency."""
+    # enter 8,0; les esi,[0x3010]; lds edi,[0x3010]; lsl eax,eax; mov eax,cr0;
+    # mov [0x3004],eax; leave; ret
+    func = bytes.fromhex("C8080000" "C43510300000" "C53D10300000" "0F03C0"
+                         "0F20C0" "A304300000" "C9" "C3")
+    rt = build_rt(func)
+    src = lift_and_install(rt)
+    assert "interp_one32(cpu, 0x" not in src            # fully native
+    assert "cpu.set_seg" in src and "cpu.selector_limits" in src and "cpu.cr" in src
+    verifier = install_pm_hook_verifier(rt)
+    run_to_halt(rt)
+    assert verifier.total_verified == 2
+
+
 def test_signature_tripwire():
     from dos_re.lift.runtime32 import LiftRuntimeError
     rt = build_rt(STRAIGHT)

@@ -370,6 +370,22 @@ def _emit_instruction(inst: Inst32, out: list[str]) -> bool:
             else:
                 out.append(f'cpu.set_seg("{sname}", cpu.pop({osz}))')
             return True
+        if op == 0xC8:      # enter alloc, level (make stack frame)
+            alloc = inst.imm & 0xFFFF
+            if (inst.imm >> 16) & 0x1F:             # nested frames -> fallback
+                return False
+            out.append(f"cpu.push({_reg_read(5, osz)}, {osz})")   # push ebp
+            out.extend(_Operand(True, osz, reg_idx=5).write("r[4]"))  # ebp = esp
+            out.append(f"r[4] = (r[4] - 0x{alloc:X}) & 0xFFFFFFFF")   # esp -= alloc
+            return True
+        if op in (0xC4, 0xC5):      # les/lds r32, m16:32 (load far pointer)
+            if inst.mod == 3 or inst.adsize != 4:    # register/16-bit -> fallback
+                return False
+            out.append(f"_o = {_addr_expr(inst)}")
+            out.extend(_Operand(True, osz, reg_idx=inst.reg).write(f"mem.r{osz * 8}(_o)"))
+            out.append(f'cpu.set_seg("{"es" if op == 0xC4 else "ds"}", '
+                       f"mem.r16((_o + {osz}) & 0xFFFFFFFF))")
+            return True
 
         # --- port I/O (in/out) -------------------------------------------------
         if op in (0xE4, 0xE5, 0xEC, 0xED):      # in
@@ -512,6 +528,18 @@ def _emit_instruction(inst: Inst32, out: list[str]) -> bool:
                     return False
                 out.append(f"_o = {_addr_expr(inst)}")
                 out.append(f"cpu._shldrd_do({left}, False, _o, {src}, {cnt}, {osz})")
+            return True
+        if op == 0x0F03:                               # lsl r32, r/m16
+            rm = _rm_operand(inst, 2, out)
+            out.append(f"cpu.set_reg({inst.reg}, {osz}, "
+                       f"cpu.selector_limits.get(({rm.read()}) & 0xFFFC, 0xFFFFFFFF))")
+            out.append("cpu.set_flag(ZF, True)")
+            return True
+        if op == 0x0F20:                               # mov reg, crN
+            out.append(_reg_write(inst.rm, 4, f"cpu.cr.get({inst.reg}, 0)"))
+            return True
+        if op == 0x0F22:                               # mov crN, reg
+            out.append(f"cpu.cr[{inst.reg}] = {_reg_read(inst.rm, 4)}")
             return True
         if op in (0x0FBC, 0x0FBD):                     # bsf / bsr
             rm = _rm_operand(inst, osz, out)
