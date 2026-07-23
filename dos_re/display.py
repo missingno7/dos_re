@@ -281,7 +281,14 @@ class Display:
             window.set_windowed()
             self._windowed_position = tuple(window.position)
             self._windowed_borderless = bool(window.borderless)
-            self._windowed_always_on_top = bool(window.always_on_top)
+            # pygame-ce exposes ``always_on_top`` on its SDL2 Window;
+            # upstream pygame 2.6.1 does not.  It is a presentation nicety,
+            # never a requirement for borderless sizing.
+            self._windowed_always_on_top = (
+                bool(window.always_on_top)
+                if hasattr(window, "always_on_top")
+                else None
+            )
             self._windowed_resizable = bool(window.resizable)
             try:
                 desktop_size = tuple(pygame.display.get_desktop_sizes()[0])
@@ -295,10 +302,13 @@ class Display:
             # A normal borderless window otherwise sits below the Windows
             # taskbar. Topmost gives it the expected fullscreen coverage while
             # Alt+Tab remains a normal window transition.
-            window.always_on_top = True
+            if hasattr(window, "always_on_top"):
+                window.always_on_top = True
             return
 
-        window.always_on_top = self._windowed_always_on_top
+        if (self._windowed_always_on_top is not None
+                and hasattr(window, "always_on_top")):
+            window.always_on_top = self._windowed_always_on_top
         window.borderless = self._windowed_borderless
         window.resizable = self._windowed_resizable
         window.size = tuple(windowed_size or (1280, 800))

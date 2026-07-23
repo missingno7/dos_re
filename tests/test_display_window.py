@@ -111,6 +111,45 @@ def test_opengl_fullscreen_is_a_normal_borderless_desktop_window(monkeypatch):
     assert display._gl_window.size == (800, 600)
 
 
+def test_borderless_window_does_not_require_pygame_ce_topmost_api(monkeypatch):
+    """Upstream pygame 2.6.1's SDL2 Window has no always_on_top property."""
+    class UpstreamWindow:
+        def __init__(self):
+            self.size = (640, 480)
+            self.position = (100, 80)
+            self.borderless = False
+            self.resizable = True
+            self.windowed_calls = 0
+
+        def set_windowed(self):
+            self.windowed_calls += 1
+
+    monkeypatch.setattr(
+        pygame.display, "get_desktop_sizes", lambda: [(3840, 2160)],
+    )
+    display = Display.__new__(Display)
+    display.opengl = True
+    display._gl_window = UpstreamWindow()
+    display._texsize = (320, 200)
+    display._windowed_position = None
+    display._windowed_borderless = False
+    display._windowed_always_on_top = False
+    display._windowed_resizable = True
+
+    display.set_fullscreen(True)
+    assert display._gl_window.windowed_calls == 1
+    assert display._gl_window.borderless is True
+    assert display._gl_window.position == (0, 0)
+    assert display._gl_window.size == (3840, 2160)
+    assert display._windowed_always_on_top is None
+
+    display.set_fullscreen(False, windowed_size=(800, 600))
+    assert display._gl_window.borderless is False
+    assert display._gl_window.resizable is True
+    assert display._gl_window.position == (100, 80)
+    assert display._gl_window.size == (800, 600)
+
+
 @pytest.mark.parametrize("fw,fh", [(320, 200), (320, 240), (320, 400)])
 def test_par_shows_every_pm_geometry_at_4_3(fw, fh):
     """The protected-mode backend sets par = 3w/4h so mode 13h and both Mode X
