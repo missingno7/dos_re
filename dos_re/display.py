@@ -16,6 +16,13 @@ is owned directly by the package frontend ring.
 """
 from __future__ import annotations
 
+from dos_re.display_platform import configure_physical_pixel_coordinates
+
+# This must run before pygame initializes SDL's video subsystem.  In
+# particular, a 3840x2160 Windows desktop at 150% scaling must not be exposed
+# as the DPI-virtualized 2560x1440 logical desktop.
+configure_physical_pixel_coordinates()
+
 import numpy as np
 import pygame
 
