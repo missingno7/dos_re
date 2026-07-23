@@ -1191,7 +1191,7 @@ def run_view(frontend: GameFrontend, rt, args,
             f"(snapshots, replay playback and every verifier work headless)"
         ) from exc
 
-    from dos_re.display import Display
+    from dos_re.display import Display, is_fullscreen_toggle
 
     replaying = playback is not None
 
@@ -1344,6 +1344,10 @@ def run_view(frontend: GameFrontend, rt, args,
     dispatcher = KeyDispatcher(live_input)
 
     _VIEWER_HOTKEYS = {pygame.K_F10, pygame.K_F11, pygame.K_F12}
+    # Alt+Enter is a viewer chord, never game input: remember that we consumed
+    # the make so the matching Enter break is swallowed too (same leak the
+    # F10/F11/F12 filter below guards against).
+    fs_chord = [False]
 
     audio = frontend.create_audio_sink(pygame, rt, args)
     running = True
@@ -1391,6 +1395,14 @@ def run_view(frontend: GameFrontend, rt, args,
                     display.resize(event.w, event.h)
                     if gpu_presenter is not None:
                         gpu_presenter.resize(display)
+                elif is_fullscreen_toggle(event):
+                    display.toggle_fullscreen()
+                    if gpu_presenter is not None:
+                        gpu_presenter.resize(display)
+                    fs_chord[0] = True
+                elif (event.type == pygame.KEYUP and event.key == pygame.K_RETURN
+                        and fs_chord[0]):
+                    fs_chord[0] = False        # the chord's break — not game input
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_F12:
                     out = _timestamp_dir(frontend.artifacts_dir, f"snapshot_{frontend.name}")
                     write_snapshot(rt, out, status="manual viewer snapshot",

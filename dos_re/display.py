@@ -22,9 +22,22 @@ import pygame
 _TITLE = "dos_re native viewer"
 
 
+def is_fullscreen_toggle(event) -> bool:
+    """True for the conventional Alt+Enter fullscreen chord.
+
+    Shared by every viewer so the chord is identical across the real-mode and
+    protected-mode players (and so each can also swallow the event instead of
+    leaking a stray Enter into the guest as game input)."""
+    return (event.type == pygame.KEYDOWN
+            and event.key == pygame.K_RETURN
+            and bool(event.mod & pygame.KMOD_ALT))
+
+
 class Display:
     def __init__(self, size, *, title: str = _TITLE, opengl: bool = False):
         self.integer_scale = False
+        self.fullscreen = False
+        self._windowed_size = tuple(size)   # restored when leaving fullscreen
         self.par = 1.0                     # displayed pixel aspect (height/width). 1.0 = square pixels;
         #                                    1.2 = the DOS 4:3 look (320x200 shown at 4:3 -> pixels 1.2x tall).
         self.gpu = False
@@ -229,9 +242,33 @@ class Display:
         else:
             self.screen = pygame.display.set_mode((max(160, w), max(100, h)), pygame.RESIZABLE)
 
+    def toggle_fullscreen(self) -> bool:
+        """Alt+Enter: flip borderless fullscreen, restoring the pre-fullscreen window size on the way back.
+
+        Viewers call this on :func:`is_fullscreen_toggle`; returns the new state."""
+        if not self.fullscreen:
+            self._windowed_size = self.get_size()
+        self.set_fullscreen(not self.fullscreen, windowed_size=self._windowed_size)
+        self.fullscreen = not self.fullscreen
+        return self.fullscreen
+
     def set_fullscreen(self, on: bool, windowed_size=None) -> None:
         """Borderless fullscreen (SDL's own fullscreen-desktop on the GPU path — DPI/monitor correct, no ctypes;
         the software path recreates a NOFRAME desktop-sized window)."""
+        if self.opengl:
+            # Keep the GL context/flags; only the geometry changes.
+            if on:
+                try:
+                    dw, dh = pygame.display.get_desktop_sizes()[0]
+                except Exception:                            # noqa: BLE001
+                    info = pygame.display.Info(); dw, dh = info.current_w, info.current_h
+                self.screen = pygame.display.set_mode(
+                    (dw, dh), self._opengl_flags | pygame.FULLSCREEN)
+            else:
+                self.screen = pygame.display.set_mode(
+                    windowed_size or (1280, 800), self._opengl_flags)
+            self._texsize = None
+            return
         if self.gpu:
             self.window.set_fullscreen(desktop=True) if on else self.window.set_windowed()
             if not on and windowed_size:

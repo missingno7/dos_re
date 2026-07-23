@@ -1,8 +1,11 @@
 """Protected-mode backend adapter for the canonical player lifecycle.
 
 The protected-mode counterpart of :mod:`dos_re.player`, reduced to what the
-PM runtime supports today: a pygame window presenting the VGA screen
-(chained 13h or unchained Mode X via :func:`~dos_re.dos4gw.render_pm_frame`),
+PM runtime supports today: a RESIZABLE pygame window presenting the VGA screen
+(chained 13h or unchained Mode X via :func:`~dos_re.dos4gw.render_pm_frame`)
+through the shared :mod:`dos_re.display` backend — drag-resize and Alt+Enter
+borderless fullscreen work here exactly as in the real-mode player, with the
+frame letterboxed at 4:3 whatever the window shape,
 keyboard delivered as set-1 scancodes through the emulated 8042 KBC
 (extended-key E0 pairs included), mouse through the INT 33h driver state,
 pacing by wall-clock vsync (``dos.time_source`` drives the program's own
@@ -356,14 +359,17 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                replay_profile: ReplayExecutionIdentity | None = None,
                present_hz: int = 70) -> int:
     import pygame
+    from .display import Display, is_fullscreen_toggle
     from .pm_replay_input import FrameClock, FramePaced, KEY_CHANNEL, key_payload
 
     pygame.init()
-    # A fixed 4:3 canvas: every VGA geometry this runtime produces (320x200
-    # mode 13h, Mode X 320x240 / 320x400) displays at the aspect a real
-    # monitor showed — the frame is scaled to the canvas each present.
-    win = pygame.display.set_mode((320 * scale, 240 * scale))
-    pygame.display.set_caption(title)
+    # The shared Display backend (same one the real-mode player uses): a
+    # RESIZABLE window, GPU-scaled presents, Alt+Enter borderless fullscreen,
+    # and aspect-correct letterboxing.  Every VGA geometry this runtime
+    # produces (320x200 mode 13h, Mode X 320x240 / 320x400) is shown at the 4:3
+    # a real monitor showed by setting the pixel aspect per frame (see `par`
+    # below), so the picture keeps its shape at any window size.
+    display = Display((320 * scale, 240 * scale), title=title)
     pygame.mouse.set_visible(False)      # the game draws its own cursor
 
     dos, cpu = rt.dos, rt.cpu
@@ -375,6 +381,7 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
     # tags input with the frame index, so the replay playbacks deterministically.
     mouse_norm = [0.5, 0.5]
     mbtn = [0]                       # mouse-button mask (host copy)
+    fs_chord = [False]               # Alt+Enter consumed -> swallow its Enter break
     rec = {"recording": None, "start": 0, "last_mouse": None, "dir": None}
     # While recording, input is BUFFERED and applied to the VM only at the frame
     # boundary (on_frame) — never mid-frame.  On a slow interpreter one game
@@ -588,6 +595,14 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 running = False
+            elif ev.type == pygame.VIDEORESIZE:
+                display.resize(ev.w, ev.h)
+            elif is_fullscreen_toggle(ev):
+                display.toggle_fullscreen()
+                fs_chord[0] = True            # swallow the chord's Enter break
+            elif (ev.type == pygame.KEYUP and ev.key == pygame.K_RETURN
+                    and fs_chord[0]):
+                fs_chord[0] = False           # viewer chord, never game input
             elif ev.type in (pygame.KEYDOWN, pygame.KEYUP):
                 make = ev.type == pygame.KEYDOWN
                 name = pygame.key.name(ev.key)
@@ -631,12 +646,13 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                         dos.key_queue.append(ord(ch[0]) & 0xFF)
                         waiting_console = False
             elif ev.type == pygame.MOUSEMOTION:
-                mx, my = ev.pos
-                ww, wh = win.get_size()
-                # Window-relative position, mapped onto the game's own
-                # INT 33h virtual range by the host.
-                mouse_norm[0] = mx / max(1, ww - 1)
-                mouse_norm[1] = my / max(1, wh - 1)
+                # Map against the rect the frame was actually drawn into, not
+                # the whole window: once the window is resized or fullscreen the
+                # frame is letterboxed, and mapping against the window would
+                # skew the cursor and offset it by the bar size.
+                uv = display.window_to_frame_norm(ev.pos)
+                if uv is not None:
+                    mouse_norm[0], mouse_norm[1] = uv
                 if rec["recording"] is None:              # recording defers to on_frame
                     dos.set_mouse_norm(mouse_norm[0], mouse_norm[1], mbtn[0])
             elif ev.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP):
@@ -647,9 +663,11 @@ def run_viewer(rt, *, scale: int = 3, title: str = "dos_re PM",
                     dos.mouse_buttons = mbtn[0]
 
         rgb, w, h = render_pm_frame(dos)
-        frame = pygame.image.frombuffer(rgb, (w, h), "RGB").convert(win)
-        pygame.transform.scale(frame, win.get_size(), win)
-        pygame.display.flip()
+        # Pixel aspect that puts any of the runtime's geometries on screen at
+        # 4:3 (320x200 -> 1.2, 320x240 -> 1.0, 320x400 -> 0.6).
+        display.par = (3.0 * w) / (4.0 * h)
+        display.draw_game(_np.frombuffer(rgb, _np.uint8).reshape(h, w, 3))
+        display.flip()
         pcm.pump()
     # Flush an in-progress recording on exit: closing the window (or ESC)
     # instead of pressing F11-to-stop must still save the captured replay, not
@@ -751,10 +769,10 @@ def run_replay(rt, replay_path, *, boot_keys=(), extra_frames: int = 30,
     # one game frame per iteration, rendered and throttled to 70 fps.  Esc or
     # closing the window quits early; the final frame stays up until dismissed.
     import pygame
+    from .display import Display, is_fullscreen_toggle
     from .pm_replay_input import FramePaced
     pygame.init()
-    win = pygame.display.set_mode((320 * scale, 240 * scale))
-    pygame.display.set_caption(title)
+    display = Display((320 * scale, 240 * scale), title=title)   # resizable + Alt+Enter
     pygame.mouse.set_visible(False)          # the game draws its own cursor
     pcm = _make_audio_sink(rt.dos.sound_blaster)
     rt.dos.time_source = None                # frame clock paces; deterministic retrace
@@ -762,9 +780,9 @@ def run_replay(rt, replay_path, *, boot_keys=(), extra_frames: int = 30,
 
     def _present():
         rgb, w, h = render_pm_frame(dos)
-        img = pygame.image.frombuffer(rgb, (w, h), "RGB").convert(win)
-        pygame.transform.scale(img, win.get_size(), win)
-        pygame.display.flip()
+        display.par = (3.0 * w) / (4.0 * h)      # show any geometry at 4:3
+        display.draw_game(_np.frombuffer(rgb, _np.uint8).reshape(h, w, 3))
+        display.flip()
 
     running = True
     while running and not done["flag"] and not rt.cpu.halted:
@@ -772,6 +790,10 @@ def run_replay(rt, replay_path, *, boot_keys=(), extra_frames: int = 30,
             if ev.type == pygame.QUIT or (
                     ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE):
                 running = False
+            elif ev.type == pygame.VIDEORESIZE:
+                display.resize(ev.w, ev.h)
+            elif is_fullscreen_toggle(ev):
+                display.toggle_fullscreen()
         t0 = time.monotonic()
         clock.stop_at = clock.frame + 1
         try:
