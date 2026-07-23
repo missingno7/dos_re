@@ -53,6 +53,7 @@ class Display:
         self._last_rect = None             # where the last frame was drawn (see window_to_frame_norm)
         self._ov = {}                      # cached overlay textures keyed by id(surface)
         self.opengl = bool(opengl)
+        self._gl_window = None
         self._opengl_flags = pygame.RESIZABLE | pygame.OPENGL | pygame.DOUBLEBUF
         if self.opengl:
             # A product-selected GPU presenter owns the OpenGL drawing.  Keep
@@ -60,6 +61,13 @@ class Display:
             # renderer on the same window/context.
             self.screen = pygame.display.set_mode(size, self._opengl_flags)
             pygame.display.set_caption(title)
+            try:
+                from pygame._sdl2 import video as sdl2
+                # Control the window created by display.set_mode without
+                # creating another window or an SDL 2D renderer.
+                self._gl_window = sdl2.Window.from_display_module()
+            except Exception:              # noqa: BLE001 - optional pygame API
+                pass
             return
         try:
             from pygame._sdl2 import video as sdl2
@@ -234,9 +242,11 @@ class Display:
     def resize(self, w: int, h: int) -> None:
         """Handle a user window drag-resize (software path re-creates the surface; GPU auto-tracks)."""
         if self.opengl:
-            self.screen = pygame.display.set_mode(
-                (max(160, w), max(100, h)), self._opengl_flags,
-            )
+            size = (max(160, w), max(100, h))
+            if self._gl_window is not None:
+                self._gl_window.size = size
+            else:
+                self.screen = pygame.display.set_mode(size, self._opengl_flags)
         elif self.gpu:
             self.window.size = (max(160, w), max(100, h))
         else:
@@ -256,17 +266,36 @@ class Display:
         """Borderless fullscreen (SDL's own fullscreen-desktop on the GPU path — DPI/monitor correct, no ctypes;
         the software path recreates a NOFRAME desktop-sized window)."""
         if self.opengl:
-            # Keep the GL context/flags; only the geometry changes.
-            if on:
-                try:
-                    dw, dh = pygame.display.get_desktop_sizes()[0]
-                except Exception:                            # noqa: BLE001
-                    info = pygame.display.Info(); dw, dh = info.current_w, info.current_h
-                self.screen = pygame.display.set_mode(
-                    (dw, dh), self._opengl_flags | pygame.FULLSCREEN)
+            if self._gl_window is not None:
+                # desktop=True maps to SDL_WINDOW_FULLSCREEN_DESKTOP: a
+                # borderless window at desktop resolution, never an exclusive
+                # display-mode switch. It also preserves the live GL context.
+                if on:
+                    self._gl_window.set_fullscreen(desktop=True)
+                else:
+                    self._gl_window.set_windowed()
+                    if windowed_size:
+                        self._gl_window.size = tuple(windowed_size)
             else:
-                self.screen = pygame.display.set_mode(
-                    windowed_size or (1280, 800), self._opengl_flags)
+                # Older pygame builds without Window.from_display_module still
+                # get a borderless desktop window. NOFRAME is important:
+                # pygame.FULLSCREEN here can select exclusive fullscreen.
+                import os
+                if on:
+                    try:
+                        dw, dh = pygame.display.get_desktop_sizes()[0]
+                    except Exception:                        # noqa: BLE001
+                        info = pygame.display.Info()
+                        dw, dh = info.current_w, info.current_h
+                    os.environ["SDL_VIDEO_WINDOW_POS"] = "0,0"
+                    self.screen = pygame.display.set_mode(
+                        (dw, dh), self._opengl_flags | pygame.NOFRAME,
+                    )
+                else:
+                    os.environ.pop("SDL_VIDEO_WINDOW_POS", None)
+                    self.screen = pygame.display.set_mode(
+                        windowed_size or (1280, 800), self._opengl_flags,
+                    )
             self._texsize = None
             return
         if self.gpu:

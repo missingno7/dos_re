@@ -65,6 +65,32 @@ def test_fullscreen_toggle_round_trips_the_windowed_size():
     assert d.get_size() == (800, 600)     # pre-fullscreen window restored
 
 
+def test_opengl_fullscreen_uses_borderless_desktop_window():
+    class Window:
+        def __init__(self):
+            self.calls = []
+            self.size = (640, 480)
+
+        def set_fullscreen(self, *, desktop):
+            self.calls.append(("fullscreen", desktop))
+
+        def set_windowed(self):
+            self.calls.append(("windowed",))
+
+    display = Display.__new__(Display)
+    display.opengl = True
+    display._gl_window = Window()
+    display._texsize = (320, 200)
+
+    display.set_fullscreen(True)
+    assert display._gl_window.calls == [("fullscreen", True)]
+    assert display._texsize is None
+
+    display.set_fullscreen(False, windowed_size=(800, 600))
+    assert display._gl_window.calls[-1] == ("windowed",)
+    assert display._gl_window.size == (800, 600)
+
+
 @pytest.mark.parametrize("fw,fh", [(320, 200), (320, 240), (320, 400)])
 def test_par_shows_every_pm_geometry_at_4_3(fw, fh):
     """The protected-mode backend sets par = 3w/4h so mode 13h and both Mode X
