@@ -65,29 +65,49 @@ def test_fullscreen_toggle_round_trips_the_windowed_size():
     assert d.get_size() == (800, 600)     # pre-fullscreen window restored
 
 
-def test_opengl_fullscreen_uses_borderless_desktop_window():
+def test_opengl_fullscreen_is_a_normal_borderless_desktop_window(monkeypatch):
     class Window:
         def __init__(self):
             self.calls = []
             self.size = (640, 480)
+            self.position = (100, 80)
+            self.borderless = False
+            self.always_on_top = False
+            self.resizable = True
 
         def set_fullscreen(self, *, desktop):
-            self.calls.append(("fullscreen", desktop))
+            raise AssertionError("borderless mode used an SDL fullscreen flag")
 
         def set_windowed(self):
             self.calls.append(("windowed",))
 
+    monkeypatch.setattr(
+        pygame.display, "get_desktop_sizes", lambda: [(1920, 1080)],
+    )
     display = Display.__new__(Display)
     display.opengl = True
     display._gl_window = Window()
     display._texsize = (320, 200)
+    display._windowed_position = None
+    display._windowed_borderless = False
+    display._windowed_always_on_top = False
+    display._windowed_resizable = True
 
     display.set_fullscreen(True)
-    assert display._gl_window.calls == [("fullscreen", True)]
+    assert display._gl_window.calls == [("windowed",)]
+    assert display._gl_window.borderless is True
+    assert display._gl_window.always_on_top is True
+    assert display._gl_window.resizable is False
+    assert display._gl_window.position == (0, 0)
+    assert display._gl_window.size == (1920, 1080)
     assert display._texsize is None
 
     display.set_fullscreen(False, windowed_size=(800, 600))
-    assert display._gl_window.calls[-1] == ("windowed",)
+    assert display._gl_window.calls == [("windowed",)]
+    assert display._gl_window.borderless is False
+    assert display._gl_window.always_on_top is False
+    assert display._gl_window.resizable is True
+    assert display._gl_window.position == (100, 80)
     assert display._gl_window.size == (800, 600)
 
 

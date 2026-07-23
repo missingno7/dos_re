@@ -38,6 +38,10 @@ class Display:
         self.integer_scale = False
         self.fullscreen = False
         self._windowed_size = tuple(size)   # restored when leaving fullscreen
+        self._windowed_position = None
+        self._windowed_borderless = False
+        self._windowed_always_on_top = False
+        self._windowed_resizable = True
         self.par = 1.0                     # displayed pixel aspect (height/width). 1.0 = square pixels;
         #                                    1.2 = the DOS 4:3 look (320x200 shown at 4:3 -> pixels 1.2x tall).
         self.gpu = False
@@ -262,20 +266,49 @@ class Display:
         self.fullscreen = not self.fullscreen
         return self.fullscreen
 
+    def _set_borderless_desktop(self, window, on: bool, windowed_size) -> None:
+        """Make an SDL window cover the desktop without any fullscreen flag."""
+        if on:
+            # Explicitly leave any inherited fullscreen state first. The
+            # resulting window remains an ordinary SDL window throughout.
+            window.set_windowed()
+            self._windowed_position = tuple(window.position)
+            self._windowed_borderless = bool(window.borderless)
+            self._windowed_always_on_top = bool(window.always_on_top)
+            self._windowed_resizable = bool(window.resizable)
+            try:
+                desktop_size = tuple(pygame.display.get_desktop_sizes()[0])
+            except Exception:                                # noqa: BLE001
+                info = pygame.display.Info()
+                desktop_size = (info.current_w, info.current_h)
+            window.borderless = True
+            window.resizable = False
+            window.position = (0, 0)
+            window.size = desktop_size
+            # A normal borderless window otherwise sits below the Windows
+            # taskbar. Topmost gives it the expected fullscreen coverage while
+            # Alt+Tab remains a normal window transition.
+            window.always_on_top = True
+            return
+
+        window.always_on_top = self._windowed_always_on_top
+        window.borderless = self._windowed_borderless
+        window.resizable = self._windowed_resizable
+        window.size = tuple(windowed_size or (1280, 800))
+        if self._windowed_position is not None:
+            window.position = self._windowed_position
+
     def set_fullscreen(self, on: bool, windowed_size=None) -> None:
-        """Borderless fullscreen (SDL's own fullscreen-desktop on the GPU path — DPI/monitor correct, no ctypes;
-        the software path recreates a NOFRAME desktop-sized window)."""
+        """Use a desktop-sized borderless window without an exclusive mode.
+
+        SDL2-backed paths remain ordinary windows with their border disabled;
+        the legacy surface fallback recreates an equivalent NOFRAME window.
+        """
         if self.opengl:
             if self._gl_window is not None:
-                # desktop=True maps to SDL_WINDOW_FULLSCREEN_DESKTOP: a
-                # borderless window at desktop resolution, never an exclusive
-                # display-mode switch. It also preserves the live GL context.
-                if on:
-                    self._gl_window.set_fullscreen(desktop=True)
-                else:
-                    self._gl_window.set_windowed()
-                    if windowed_size:
-                        self._gl_window.size = tuple(windowed_size)
+                self._set_borderless_desktop(
+                    self._gl_window, on, windowed_size,
+                )
             else:
                 # Older pygame builds without Window.from_display_module still
                 # get a borderless desktop window. NOFRAME is important:
@@ -299,9 +332,7 @@ class Display:
             self._texsize = None
             return
         if self.gpu:
-            self.window.set_fullscreen(desktop=True) if on else self.window.set_windowed()
-            if not on and windowed_size:
-                self.window.size = windowed_size
+            self._set_borderless_desktop(self.window, on, windowed_size)
             self._ov.clear()                                      # window size changed -> stale overlay textures
         else:
             import os
