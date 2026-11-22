@@ -30,6 +30,35 @@ def test_int21_1b_returns_media_byte_at_ds_bx(tmp_path: Path) -> None:
     assert mem.rb(cpu.s.ds, cpu.s.bx) == 0xF8
 
 
+def test_int21_1c_default_and_c_drive_match_1b(tmp_path: Path) -> None:
+    # AH=1Ch is AH=1Bh with an explicit drive in DL (0=default, 1=A, 3=C).
+    # The machine models one drive, C: (AH=19h), so DL=0 and DL=3 describe it.
+    # Observed caller (wme START.EXE 10C8:0000) passes DL=3 and returns the
+    # media byte at DS:BX unless AL=FFh.
+    for dl in (0x00, 0x03):
+        mem = Memory()
+        dos = DOSMachine(tmp_path)
+        cpu = _cpu(mem, ax=0x1C00, dx=dl, bx=0xFF53)
+        dos.int21(cpu)
+        assert not cpu.get_flag(CF)
+        assert cpu.s.ax & 0xFF == 0x04          # sectors per cluster
+        assert cpu.s.cx == 512                  # bytes per sector
+        assert cpu.s.dx == 0x8000               # total clusters
+        assert mem.rb(cpu.s.ds, cpu.s.bx) == 0xF8
+
+
+def test_int21_1c_unmodeled_drive_reports_invalid(tmp_path: Path) -> None:
+    # A, B, D... do not exist in this machine: DOS answers AL=FFh and leaves
+    # the pointer registers alone; callers branch on AL before reading DS:BX.
+    for dl in (0x01, 0x02, 0x04, 0x1A):
+        mem = Memory()
+        dos = DOSMachine(tmp_path)
+        cpu = _cpu(mem, ax=0x1C00, dx=dl, ds=0x1234, bx=0x5678)
+        dos.int21(cpu)
+        assert cpu.s.ax == 0x1CFF
+        assert (cpu.s.ds, cpu.s.bx) == (0x1234, 0x5678)
+
+
 def _put_asciiz(mem: Memory, seg: int, off: int, name: str) -> None:
     for i, ch in enumerate(name.encode("ascii")):
         mem.wb(seg, off + i, ch)
