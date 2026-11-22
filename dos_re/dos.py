@@ -1294,15 +1294,25 @@ class DOSMachine:
             return
         if ah == 0x1A:  # set DTA
             return
-        if ah == 0x1B:  # get allocation info for the default drive
-            # Returns AL=sectors per cluster, CX=bytes per sector, DX=total
-            # clusters, and DS:BX -> the drive's media descriptor byte.  Games
-            # call it as a lightweight "is there a disk / what media" probe; the
-            # only value observed being consumed is the media byte at DS:BX
-            # (VGA Lemmings reads [BX] and stores it, ignoring AL/CX/DX).  We
-            # publish the media byte into a fixed low-memory scratch cell the
-            # loader never allocates (linear 0500h, the DOS data area) so the
-            # returned pointer is always valid and deterministic.
+        if ah == 0x1B or ah == 0x1C:
+            # Get allocation info: AH=1Bh for the default drive, AH=1Ch for
+            # the drive in DL (0=default, 1=A, 2=B, 3=C, ...).  Returns
+            # AL=sectors per cluster, CX=bytes per sector, DX=total clusters,
+            # and DS:BX -> the drive's media descriptor byte.  Games call it as
+            # a lightweight "is there a disk / what media" probe; the only
+            # value observed being consumed is the media byte at DS:BX (VGA
+            # Lemmings reads [BX] after 1Bh; wme START.EXE 10C8:0000 calls 1Ch
+            # with DL=3 and returns [BX] unless AL=FFh), ignoring AL/CX/DX.
+            # This machine models one drive, C: (AH=19h above), so any other
+            # drive gets the documented invalid-drive answer AL=FFh with the
+            # remaining registers untouched.
+            drive = cpu.s.dx & 0xFF if ah == 0x1C else 0
+            if drive not in (0, 3):
+                cpu.s.ax = (cpu.s.ax & 0xFF00) | 0xFF
+                return
+            # We publish the media byte into a fixed low-memory scratch cell
+            # the loader never allocates (linear 0500h, the DOS data area) so
+            # the returned pointer is always valid and deterministic.
             scratch_seg, scratch_off = 0x0050, 0x0000
             cpu.mem.wb(scratch_seg, scratch_off, 0xF8)  # F8h = fixed disk
             cpu.s.ax = (cpu.s.ax & 0xFF00) | 0x04       # sectors per cluster
